@@ -43,6 +43,7 @@ as part of any deploy.
 | D17 (Q17) | A committed browser harness under `tests/e2e/ui_audit/`, run before each deploy outside `ci.sh`; `ci.sh` keeps deterministic checks. |
 | D18 (2026-10-01) | D-16 (tag fields split on commas) is exempt from the freeze (D2): no prompt-building code changes; the fix stops stored profile data — which the exported lab prompt is built from — from being corrupted on every save. |
 | D19 (2026-10-01) | Nothing is pushed to `origin` until all three phases are deployed; publication is then from a squashed or `git filter-repo`-cleaned branch whose full history carries no reproduction detail, and only once `CLAUDE.md`'s own push preconditions (open-findings C2 and the SSH host-key row) are met. |
+| D20 (2026-10-02) | The freeze (D2) is also lifted for the scout_hub 1.10.0 release of `docs/specs/2026-10-02-hub-1-10-summary-risks-gates-design.md` (its owner decisions O1 and O5): the scout_hub prompt set 1.9.0 → 1.10.0, the hub-only staff company record appended to `retrieve_profile`, and the assessment-chat record's rendering of the new fields on rows that carry them (rows without them render byte-identically). One reviewed regeneration of the scout_hub-prompt entries of `test_prompt_freeze_gm` goes with it. The `pi_lab` prompt set, the rubric and `test_agent_turn_gm.ambr` stay frozen. |
 
 ## 3. Verified constraints
 

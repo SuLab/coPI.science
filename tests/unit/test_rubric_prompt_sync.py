@@ -282,7 +282,7 @@ def test_skeleton_carries_the_narrative_fields():
     for key in (
         "headline", "key_points", "elevator_pitch", "score_rationale",
         "strengths", "risks", "competitive_landscape", "evidence_maturity",
-        "dimension_rationales",
+        "dimension_rationales", "gating_rationales",
     ):
         assert key in skeleton, f"phase4-thread-reply.md dropped {key!r}"
     assert skeleton["key_points"] == {
@@ -316,15 +316,16 @@ def test_item_seven_lists_the_six_groups_with_their_bullet_counts_in_skeleton_or
     """The prose contract and the skeleton must agree on names, order and
     counts; the engine warns against the same counts
     (src/agent/simulation.py `_KEY_POINT_GROUP_BULLETS`). Since scout_hub
-    1.9.0 every group is one bullet, and the retired `key_questions` group is
-    no longer asked for anywhere in item 7."""
+    1.10.0 that map counts MAIN bullets, one per group; the labelled `Risk:`
+    and `Companies:` bullets are pinned by the next test. The retired
+    `key_questions` group is not asked for anywhere in item 7."""
     from src.agent.simulation import _KEY_POINT_GROUP_BULLETS
     from src.services.assessment_detail import KEY_POINT_GROUPS
 
     text = _phase4_text()
     item = text[text.index("7. **Key points.**"): text.index("8. **Elevator pitch.**")]
     body = _norm(item)
-    words = {1: "**one bullet**", 2: "**two bullets**"}
+    words = {1: "**one main bullet**"}
     positions = []
     for key in _skeleton()["key_points"]:
         at = body.index(f"`{key}` — {words[_KEY_POINT_GROUP_BULLETS[key]]}")
@@ -332,10 +333,41 @@ def test_item_seven_lists_the_six_groups_with_their_bullet_counts_in_skeleton_or
     assert positions == sorted(positions)
     assert set(_KEY_POINT_GROUP_BULLETS.values()) == {1}
     assert "**two bullets**" not in body
+    assert "**one bullet**" not in body
+    assert "an array holding exactly one string" not in body
     assert "`key_questions`" not in body
     assert "at most 300 characters" in body
     assert list(_KEY_POINT_GROUP_BULLETS) == list(_skeleton()["key_points"])
     assert list(_KEY_POINT_GROUP_BULLETS) == [k for k, _ in KEY_POINT_GROUPS]
+
+
+def test_item_seven_adds_the_risk_and_companies_bullets():
+    """Spec 2026-10-02 §6.1 (O4, O5): one optional `Risk:` bullet per group,
+    which must carry every `risks` entry and red flag at the public level, and
+    one optional `Companies:` bullet in `lab_background` for ties the staff
+    company record lacks. Pinned so the coverage rule and the sourcing limits
+    are not softened without a decision."""
+    text = _phase4_text()
+    item = text[text.index("7. **Key points.**"): text.index("8. **Elevator pitch.**")]
+    body = _norm(item)
+    assert "a bullet that begins `Risk:`" in body
+    assert "a bullet that begins `Companies:`" in body
+    assert "in `lab_background` only, at most one" in body
+    assert (
+        "Every entry in `risks` (item 12) and every `red_flags` entry (item 3) "
+        "must be stated, at the public level, in the `Risk:` bullet of the "
+        "heading it bears on"
+    ) in body
+    assert "one `Risk:` bullet may carry more than one risk" in body
+    assert "names the other party and the document or answer that would resolve it" in body
+    assert '"has historically licensed this lab\'s IP", not "is a spin-out"' in body
+    assert "**not** already in Blackbird's staff company record" in body
+    assert "`<staff_company_record>`" in body
+    assert '("funded one cohort")' in body
+    assert "only where the record states it, with its date" in body
+    assert "**read by Blackbird reviewers as well as staff**" in body
+    assert "do not restate a PI's unpublished result" in body
+    assert "why it is worth building, and what could stop it" in body
 
 
 def test_item_seven_binds_every_bullet_to_plain_language():
@@ -370,6 +402,48 @@ def test_the_skeleton_carries_a_rationale_for_every_scored_dimension():
     # Written next to the number it explains.
     keys = list(skeleton)
     assert keys.index("dimension_rationales") == keys.index("scores") + 1
+
+
+def test_the_skeleton_carries_a_reason_for_every_gate():
+    """Sidecar item 1's companion (scout_hub 1.10.0, migration 0058). Keyed
+    exactly like `gating`, which is pinned to the document's gating criteria
+    above, and written next to it."""
+    skeleton = _skeleton()
+    assert set(skeleton["gating_rationales"]) == set(skeleton["gating"])
+    assert all(v == "" for v in skeleton["gating_rationales"].values())
+    keys = list(skeleton)
+    assert keys.index("gating_rationales") == keys.index("gating") + 1
+
+
+def test_item_one_bounds_the_gate_reason_and_names_its_audience():
+    """O2: a gate reason is reviewer-visible, so item 1 binds it to the same
+    public-level rule item 2 states for `dimension_rationales`, in its own
+    words rather than by pointing at another rule; the paragraph after the
+    skeleton asks for a reason on every gate."""
+    text = _phase4_text()
+    item = text[text.index("1. **Gating criteria.**"):text.index("2. **The six dimension scores.**")]
+    body = _norm(item)
+    assert "`gating_rationales`" in body
+    assert "one sentence of at most 200 characters" in body
+    assert "the evidence that met it, the fact that failed it, or what was never asked" in body
+    assert "never posted to Slack" in body
+    assert "is read by Blackbird reviewers as well as staff" in body
+    assert "do not restate a PI's unpublished result" in body
+    assert "Staff-only" not in body
+    tail = _norm(text[text.index("</assessment_json>"):])
+    assert "Every `gating_rationales.*` value" in tail
+    assert 'an `"unconfirmed"` gate included' in tail
+
+
+def test_rule_one_names_the_staff_company_record_as_a_source():
+    """O5: a company tie the hub read in the staff company record is a sourced
+    claim, so Rule 1 lists the record among the allowed sources."""
+    body = _norm(SYSTEM_PROMPT.read_text(encoding="utf-8"))
+    start = body.index("1. **Represent Blackbird honestly, not a lab.**")
+    rule = body[start:body.index("2. **Cannot commit resources.**", start)]
+    assert "Blackbird's staff company record for that PI" in rule
+    assert "`<staff_company_record>`" in rule
+    assert "never invent or embellish it" in rule
 
 
 def test_item_two_bounds_the_rationale_and_names_its_audience():
@@ -431,13 +505,21 @@ def test_phase4_forbids_the_bare_approximation_tilde():
     assert "strikethrough" in body
 
 
-def test_phase4_marks_the_score_rationale_staff_only():
+def test_phase4_keeps_the_score_rationale_off_slack_and_names_its_reviewers():
     """D3 kept score reasoning OUT of the elevator pitch, which IS published,
-    and gave it its own staff-only field. This assertion is the only thing
-    standing between that decision and a future edit that re-merges the two."""
-    body = _norm(_phase4_text())
-    assert "score_rationale" in body
-    assert "never posted to Slack" in body
+    and gave it a field of its own that is never posted to Slack; this is the
+    only thing standing between that decision and an edit that re-merges the
+    two. Since scout_hub 1.10.0 (O7) item 10 also says what the page always
+    did: reviewers read the field, so it is bound by the public-level rule, and
+    items 11-13 no longer call it staff-only by comparison."""
+    text = _phase4_text()
+    item = _norm(text[text.index("10. **Score rationale.**"):text.index("11. **Strengths.**")])
+    assert "score_rationale" in item
+    assert "never posted to Slack" in item
+    assert "is read by Blackbird reviewers as well as staff" in item
+    assert "do not restate a PI's unpublished result" in item
+    assert "Staff-only" not in item
+    assert "Staff-only: like the score rationale" not in _norm(text)
 
 
 def test_phase4_marks_strengths_and_risks_staff_only():

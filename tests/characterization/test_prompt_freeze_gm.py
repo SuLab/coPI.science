@@ -8,6 +8,14 @@ Freeze rules (spec §11): never run `--snapshot-update` on this module again;
 the fixtures and expected values are frozen; driver code may change only for
 import paths (Phase 1, under the §7.6 checker) and for construction through
 new seams (Phase 2's PromptSnapshot), each change reviewed.
+
+One owner-approved exception (O1 of
+docs/specs/2026-10-02-hub-1-10-summary-risks-gates-design.md, 2026-10-02;
+recorded as B25 of the 2026-09-29 spec and D20 of the 2026-10-01 web-UI
+spec): the entries that embed the scout_hub prompt set are regenerated once,
+for scout_hub 1.10.0, and the `.ambr` diff must be exactly the prompt diff
+plus its version and hash stamps, reviewed line by line. It licenses no other
+regeneration, and `test_agent_turn_gm.ambr` is not touched by it.
 """
 import json
 import uuid
