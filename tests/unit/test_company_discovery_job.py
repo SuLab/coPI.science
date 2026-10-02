@@ -3,7 +3,9 @@ respx and answered from the recorded fixtures in tests/fixtures/company_discover
 the Claude COI extraction (`coi_llm.extract_founder_claims`) is replaced by scripted
 outcomes per PMID (`_coi` fixture), so no test calls the Anthropic API.
 Each source can fail alone and the job still completes with a per-source note; a re-run
-never re-suggests a name the PI already has in any status; nothing is ever confirmed."""
+never re-suggests a name the PI already has in any status; nothing is ever confirmed.
+Only gated records are sent, at most 60, 4 at a time, with no transaction open; at most
+20 new names are looked up; the outcome line reports the extraction's token spend."""
 import asyncio
 import json
 import re
@@ -19,7 +21,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from src.models import Job, PiCompany, Publication, User
 from src.services import company_discovery as cd
 from src.services import pubmed
-from src.services.company_sources import coi_llm, sec_form_d, wikidata
+from src.services.company_sources import coi_llm, pi_name, sec_form_d, wikidata
 from src.services.company_sources.coi_founders import FounderClaim
 from src.services.pi_companies import normalize_company_name
 from src.worker.main import JobContext
@@ -57,9 +59,28 @@ BOTH_2021 = (
     "Genome Diagnostics stock, which are subject to certain restrictions under university policy.")
 
 
+#: Token counts of one scripted call: 1000 in (input + cache read + cache creation), 100 out.
+USAGE = {"input_tokens": 900, "cache_read_input_tokens": 60, "cache_creation_input_tokens": 40,
+         "output_tokens": 100}
+
+
+def _spend(calls: int) -> str:
+    """The outcome note of `calls` scripted calls of `USAGE` each."""
+    return f"coi: {calls} calls, {1000 * calls} in / {100 * calls} out tokens"
+
+
 def _ok(pmid: str, year: int, sentence: str, *companies: tuple[str, bool]) -> coi_llm.CoiOutcome:
     return coi_llm.CoiOutcome("ok", [FounderClaim(c, "founder", pmid, year, sentence, former)
-                                     for c, former in companies])
+                                     for c, former in companies], usage=USAGE)
+
+
+VELCULESCU = {"last": "Velculescu", "fore": "Victor E", "initials": "VE"}
+
+
+def _record(pmid: int, year: int = 2020, statement: str = "V.E.V. is a founder of Acme Bio.",
+            author: dict = VELCULESCU) -> dict:
+    """A PubMed record as `pubmed.fetch_pubmed_records` returns it; the defaults pass the gate."""
+    return {"pmid": str(pmid), "year": year, "authors": [author], "coi_statement": statement}
 
 
 def _velculescu_script() -> dict:
@@ -163,7 +184,7 @@ async def test_velculescu_happy_path(db_session, monkeypatch, respx_mock, _coi):
     routes = _routes(respx_mock)
     user, job = await _velculescu(db_session)
 
-    assert await _run(db_session, job) == "2 suggested"
+    assert await _run(db_session, job) == f"2 suggested; {_spend(2)}"
 
     rows = await _rows(db_session, user.id)
     assert set(rows) == {"DELFI Diagnostics", "Personal Genome Diagnostics"}
@@ -211,7 +232,7 @@ async def test_a_rerun_skips_names_in_any_status(db_session, monkeypatch, respx_
         source_url="https://example.org/pgdx", status="rejected", origin="discovered"))
     await db_session.flush()
 
-    assert await _run(db_session, job) == "0 suggested (2 already listed)"
+    assert await _run(db_session, job) == f"0 suggested (2 already listed); {_spend(2)}"
     rows = await _rows(db_session, user.id)
     assert {r.status for r in rows.values()} == {"confirmed", "rejected"}
     assert routes.efts.call_count == 0  # no funding lookup for a name already listed
@@ -221,7 +242,7 @@ async def test_a_second_run_suggests_nothing_new(db_session, monkeypatch, respx_
     _settings(monkeypatch)
     _routes(respx_mock, sparql=[_wikidata_answer(), _wikidata_answer()])
     user, job = await _velculescu(db_session)
-    assert await _run(db_session, job) == "2 suggested"
+    assert await _run(db_session, job) == f"2 suggested; {_spend(2)}"
     # The worker loop, not the handler, completes a job; until then the
     # one-active-per-PI index refuses a second row.
     job.status = "completed"
@@ -229,7 +250,7 @@ async def test_a_second_run_suggests_nothing_new(db_session, monkeypatch, respx_
     second = Job(type="company_discovery", user_id=user.id, payload=dict(job.payload))
     db_session.add(second)
     await db_session.flush()
-    assert await _run(db_session, second) == "0 suggested (2 already listed)"
+    assert await _run(db_session, second) == f"0 suggested (2 already listed); {_spend(2)}"
     assert len(await _rows(db_session, user.id)) == 2
 
 
@@ -280,7 +301,7 @@ async def test_wikidata_429_alone_is_a_note(db_session, monkeypatch, respx_mock)
     _routes(respx_mock, sparql=[httpx.Response(429, headers={"Retry-After": "1"}),
                                 httpx.Response(429, headers={"Retry-After": "1"})])
     user, job = await _velculescu(db_session)
-    assert await _run(db_session, job) == "2 suggested; wikidata: lookup unavailable"
+    assert await _run(db_session, job) == f"2 suggested; {_spend(2)}; wikidata: lookup unavailable"
     assert len(await _rows(db_session, user.id)) == 2
 
 
@@ -295,7 +316,7 @@ async def test_sec_failure_alone_is_a_note(db_session, monkeypatch, respx_mock, 
 
     routes = _routes(respx_mock, efts=efts)
     user, job = await _velculescu(db_session)
-    assert await _run(db_session, job) == "2 suggested; sec: funding lookup unavailable"
+    assert await _run(db_session, job) == f"2 suggested; {_spend(2)}; sec: funding lookup unavailable"
     rows = await _rows(db_session, user.id)
     for row in rows.values():
         assert row.funding_usd is None and row.funding_source_url is None
@@ -309,7 +330,7 @@ async def test_unset_sec_user_agent_skips_sec_and_wikidata(db_session, monkeypat
     routes = _routes(respx_mock)
     user, job = await _velculescu(db_session)
     assert await _run(db_session, job) == (
-        "2 suggested; wikidata: lookup unavailable; sec: funding lookup unavailable")
+        f"2 suggested; {_spend(2)}; wikidata: lookup unavailable; sec: funding lookup unavailable")
     assert routes.efts.call_count == 0 and routes.sparql.call_count == 0
     rows = await _rows(db_session, user.id)
     assert {r.evidence["form_d"]["reason"] for r in rows.values()} == {"SEC_USER_AGENT unset"}
@@ -371,6 +392,18 @@ async def test_outcome_line(args, line):
     assert cd.outcome_line(*args) == line
 
 
+async def test_spend_note_sums_answered_calls_only():
+    outcomes = [
+        coi_llm.CoiOutcome("ok", [], usage={"input_tokens": 10, "cache_read_input_tokens": 5,
+                                             "cache_creation_input_tokens": 1, "output_tokens": 7}),
+        coi_llm.CoiOutcome("unavailable", [], reason="refusal", usage={"input_tokens": 4, "output_tokens": 2}),
+        coi_llm.CoiOutcome("unavailable", [], reason="api_timeout"),  # no reply, no usage
+    ]
+    assert cd.spend_note(outcomes) == "coi: 2 calls, 20 in / 9 out tokens"
+    assert cd.spend_note([coi_llm.CoiOutcome("unavailable", [], reason="prompt_missing")]) is None
+    assert cd.spend_note([]) is None
+
+
 async def test_no_insert_until_every_lookup_is_done(db_session, monkeypatch, respx_mock):
     """The job's one transaction holds no uncommitted pi_companies row while SEC runs."""
     _settings(monkeypatch)
@@ -385,7 +418,7 @@ async def test_no_insert_until_every_lookup_is_done(db_session, monkeypatch, res
         return await real_write(*args, **kwargs)
 
     monkeypatch.setattr(cd, "_write_suggestion", spy)
-    assert await _run(db_session, job) == "2 suggested"
+    assert await _run(db_session, job) == f"2 suggested; {_spend(2)}"
     assert seen == [(1, 1, 2, 1), (1, 1, 2, 1)]
 
 
@@ -414,7 +447,7 @@ async def test_refused_upstream_names_are_skipped_with_a_note(db_session, monkey
 
     monkeypatch.setattr(cd, "_wikidata_companies", companies)
     assert await _run(db_session, job) == (
-        "3 suggested; skipped name 'Evil\\x00Corp': The company name must be one line of text.; "
+        f"3 suggested; {_spend(2)}; skipped name 'Evil\\x00Corp': The company name must be one line of text.; "
         f"skipped name {long_name!r}: Company names are limited to 200 characters.")
     rows = await _rows(db_session, user.id)
     assert set(rows) == {"DELFI Diagnostics", "Personal Genome Diagnostics", "Celera Corporation"}
@@ -442,7 +475,7 @@ async def test_funding_beyond_bigint_is_dropped_and_the_suggestion_kept(db_sessi
 
     monkeypatch.setattr(sec_form_d, "lookup_funding", huge)
     assert await _run(db_session, job) == (
-        "2 suggested; sec: funding figure out of range for DELFI Diagnostics; "
+        f"2 suggested; {_spend(2)}; sec: funding figure out of range for DELFI Diagnostics; "
         "sec: funding figure out of range for Personal Genome Diagnostics")
     rows = await _rows(db_session, user.id)
     assert len(rows) == 2
@@ -467,33 +500,15 @@ async def test_one_failed_pubmed_batch_keeps_the_others(db_session, monkeypatch,
 
     routes = _routes(respx_mock, efetch=efetch)
     user, job = await _velculescu(db_session)
-    assert await _run(db_session, job) == "1 suggested; pubmed: partial (1 of 2 records)"
+    assert await _run(db_session, job) == f"1 suggested; pubmed: partial (1 of 2 records); {_spend(1)}"
     rows = await _rows(db_session, user.id)
     assert set(rows) == {"DELFI Diagnostics"}
     assert [e["pmid"] for e in rows["DELFI Diagnostics"].evidence["coi"]] == ["39433569"]
     assert routes.efetch.call_count == 4  # the OK batch, then three tries of the 503
 
 
-async def test_a_skipped_record_costs_no_call(db_session, monkeypatch, respx_mock, _coi):
-    """With a cap of one, the newest record being skipped by the gate still leaves the
-    one call for the next record: a skip is not counted."""
-    _settings(monkeypatch)
-    _routes(respx_mock)
-    monkeypatch.setattr(coi_llm, "MAX_COI_CALLS_PER_PI", 1)
-    del _coi.script["39433569"]
-    user, job = await _velculescu(db_session)
-    assert await _run(db_session, job) == "2 suggested"
-    assert _coi.calls == ["39433569", "34290408"]
-    rows = await _rows(db_session, user.id)
-    assert set(rows) == {"Delfi Diagnostics", "Personal Genome Diagnostics"}
-
-
-async def test_extraction_is_capped_at_60_disclosures(db_session, monkeypatch, respx_mock, _coi):
-    """80 records, every seventh skipped: the 60 newest non-skipped are sent, the rest
-    are never called, and the outcome says so."""
-    _settings(monkeypatch)
-    routes = _routes(respx_mock)
-    assert coi_llm.MAX_COI_CALLS_PER_PI == 60
+async def _pi_with_records(db_session, monkeypatch, records: list[dict]) -> tuple[User, Job]:
+    """Velculescu with one publication row, whose PubMed fetch returns `records`."""
     user = User(orcid=VELCULESCU_ORCID, name="Victor Velculescu", user_role="pi")
     db_session.add(user)
     await db_session.flush()
@@ -502,20 +517,132 @@ async def test_extraction_is_capped_at_60_disclosures(db_session, monkeypatch, r
     db_session.add(job)
     await db_session.flush()
 
-    async def records(*_args):
-        return [{"pmid": str(n), "year": 2020} for n in range(1, 81)]
+    async def fetched(*_args):
+        return records
 
-    monkeypatch.setattr(cd, "_fetch_coi_records", records)
-    _coi.script = {str(n): coi_llm.CoiOutcome("ok", []) for n in range(1, 81) if n % 7}
+    monkeypatch.setattr(cd, "_fetch_coi_records", fetched)
+    return user, job
+
+
+async def test_a_record_failing_the_gate_costs_no_call_and_no_slot(db_session, monkeypatch, respx_mock, _coi):
+    """With a cap of one, the newest record (no founding wording) and the next (the PI
+    is not an author) are never sent, so the one call goes to the third; no cap note,
+    since no gated record was left over."""
+    _settings(monkeypatch)
+    _routes(respx_mock)
+    monkeypatch.setattr(coi_llm, "MAX_COI_CALLS_PER_PI", 1)
+    smith = {"last": "Smith", "fore": "John", "initials": "J"}
+    user, job = await _pi_with_records(db_session, monkeypatch, [
+        _record(3, 2024, statement="The authors declare no competing interests."),
+        _record(2, 2023, author=smith),
+        _record(1, 2022),
+    ])
+    _coi.script = {p: _ok(p, 2022, "V.E.V. is a founder of Acme Bio.", ("Acme Bio", False))
+                   for p in ("1", "2", "3")}
+    assert await _run(db_session, job) == f"1 suggested; {_spend(1)}"
+    assert _coi.calls == ["1"]
+    assert set(await _rows(db_session, user.id)) == {"Acme Bio"}
+
+
+async def test_extraction_is_capped_at_60_disclosures(db_session, monkeypatch, respx_mock, _coi):
+    """80 records, every seventh failing the gate: of the 69 gated, the 60 newest are
+    sent, the 9 oldest are never called, and the outcome says so."""
+    _settings(monkeypatch)
+    routes = _routes(respx_mock)
+    assert coi_llm.MAX_COI_CALLS_PER_PI == 60
+    records = [_record(n) if n % 7 else _record(n, statement="No conflicts.") for n in range(1, 81)]
+    user, job = await _pi_with_records(db_session, monkeypatch, records)
+    _coi.script = {str(n): coi_llm.CoiOutcome("ok", [], usage=USAGE) for n in range(1, 81) if n % 7}
     _coi.script["80"] = _ok("80", 2020, "V.E.V. is a founder of Acme Bio.", ("Acme Bio", False))
     _coi.script["1"] = _ok("1", 2020, "V.E.V. is a founder of Never Bio.", ("Never Bio", False))
 
-    assert await _run(db_session, job) == "1 suggested; coi: capped at 60 disclosures"
-    sent = [p for p in _coi.calls if int(p) % 7]
-    assert len(sent) == 60 and _coi.calls == [str(n) for n in range(80, 80 - len(_coi.calls), -1)]
-    assert "1" not in _coi.calls
+    assert await _run(db_session, job) == f"1 suggested; coi: capped at 60 disclosures; {_spend(60)}"
+    assert len(_coi.calls) == 60
+    assert set(_coi.calls) == {str(n) for n in range(11, 81) if n % 7}
     assert set(await _rows(db_session, user.id)) == {"Acme Bio"}
     assert routes.efetch.call_count == 0
+
+
+async def test_no_cap_note_when_every_gated_record_was_sent(db_session, monkeypatch, respx_mock, _coi):
+    """Exactly the cap of gated records (plus ungated ones) is not a capped run."""
+    _settings(monkeypatch)
+    _routes(respx_mock)
+    monkeypatch.setattr(coi_llm, "MAX_COI_CALLS_PER_PI", 3)
+    records = [_record(4, statement="No conflicts."), _record(3), _record(2), _record(1)]
+    _user, job = await _pi_with_records(db_session, monkeypatch, records)
+    _coi.script = {p: coi_llm.CoiOutcome("ok", [], usage=USAGE) for p in ("1", "2", "3")}
+    assert await _run(db_session, job) == f"0 suggested; {_spend(3)}"
+    assert sorted(_coi.calls) == ["1", "2", "3"]
+
+
+async def test_extraction_runs_four_at_a_time_and_keeps_the_newest_first_order(monkeypatch):
+    """Ten gated records whose calls finish oldest first: never more than four in
+    flight, and the claims still come back newest first."""
+    monkeypatch.setattr(coi_llm, "MAX_COI_CALLS_PER_PI", 60)
+    state = SimpleNamespace(inflight=0, peak=0)
+
+    async def slow(record, pi, *, client=None):
+        state.inflight += 1
+        state.peak = max(state.peak, state.inflight)
+        for _ in range(int(record["pmid"])):  # newer records (bigger pmid) take longer
+            await asyncio.sleep(0)
+        state.inflight -= 1
+        pmid = record["pmid"]
+        return _ok(pmid, 2020, f"V.E.V. is a founder of Co {pmid}.", (f"Co {pmid}", False))
+
+    monkeypatch.setattr(coi_llm, "extract_founder_claims", slow)
+    notes: list[str] = []
+    records = [_record(n) for n in range(1, 11)]
+    claims = await cd._extract_claims(None, records, pi_name("Victor Velculescu"), {}, notes)
+    assert [c.pmid for c in claims] == [str(n) for n in range(10, 0, -1)]
+    assert state.peak == cd.COI_CONCURRENCY == 4
+    assert notes == [_spend(10)]
+
+
+async def test_no_transaction_is_open_during_the_network_lookups(db_session, monkeypatch, respx_mock, _coi):
+    """The job commits its reads before the extraction calls and again before the SEC
+    lookups, so neither runs inside a transaction (no snapshot, no locks held)."""
+    _settings(monkeypatch)
+    _routes(respx_mock)
+    user, job = await _velculescu(db_session)
+    open_during: list[tuple[str, bool]] = []
+    scripted = coi_llm.extract_founder_claims
+    real_lookup = sec_form_d.lookup_funding
+
+    async def extraction(record, pi, *, client=None):
+        open_during.append(("coi", db_session.in_transaction()))
+        return await scripted(record, pi, client=client)
+
+    async def lookup(*args, **kwargs):
+        open_during.append(("sec", db_session.in_transaction()))
+        return await real_lookup(*args, **kwargs)
+
+    monkeypatch.setattr(coi_llm, "extract_founder_claims", extraction)
+    monkeypatch.setattr(sec_form_d, "lookup_funding", lookup)
+    assert await _run(db_session, job) == f"2 suggested; {_spend(2)}"
+    assert open_during == [("coi", False), ("coi", False), ("sec", False), ("sec", False)]
+    assert len(await _rows(db_session, user.id)) == 2
+
+
+async def test_new_candidates_are_capped_at_20(db_session, monkeypatch, respx_mock):
+    """24 new names: the first 20 in merge order (the COI ones first) get a Form D
+    lookup and a row; the rest are skipped with a note and nothing is written for them."""
+    _settings(monkeypatch)
+    routes = _routes(respx_mock)
+    user, job = await _velculescu(db_session)
+    assert cd.MAX_NEW_CANDIDATES == 20
+
+    async def companies(*_args):
+        return [wikidata.WikidataCompany(f"Wikibio {n:02d}", f"Q{100 + n}",
+                                         f"https://www.wikidata.org/wiki/Q{100 + n}")
+                for n in range(1, 23)]
+
+    monkeypatch.setattr(cd, "_wikidata_companies", companies)
+    assert await _run(db_session, job) == f"20 suggested; {_spend(2)}; candidates: capped at 20"
+    rows = await _rows(db_session, user.id)
+    assert len(rows) == 20 and routes.efts.call_count == 20
+    assert {"DELFI Diagnostics", "Personal Genome Diagnostics", "Wikibio 18"} <= set(rows)
+    assert "Wikibio 19" not in rows and "Wikibio 22" not in rows
 
 
 @pytest.mark.parametrize("failure", ["unavailable", "raise"])
@@ -525,7 +652,7 @@ async def test_unavailable_disclosures_are_a_note(db_session, monkeypatch, respx
     _coi.script["34290408"] = (coi_llm.CoiOutcome("unavailable", [], reason="refusal")
                                if failure == "unavailable" else RuntimeError("boom"))
     user, job = await _velculescu(db_session)
-    assert await _run(db_session, job) == "1 suggested; coi: 1 of 2 disclosures unavailable"
+    assert await _run(db_session, job) == f"1 suggested; coi: 1 of 2 disclosures unavailable; {_spend(1)}"
     rows = await _rows(db_session, user.id)
     assert set(rows) == {"DELFI Diagnostics"}
     assert rows["DELFI Diagnostics"].status == "suggested"

@@ -1,4 +1,9 @@
 {
+ "_meta": {
+  "prompt_sha256": "83a9bf7e45c5a4c913b73a1186c50b30a7b27bcbc1283054f47b60ee474ced73",
+  "model": "claude-opus-5-5",
+  "recorded_at": "2026-10-02"
+ },
  "regex-pi-form-01": {
   "usage": {
    "input_tokens": 250,

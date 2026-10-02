@@ -11,17 +11,23 @@ prints one line per case:
   UNAVAILABLE     refusal, API error or malformed reply (reported, not gated)
 
 Companies compare by `pi_companies.normalize_company_name` ("DELFI Diagnostics, Inc."
-equals "DELFI Diagnostics"); roles compare exactly. Exits 1 when any case is a false
-positive (the O14 acceptance bar is zero), 2 without an API key, else 0. Misses are
-reported, not gated.
+equals "DELFI Diagnostics"); roles compare exactly. Exit status:
+
+  1  any case is a false positive (the O14 acceptance bar is zero)
+  2  no API key; or no case passed, or more than 5% of the cases sent to the API came
+     back unavailable, so the zero-false-positive bar cannot pass trivially
+  0  otherwise; misses are reported, not gated
 
 It spends real API calls (one per gated-in case, about 300) on the key in the
 environment, so it is operator-run only, never from CI. `--record PATH` writes every
-raw reply (stop reason, parsed payload, text) keyed by case id, for
-tests/unit/test_coi_llm.py's replay test (`coi_eval_recorded.json`).
+raw reply (stop reason, parsed payload, text) keyed by case id, plus a `_meta` entry
+(the prompt file's sha256, the model setting, the date), for
+tests/unit/test_coi_llm.py's replay test (`coi_eval_recorded.json`), which fails once
+the prompt or the model changes without a new recording.
 
 Run from a checkout on the host (the images carry no tests/ tree; `--cases` points
-elsewhere). Settings, including ANTHROPIC_API_KEY, load from the repository's `.env`:
+elsewhere). `--cases` and `--record` are relative to the directory the script is run
+from. Settings, including ANTHROPIC_API_KEY, load from the repository's `.env`:
 
   .venv-test/bin/python scripts/eval_coi_extraction.py \\
       --record tests/fixtures/company_discovery/coi_eval_recorded.json
@@ -29,9 +35,11 @@ elsewhere). Settings, including ANTHROPIC_API_KEY, load from the repository's `.
 """
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import sys
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -41,12 +49,17 @@ sys.path.insert(0, str(ROOT))
 from src.config import get_settings  # noqa: E402
 from src.services import llm  # noqa: E402
 from src.services.company_sources import pi_name  # noqa: E402
-from src.services.company_sources.coi_llm import extract_founder_claims  # noqa: E402
+from src.services.company_sources.coi_llm import (  # noqa: E402
+    COI_PROMPT_PATH,
+    extract_founder_claims,
+)
 from src.services.pi_companies import normalize_company_name  # noqa: E402
 
 CASES_PATH = ROOT / "tests/fixtures/company_discovery/coi_eval_cases.json"
 #: Seconds between calls: one request at a time, well under any rate limit.
 PACE_SECONDS = 1.0
+#: Above this share of unavailable replies among the cases sent, the run proves nothing.
+MAX_UNAVAILABLE_SHARE = 0.05
 
 
 class _Recorder:
@@ -125,12 +138,42 @@ async def _run_case(case: dict, recorder: _Recorder) -> tuple[str, str, dict | N
     return _verdict(returned, expected), detail, raw
 
 
+def _meta() -> dict:
+    """The recording's `_meta` entry: what the replies were produced with."""
+    prompt = (ROOT / COI_PROMPT_PATH).read_bytes()
+    return {
+        "prompt_sha256": hashlib.sha256(prompt).hexdigest(),
+        "model": get_settings().llm_coi_model,
+        "recorded_at": date.today().isoformat(),
+    }
+
+
+def _exit_status(totals: dict[str, int]) -> int:
+    """1 on any false positive; 2 when no case passed or too many sent cases were
+    unavailable (the bar would pass trivially); else 0."""
+    if totals.get("FALSE_POSITIVE"):
+        return 1
+    sent = sum(n for verdict, n in totals.items() if verdict != "SKIPPED")
+    unavailable = totals.get("UNAVAILABLE", 0)
+    if not totals.get("PASS"):
+        print("no case passed: the run does not show the zero-false-positive bar", file=sys.stderr)
+        return 2
+    if unavailable > MAX_UNAVAILABLE_SHARE * sent:
+        print(f"{unavailable} of {sent} sent cases unavailable (over {MAX_UNAVAILABLE_SHARE:.0%})",
+              file=sys.stderr)
+        return 2
+    return 0
+
+
 async def _main() -> int:
     p = argparse.ArgumentParser(description="Live COI founder-extraction evaluation (spends API calls).")
     p.add_argument("--record", type=Path, help="write every raw reply, keyed by case id, to this JSON file")
     p.add_argument("--only", action="append", help="run only this case id (repeatable)")
     p.add_argument("--cases", type=Path, default=CASES_PATH, help="case set (default: %(default)s)")
     a = p.parse_args()
+    # Paths given on the command line are the caller's; resolve them before moving.
+    a.cases = a.cases.resolve()
+    a.record = a.record.resolve() if a.record else None
     os.chdir(ROOT)  # COI_PROMPT_PATH is relative to the repository root
     if not get_settings().anthropic_api_key:
         print("ANTHROPIC_API_KEY is not set; this script makes live calls and needs one.", file=sys.stderr)
@@ -143,7 +186,7 @@ async def _main() -> int:
             return 2
     recorder = _Recorder(llm.get_anthropic_client())
     totals: dict[str, int] = {}
-    recorded: dict[str, dict] = {}
+    recorded: dict[str, dict] = {"_meta": _meta()}
     for n, case in enumerate(cases, 1):
         verdict, detail, raw = await _run_case(case, recorder)
         totals[verdict] = totals.get(verdict, 0) + 1
@@ -153,9 +196,9 @@ async def _main() -> int:
             await asyncio.sleep(PACE_SECONDS)
     if a.record:
         a.record.write_text(json.dumps(recorded, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
-        print(f"recorded {len(recorded)} replies to {a.record}")
+        print(f"recorded {len(recorded) - 1} replies to {a.record}")
     print("totals: " + ", ".join(f"{k}={v}" for k, v in sorted(totals.items())))
-    return 1 if totals.get("FALSE_POSITIVE") else 0
+    return _exit_status(totals)
 
 
 if __name__ == "__main__":

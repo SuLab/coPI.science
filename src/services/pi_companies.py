@@ -158,13 +158,25 @@ def _has_control_chars(text: str) -> bool:
     return any(unicodedata.category(ch) == "Cc" for ch in text)
 
 
+def _has_format_chars(text: str) -> bool:
+    """Unicode format characters (category Cf: U+202E right-to-left override, U+200B
+    zero-width space, ...), which make a name read differently from what it is."""
+    return any(unicodedata.category(ch) == "Cf" for ch in text)
+
+
 def _clean_name(company_name: str) -> tuple[str, str]:
-    """(name as stored, its normalized form), or CompanyValidationError."""
+    """(name as stored, its normalized form), or CompanyValidationError. Refuses control
+    and format characters, and a name over `MAX_NAME_CHARS` before or after
+    normalization or with no letter or digit."""
     name = (company_name or "").strip()
     if not name:
         raise CompanyValidationError("Enter the company's name.")
     if _has_control_chars(name):
         raise CompanyValidationError("The company name must be one line of text.")
+    if _has_format_chars(name):
+        raise CompanyValidationError(
+            "The company name must not contain invisible formatting characters."
+        )
     normalized = normalize_company_name(name)
     if len(name) > MAX_NAME_CHARS or len(normalized) > MAX_NAME_CHARS:
         raise CompanyValidationError(

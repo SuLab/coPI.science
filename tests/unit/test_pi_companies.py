@@ -13,6 +13,7 @@ from src.services import pi_companies, user_deletion
 from src.services.pi_companies import (
     PI_COMPANY_ROLE_LABELS,
     CompanyValidationError,
+    _clean_name,
     evidence_for_display,
     format_funding,
     http_url,
@@ -284,3 +285,21 @@ def test_the_companies_directory_and_agent_id_check_match_the_deletion_teardown(
     assert line in (services / "pi_companies.py").read_text()
     assert f"_{line}" in (services / "user_deletion.py").read_text()
     assert pi_companies._SAFE_AGENT_ID.pattern == user_deletion._SAFE_AGENT_ID.pattern
+
+
+@pytest.mark.parametrize("name", [
+    "Acme\u202eoiB",       # right-to-left override
+    "Ac\u200bme Bio",      # zero-width space
+    "\ufeffAcme Bio",      # byte-order mark / zero-width no-break space
+    "Acme\u2066 Bio",      # left-to-right isolate
+])
+def test_clean_name_refuses_format_characters(name):
+    with pytest.raises(CompanyValidationError, match="invisible formatting characters"):
+        _clean_name(name)
+
+
+def test_clean_name_still_refuses_control_characters_and_keeps_plain_names():
+    with pytest.raises(CompanyValidationError, match="one line of text"):
+        _clean_name("Acme\nBio")
+    assert _clean_name("  Müller Therapeutics, Inc. ") == (
+        "Müller Therapeutics, Inc.", normalize_company_name("Müller Therapeutics, Inc."))

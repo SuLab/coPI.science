@@ -45,8 +45,9 @@ def mentions_founding(statement: str) -> bool:
 
 @dataclass(frozen=True)
 class FounderClaim:
-    """One verified founder claim (`coi_llm.verify_claims`): `sentence` is the quote
-    from the statement that states it, `former` is set for a former or divested role."""
+    """One verified founder claim (`coi_llm.verify_claims`): `sentence` is the whole
+    enclosing sentence of the original statement that states it and names the PI,
+    `former` is set for a former or divested role."""
 
     company_name: str
     pi_role: str  # "founder" | "co_founder"

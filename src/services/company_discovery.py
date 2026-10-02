@@ -16,12 +16,23 @@ job's final progress entry (`DISCOVERY_DONE_STEP`) and the job completes with wh
 the other sources found: `industry_evidence` lost whole runs to one upstream 429 (F13).
 Only a database error fails the job.
 
-The worker holds one transaction for the whole job (`src.worker.main.process_job`), so
-every network lookup (PubMed, the COI extraction calls, Wikidata, then SEC Form D for
-each new candidate) runs
-before the first insert: an uncommitted `pi_companies` row would otherwise hold its
+Transactions: `src.worker.main.process_job` commits the handler's session once, after
+the handler returns, and writes the job's status in separate sessions. The job reads
+what it needs (the user, the publication PMIDs; later the names already listed) and
+commits each read before the network work that follows it, so no snapshot or lock is
+held while PubMed, Claude, Wikidata or SEC answer; those commits persist nothing,
+because nothing has been written yet. Every network lookup (PubMed, the COI
+extraction calls, Wikidata, then SEC Form D for each new candidate) runs before the
+first insert: an uncommitted `pi_companies` row would otherwise hold its
 `(user_id, normalized_name)` key through minutes of SEC requests and block a manager's
 manual add of the same name until the job commits.
+
+Bounds per run: only records that pass the deterministic gate
+(`coi_founders.locate_pi` and `mentions_founding`) are candidates for extraction, at
+most `coi_llm.MAX_COI_CALLS_PER_PI` of them (newest first), at most `COI_CONCURRENCY`
+calls in flight; at most `MAX_NEW_CANDIDATES` new names get a Form D lookup and a row.
+The outcome line reports the extraction's token spend ("coi: N calls, I in / O out
+tokens").
 
 Upstream text is untrusted: every candidate name passes the same cleaner a manual entry
 does (`pi_companies._clean_name`), and a refused one is skipped with a note.
@@ -31,6 +42,7 @@ Must not import the modules tests/unit/test_enrichment_isolation.py forbids, nor
 """
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 import uuid
@@ -75,6 +87,11 @@ MAX_COI_EVIDENCE = 10
 MAX_SENTENCE_CHARS = 1000
 #: PMIDs per EFetch request; each batch fails alone (`_fetch_coi_records`).
 PUBMED_BATCH = 100
+#: COI extraction calls in flight at once; results keep the newest-first order.
+COI_CONCURRENCY = 4
+#: New candidates (names the PI does not have in any status) one run looks up on SEC
+#: and suggests; the rest wait for the next run ("candidates: capped at N").
+MAX_NEW_CANDIDATES = 20
 #: How much of a refused upstream name a skip note quotes.
 _SHOWN_NAME_CHARS = 40
 
@@ -171,51 +188,93 @@ def merge_candidates(
 # --- sources (each failure is a note, never a job failure) --------------------
 
 
-async def _coi_claims(
-    db: AsyncSession, user_id: uuid.UUID, name: PiName | None, notes: list[str]
-) -> list[coi_founders.FounderClaim]:
+async def _publication_years(db: AsyncSession, user_id: uuid.UUID) -> dict[str, int | None]:
+    """PMID -> publication year of the PI's publications that have a PMID."""
     rows = (await db.execute(
         select(Publication.pmid, Publication.year)
         .where(Publication.user_id == user_id, Publication.pmid.isnot(None))
         .order_by(Publication.pmid)
     )).all()
-    if not rows:
+    return {str(pmid): year for pmid, year in rows}
+
+
+async def _coi_claims(
+    user_id: uuid.UUID, year_by_pmid: dict[str, int | None], name: PiName | None,
+    notes: list[str],
+) -> list[coi_founders.FounderClaim]:
+    """Founder claims from the PubMed records of `year_by_pmid`'s PMIDs. Network only:
+    the caller has already read the PMIDs and ended its transaction."""
+    if not year_by_pmid:
         return []
     if name is None:
         notes.append("pubmed: no usable PI name")
         return []
-    year_by_pmid = {str(pmid): year for pmid, year in rows}
     records = await _fetch_coi_records(user_id, list(year_by_pmid), notes)
     return await _extract_claims(user_id, records, name, year_by_pmid, notes)
+
+
+def _gated(record: dict, name: PiName) -> bool:
+    """The deterministic gate `coi_llm.extract_founder_claims` applies before its call:
+    a statement that mentions founding, on a record where the PI is located."""
+    statement = (record.get("coi_statement") or "").strip()
+    return coi_founders.mentions_founding(statement) and coi_founders.locate_pi(record, name) is not None
+
+
+async def _extract_one(
+    user_id: uuid.UUID, record: dict, name: PiName, slots: asyncio.Semaphore
+) -> coi_llm.CoiOutcome:
+    """One record's extraction under `slots`; a raise becomes "unavailable", so one odd
+    record never costs the others (or cancels them under `gather`)."""
+    async with slots:
+        try:
+            return await coi_llm.extract_founder_claims(record, name)
+        except Exception:
+            logger.exception("company_discovery %s: COI extraction failed for PMID %s", user_id, record.get("pmid"))
+            return coi_llm.CoiOutcome("unavailable", [], reason="error")
+
+
+def spend_note(outcomes: list[coi_llm.CoiOutcome]) -> str | None:
+    """"coi: N calls, I in / O out tokens" over the outcomes that carry token counts
+    (one per answered API call): I is input plus cache read plus cache creation, O is
+    output. None when no call was answered."""
+    usages = [o.usage for o in outcomes if o.usage is not None]
+    if not usages:
+        return None
+    tokens_in = sum(
+        u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0)
+        + u.get("cache_creation_input_tokens", 0)
+        for u in usages
+    )
+    tokens_out = sum(u.get("output_tokens", 0) for u in usages)
+    return f"coi: {len(usages)} calls, {tokens_in} in / {tokens_out} out tokens"
 
 
 async def _extract_claims(
     user_id: uuid.UUID, records: list[dict], name: PiName,
     year_by_pmid: dict[str, int | None], notes: list[str],
 ) -> list[coi_founders.FounderClaim]:
-    """One `coi_llm.extract_founder_claims` per record, newest first. A "skipped"
-    record (the gate refused it; no API call) costs nothing; at most
-    `coi_llm.MAX_COI_CALLS_PER_PI` records are sent, and the rest are not called
-    ("coi: capped at N disclosures"). An "unavailable" outcome, or a raise, costs that
-    record alone ("coi: N of M disclosures unavailable", M = records sent)."""
+    """Extraction over the records that pass the gate (`_gated`), newest first: the
+    first `coi_llm.MAX_COI_CALLS_PER_PI` of them are sent, `COI_CONCURRENCY` at a
+    time, and "coi: capped at N disclosures" is noted only when gated records were left
+    unsent. A record that fails the gate costs nothing and takes no slot under the cap.
+    An "unavailable" outcome, or a raise, costs that record alone ("coi: N of M
+    disclosures unavailable", M = records sent and not skipped). Claims keep the
+    records' newest-first order whatever order the calls finish in."""
     def newest(record: dict) -> tuple[int, int]:
         pmid = str(record.get("pmid") or "")
         year = year_by_pmid.get(pmid) or record.get("year") or 0
         return (year, int(pmid) if pmid.isdigit() else 0)
 
     cap = coi_llm.MAX_COI_CALLS_PER_PI
+    gated = [r for r in sorted(records, key=newest, reverse=True) if _gated(r, name)]
+    if len(gated) > cap:
+        notes.append(f"coi: capped at {cap} disclosures")
+    slots = asyncio.Semaphore(COI_CONCURRENCY)
+    outcomes = list(await asyncio.gather(*(_extract_one(user_id, r, name, slots) for r in gated[:cap])))
     claims: list[coi_founders.FounderClaim] = []
     sent = unavailable = 0
-    for record in sorted(records, key=newest, reverse=True):
-        if sent >= cap:
-            notes.append(f"coi: capped at {cap} disclosures")
-            break
-        try:
-            outcome = await coi_llm.extract_founder_claims(record, name)
-        except Exception:  # one odd record never costs the others
-            logger.exception("company_discovery %s: COI extraction failed for PMID %s", user_id, record.get("pmid"))
-            outcome = coi_llm.CoiOutcome("unavailable", [], reason="error")
-        if outcome.status == "skipped":
+    for outcome in outcomes:
+        if outcome.status == "skipped":  # the extractor's own gate disagreed: no call
             continue
         sent += 1
         if outcome.status != "ok":
@@ -227,6 +286,9 @@ async def _extract_claims(
             claims.append(claim)
     if unavailable:
         notes.append(f"coi: {unavailable} of {sent} disclosures unavailable")
+    spend = spend_note(outcomes)
+    if spend:
+        notes.append(spend)
     return claims
 
 
@@ -367,6 +429,16 @@ async def _write_suggestion(
     return (await db.execute(stmt)).scalar_one_or_none() is not None
 
 
+def capped_new(new: list[Candidate], notes: list[str]) -> list[Candidate]:
+    """The first `MAX_NEW_CANDIDATES` of `new` (merge order: newest statement first,
+    then Wikidata-only names); the rest are skipped with "candidates: capped at N" and
+    come back on a later run, since nothing was written for them."""
+    if len(new) <= MAX_NEW_CANDIDATES:
+        return new
+    notes.append(f"candidates: capped at {MAX_NEW_CANDIDATES}")
+    return new[:MAX_NEW_CANDIDATES]
+
+
 def outcome_line(suggested: int, already_listed: int, notes: list[str]) -> str:
     """"2 suggested", "0 suggested (2 already listed)", "2 suggested; sec: funding
     lookup unavailable"."""
@@ -382,18 +454,26 @@ async def execute_company_discovery(ctx: JobContext, db: AsyncSession) -> None:
     if user is None:
         await job_progress.record(ctx.id, DISCOVERY_DONE_STEP, "0 suggested; the account no longer exists")
         return
-    name = pi_name(user.name)
+    display_name, orcid = user.name, user.orcid
+    name = pi_name(display_name)
     sec_user_agent = get_settings().sec_user_agent
     notes: list[str] = []
+    year_by_pmid = await _publication_years(db, user_id)
+    # Nothing is written yet: end the read transaction before PubMed and Claude run
+    # (module docstring, "Transactions").
+    await db.commit()
 
-    claims = valid_names(await _coi_claims(db, user_id, name, notes), notes)
-    companies = valid_names(await _wikidata_companies(user_id, user.orcid, sec_user_agent, notes), notes)
+    claims = valid_names(await _coi_claims(user_id, year_by_pmid, name, notes), notes)
+    companies = valid_names(await _wikidata_companies(user_id, orcid, sec_user_agent, notes), notes)
     candidates = merge_candidates(claims, companies)
 
     existing = set((await db.execute(
         select(PiCompany.normalized_name).where(PiCompany.user_id == user_id)
     )).scalars())
+    await db.commit()  # again before the SEC lookups; ON CONFLICT absorbs a racing add
     new = [cand for key, cand in candidates.items() if key not in existing]
+    already_listed = len(candidates) - len(new)
+    new = capped_new(new, notes)
 
     # Every lookup first, then one short write phase (module docstring).
     fundings = [await _funding(cand, name, sec_user_agent) for cand in new]
@@ -406,6 +486,6 @@ async def execute_company_discovery(ctx: JobContext, db: AsyncSession) -> None:
     await db.flush()
     if sec_down:
         notes.append(f"sec: {sec_form_d.FUNDING_UNAVAILABLE}")
-    outcome = outcome_line(suggested, len(candidates) - len(new), notes)
-    logger.info("company_discovery %s (%s): %s", user_id, user.name, outcome)
+    outcome = outcome_line(suggested, already_listed, notes)
+    logger.info("company_discovery %s (%s): %s", user_id, display_name, outcome)
     await job_progress.record(ctx.id, DISCOVERY_DONE_STEP, outcome)

@@ -264,6 +264,13 @@ def _companies_dir() -> Path:
     return PROFILES_DIR / "private" / "companies"
 
 
+#: Applied to the staff company record before it is fenced: `delimit` strips only
+#: whole tags, so a name such as "</staff_co</staff_company_record>mpany_record>"
+#: would reassemble a closing tag after the strip. With no "<" or ">" left the
+#: record can neither close nor forge a fence.
+_RECORD_ESCAPES = str.maketrans({"<": "&lt;", ">": "&gt;"})
+
+
 def _staff_company_record(agent_id: str) -> str | None:
     """The PI's staff company record, or None when there is none, it is blank,
     or it cannot be read. ``agent_id`` has already passed ``_SAFE_AGENT_ID``;
@@ -309,7 +316,8 @@ async def _execute_retrieve_profile(agent_id: str, role: str) -> str:
     docs/specs/2026-10-02-hub-1-10-summary-risks-gates-design.md): when
     ``profiles/private/companies/<agent_id>.md`` exists and is not blank, a
     blank line and that file fenced as ``<staff_company_record>`` follow the
-    result. A lab bot, and the hub asking about a PI with no record, get the
+    result, with every "<" and ">" in the file escaped as ``&lt;``/``&gt;``
+    first (``_RECORD_ESCAPES``). A lab bot, and the hub asking about a PI with no record, get the
     same bytes as before the record existed. The file is the export of the
     PI's confirmed company rows; this function never reads the table.
     """
@@ -340,8 +348,10 @@ async def _execute_retrieve_profile(agent_id: str, role: str) -> str:
     record = _staff_company_record(agent_id)
     if record is None:
         return result
-    # Staff-confirmed company data, fenced as data like the profile (SEC-14).
-    return f"{result}\n\n{delimit(record, 'staff_company_record')}"
+    # Staff-confirmed company data, fenced as data like the profile (SEC-14),
+    # with angle brackets escaped so a company name cannot rebuild a tag.
+    fenced = delimit(record.translate(_RECORD_ESCAPES), "staff_company_record")
+    return f"{result}\n\n{fenced}"
 
 
 def _format_abstract(result: dict) -> str:
