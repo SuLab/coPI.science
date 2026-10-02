@@ -9,13 +9,12 @@
             <h1 class="text-2xl font-bold text-gray-900 mt-1">Simulation Run</h1>
         </div>
         <div class="text-right">
-            <p class="text-sm text-gray-500"><span data-utc="{{ run.started_at.isoformat() }}" data-utc-fmt="short">{{ run.started_at.strftime('%b %d, %Y %H:%M') }}</span></p>
+            <p class="text-sm text-gray-500">{{ run.started_at | ts }}</p>
             {% set sc = {'running': 'text-blue-600', 'completed': 'text-green-700', 'stopped': 'text-gray-500'} %}
             <span class="text-sm font-medium {{ sc.get(run.status, '') }}">{{ run.status | capitalize }}</span>
         </div>
     </div>
 
-    {% if msg %}<div class="mb-4 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-base text-green-800">{{ msg }}</div>{% endif %}
     <!-- Actions -->
     <div class="mb-6 flex flex-wrap items-center gap-3">
         <a href="/admin/activity/{{ run.id }}/llm-calls"

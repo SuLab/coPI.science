@@ -8,7 +8,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
-from src.dependencies import get_current_user, get_pi_user
+from src.dependencies import get_current_user, get_pi_user, impersonation_note
 from src.models import Job, ResearcherProfile, User
 from src.models.job import INTERACTIVE_PRIORITY
 from src.routers.auth import pop_post_login_redirect
@@ -27,11 +27,14 @@ templates = make_templates()
 
 
 def _template_context(request: Request, user: User, **kwargs) -> dict:
+    """``current_user`` is the real admin under impersonation (it drives the nav); ``user`` is the
+    effective account, which every form field must read (FN-02)."""
     impersonated = getattr(user, "_is_impersonated", False)
     real_admin = getattr(user, "_real_admin", None)
     ctx = {
         "request": request,
         "current_user": real_admin if impersonated else user,
+        "user": user,
         "impersonation_banner": user if impersonated else None,
         "active_page": "onboarding",
     }
@@ -135,6 +138,7 @@ async def save_profile(
 
     # Email is required at onboarding. apply_profile_edits validates it before
     # persisting anything, so a bad value rejects the whole submission.
+    note = impersonation_note(current_user)
     error = await apply_profile_edits(
         db, target_user=current_user, changed_by_user_id=current_user.id,
         form={
@@ -143,7 +147,8 @@ async def save_profile(
         },
         expected_version=parse_expected_version(profile_version),
         email_required=True,
-        change_summary="Profile saved during onboarding",
+        change_summary="; ".join(filter(None, ["Profile saved during onboarding", note])),
+        mechanism="web_impersonated" if note else "web",
     )
     if error:
         return RedirectResponse(url=f"/onboarding?error={error}", status_code=302)

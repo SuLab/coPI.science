@@ -38,7 +38,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import JSON, literal_column, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # `panel_is_owed`/`PANEL_REQUIRED_FOR` are deliberately NOT imported here. This
@@ -1890,6 +1890,31 @@ async def _load_consults(
     ]
 
 
+#: B-07: the tool_use / tool_result blocks of a logged hub turn, extracted in SQL, as
+#: `[{"content": [block, ...]}, ...]` in conversation order (NULL when there are
+#: none). `tool_chips_from_conversation` reads nothing else, so the page no longer
+#: transfers the thinking and text blocks, which are the bulk of the column's bytes.
+#: `messages_json` is `json` (not `jsonb`); a non-array value or a non-array
+#: `content` contributes nothing, as in the Python reader.
+TOOL_BLOCKS_SLICE = literal_column(
+    """(SELECT json_agg(json_build_object('content', kept.blocks) ORDER BY msg.ord)
+        FROM json_array_elements(
+               CASE WHEN json_typeof(llm_call_logs.messages_json) = 'array'
+                    THEN llm_call_logs.messages_json ELSE '[]'::json END
+             ) WITH ORDINALITY AS msg(value, ord)
+        CROSS JOIN LATERAL (
+          SELECT json_agg(blk.value ORDER BY blk.ord) AS blocks
+          FROM json_array_elements(
+                 CASE WHEN json_typeof(msg.value -> 'content') = 'array'
+                      THEN msg.value -> 'content' ELSE '[]'::json END
+               ) WITH ORDINALITY AS blk(value, ord)
+          WHERE blk.value ->> 'type' IN ('tool_use', 'tool_result')
+        ) AS kept
+        WHERE kept.blocks IS NOT NULL)""",
+    type_=JSON,
+).label("tool_slice")
+
+
 async def _load_tool_turns(
     db: AsyncSession,
     assessment: OpportunityAssessment,
@@ -1911,7 +1936,8 @@ async def _load_tool_turns(
     ``system_prompt`` is deliberately NOT selected: it is the largest column in
     the table, it is already readable on the LLM-calls page, and nothing here
     renders it — loading it would put tens of kilobytes per row into the
-    template context for nothing.
+    template context for nothing. Nor is the whole ``messages_json``: only its
+    tool blocks, extracted in SQL (``TOOL_BLOCKS_SLICE``, B-07).
     """
     channel = message_views[0].get("channel_name") or assessment.channel_name
     first = min(view["at"] for view in message_views)
@@ -1921,7 +1947,7 @@ async def _load_tool_turns(
             LlmCallLog.id,
             LlmCallLog.created_at,
             LlmCallLog.model,
-            LlmCallLog.messages_json,
+            TOOL_BLOCKS_SLICE,
             LlmCallLog.response_text,
         )
         .where(
@@ -1948,7 +1974,7 @@ async def _load_tool_turns(
     rows = list(reversed((await db.execute(query)).all()))
     turns = []
     for row in rows:
-        chips = tool_chips_from_conversation(row.messages_json)
+        chips = tool_chips_from_conversation(row.tool_slice)
         if not chips:
             # A turn that called no tool adds nothing the message itself does
             # not already say.

@@ -966,15 +966,33 @@ async def run_turn(prepared: PreparedTurn, queue: asyncio.Queue) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _own_turn_is_stale(db: AsyncSession, *, assessment_id: uuid.UUID, user_id: uuid.UUID) -> bool:
+    """Whether the caller has a `streaming` turn on this assessment older than
+    STALE_AFTER_SECONDS — the one case a poll must still sweep, or the drawer would
+    poll a dead answer until it is reopened."""
+    count = await db.scalar(
+        select(func.count(AssessmentChatTurn.id)).where(
+            AssessmentChatTurn.assessment_id == assessment_id,
+            AssessmentChatTurn.user_id == user_id,
+            AssessmentChatTurn.status == CHAT_STATUS_STREAMING,
+            AssessmentChatTurn.created_at < _since(timedelta(seconds=STALE_AFTER_SECONDS)),
+        )
+    )
+    return bool(count)
+
+
 async def list_history(
-    db: AsyncSession, *, assessment_id: uuid.UUID, user: Any
+    db: AsyncSession, *, assessment_id: uuid.UUID, user: Any, sweep: bool = True
 ) -> dict[str, Any] | None:
     """The GET shape (§6.5), or None for an unknown assessment. Sweeps first; builds
-    the current record so each turn can say whether its record has changed."""
+    the current record so each turn can say whether its record has changed.
+    `sweep=False` is the drawer's 5 s poll (B-08): it skips the every-user sweep
+    unless the caller's own turn here is already stale (`_own_turn_is_stale`)."""
     settings = get_settings()
     user_id = user.id
     tier = tier_for(user)
-    await sweep_stale(db)
+    if sweep or await _own_turn_is_stale(db, assessment_id=assessment_id, user_id=user_id):
+        await sweep_stale(db)
     loaded = await load_chat_record(db, assessment_id, tier=tier)
     if loaded is None:
         return None

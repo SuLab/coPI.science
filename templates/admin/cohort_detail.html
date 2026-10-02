@@ -34,15 +34,11 @@
     </div>
 </div>
 
-{% if notice %}
-<div class="mb-4 rounded-md bg-green-50 border border-green-200 px-4 py-3 text-sm text-green-800">{{ notice }}</div>
-{% endif %}
-
 {% include "admin/_cohort_gate_banner.html" %}
 
 <!-- Members -->
 <h2 class="text-lg font-semibold text-gray-900 mb-3">Members ({{ cohort.memberships | length }})</h2>
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-8">
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto mb-8">
     {% if cohort.memberships %}
     <table class="min-w-full divide-y divide-gray-200">
         <thead class="bg-gray-50">
@@ -74,7 +70,7 @@
                     {% endif %}
                 </td>
                 <td class="px-4 py-3 text-sm text-gray-600">{{ adder_map.get(m.added_by | string, '—') }}</td>
-                <td class="px-4 py-3 text-xs text-gray-500" data-utc="{{ m.added_at.isoformat() }}" data-utc-fmt="short">{{ m.added_at.strftime('%b %d') }}</td>
+                <td class="px-4 py-3 text-xs text-gray-500">{{ m.added_at | ts("date") }}</td>
                 <td class="px-4 py-3 text-sm">
                     <form method="POST" action="/admin/cohorts/{{ cohort.id }}/remove-agent">
                         <input type="hidden" name="agent_id" value="{{ m.agent_id }}">
@@ -111,7 +107,7 @@
 <!-- Read-only agent → cohort map -->
 <h2 class="text-lg font-semibold text-gray-900 mb-3">Agent Cohort Map</h2>
 <p class="text-sm text-gray-500 mb-3">All agents and the cohorts they currently belong to (read-only; manage membership from each cohort's page).</p>
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto">
     <table class="min-w-full divide-y divide-gray-200">
         <thead class="bg-gray-50">
             <tr>
@@ -139,7 +135,7 @@
     Every change to this cohort, newest first. Append-only, and it outlives the
     cohort row itself — deleting a cohort does not erase its history.
 </p>
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto">
     {% if audit_events %}
     <table class="min-w-full divide-y divide-gray-200">
         <thead class="bg-gray-50">
@@ -153,9 +149,8 @@
         <tbody class="divide-y divide-gray-100">
             {% for e in audit_events %}
             <tr class="hover:bg-gray-50">
-                <td class="px-4 py-3 text-xs text-gray-500"
-                    data-utc="{{ e.created_at.isoformat() }}" data-utc-fmt="short">
-                    {{ e.created_at.strftime('%b %d %H:%M') }}
+                <td class="px-4 py-3 text-xs text-gray-500">
+                    {{ e.created_at | ts }}
                 </td>
                 <td class="px-4 py-3 text-sm text-gray-700"><code>{{ e.action }}</code></td>
                 <td class="px-4 py-3 text-sm text-gray-600">

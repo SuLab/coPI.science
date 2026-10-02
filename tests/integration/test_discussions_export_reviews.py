@@ -70,3 +70,26 @@ async def test_the_agents_page_has_no_proposal_counts(client, db_session):
     assert page.status_code == 200
     assert "to review" not in page.text
     assert ">Proposals<" not in page.text
+
+
+async def test_the_html_export_renders_summaries_on_the_server(client, db_session):
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+    run = await factories.make_simulation_run(db_session)
+    await factories.make_agent_message(
+        db_session, run=run, agent_id="su", channel_name="general",
+        phase="new_post", message_ts="1700000000.000200", content="root",
+    )
+    await factories.make_thread_decision(
+        db_session, run=run, thread_id="1700000000.000200", channel="general",
+        agent_a="su", agent_b="lotz", outcome="proposal",
+        summary_text="**Bold plan**\n\n<script>window.__x=1</script>", decided_at=REVIEWED,
+    )
+    await db_session.flush()
+    r = await client.get(
+        f"/admin/discussions?run_id={run.id}&export=html", headers=auth_headers(admin.id)
+    )
+    assert r.status_code == 200
+    assert "<strong>Bold plan</strong>" in r.text
+    assert "<script>window.__x=1</script>" not in r.text
+    assert "data-markdown" not in r.text
+    assert "/static/js/markdown.js" not in r.text

@@ -384,7 +384,9 @@ async def test_admin_impersonating_a_reviewer_sees_no_staff_forms(client, db_ses
 
     pis_body = (await client.get("/manager/pis", headers=headers)).text
     assert pis_body  # sanity: the page actually rendered (200, not a redirect body)
-    assert 'action="/manager/pis"' not in pis_body
+    # The Add-PI write form; the GET filter form (FN-04 Apply button) is a read.
+    assert '<form method="post" action="/manager/pis"' not in pis_body
+    assert '<form method="get" action="/manager/pis"' in pis_body
 
     detail_body = (await client.get(f"/manager/pis/{pi.id}", headers=headers)).text
     assert 'action="/manager/pis/' not in detail_body

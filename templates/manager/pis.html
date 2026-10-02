@@ -4,7 +4,7 @@
 {% block content %}
 <div class="flex items-center justify-between mb-6">
     <h1 class="text-2xl font-bold text-gray-900">PIs</h1>
-    <span class="text-sm text-gray-500">{{ user_data | length }} PIs</span>
+    <span class="text-sm text-gray-500">{{ user_total }} PIs</span>
 </div>
 
 <!-- Add PI -->
@@ -40,11 +40,10 @@
 {% endif %}
 
 <!-- Filters -->
-<div data-filter-nav="/manager/pis" class="bg-white rounded-lg border border-gray-200 p-4 mb-4 flex flex-wrap gap-4">
+<form method="get" action="/manager/pis" class="bg-white rounded-lg border border-gray-200 p-4 mb-4 flex flex-wrap items-end gap-4">
     <div>
         <label for="status-filter" class="text-xs font-medium text-gray-600 block mb-1">Profile Status</label>
-        <select data-filter-param="status_filter" id="status-filter"
-                class="border border-gray-300 rounded px-2 py-1 text-sm">
+        <select id="status-filter" name="status_filter" class="border border-gray-300 rounded px-2 py-1 text-sm">
             <option value="">All</option>
             <option value="no_profile" {% if status_filter == 'no_profile' %}selected{% endif %}>No Profile</option>
             <option value="generating" {% if status_filter == 'generating' %}selected{% endif %}>Generating</option>
@@ -54,17 +53,17 @@
     </div>
     <div>
         <label for="claimed-filter" class="text-xs font-medium text-gray-600 block mb-1">Claimed</label>
-        <select data-filter-param="claimed_filter" id="claimed-filter"
-                class="border border-gray-300 rounded px-2 py-1 text-sm">
+        <select id="claimed-filter" name="claimed_filter" class="border border-gray-300 rounded px-2 py-1 text-sm">
             <option value="">All</option>
             <option value="claimed" {% if claimed_filter == 'claimed' %}selected{% endif %}>Claimed</option>
             <option value="unclaimed" {% if claimed_filter == 'unclaimed' %}selected{% endif %}>Unclaimed</option>
         </select>
     </div>
-</div>
+    <button type="submit" class="px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">Apply</button>
+</form>
 
 <!-- PIs table -->
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto">
     <table class="min-w-full divide-y divide-gray-200">
         <thead class="bg-gray-50">
             <tr>
@@ -142,17 +141,17 @@
                 </td>
                 <td class="px-4 py-3 hidden lg:table-cell">
                     {% if item.user.claimed_at %}
-                    <span class="text-xs text-green-700">✓ {{ item.user.claimed_at.strftime('%b %d') }}</span>
+                    <span class="text-xs text-green-700">✓ {{ item.user.claimed_at | ts("date") }}</span>
                     {% else %}
                     <span class="text-xs text-gray-600">No</span>
                     {% endif %}
                 </td>
                 <td class="px-4 py-3 text-xs text-gray-500 hidden md:table-cell">
-                    {{ item.user.created_at.strftime('%b %d, %Y') }}
+                    {{ item.user.created_at | ts("date") }}
                 </td>
                 <td class="px-4 py-3 text-xs text-gray-500 hidden md:table-cell">
                     {% if item.user.last_login_at %}
-                        {{ item.user.last_login_at.strftime('%b %d, %Y') }}
+                        {{ item.user.last_login_at | ts("date") }}
                     {% else %}
                         <span class="text-gray-600">—</span>
                     {% endif %}
@@ -166,5 +165,15 @@
         </tbody>
     </table>
 </div>
+{% if page_count > 1 %}
+{% set pager_qs %}{% if status_filter %}status_filter={{ status_filter | urlencode }}&amp;{% endif %}{% if claimed_filter %}claimed_filter={{ claimed_filter | urlencode }}&amp;{% endif %}{% if institution_filter %}institution_filter={{ institution_filter | urlencode }}&amp;{% endif %}{% endset %}
+<nav aria-label="Pages" class="flex flex-wrap items-center justify-between gap-2 mt-4 text-sm text-gray-600">
+    <span>Page {{ page }} of {{ page_count }} ({{ user_total }} PIs)</span>
+    <span class="flex gap-3">
+        {% if page > 1 %}<a href="/manager/pis?{{ pager_qs }}page={{ page - 1 }}" class="text-indigo-700 underline">&larr; Prev</a>{% endif %}
+        {% if page < page_count %}<a href="/manager/pis?{{ pager_qs }}page={{ page + 1 }}" class="text-indigo-700 underline">Next &rarr;</a>{% endif %}
+    </span>
+</nav>
+{% endif %}
 
 {% endblock %}

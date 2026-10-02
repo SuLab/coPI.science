@@ -2470,7 +2470,7 @@ async def test_admin_assessments_cards_count_recommendation_not_band(
     assert resp.status_code == 200
     html = resp.text
 
-    cards = re.search(r'<div class="grid grid-cols-5[^"]*">(.*?)\n</div>', html, re.S)
+    cards = re.search(r'<div class="grid grid-cols-2 sm:grid-cols-5[^"]*">(.*?)\n</div>', html, re.S)
     assert cards, "five headline cards must render"
     block = cards.group(1)
     counts = {

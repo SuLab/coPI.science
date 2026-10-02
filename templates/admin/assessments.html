@@ -90,20 +90,20 @@
 {% endblock %}
 
 {% block content %}
-<div class="flex items-center justify-between mb-2 gap-4">
+<div class="flex flex-wrap items-center justify-between mb-2 gap-4">
     <h1 class="text-2xl font-bold text-gray-900">Opportunity Assessments</h1>
     {% if runs %}
     {# ONE form for all three controls, so each select submits the others'
        current values as ordinary form fields — that is what preserves run_id
        when the sort changes, and the sort when the run changes, without a
        single hidden input or a hand-assembled query string. #}
-    <form method="GET" action="/admin/assessments" class="flex flex-wrap items-center gap-2 justify-end">
+    <form method="GET" action="/admin/assessments" class="flex flex-wrap items-center gap-2 justify-end min-w-0 max-w-full">
         <label for="assessments-run-select" class="text-sm text-gray-500">Run:</label>
-        <select id="assessments-run-select" name="run_id" data-autosubmit
+        <select id="assessments-run-select" name="run_id"
                 class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
             {% for run in runs %}
             <option value="{{ run.id }}" {% if not show_all_runs and run.id == selected_run_id %}selected{% endif %}>
-                {{ run.started_at.strftime('%b %d %H:%M') }} ({{ run.status }}, {{ assessment_counts_by_run.get(run.id, 0) }} stored{% if run.config and run.config.get('rubric_version') %}, rubric {{ run.config.get('rubric_version') }}{% endif %}){% if run.id == runs[0].id %} — current{% endif %}
+                {{ run.started_at | ts }} ({{ run.status }}, {{ assessment_counts_by_run.get(run.id, 0) }} stored{% if run.config and run.config.get('rubric_version') %}, rubric {{ run.config.get('rubric_version') }}{% endif %}){% if run.id == runs[0].id %} — current{% endif %}
             </option>
             {% endfor %}
             <option value="all" {% if show_all_runs %}selected{% endif %}>All Runs</option>
@@ -113,7 +113,7 @@
            not accept would silently render the default order with the wrong
            option showing as selected. #}
         <label for="assessments-sort-select" class="text-sm text-gray-500">Sort:</label>
-        <select id="assessments-sort-select" name="sort" data-autosubmit
+        <select id="assessments-sort-select" name="sort"
                 class="assessment-sort-select text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
             {% for value, label in sort_options %}
             <option value="{{ value }}" {% if sort == value %}selected{% endif %}>{{ label }}</option>
@@ -124,7 +124,7 @@
            own "Lab:" line — "WangBot" here against "wang" on the cards it
            filters would read as two different things. #}
         <label for="assessments-lab-select" class="text-sm text-gray-500">Lab:</label>
-        <select id="assessments-lab-select" name="lab" data-autosubmit
+        <select id="assessments-lab-select" name="lab"
                 class="assessment-lab-select text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
             <option value="">All labs</option>
             {% for option in lab_options %}
@@ -136,6 +136,7 @@
            without this hidden input every select would drop it and silently
            return the reader to the default tab. #}
         <input type="hidden" name="review" value="{{ review }}">
+        <button type="submit" class="px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">Apply</button>
     </form>
     {% endif %}
 </div>
@@ -181,7 +182,7 @@
    styling, never by colour alone. #}
 <nav class="assessment-review-tabs mb-4 flex flex-wrap items-center gap-2 border-b border-gray-200" aria-label="Review status">
     {% for value, label in [('unreviewed', 'Unreviewed'), ('reviewed', 'Reviewed'), ('all', 'All')] %}
-    <a href="/admin/assessments?run_id={{ 'all' if show_all_runs else selected_run_id }}&amp;sort={{ sort }}&amp;lab={{ lab_filter or '' }}&amp;review={{ value }}"
+    <a href="/admin/assessments?run_id={{ 'all' if show_all_runs else selected_run_id }}&amp;sort={{ sort }}&amp;lab={{ (lab_filter or '') | urlencode }}&amp;review={{ value }}"
        {% if review == value %}aria-current="page" class="border-b-2 border-indigo-600 px-3 py-2 text-sm font-semibold text-indigo-700"{% else %}class="px-3 py-2 text-sm text-gray-600 hover:text-gray-900"{% endif %}>{{ label }} ({{ review_counts[value] }})</a>
     {% endfor %}
     <span class="ml-2 text-xs text-gray-500">A tab counts written review feedback, not assignment.</span>

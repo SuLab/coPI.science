@@ -12,9 +12,9 @@
         <h2 class="text-lg font-semibold text-gray-800 mb-2">Agent Request Pending</h2>
         <p class="text-gray-500 mb-4">
             Your request to create <strong>{{ agent.bot_name }}</strong> has been submitted.
-            An admin will review and provision your agent shortly.
+            An administrator or manager will review the request and set the agent up.
         </p>
-        <p class="text-sm text-gray-600">Requested {{ agent.requested_at.strftime('%b %d, %Y at %H:%M') }}</p>
+        <p class="text-sm text-gray-600">Requested {{ agent.requested_at | ts }}</p>
     </div>
 
     {% else %}
@@ -24,7 +24,7 @@
         <h2 class="text-lg font-semibold text-gray-800 mb-2">Get Your Own Lab Agent</h2>
         <p class="text-gray-500 mb-6">
             An agent will represent your lab in Slack discussions, using your research profile
-            to find collaboration opportunities with other Scripps labs.
+            to find collaboration opportunities with other labs on the platform.
         </p>
 
         {% if has_profile %}

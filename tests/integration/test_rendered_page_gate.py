@@ -3,7 +3,7 @@ inline-handler removal).
 
 Every GET page the app serves is rendered against factory data as an anonymous visitor, a
 PI who owns an agent, a reviewer, a manager and an admin. Every HTML response that is not a
-redirect (error pages included) must hold four properties:
+redirect (error pages included) must hold five properties:
 
 * every ``input`` (other than hidden/submit/button/reset/image), ``select`` and ``textarea``
   has an accessible name: a non-empty ``aria-label`` or ``aria-labelledby``, a wrapping
@@ -11,13 +11,14 @@ redirect (error pages included) must hold four properties:
   or ``placeholder`` alone does not count);
 * no ``text-gray-300``/``text-gray-400`` anywhere in the document, scripts included (X-01);
 * no ``<tr onclick>`` (X-05);
-* no inline ``on…=`` attribute on any element (the Phase 2 enforced CSP blocks them).
+* no inline ``on…=`` attribute on any element (the Phase 2 enforced CSP blocks them);
+* a full document (X-04) has one ``<main>``, one ``<h1>``, headings that never skip a level
+  going down, every ``<nav>`` uniquely named, and no empty ``<th>``.
 
 The page list is the app's own route table (``http_routes``, shared with
 ``tests/unit/test_reachability.py``): a new GET route fails
 ``test_every_get_route_is_walked_or_skipped`` until it is added to ``PAGES`` with a URL
-built from the seed, or to ``SKIPPED`` with the reason it renders no HTML page. Phase 2
-extends ``page_problems``.
+built from the seed, or to ``SKIPPED`` with the reason it renders no HTML page.
 """
 import hashlib
 import re
@@ -117,6 +118,7 @@ SKIPPED: dict[str, str] = {
     "/login/start": "redirects to ORCID",
     "/assessment-chat/{assessment_id}": "JSON for static/js/assessment_chat.js",
     "/api/health": "JSON health probe",
+    "/admin/activity/{run_id}/llm-calls/{call_id}/bodies": "HTML fragment for the llm_calls page; no layout",
 }
 
 #: Walked (any HTML they return is still checked) but expected to answer every role with a
@@ -191,6 +193,69 @@ class _GateParser(HTMLParser):
         return out
 
 
+# --- X-04 (Phase 2, Part 2B): landmarks and headings --------------------------------
+
+
+def _landmark_and_h1_problems(html: str) -> list[str]:
+    """X-04 on one full document: exactly one <main> and one <h1>, headings that never
+    skip a level going down, every <nav> named (aria-label/aria-labelledby) with unique
+    names, and no empty <th>. A fragment (no <html>) is not a page and passes."""
+    if "<html" not in html:
+        return []
+
+    class _Scan(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.mains = 0
+            self.headings: list[int] = []
+            self.navs: list[str | None] = []
+            self.empty_th = 0
+            self._th: list[str] | None = None
+            self._th_label = None
+
+        def handle_starttag(self, tag, attrs):
+            a = dict(attrs)
+            if tag == "main":
+                self.mains += 1
+            elif tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+                self.headings.append(int(tag[1]))
+            elif tag == "nav":
+                self.navs.append(a.get("aria-label") or a.get("aria-labelledby"))
+            elif tag == "th":
+                self._th, self._th_label = [], a.get("aria-label")
+
+        def handle_endtag(self, tag):
+            if tag == "th" and self._th is not None:
+                if not "".join(self._th).strip() and not self._th_label:
+                    self.empty_th += 1
+                self._th = None
+
+        def handle_data(self, data):
+            if self._th is not None:
+                self._th.append(data)
+
+    scan = _Scan()
+    scan.feed(html)
+    problems = []
+    if scan.mains != 1:
+        problems.append(f"{scan.mains} <main> elements")
+    if scan.headings.count(1) != 1:
+        problems.append(f"{scan.headings.count(1)} <h1> elements")
+    previous = 0
+    for level in scan.headings:
+        if level > previous + 1:
+            problems.append(f"heading skips from h{previous} to h{level}")
+        previous = level
+    if any(not n for n in scan.navs):
+        problems.append("a <nav> without aria-label")
+    named = [n for n in scan.navs if n]
+    if len(named) != len(set(named)):
+        problems.append(f"duplicate <nav> labels {named}")
+    if scan.empty_th:
+        problems.append(f"{scan.empty_th} empty <th>")
+    return problems
+
+
 def page_problems(html: str) -> list[str]:
     """Every gate violation in one HTML document."""
     parser = _GateParser()
@@ -202,6 +267,7 @@ def page_problems(html: str) -> list[str]:
     if parser.tr_onclick:
         problems.append(f"{parser.tr_onclick} <tr onclick> row(s) (X-05)")
     problems += [f"inline handler {h}" for h in sorted(parser.inline_handlers)]
+    problems += _landmark_and_h1_problems(html)
     return problems
 
 
@@ -320,3 +386,100 @@ async def test_every_page_passes_the_gate(client, gate_world):
     never = set(PAGES) - rendered_200 - set(NO_200_EXPECTED)
     assert not never, f"no role rendered these with 200, so the gate checked nothing there: {sorted(never)}"
     assert not problems, "\n".join(problems)
+
+
+def test_the_landmark_checker_has_teeth():
+    page = '<html><body><nav aria-label="Main"></nav><main><h1>T</h1><h2>S</h2></main></body></html>'
+    assert _landmark_and_h1_problems(page) == []
+    assert _landmark_and_h1_problems("<div><h3>fragment</h3></div>") == []
+    bad = '<html><body><nav></nav><nav aria-label="A"></nav><nav aria-label="A"></nav><h2>x</h2><h4>y</h4><table><tr><th></th></tr></table></body></html>'
+    problems = _landmark_and_h1_problems(bad)
+    assert "0 <main> elements" in problems and "0 <h1> elements" in problems
+    assert "heading skips from h0 to h2" in problems and "heading skips from h2 to h4" in problems
+    assert "a <nav> without aria-label" in problems and "1 empty <th>" in problems
+    assert any(p.startswith("duplicate <nav> labels") for p in problems)
+
+
+async def _render_structure_pages(client, db_session) -> dict[str, str]:
+    """Path -> HTML for a fixed page set across roles, with factory data (shared with
+    the R-01 table check). Includes the login page and an HTML 404 error page."""
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    pi = await factories.make_user(db_session)
+    await factories.make_profile(db_session, user=pi)
+    agent = await factories.make_agent(db_session, user=pi)
+    run = await factories.make_simulation_run(db_session, status="stopped")
+    await factories.make_agent_message(db_session, run=run, phase="new_post", thread_ts=None, message_ts="900.1")
+    await factories.make_llm_call_log(db_session, run=run)
+    pages = [
+        (None, "/login"),
+        (admin, "/admin/users"), (admin, f"/admin/users/{pi.id}"), (admin, f"/admin/users/{uuid.uuid4()}"),
+        (admin, "/admin/jobs"), (admin, "/admin/activity"), (admin, f"/admin/activity/{run.id}"),
+        (admin, f"/admin/activity/{run.id}/llm-calls"), (admin, "/admin/discussions"),
+        (admin, "/admin/agents"), (admin, f"/admin/agents/{agent.id}"), (admin, "/admin/cohorts"),
+        (admin, "/admin/access-requests"), (admin, "/admin/simulation"),
+        (manager, "/manager/pis"), (manager, f"/manager/pis/{pi.id}"), (manager, "/manager/discussions"),
+        (manager, "/manager/activity"), (manager, "/manager/slack-bots"),
+        (manager, "/manager/prompt-suggestions"), (manager, "/manager/assessments"),
+        (pi, "/settings"), (pi, "/profile"),
+    ]
+    rendered: dict[str, str] = {}
+    for user, path in pages:
+        headers = {"Accept": "text/html"}
+        if user is not None:
+            headers.update(auth_headers(user.id))
+        response = await client.get(path, headers=headers)
+        assert response.status_code in (200, 404), (path, response.status_code)
+        rendered[path] = response.text
+    return rendered
+
+
+async def test_full_pages_have_landmarks_one_h1_and_ordered_headings(client, db_session):
+    pages = await _render_structure_pages(client, db_session)
+    failures = {path: p for path, html in pages.items() if (p := _landmark_and_h1_problems(html))}
+    assert failures == {}
+
+
+# --- R-01/FN-03 (Phase 2, Part 2B): every table can scroll sideways ------------------
+
+
+def _unscrollable_tables(html: str) -> int:
+    """How many <table> elements have no `overflow-x-auto`/`overflow-auto` ancestor."""
+    void = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
+
+    class _Scan(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.stack: list[tuple[str, list[str]]] = []
+            self.bad = 0
+
+        def handle_starttag(self, tag, attrs):
+            if tag in void:
+                return
+            classes = (dict(attrs).get("class") or "").split()
+            if tag == "table" and not any(
+                c in ("overflow-x-auto", "overflow-auto") for _t, cs in self.stack for c in cs
+            ):
+                self.bad += 1
+            self.stack.append((tag, classes))
+
+        def handle_endtag(self, tag):
+            for i in range(len(self.stack) - 1, -1, -1):
+                if self.stack[i][0] == tag:
+                    del self.stack[i:]
+                    break
+
+    scan = _Scan()
+    scan.feed(html)
+    return scan.bad
+
+
+def test_the_table_checker_has_teeth():
+    assert _unscrollable_tables('<div class="overflow-x-auto"><table></table></div>') == 0
+    assert _unscrollable_tables('<div class="overflow-hidden"><table></table></div>') == 1
+
+
+async def test_every_rendered_table_can_scroll_sideways(client, db_session):
+    pages = await _render_structure_pages(client, db_session)
+    failures = {path: n for path, html in pages.items() if (n := _unscrollable_tables(html))}
+    assert failures == {}

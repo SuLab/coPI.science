@@ -3,7 +3,6 @@
 import re
 import uuid
 from typing import Any
-from urllib.parse import quote
 
 from fastapi import Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -145,7 +144,6 @@ async def admin_cohorts(
             cohorts=cohorts,
             creator_map=creator_map,
             spokes_missing=spokes_missing,
-            notice=request.query_params.get("notice"),
             gate=await _cohort_gate_context(db),
         ),
     )
@@ -225,7 +223,6 @@ async def admin_cohort_topology(
             cohorts=cohorts,
             agents=agents,
             membership_set=membership_set,
-            notice=request.query_params.get("notice"),
             gate=await _cohort_gate_context(db),
         ),
     )
@@ -353,10 +350,8 @@ async def admin_cohort_topology_save(
 
     if added or removed:
         await db.commit()
-    return RedirectResponse(
-        url=f"/admin/cohorts/topology?notice={added}+added,+{removed}+removed",
-        status_code=302,
-    )
+    flash(request, f"{added} added, {removed} removed", "success")
+    return RedirectResponse(url="/admin/cohorts/topology", status_code=302)
 
 
 
@@ -388,11 +383,11 @@ async def admin_ensure_star_spokes(
         f"{len(report.added_members)} membership(s) added, "
         f"{len(report.complete)} already complete"
     )
-    url = f"/admin/cohorts?notice={quote(notice)}"
+    flash(request, notice, "success")
     if report.anomalies:
         # MAX_FLASH_CHARS (src/web/flash.py) bounds the joined text.
         flash(request, "; ".join(report.anomalies), "error")
-    return RedirectResponse(url=url, status_code=302)
+    return RedirectResponse(url="/admin/cohorts", status_code=302)
 
 
 
@@ -462,7 +457,6 @@ async def admin_cohort_detail(
             all_agents=all_agents,
             agent_cohort_map=agent_cohort_map,
             audit_events=audit_events,
-            notice=request.query_params.get("notice"),
             gate=await _cohort_gate_context(db),
         ),
     )
@@ -514,9 +508,8 @@ async def admin_cohort_delete(
     )
     await db.delete(cohort)
     await db.commit()
-    return RedirectResponse(
-        url=f"/admin/cohorts?notice=Deleted+cohort+{name}", status_code=302
-    )
+    flash(request, f"Deleted cohort {name}", "success")
+    return RedirectResponse(url="/admin/cohorts", status_code=302)
 
 
 

@@ -3,7 +3,7 @@
 import logging
 import uuid
 
-from fastapi import Depends, Form, HTTPException, Request
+from fastapi import Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,13 +12,21 @@ from src.database import get_db
 from src.dependencies import get_admin_user, refuse_impersonation
 from src.models import USER_ROLE_ADMIN, VALID_USER_ROLES, User
 from src.routers.admin._common import _ADMIN, _DB, _template_context, router, templates
+from src.services import directory
 from src.services.admin_invariant import LastAdminError, ensure_admin_remains
-from src.services.directory import list_pi_directory, load_user_detail
+from src.services.directory import (
+    MAX_PAGE,
+    count_pi_directory,
+    list_pi_directory,
+    load_user_detail,
+)
 from src.services.email_verification import mark_email_verified
 from src.services.session_epoch import bump_session_epoch
 from src.services.user_deletion import delete_user_account
 
 logger = logging.getLogger("src.routers.admin")
+
+_PAGE = Query(1, ge=1, le=MAX_PAGE)
 
 
 @router.get("", response_class=HTMLResponse)
@@ -28,16 +36,20 @@ async def admin_users(
     status_filter: str | None = None,
     institution_filter: str | None = None,
     claimed_filter: str | None = None,
+    page: int = _PAGE,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
-    """Admin users overview."""
-    user_data = await list_pi_directory(
-        db,
+    """Admin users overview, one page of PI_DIRECTORY_PAGE_SIZE (C-15)."""
+    filters = dict(
         status_filter=status_filter,
         institution_filter=institution_filter,
         claimed_filter=claimed_filter,
     )
+    user_total = await count_pi_directory(db, **filters)
+    page_count = max(1, -(-user_total // directory.PI_DIRECTORY_PAGE_SIZE))
+    page = min(page, page_count)  # a page past the end shows the last one (D-27's rule)
+    user_data = await list_pi_directory(db, page=page, **filters)
 
     return templates.TemplateResponse(
         request,
@@ -50,6 +62,9 @@ async def admin_users(
             status_filter=status_filter,
             institution_filter=institution_filter,
             claimed_filter=claimed_filter,
+            user_total=user_total,
+            page=page,
+            page_count=page_count,
         ),
     )
 
@@ -106,6 +121,16 @@ async def admin_delete_user(
         raise HTTPException(status_code=404, detail="User not found")
     if user.id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
+    # A-07: an admin deleting another admin is a way out of adminhood too. The
+    # invariant lock (ensure_admin_remains) is held until delete_user_account
+    # commits, so two admins deleting each other cannot both succeed.
+    if user.access_status == "allowed":
+        try:
+            await ensure_admin_remains(db, user=user)
+        except LastAdminError:
+            raise HTTPException(
+                status_code=400, detail="Cannot delete the last remaining admin"
+            ) from None
 
     name = user.name
     report = await delete_user_account(

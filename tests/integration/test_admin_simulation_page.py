@@ -38,6 +38,7 @@ from src.models import (
     SimulationProcessStatus,
     ThreadDecision,
 )
+from src.services import simulation_view
 from tests import factories
 from tests.integration.test_manager_access import auth_headers
 
@@ -619,6 +620,9 @@ async def test_live_tab_unattributed_cost_footnote_gated_on_positive_cost(client
         cache_read_input_tokens=0, cache_creation_input_tokens=0,
     )
     await db_session.commit()
+    # The Live tab caches a running run's aggregates for 25 s (C-14); drop the entry the
+    # first render made so this render sees the new call.
+    simulation_view._LIVE_RUN_STATS.clear()
 
     positive_resp = await client.get(
         f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id)

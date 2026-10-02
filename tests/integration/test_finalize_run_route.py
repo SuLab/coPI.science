@@ -2,7 +2,7 @@
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from src.models import (
     USER_ROLE_ADMIN,
@@ -134,3 +134,70 @@ async def test_start_is_refused_while_a_finalize_stop_is_pending(client, db_sess
     ]
     assert (await db_session.execute(select(SimulationCommand).where(
         SimulationCommand.command == "start"))).scalars().all() == []
+
+
+def _capture_statements(sync_conn):
+    seen: list[str] = []
+
+    def _before(conn, cursor, statement, parameters, context, executemany):
+        seen.append(statement)
+
+    event.listen(sync_conn, "before_cursor_execute", _before)
+    return seen, lambda: event.remove(sync_conn, "before_cursor_execute", _before)
+
+
+def _lock_precedes_command_reads(seen: list[str]) -> bool:
+    lock_at = next(
+        i for i, s in enumerate(seen) if "FROM simulation_runs" in s and "FOR NO KEY UPDATE" in s
+    )
+    commands_at = next(i for i, s in enumerate(seen) if "FROM simulation_commands" in s)
+    return lock_at < commands_at
+
+
+async def test_start_locks_the_latest_run_before_reading_pending_commands(
+    client, db_session, monkeypatch
+):
+    import src.routers.admin.simulation as sim_routes
+
+    async def _dead(db):
+        return False
+
+    monkeypatch.setattr(sim_routes, "engine_alive", _dead)
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, email="lock-a@example.org")
+    await _stopped_run(db_session)
+    conn = await db_session.connection()
+    seen, stop = _capture_statements(conn.sync_connection)
+    try:
+        r = await client.post(
+            "/admin/simulation/start", data={"max_runtime": "0", "max_proposals": "0"},
+            headers=auth_headers(admin.id), follow_redirects=False,
+        )
+    finally:
+        stop()
+    assert r.status_code == 302
+    assert _lock_precedes_command_reads(seen)
+
+
+async def test_finalize_locks_the_run_before_reading_pending_commands(
+    client, db_session, monkeypatch
+):
+    import src.routers.admin.simulation as sim_routes
+
+    async def _dead(db):
+        return False
+
+    monkeypatch.setattr(sim_routes, "engine_alive", _dead)
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, email="lock-b@example.org")
+    run = await _stopped_run(db_session)
+    conn = await db_session.connection()
+    seen, stop = _capture_statements(conn.sync_connection)
+    try:
+        r = await client.post(
+            "/admin/simulation/finalize-run",
+            data={"run_id": str(run.id), "confirm_run": str(run.id)[:8]},
+            headers=auth_headers(admin.id), follow_redirects=False,
+        )
+    finally:
+        stop()
+    assert r.status_code == 302
+    assert _lock_precedes_command_reads(seen)

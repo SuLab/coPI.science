@@ -5,9 +5,10 @@ tests/integration/test_manager_views.py's mutation-allowlist test.
 """
 
 import uuid
+from datetime import timedelta
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text, update
 
 from src.models import (
     USER_ROLE_ADMIN,
@@ -25,6 +26,7 @@ from src.routers import reviews as reviews_router
 from src.services.assessment_reviews import _MAX_COMMENT_CHARS
 from src.services.directory import ASSESSMENT_SORTS
 from tests import factories
+from tests.integration._webui_helpers import follow
 from tests.integration.test_manager_access import auth_headers
 
 pytestmark = pytest.mark.integration
@@ -390,30 +392,63 @@ async def test_editing_log_only_to_learn_makes_it_eligible_for_the_next_manual_g
     assert review.consumed_at is None
 
 
-async def test_an_overlong_comment_is_truncated_not_rejected(client, db_session):
-    """A reviewer pasting a transcript still gets a saved row, just a clipped one.
-
-    ``_MAX_COMMENT_CHARS`` is imported rather than hardcoded so this tracks the
-    cap instead of restating it. The cap is silent — there is no error and no
-    flash — so without this test a change to it (or its removal, which would push
-    an unbounded comment into every subsequent bot payload) would go unnoticed.
-    """
+async def test_an_overlong_comment_is_refused_and_nothing_is_written(client, db_session):
+    """B-11: refused with a 400, never silently cut. ``_MAX_COMMENT_CHARS`` is
+    imported rather than hardcoded so this tracks the cap, which the forms also
+    carry as ``maxlength``."""
     reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
     assessment = await _seed_assessment(db_session)
-    overlong = "x" * (_MAX_COMMENT_CHARS + 500) + "TAIL-THAT-MUST-NOT-SURVIVE"
-
     r = await client.post(
         f"/reviews/assessments/{assessment.id}/feedback",
-        data={"score": "4", "comment": overlong, "feedback_mode": "log_only"},
-        headers=auth_headers(reviewer.id),
-        follow_redirects=False,
+        data={"score": "4", "comment": "x" * (_MAX_COMMENT_CHARS + 1), "feedback_mode": "log_only"},
+        headers=auth_headers(reviewer.id), follow_redirects=False,
+    )
+    assert r.status_code == 400
+    assert (await db_session.execute(select(AssessmentReview))).scalars().all() == []
+
+
+async def test_a_comment_at_the_cap_is_stored_whole(client, db_session):
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    assessment = await _seed_assessment(db_session)
+    r = await client.post(
+        f"/reviews/assessments/{assessment.id}/feedback",
+        data={"score": "4", "comment": "y" * _MAX_COMMENT_CHARS, "feedback_mode": "log_only"},
+        headers=auth_headers(reviewer.id), follow_redirects=False,
     )
     assert r.status_code == 302, r.text
-
     review = (await db_session.execute(select(AssessmentReview))).scalar_one()
     assert len(review.comment) == _MAX_COMMENT_CHARS
-    assert review.comment == overlong[:_MAX_COMMENT_CHARS]
-    assert "TAIL-THAT-MUST-NOT-SURVIVE" not in review.comment
+
+
+async def test_a_nul_in_a_comment_is_a_400_not_a_500(client, db_session):
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    assessment = await _seed_assessment(db_session)
+    r = await client.post(
+        f"/reviews/assessments/{assessment.id}/feedback",
+        data={"score": "4", "comment": "before\x00after", "feedback_mode": "log_only"},
+        headers=auth_headers(reviewer.id), follow_redirects=False,
+    )
+    assert r.status_code == 400
+    assert (await db_session.execute(select(AssessmentReview))).scalars().all() == []
+
+
+async def test_an_overlong_edit_is_refused_and_the_comment_is_kept(client, db_session):
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    assessment = await _seed_assessment(db_session)
+    review = AssessmentReview(
+        assessment_id=assessment.id, reviewer_user_id=reviewer.id,
+        reviewer_name=reviewer.name, score=3, feedback_mode="log_only", comment="original",
+    )
+    db_session.add(review)
+    await db_session.flush()
+    r = await client.post(
+        f"/reviews/feedback/{review.id}/edit",
+        data={"score": "3", "comment": "z" * (_MAX_COMMENT_CHARS + 1), "feedback_mode": "log_only"},
+        headers=auth_headers(reviewer.id), follow_redirects=False,
+    )
+    assert r.status_code == 400
+    await db_session.refresh(review)
+    assert review.comment == "original"
 
 
 async def test_only_an_admin_can_delete(client, db_session):
@@ -1099,3 +1134,119 @@ async def test_the_default_review_tab_is_dropped_from_the_redirect(client, db_se
         follow_redirects=False,
     )
     assert r.headers["location"] == f"/manager/assessments#a-{assessment.id}"
+
+
+_SAME = {"score": "4", "comment": "same words", "feedback_mode": "log_only",
+         "surface": "manager-list"}
+
+
+async def _reviews_of(db, assessment):
+    return (await db.execute(
+        select(AssessmentReview).where(AssessmentReview.assessment_id == assessment.id)
+    )).scalars().all()
+
+
+async def _post(client, assessment, user, data):
+    return await client.post(
+        f"/reviews/assessments/{assessment.id}/feedback", data=data,
+        headers=auth_headers(user.id), follow_redirects=False,
+    )
+
+
+async def test_an_identical_review_within_a_minute_is_stored_once(client, db_session):
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    assessment = await _seed_assessment(db_session)
+    r1 = await _post(client, assessment, reviewer, _SAME)
+    r2 = await _post(client, assessment, reviewer, _SAME)
+    assert r1.status_code == 302 and r2.status_code == 302
+    assert len(await _reviews_of(db_session, assessment)) == 1
+    page = await follow(client, r2)
+    assert "already recorded" in page.text
+
+
+async def test_a_different_comment_within_a_minute_is_a_second_review(client, db_session):
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    assessment = await _seed_assessment(db_session)
+    await _post(client, assessment, reviewer, _SAME)
+    await _post(client, assessment, reviewer, {**_SAME, "comment": "second thought"})
+    assert len(await _reviews_of(db_session, assessment)) == 2
+
+
+async def test_another_reviewer_may_submit_the_same_review(client, db_session):
+    first = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    second = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    assessment = await _seed_assessment(db_session)
+    await _post(client, assessment, first, _SAME)
+    await _post(client, assessment, second, _SAME)
+    assert len(await _reviews_of(db_session, assessment)) == 2
+
+
+async def test_the_same_review_after_a_minute_is_stored_again(client, db_session):
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    assessment = await _seed_assessment(db_session)
+    await _post(client, assessment, reviewer, _SAME)
+    await db_session.execute(
+        update(AssessmentReview)
+        .where(AssessmentReview.assessment_id == assessment.id)
+        .values(created_at=func.now() - timedelta(seconds=61))
+    )
+    await _post(client, assessment, reviewer, _SAME)
+    assert len(await _reviews_of(db_session, assessment)) == 2
+
+
+async def test_quick_score_on_the_unreviewed_tab_anchors_the_next_card(client, db_session):
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    assessment = await _seed_assessment(db_session)
+    next_id = uuid.uuid4()
+    r = await client.post(
+        f"/reviews/assessments/{assessment.id}/feedback",
+        data={"score": "3", "comment": "x", "feedback_mode": "log_only",
+              "surface": "manager-list", "review": "unreviewed", "next_id": str(next_id)},
+        headers=auth_headers(manager.id), follow_redirects=False,
+    )
+    assert r.headers["location"] == f"/manager/assessments#a-{next_id}"
+    page = await follow(client, r)
+    assert "Moved to Reviewed." in page.text
+
+
+async def test_quick_score_on_the_last_unreviewed_card_has_no_anchor(client, db_session):
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    assessment = await _seed_assessment(db_session)
+    r = await client.post(
+        f"/reviews/assessments/{assessment.id}/feedback",
+        data={"score": "3", "comment": "x", "feedback_mode": "log_only",
+              "surface": "manager-list", "next_id": ""},
+        headers=auth_headers(manager.id), follow_redirects=False,
+    )
+    assert r.headers["location"] == "/manager/assessments"
+
+
+async def test_quick_score_on_the_all_tab_keeps_the_scored_card_anchor(client, db_session):
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    assessment = await _seed_assessment(db_session)
+    r = await client.post(
+        f"/reviews/assessments/{assessment.id}/feedback",
+        data={"score": "3", "comment": "x", "feedback_mode": "log_only",
+              "surface": "manager-list", "review": "all", "next_id": str(uuid.uuid4())},
+        headers=auth_headers(manager.id), follow_redirects=False,
+    )
+    assert r.headers["location"] == f"/manager/assessments?review=all#a-{assessment.id}"
+
+
+async def test_each_quick_score_form_names_the_following_card(client, db_session):
+    import re
+
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    first = await _seed_assessment(db_session)
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=first.simulation_run_id, agent_id="blackbird", channel_name="c2",
+    ))
+    await db_session.flush()
+    page = await client.get(
+        f"/manager/assessments?run_id={first.simulation_run_id}&review=all",
+        headers=auth_headers(manager.id),
+    )
+    cards = re.findall(r'id="a-([0-9a-f-]{36})"', page.text)
+    nexts = re.findall(r'name="next_id" value="([^"]*)"', page.text)
+    assert len(cards) == 2
+    assert nexts == cards[1:] + [""]

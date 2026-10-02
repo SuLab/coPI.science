@@ -27,31 +27,30 @@
 </div>
 
 <!-- Filters -->
-<div data-filter-nav="/admin/jobs" class="bg-white border border-gray-200 rounded-lg p-4 mb-4 flex gap-4">
+<form method="get" action="/admin/jobs" class="bg-white border border-gray-200 rounded-lg p-4 mb-4 flex flex-wrap items-end gap-4">
     <div>
         <label for="status-filter" class="text-xs font-medium text-gray-600 block mb-1">Status</label>
-        <select data-filter-param="status_filter" id="status-filter"
-                class="border border-gray-300 rounded px-2 py-1 text-sm">
+        <select id="status-filter" name="status_filter" class="border border-gray-300 rounded px-2 py-1 text-sm">
             <option value="">All</option>
-            {% for s in ['pending', 'processing', 'completed', 'failed', 'dead'] %}
+            {% for s in job_statuses %}
             <option value="{{ s }}" {% if status_filter == s %}selected{% endif %}>{{ s | capitalize }}</option>
             {% endfor %}
         </select>
     </div>
     <div>
         <label for="type-filter" class="text-xs font-medium text-gray-600 block mb-1">Type</label>
-        <select data-filter-param="type_filter" id="type-filter"
-                class="border border-gray-300 rounded px-2 py-1 text-sm">
+        <select id="type-filter" name="type_filter" class="border border-gray-300 rounded px-2 py-1 text-sm">
             <option value="">All</option>
-            <option value="generate_profile" {% if type_filter == 'generate_profile' %}selected{% endif %}>Generate Profile</option>
-            <option value="monthly_refresh" {% if type_filter == 'monthly_refresh' %}selected{% endif %}>Monthly Refresh</option>
-            <option value="review_feedback_analysis" {% if type_filter == 'review_feedback_analysis' %}selected{% endif %}>Review Feedback Analysis</option>
+            {% for t in job_types %}
+            <option value="{{ t }}" {% if type_filter == t %}selected{% endif %}>{{ t | replace('_', ' ') | title }}</option>
+            {% endfor %}
         </select>
     </div>
-</div>
+    <button type="submit" class="px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">Apply</button>
+</form>
 
 <!-- Jobs table -->
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto">
     <table class="min-w-full divide-y divide-gray-200">
         <thead class="bg-gray-50">
             <tr>
@@ -84,9 +83,9 @@
                     {% else %}—{% endif %}
                 </td>
                 <td class="px-4 py-3 text-sm text-gray-600">{{ job.attempts }}/{{ job.max_attempts }}</td>
-                <td class="px-4 py-3 text-xs text-gray-500">{{ job.enqueued_at.strftime('%b %d %H:%M') }}</td>
+                <td class="px-4 py-3 text-xs text-gray-500">{{ job.enqueued_at | ts }}</td>
                 <td class="px-4 py-3 text-xs text-gray-500 hidden md:table-cell">
-                    {{ job.completed_at.strftime('%b %d %H:%M') if job.completed_at else '—' }}
+                    {{ job.completed_at | ts }}
                 </td>
                 <td class="px-4 py-3 text-xs text-red-600 hidden lg:table-cell max-w-xs truncate">
                     {{ (job.last_error or '')[:80] }}

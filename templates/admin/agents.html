@@ -5,7 +5,7 @@
 <h1 class="text-2xl font-bold text-gray-900 mb-6">Agents</h1>
 
 <!-- Summary cards -->
-<div class="grid grid-cols-4 gap-4 mb-8">
+<div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-8">
     <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
         <div class="text-3xl font-bold text-amber-700">{{ pending | length }}</div>
         <div class="text-sm text-gray-500 mt-1">Pending</div>
@@ -26,7 +26,7 @@
 
 {% if pending %}
 <!-- Pending requests -->
-<div class="bg-white rounded-xl shadow-sm border border-amber-200 overflow-hidden mb-6">
+<div class="bg-white rounded-xl shadow-sm border border-amber-200 overflow-x-auto mb-6">
     <div class="px-6 py-4 border-b border-amber-200 bg-amber-50">
         <h2 class="font-semibold text-amber-800">Pending Requests</h2>
     </div>
@@ -44,7 +44,7 @@
             <tr class="hover:bg-gray-50">
                 <td class="px-4 py-3 text-sm font-medium">{{ a.pi_name }}</td>
                 <td class="px-4 py-3 text-sm">{{ a.bot_name }}</td>
-                <td class="px-4 py-3 text-sm text-gray-500">{{ a.requested_at.strftime('%b %d %H:%M') }}</td>
+                <td class="px-4 py-3 text-sm text-gray-500">{{ a.requested_at | ts }}</td>
                 <td class="px-4 py-3">
                     <a href="/admin/agents/{{ a.id }}"
                        class="text-sm text-indigo-600 hover:text-indigo-800 font-medium">Review</a>
@@ -57,7 +57,7 @@
 {% endif %}
 
 <!-- Active agents -->
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-6">
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto mb-6">
     <div class="px-6 py-4 border-b border-gray-200">
         <h2 class="font-semibold text-gray-800">Active Agents</h2>
     </div>
@@ -118,7 +118,7 @@
 
 {% if inactive %}
 <!-- Inactive (parked) agents -->
-<div class="bg-white rounded-xl shadow-sm border border-blue-100 overflow-hidden mb-6">
+<div class="bg-white rounded-xl shadow-sm border border-blue-100 overflow-x-auto mb-6">
     <div class="px-6 py-4 border-b border-blue-100 bg-blue-50">
         <h2 class="font-semibold text-blue-800">Inactive (parked — excluded from simulation runs)</h2>
     </div>
@@ -150,7 +150,7 @@
 
 {% if suspended %}
 <!-- Suspended agents -->
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-6">
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto mb-6">
     <div class="px-6 py-4 border-b border-gray-200 bg-gray-50">
         <h2 class="font-semibold text-gray-700">Suspended (excluded from simulation runs)</h2>
     </div>

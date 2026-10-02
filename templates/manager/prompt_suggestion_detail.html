@@ -30,7 +30,7 @@
         <p class="text-xs text-gray-500 mt-1">
             Target: <span class="font-mono">{{ suggestion.target }}</span>
             &middot; Model: {{ suggestion.model or '—' }}
-            &middot; Created <span data-utc="{{ suggestion.created_at.isoformat() }}" data-utc-fmt="short">{{ suggestion.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+            &middot; Created {{ suggestion.created_at | ts }}
             {% if suggestion.rubric_version %}&middot; Rubric {{ suggestion.rubric_version }}{% endif %}
             {% if not suggestion.transcript_available %}&middot; <span class="text-amber-700">no interview transcript</span>{% endif %}
             {% if suggestion.input_truncated %}&middot; <span class="text-amber-700">input truncated</span>{% endif %}
@@ -49,14 +49,18 @@
 
 <!-- Status action -->
 <form method="post" action="/reviews/suggestions/{{ suggestion.id }}/status" class="mb-6 flex items-center gap-2">
+    {% if impersonation_banner %}
+    <span class="text-xs text-gray-600">Status changes are disabled while impersonating.</span>
+    {% else %}
     <button type="submit" name="action" value="open" class="text-xs font-medium bg-gray-600 text-white px-2 py-1 rounded hover:bg-gray-700">Reopen</button>
     <button type="submit" name="action" value="dismissed" class="text-xs font-medium bg-red-600 text-white px-2 py-1 rounded hover:bg-red-700">Dismiss</button>
     <button type="submit" name="action" value="implemented" class="text-xs font-medium bg-green-700 text-white px-2 py-1 rounded hover:bg-green-800">Mark Implemented</button>
+    {% endif %}
     {% if suggestion.status_set_by_name %}
     <span class="text-xs text-gray-500">
         last set to "{{ suggestion.status }}" by {{ suggestion.status_set_by_name }}
         {% if suggestion.status_set_at %}
-        on <span data-utc="{{ suggestion.status_set_at.isoformat() }}" data-utc-fmt="short">{{ suggestion.status_set_at.strftime('%Y-%m-%d %H:%M') }}</span>
+        on {{ suggestion.status_set_at | ts }}
         {% endif %}
     </span>
     {% endif %}
@@ -79,6 +83,7 @@
         Distilled From ({{ suggestion.feedback_snapshot | length }} feedback row{{ '' if suggestion.feedback_snapshot | length == 1 else 's' }})
     </h2>
     {% if suggestion.feedback_snapshot %}
+    <div class="overflow-x-auto">
     <table class="min-w-full text-sm">
         <thead>
             <tr class="text-left text-xs text-gray-500 uppercase">
@@ -101,6 +106,7 @@
             {% endfor %}
         </tbody>
     </table>
+    </div>
     {% else %}
     <p class="text-sm text-gray-600">No feedback recorded.</p>
     {% endif %}

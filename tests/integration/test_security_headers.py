@@ -13,19 +13,19 @@ pytestmark = pytest.mark.integration
 
 
 def _nonce(response) -> str:
-    m = re.search(r"'nonce-([A-Za-z0-9_-]+)'", response.headers["content-security-policy-report-only"])
-    assert m, response.headers["content-security-policy-report-only"]
+    m = re.search(r"'nonce-([A-Za-z0-9_-]+)'", response.headers["content-security-policy"])
+    assert m, response.headers["content-security-policy"]
     return m.group(1)
 
 
 def _assert_headers(response) -> None:
-    assert response.headers["content-security-policy"] == ENFORCED_POLICY
+    assert "content-security-policy-report-only" not in response.headers
+    assert response.headers["content-security-policy"] == (
+        ENFORCED_POLICY + "; " + REPORT_ONLY_POLICY.format(nonce=_nonce(response))
+    )
     assert response.headers["x-frame-options"] == "DENY"
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["referrer-policy"] == "strict-origin-when-cross-origin"
-    assert response.headers["content-security-policy-report-only"] == REPORT_ONLY_POLICY.format(
-        nonce=_nonce(response)
-    )
     assert len(response.headers.get_list("content-security-policy")) == 1
 
 
@@ -38,13 +38,18 @@ async def test_a_page_carries_every_security_header(client):
 async def test_every_inline_script_carries_this_responses_nonce(client, db_session):
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     await db_session.flush()
-    for path, headers in (("/login", {}), ("/admin/users", auth_headers(admin.id))):
+    seen = 0
+    pages = (("/login", {}), ("/admin/users", auth_headers(admin.id)),
+             ("/admin/simulation", auth_headers(admin.id)))
+    for path, headers in pages:
         r = await client.get(path, headers=headers)
         assert r.status_code == 200, path
         nonce = _nonce(r)
         inline = [t for t in re.findall(r"<script\b[^>]*>", r.text) if "src=" not in t]
-        assert inline, f"{path} rendered no inline script; base.html has one"
         assert all(f'nonce="{nonce}"' in t for t in inline), (path, inline)
+        seen += len(inline)
+    # Control: base.html lost its inline script with FN-07; the simulation page keeps one.
+    assert seen, "no page rendered an inline script, so nothing was checked"
 
 
 async def test_each_response_gets_a_fresh_nonce(client):

@@ -1,8 +1,8 @@
 """``POST /api/csp-report``: the sink for browsers' CSP violation reports (spec §6.3).
 
 Browsers post here because ``report-uri`` names this path, both in the app's own
-report-only policy (src/web/security_headers.py) and in the shared nginx's policy on
-this vhost. No authentication, and exempt from ``OriginGuardMiddleware`` for this
+policy (src/web/security_headers.py; enforced since Phase 2) and in the shared nginx's
+report-only policy on this vhost. No authentication, and exempt from ``OriginGuardMiddleware`` for this
 exact path only: a violation report is not a form post from one of our pages and
 may carry no Origin, or an opaque one. It stores nothing. Each report becomes one
 JSON log line, bounded in size and count, so the endpoint cannot be turned into a

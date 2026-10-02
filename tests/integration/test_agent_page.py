@@ -627,7 +627,7 @@ async def test_saving_the_public_profile_updates_the_pis_profile_not_the_editors
         },
         headers=_auth(delegated.user.id),
     )
-    assert r.status_code == 302 and "saved=1" in r.headers["location"]
+    assert r.status_code == 302 and r.headers["location"].endswith("/public-profile")
 
     pi_profile = (await db_session.execute(
         select(ResearcherProfile).where(ResearcherProfile.user_id == world.pi.id)

@@ -56,8 +56,9 @@ from __future__ import annotations
 import uuid
 from collections import namedtuple
 from collections.abc import Sequence
+from datetime import timedelta
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -70,6 +71,7 @@ from src.models import (
     User,
 )
 from src.models.job import INTERACTIVE_PRIORITY
+from src.services.advisory_locks import entity_key_sql
 from src.services.blackbird_rubric import (
     RUBRIC_CONTENT_HASH,
     RUBRIC_VERSION,
@@ -85,9 +87,19 @@ VALID_STATUS_ACTIONS = ("approved", "disapproved", "cleared")
 #: enqueues it); 'log_only' is recorded but never analyzed.
 VALID_FEEDBACK_MODES = ("learn", "log_only")
 
-#: Comment rows are capped, not rejected — a reviewer pasting an overlong
-#: transcript should still get a saved row, just truncated.
+#: Longest review comment, in characters. Refused, not truncated (B-11): the old
+#: silent cut lost the reviewer's text with no error. The comment textareas carry
+#: the same number as ``maxlength``.
 _MAX_COMMENT_CHARS = 10_000
+
+#: An identical review by the same reviewer on the same assessment within this
+#: many seconds is a double submit, not a second opinion (B-04).
+DUPLICATE_WINDOW_SECONDS = 60
+
+
+class DuplicateFeedbackError(Exception):
+    """An identical review by this reviewer on this assessment was stored less than
+    ``DUPLICATE_WINDOW_SECONDS`` ago; nothing was written."""
 
 #: The list-page columns behind one assessment row's "Assigned"/"Reviewed by"
 #: cells and status chip. ``status`` is ``None`` for "never
@@ -135,6 +147,18 @@ def _validate(
                 f"dimension score for {key} must be between "
                 f"{rubric.scale_min} and {rubric.scale_max}"
             )
+
+
+def _validate_comment(comment: str) -> None:
+    """ValueError for a comment over ``_MAX_COMMENT_CHARS`` or one containing NUL
+    (B-11). PostgreSQL text cannot store U+0000, so a NUL used to reach the INSERT
+    and surface as a 500."""
+    # Browsers count a textarea's maxlength with LF line breaks but submit CRLF, so
+    # the length is measured on the LF form (plan audit Q2-11).
+    if len(comment.replace("\r\n", "\n")) > _MAX_COMMENT_CHARS:
+        raise ValueError(f"comment is longer than {_MAX_COMMENT_CHARS} characters")
+    if "\x00" in comment:
+        raise ValueError("comment contains a NUL character")
 
 
 def _normalized_dimension_scores(
@@ -327,7 +351,10 @@ async def submit_feedback(
 ) -> AssessmentReview:
     """Create one ``AssessmentReview`` row. Caller commits.
 
-    Raises ``ValueError`` on an out-of-range score or an unrecognized mode.
+    Raises ``ValueError`` on an out-of-range score, an unrecognized mode, or a
+    comment ``_validate_comment`` refuses. Raises ``DuplicateFeedbackError`` (nothing
+    written) when the same reviewer stored an identical review on this assessment
+    within ``DUPLICATE_WINDOW_SECONDS`` (B-04).
     ``reviewer_name`` is denormalized at write time (A-3) so the review stays
     attributable after the reviewer's account is deleted.
 
@@ -337,14 +364,38 @@ async def submit_feedback(
     signature on the row. ``None`` for an ordinary, non-impersonated write.
     """
     _validate(score, feedback_mode, dimension_scores)
+    _validate_comment(comment)
+    normalized = _normalized_dimension_scores(dimension_scores)
+    # Serialize this reviewer's submissions on this assessment, so two racing
+    # POSTs of a double click cannot both pass the check below (B-04).
+    await db.execute(
+        text(f"SELECT pg_advisory_xact_lock({entity_key_sql('review_submit')})"),
+        {"id": f"{reviewer.id}:{assessment.id}"},
+    )
+    recent = (await db.execute(
+        select(AssessmentReview).where(
+            AssessmentReview.assessment_id == assessment.id,
+            AssessmentReview.reviewer_user_id == reviewer.id,
+            AssessmentReview.created_at
+            >= func.now() - timedelta(seconds=DUPLICATE_WINDOW_SECONDS),
+        )
+    )).scalars().all()
+    if any(
+        r.score == score
+        and r.comment == comment
+        and r.feedback_mode == feedback_mode
+        and (r.dimension_scores or None) == normalized
+        for r in recent
+    ):
+        raise DuplicateFeedbackError
     review = AssessmentReview(
         assessment_id=assessment.id,
         reviewer_user_id=reviewer.id,
         reviewer_name=reviewer.name,
         score=score,
-        comment=comment[:_MAX_COMMENT_CHARS],
+        comment=comment,
         feedback_mode=feedback_mode,
-        dimension_scores=_normalized_dimension_scores(dimension_scores),
+        dimension_scores=normalized,
         # Stamped from the module-level constants, not re-read from disk, and
         # unconditionally — whether or not any dimension was scored.
         # `_validate` only calls `load_rubric()` when `dimension_scores` is
@@ -406,10 +457,14 @@ async def edit_feedback(
     row self-consistent (its ``dimension_scores`` keys always match its own
     ``rubric_version``) rather than leaving a row that claims one revision but
     carries another revision's keys.
+
+    Raises ``ValueError`` on an out-of-range score, an unrecognized mode, or a
+    comment ``_validate_comment`` refuses; the review is then left unchanged.
     """
     _validate(score, feedback_mode, dimension_scores)
+    _validate_comment(comment)
     review.score = score
-    review.comment = comment[:_MAX_COMMENT_CHARS]
+    review.comment = comment
     review.feedback_mode = feedback_mode
     review.dimension_scores = _normalized_dimension_scores(dimension_scores)
     review.rubric_version = RUBRIC_VERSION

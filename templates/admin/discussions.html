@@ -15,20 +15,21 @@
 {% endblock %}
 
 {% block content %}
-<div class="flex items-center justify-between mb-6">
+<div class="flex flex-wrap items-center justify-between gap-4 mb-6">
     <h1 class="text-2xl font-bold text-gray-900">Discussions</h1>
     {% if runs %}
-    <form method="GET" action="/admin/discussions" class="flex items-center gap-2">
+    <form method="GET" action="/admin/discussions" class="flex flex-wrap items-center gap-2">
         <label for="discussions-run" class="text-sm text-gray-500">Run:</label>
-        <select name="run_id" id="discussions-run" data-autosubmit
+        <select name="run_id" id="discussions-run"
                 class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
             <option value="all" {% if selected_run_id == 'all' %}selected{% endif %}>All Runs</option>
             {% for run in runs %}
             <option value="{{ run.id }}" {% if run.id == selected_run_id %}selected{% endif %}>
-                {{ run.started_at.strftime('%b %d %H:%M') }} ({{ run.status }})
+                {{ run.started_at | ts }} ({{ run.status }})
             </option>
             {% endfor %}
         </select>
+        <button type="submit" class="px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">Apply</button>
     </form>
     {% endif %}
 </div>
@@ -58,8 +59,8 @@
 </div>
 
 <!-- Filters -->
-<div class="flex items-center gap-4 mb-4">
-    <form method="GET" action="/admin/discussions" class="flex items-center gap-3">
+<div class="flex flex-wrap items-center gap-4 mb-4">
+    <form method="GET" action="/admin/discussions" class="flex flex-wrap items-center gap-3">
         <input type="hidden" name="run_id" value="{{ selected_run_id }}">
         <select name="channel_filter" aria-label="Channel" class="text-sm border-gray-300 rounded-md shadow-sm">
             <option value="">All Channels</option>
@@ -94,7 +95,7 @@
 
 {% include "admin/_discussions_threads.html" %}
 
-{% if page_count > 1 %}
+{% if page_count > 1 and not all_runs_refused %}
 {% set pager_qs %}run_id={{ selected_run_id }}{% if channel_filter %}&channel_filter={{ channel_filter | urlencode }}{% endif %}{% if status_filter %}&status_filter={{ status_filter | urlencode }}{% endif %}{% for a in agent_filter %}&agent_filter={{ a | urlencode }}{% endfor %}{% endset %}
 <div id="discussions-pager" class="flex items-center justify-between mt-4 text-sm text-gray-600">
     <span>Page {{ page }} of {{ page_count }} ({{ thread_total }} threads)</span>

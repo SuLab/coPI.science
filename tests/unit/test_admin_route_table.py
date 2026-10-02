@@ -12,6 +12,7 @@ EXPECTED_ROUTES = {
     ("POST", "/users/{user_id}/verify-email"),
     ("GET", "/jobs"),
     ("GET", "/activity"), ("GET", "/activity/{run_id}"), ("GET", "/activity/{run_id}/llm-calls"),
+    ("GET", "/activity/{run_id}/llm-calls/{call_id}/bodies"),
     ("GET", "/discussions"),
     ("GET", "/agents"), ("GET", "/agents/{agent_id}"), ("POST", "/agents/{agent_id}/ensure-spoke"),
     ("POST", "/agents/{agent_id}/approve"), ("POST", "/agents/{agent_id}/reject"),
@@ -39,7 +40,7 @@ def _routes():
 
 def test_the_admin_route_set_is_unchanged():
     assert {(m, p) for _i, m, p in _routes()} == EXPECTED_ROUTES
-    assert len(_routes()) == 44
+    assert len(_routes()) == 45
 
 
 def test_literal_routes_are_registered_before_parameterised_siblings():

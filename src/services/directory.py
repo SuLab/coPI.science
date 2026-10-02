@@ -17,10 +17,10 @@ import uuid
 from collections import Counter
 from typing import Any
 
-from sqlalchemy import case, func, select
+from sqlalchemy import String, Text, and_, case, cast, func, literal_column, or_, select, union_all
 from sqlalchemy import true as sa_true
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
 
 from src.agent.specialists import SPECIALIST_DOMAINS
 from src.models import (
@@ -33,6 +33,7 @@ from src.models import (
     PiIndustryEvidence,
     PiIndustryScore,
     Publication,
+    ResearcherProfile,
     SimulationRun,
     ThreadDecision,
     User,
@@ -66,8 +67,14 @@ ASSESSMENTS_LIMIT = 500
 
 #: Page sizes for the lists that used to load every row.
 JOBS_PAGE_SIZE = 100
+#: Rows per page of the admin users list and the manager PI directory (C-15).
+PI_DIRECTORY_PAGE_SIZE = 100
 RUN_MESSAGES_PAGE_SIZE = 200
 DISCUSSIONS_PAGE_SIZE = 200
+#: C-15: the HTML discussions page lists `run_id=all` only while every run together
+#: holds at most this many threads; above it the page asks for one run. The admin
+#: export (`page=None`) is never capped.
+DISCUSSIONS_ALL_RUNS_MAX = 2_000
 #: Upper bound for every `?page=` query parameter, so OFFSET stays in range.
 MAX_PAGE = 100_000
 
@@ -158,6 +165,66 @@ def _assessment_order_by(sort: str) -> list[Any]:
     return [score_desc, created_desc, id_desc]
 
 
+def _pi_directory_query(*, status_filter, institution_filter, claimed_filter, roles):
+    """One row per user, ``(User, profile_status)``, every filter applied in SQL.
+
+    ``profile_status`` mirrors the Python rules it replaced: no profile row ->
+    ``no_profile``; a non-empty ``pending_profile`` -> ``pending_update``; a non-empty
+    ``research_summary`` -> ``complete``; else ``generating`` while a profile job is
+    pending or processing, otherwise ``no_profile``. "Non-empty" for the JSON column
+    excludes the JSON scalar ``null`` and an empty object or list, which Python read
+    as falsy."""
+    active_job = (
+        select(Job.id)
+        .where(Job.user_id == User.id, Job.status.in_(("pending", "processing")))
+        .exists()
+    )
+    status_expr = case(
+        (ResearcherProfile.id.is_(None), literal_column("'no_profile'")),
+        (
+            and_(
+                ResearcherProfile.pending_profile.is_not(None),
+                cast(ResearcherProfile.pending_profile, Text).not_in(("null", "{}", "[]")),
+            ),
+            literal_column("'pending_update'"),
+        ),
+        (func.coalesce(ResearcherProfile.research_summary, "") != "", literal_column("'complete'")),
+        (active_job, literal_column("'generating'")),
+        else_=literal_column("'no_profile'"),
+    )
+    query = select(User, status_expr.label("profile_status")).outerjoin(
+        ResearcherProfile, ResearcherProfile.user_id == User.id
+    )
+    if roles is not None:
+        query = query.where(User.user_role.in_(roles))
+    if status_filter:
+        query = query.where(status_expr == status_filter)
+    if institution_filter:
+        # strpos, not LIKE: a substring match with no wildcard escaping to get wrong.
+        query = query.where(func.strpos(func.lower(User.institution), institution_filter.lower()) > 0)
+    if claimed_filter == "claimed":
+        query = query.where(User.claimed_at.is_not(None))
+    elif claimed_filter == "unclaimed":
+        query = query.where(User.claimed_at.is_(None))
+    return query
+
+
+async def count_pi_directory(
+    db: AsyncSession,
+    *,
+    status_filter: str | None = None,
+    institution_filter: str | None = None,
+    claimed_filter: str | None = None,
+    roles: tuple[str, ...] | None = None,
+) -> int:
+    """How many rows `list_pi_directory` returns over all pages for the same filters."""
+    query = _pi_directory_query(
+        status_filter=status_filter, institution_filter=institution_filter,
+        claimed_filter=claimed_filter, roles=roles,
+    )
+    return (await db.execute(select(func.count()).select_from(query.subquery()))).scalar_one()
+
+
 async def list_pi_directory(
     db: AsyncSession,
     *,
@@ -165,29 +232,28 @@ async def list_pi_directory(
     institution_filter: str | None = None,
     claimed_filter: str | None = None,
     roles: tuple[str, ...] | None = None,
+    page: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Admin users overview / manager PI directory.
+    """Admin users overview / manager PI directory, by name (C-15: filtered and paged
+    in SQL). ``page=None`` returns every row; otherwise one page of
+    ``PI_DIRECTORY_PAGE_SIZE``.
 
-    ``roles=None`` means no role filter at all — this is today's `/admin`
-    behaviour, unchanged. ``roles=(USER_ROLE_PI,)`` is what the manager
-    directory passes to see PIs only.
+    ``roles=None`` means no role filter at all — the `/admin` behaviour.
+    ``roles=(USER_ROLE_PI,)`` is what the manager directory passes to see PIs only.
     """
-    # An EXISTS flag instead of loading every user's jobs: all that is read
-    # from them is whether one is pending or processing.
-    active_job = (
-        select(Job.id)
-        .where(Job.user_id == User.id, Job.status.in_(("pending", "processing")))
-        .exists()
-        .label("has_active_job")
+    query = (
+        _pi_directory_query(
+            status_filter=status_filter, institution_filter=institution_filter,
+            claimed_filter=claimed_filter, roles=roles,
+        )
+        .options(selectinload(User.profile), selectinload(User.agent))
+        .order_by(User.name, User.id)
     )
-    query = select(User, active_job).options(selectinload(User.profile), selectinload(User.agent))
-    if roles is not None:
-        query = query.where(User.user_role.in_(roles))
-
-    result = await db.execute(query)
-    pairs = result.unique().all()
+    if page is not None:
+        query = query.limit(PI_DIRECTORY_PAGE_SIZE).offset((page - 1) * PI_DIRECTORY_PAGE_SIZE)
+    pairs = (await db.execute(query)).unique().all()
     users = [u for u, _ in pairs]
-    active_by_user = {u.id: flag for u, flag in pairs}
+    status_by_user = {u.id: status for u, status in pairs}
 
     # Publication counts, scoped to each PI's JHU tenure window (Task 13 and
     # D17 of docs/plans/2026-09-22-pi-corpus-attribution-remediation-plan.md).
@@ -198,9 +264,10 @@ async def list_pi_directory(
     agent_ids_by_user = {u.id: (u.agent.agent_id if u.agent else None) for u in users}
     pub_scope_by_user = await scoped_counts(db, [u.id for u in users], agent_ids_by_user)
 
-    # Latest industry-interest score per user (Postgres DISTINCT ON).
+    # Latest industry-interest score per listed user (Postgres DISTINCT ON).
     industry_result = await db.execute(
         select(PiIndustryScore)
+        .where(PiIndustryScore.user_id.in_([u.id for u in users]))
         .distinct(PiIndustryScore.user_id)
         .order_by(PiIndustryScore.user_id, PiIndustryScore.computed_at.desc())
     )
@@ -208,57 +275,27 @@ async def list_pi_directory(
 
     user_data = []
     for user in users:
-        profile = user.profile
         pub_scope = pub_scope_by_user.get(user.id)
-        # Meaning of `pub_count` changes here: it is now the
-        # SCOPED (in-tenure) count, not the full-career count, so every
-        # existing template reference to it stays correct without a rename.
-        # `pub_scope` carries the split (tenure_start / before_tenure /
-        # undated_excluded / scoped) for the templates that need to explain
-        # the number rather than just print it.
+        # `pub_count` is the SCOPED (in-tenure) count, not the full-career count;
+        # `pub_scope` carries the split for the templates that explain the number.
         pub_count = pub_scope.in_tenure if pub_scope else 0
-
-        # Profile status
-        if not profile:
-            profile_status = "no_profile"
-        elif profile.pending_profile:
-            profile_status = "pending_update"
-        elif profile.research_summary:
-            profile_status = "complete"
-        else:
-            # Check if there's a running job
-            profile_status = "generating" if active_by_user[user.id] else "no_profile"
-
-        # Apply filters
-        if status_filter and profile_status != status_filter:
-            continue
-        if institution_filter and (not user.institution or institution_filter.lower() not in user.institution.lower()):
-            continue
-        if claimed_filter == "claimed" and not user.claimed_at:
-            continue
-        if claimed_filter == "unclaimed" and user.claimed_at:
-            continue
-
-        # Agent status
         if not user.agent:
             agent_status = "not_requested"
         elif user.agent.status == "pending":
             agent_status = "awaiting_token"
         else:
             agent_status = user.agent.status  # "active" or "suspended"
-
         industry_row = industry_by_user.get(user.id)
         user_data.append({
             "user": user,
-            "profile": profile,
-            "profile_status": profile_status,
+            "profile": user.profile,
+            "profile_status": status_by_user[user.id],
             "pub_count": pub_count,
             "pub_scope": pub_scope,
             "agent_status": agent_status,
             "industry_score": industry_row.score if industry_row else None,
             "industry_reason": industry_row.reason if industry_row else None,
         })
-
     return user_data
 
 
@@ -356,14 +393,19 @@ def _resolve_run_selection(
     runs: list[SimulationRun], run_id: str | None
 ) -> tuple[bool, uuid.UUID | str | None]:
     """``(show_all_runs, selected_run_id)``: ``run_id == "all"`` selects every run;
-    an unparseable or absent id falls back to the newest run (``runs[0]``)."""
+    an absent or unparseable id, or one naming no run in ``runs``, falls back to the newest run
+    (``runs[0]``)."""
     show_all_runs = run_id == "all"
     selected_run_id: uuid.UUID | str | None = "all" if show_all_runs else None
     if not show_all_runs and run_id:
         try:
-            selected_run_id = uuid.UUID(run_id)
+            parsed = uuid.UUID(run_id)
         except ValueError:
-            pass
+            parsed = None
+        # B-13: a well-formed id that names no run (a stale bookmark, a purged
+        # run) is treated like no id at all.
+        if parsed is not None and any(r.id == parsed for r in runs):
+            selected_run_id = parsed
     if not selected_run_id and runs:
         selected_run_id = runs[0].id
     return show_all_runs, selected_run_id
@@ -817,199 +859,218 @@ async def list_assessments(
 
 
 def _select_run(runs: list[SimulationRun], run_id: str | None) -> uuid.UUID | str | None:
-    """The run (or ``"all"``) the page shows: the requested one, else the newest."""
-    selected_run_id: uuid.UUID | str | None = "all" if run_id == "all" else None
-    if run_id != "all" and run_id:
-        try:
-            selected_run_id = uuid.UUID(run_id)
-        except ValueError:
-            pass
-    if not selected_run_id and runs:
-        selected_run_id = runs[0].id
-    return selected_run_id
+    """The run (or ``"all"``) the page shows: the requested one when it names a run in
+    ``runs``, else the newest (B-13, the assessments pages' rule)."""
+    return _resolve_run_selection(runs, run_id)[1]
 
 
-async def _load_thread_inputs(
-    db: AsyncSession,
-    selected_run_id: uuid.UUID | str,
-    show_all_runs: bool,
-) -> tuple[list[Any], dict[str, int], dict[str, set[str]], dict[str, ThreadDecision]]:
-    """Root posts, reply counts, repliers and the last decision per thread.
+def _run_scope(column, selected_run_id, show_all_runs: bool) -> list[Any]:
+    return [] if show_all_runs else [column == selected_run_id]
 
-    Root posts are column rows (``message_ts, channel_name, agent_id,
-    created_at``), not ORM rows, so a message's ``content`` is never loaded.
-    """
-    # Get all root posts (new_post phase, no thread_ts)
-    roots_query = select(
-        AgentMessage.message_ts,
-        AgentMessage.channel_name,
-        AgentMessage.agent_id,
-        AgentMessage.created_at,
-    ).where(
-        AgentMessage.phase == "new_post",
-        AgentMessage.thread_ts.is_(None),
+
+def _thread_rows(selected_run_id, show_all_runs: bool):
+    """One SQL row per thread: every root post (``new_post``, no ``thread_ts``), then
+    every thread whose decisions have no root post. A thread's decision is its LAST by
+    ``decided_at``; reply counts span every run under ``run_id=all``. ``grp`` is 0 for
+    a root, 1 for an orphan; ``row_key`` is a unique tiebreak for stable paging."""
+    roots = (
+        select(
+            AgentMessage.message_ts.label("ts"),
+            AgentMessage.channel_name.label("channel"),
+            AgentMessage.agent_id.label("poster"),
+            AgentMessage.created_at.label("at"),
+            AgentMessage.id.label("row_key"),
+        )
+        .where(
+            AgentMessage.phase == "new_post",
+            AgentMessage.thread_ts.is_(None),
+            *_run_scope(AgentMessage.simulation_run_id, selected_run_id, show_all_runs),
+        )
+        .cte("roots")
     )
-    if not show_all_runs:
-        roots_query = roots_query.where(AgentMessage.simulation_run_id == selected_run_id)
-    root_posts = (await db.execute(roots_query.order_by(AgentMessage.created_at))).all()
-
-    # Get reply counts and replier agent IDs per thread
-    reply_query = select(
-        AgentMessage.thread_ts,
-        func.count(AgentMessage.id).label("reply_count"),
-    ).where(AgentMessage.phase == "thread_reply")
-    if not show_all_runs:
-        reply_query = reply_query.where(AgentMessage.simulation_run_id == selected_run_id)
-    reply_counts_result = await db.execute(reply_query.group_by(AgentMessage.thread_ts))
-    reply_count_map = {r.thread_ts: r.reply_count for r in reply_counts_result}
-
-    # Get distinct replier agent IDs per thread
-    replier_query = select(AgentMessage.thread_ts, AgentMessage.agent_id).where(
-        AgentMessage.phase == "thread_reply",
+    replies = (
+        select(AgentMessage.thread_ts.label("ts"), func.count(AgentMessage.id).label("n"))
+        .where(
+            AgentMessage.phase == "thread_reply",
+            *_run_scope(AgentMessage.simulation_run_id, selected_run_id, show_all_runs),
+        )
+        .group_by(AgentMessage.thread_ts)
+        .cte("replies")
     )
-    if not show_all_runs:
-        replier_query = replier_query.where(AgentMessage.simulation_run_id == selected_run_id)
-    repliers_result = await db.execute(replier_query.distinct())
-    replier_map: dict[str, set[str]] = {}
-    for r in repliers_result:
-        replier_map.setdefault(r.thread_ts, set()).add(r.agent_id)
-
-    # Get thread decisions
-    decisions_query = select(ThreadDecision)
-    if not show_all_runs:
-        decisions_query = decisions_query.where(ThreadDecision.simulation_run_id == selected_run_id)
-    decisions_result = await db.execute(decisions_query.order_by(ThreadDecision.decided_at))
-
-    # Build a map: thread_id -> final outcome (last decision wins)
-    decision_map: dict[str, ThreadDecision] = {}
-    for d in decisions_result.scalars().all():
-        decision_map[d.thread_id] = d
-    return root_posts, reply_count_map, replier_map, decision_map
-
-
-def _thread_status(decision: ThreadDecision | None, reply_count: int) -> str:
-    """A thread's status: its decision's outcome, else active/no_replies by replies."""
-    if decision:
-        return decision.outcome
-    return "active" if reply_count > 0 else "no_replies"
-
-
-def _build_threads(
-    root_posts: list[Any],
-    reply_count_map: dict[str, int],
-    replier_map: dict[str, set[str]],
-    decision_map: dict[str, ThreadDecision],
-) -> tuple[list[dict[str, Any]], set[str]]:
-    """The thread dicts (root posts, then orphaned decisions) and their channels."""
-    threads: list[dict[str, Any]] = []
-    available_channels: set[str] = set()
-    for post in root_posts:
-        ts = post.message_ts
-        available_channels.add(post.channel_name)
-        reply_count = reply_count_map.get(ts, 0)
-        repliers = replier_map.get(ts, set())
-        decision = decision_map.get(ts)
-
-        # Find the other agent (replier who isn't the poster)
-        other_agents = repliers - {post.agent_id}
-        replier = next(iter(other_agents), None) if other_agents else None
-
-        threads.append({
-            "message_ts": ts,
-            "channel_name": post.channel_name,
-            "agent_id": post.agent_id,
-            "created_at": post.created_at,
-            "reply_count": reply_count,
-            "replier": replier,
-            "status": _thread_status(decision, reply_count),
-            "decision": decision,
-        })
-
-    # Add orphaned decisions (thread_decisions with no matching root post in
-    # agent_messages). Iterating decision_map, not all_decisions, gives each
-    # orphan its LAST decision, the same rule the root-post loop applies; a
-    # thread with several decisions appears once, under its final outcome.
-    known_thread_ids = {t["message_ts"] for t in threads}
-    for thread_id, td in decision_map.items():
-        if thread_id not in known_thread_ids:
-            poster_id = td.agent_a
-            replier = td.agent_b if td.agent_a == poster_id else td.agent_a
-            threads.append({
-                "message_ts": td.thread_id,
-                "channel_name": td.channel,
-                "agent_id": poster_id,
-                "created_at": td.decided_at,
-                "reply_count": reply_count_map.get(td.thread_id, 0),
-                "replier": replier,
-                "status": td.outcome,
-                "decision": td,
-            })
-            known_thread_ids.add(td.thread_id)
-            available_channels.add(td.channel)
-    return threads, available_channels
+    last_dec = (
+        select(
+            ThreadDecision.thread_id.label("ts"),
+            ThreadDecision.id.label("decision_id"),
+            cast(ThreadDecision.outcome, String).label("outcome"),
+            ThreadDecision.channel,
+            ThreadDecision.agent_a,
+            ThreadDecision.agent_b,
+            ThreadDecision.decided_at,
+        )
+        .where(*_run_scope(ThreadDecision.simulation_run_id, selected_run_id, show_all_runs))
+        .distinct(ThreadDecision.thread_id)
+        .order_by(ThreadDecision.thread_id, ThreadDecision.decided_at.desc(), ThreadDecision.id.desc())
+        .cte("last_dec")
+    )
+    root_replies = func.coalesce(replies.c.n, literal_column("0"))
+    root_rows = select(
+        roots.c.ts.label("message_ts"),
+        roots.c.channel.label("channel_name"),
+        roots.c.poster.label("agent_id"),
+        roots.c.at.label("created_at"),
+        root_replies.label("reply_count"),
+        case(
+            (last_dec.c.decision_id.is_not(None), last_dec.c.outcome),
+            (root_replies > 0, literal_column("'active'")),
+            else_=literal_column("'no_replies'"),
+        ).label("status"),
+        last_dec.c.decision_id,
+        last_dec.c.agent_a,
+        last_dec.c.agent_b,
+        literal_column("0").label("grp"),
+        roots.c.row_key,
+    ).select_from(
+        roots.outerjoin(replies, replies.c.ts == roots.c.ts).outerjoin(
+            last_dec, last_dec.c.ts == roots.c.ts
+        )
+    )
+    orphan_rows = (
+        select(
+            last_dec.c.ts,
+            last_dec.c.channel,
+            last_dec.c.agent_a,
+            last_dec.c.decided_at,
+            func.coalesce(replies.c.n, literal_column("0")),
+            last_dec.c.outcome,
+            last_dec.c.decision_id,
+            last_dec.c.agent_a,
+            last_dec.c.agent_b,
+            literal_column("1"),
+            last_dec.c.decision_id,
+        )
+        .select_from(last_dec.outerjoin(replies, replies.c.ts == last_dec.c.ts))
+        .where(~select(roots.c.ts).where(roots.c.ts == last_dec.c.ts).exists())
+    )
+    return union_all(root_rows, orphan_rows).subquery("threads")
 
 
-def _status_counts(threads: list[dict[str, Any]]) -> dict[str, int]:
-    """Count by status over the whole run, before any filter: the summary cards
-    link to `?run_id=...&status_filter=...` with no channel or agent filter,
-    so each card's number must be what its link lists, and "Total threads"
-    (the sum) is the same under every filter. It counts threads, not root
-    posts: an orphaned decision (no root post) is listed, carded and
-    exported as a thread, so it is counted as one too.
-    """
-    counts: dict[str, int] = {}
-    for t in threads:
-        s = t["status"]
-        counts[s] = counts.get(s, 0) + 1
-    return counts
+def _repliers_of(threads, scope_for_reply):
+    """(thread message_ts, agent_id) of every non-poster replier of a root thread."""
+    rep = aliased(AgentMessage)
+    return (
+        select(threads.c.message_ts, rep.agent_id)
+        .select_from(threads)
+        .join(rep, and_(
+            rep.thread_ts == threads.c.message_ts, rep.phase == "thread_reply", *scope_for_reply(rep),
+        ))
+        .where(
+            threads.c.grp == 0,
+            rep.agent_id.is_not(None),
+            rep.agent_id.is_distinct_from(threads.c.agent_id),
+        )
+        .distinct()
+    )
 
 
-def _collect_agents(threads: list[dict[str, Any]]) -> set[str]:
-    """Available agents from threads.
-
-    Every add is None-guarded, including the poster's. `agent_id` is nullable
-    on agent_messages and really is NULL in production: the retired Slack reconcile
-    (`_rebuild_state_from_slack`, removed 2026-09-29) recorded a real Slack message whose sender maps to no known bot as
-    `is_bot=True, agent_id=NULL` (measured: 7 rows, all from one raw Slack user
-    id). The caller sorts this set, so a single None took the whole page down
-    with "'<' not supported between instances of 'NoneType' and 'str'". The
-    replier and decision adds were already guarded; the poster's was not.
-    """
-    available_agents: set[str] = set()
-    for t in threads:
-        for candidate in (
-            t["agent_id"],
-            t.get("replier"),
-            t["decision"].agent_a if t.get("decision") else None,
-            t["decision"].agent_b if t.get("decision") else None,
-        ):
-            if candidate:
-                available_agents.add(candidate)
-    return available_agents
-
-
-def _apply_filters(
-    threads: list[dict[str, Any]],
-    channel_filter: str | None,
-    status_filter: str | None,
-    agent_filter: list[str],
-) -> list[dict[str, Any]]:
-    """Narrow the thread list by channel, status and agent."""
+def _thread_conditions(threads, scope_for_reply, channel_filter, status_filter, agent_filter) -> list[Any]:
+    """The channel, status and agent filters as SQL. An agent matches as poster, as
+    either side of the thread's decision, or (root threads) as any non-poster replier."""
+    conds: list[Any] = []
     if channel_filter:
-        threads = [t for t in threads if t["channel_name"] == channel_filter]
+        conds.append(threads.c.channel_name == channel_filter)
     if status_filter:
-        threads = [t for t in threads if t["status"] == status_filter]
+        conds.append(threads.c.status == status_filter)
     if agent_filter:
-        agent_set = set(agent_filter)
-        threads = [
-            t for t in threads
-            if t["agent_id"] in agent_set
-            or (t.get("replier") and t["replier"] in agent_set)
-            or (t.get("decision") and (
-                t["decision"].agent_a in agent_set or t["decision"].agent_b in agent_set
-            ))
-        ]
-    return threads
+        agents = list(agent_filter)
+        rep = aliased(AgentMessage)
+        replier_match = (
+            select(rep.id)
+            .where(
+                rep.phase == "thread_reply",
+                rep.thread_ts == threads.c.message_ts,
+                rep.agent_id.in_(agents),
+                rep.agent_id.is_distinct_from(threads.c.agent_id),
+                *scope_for_reply(rep),
+            )
+            .exists()
+        )
+        conds.append(or_(
+            threads.c.agent_id.in_(agents),
+            threads.c.agent_a.in_(agents),
+            threads.c.agent_b.in_(agents),
+            and_(threads.c.grp == 0, replier_match),
+        ))
+    return conds
+
+
+async def _thread_summary(db: AsyncSession, threads, scope_for_reply) -> tuple[dict[str, int], list[str], list[str]]:
+    """Status counts, channels and agents over the whole selection, before any filter:
+    each summary card links to a status filter alone, so its number must be what that
+    link lists."""
+    counts = {
+        status: n
+        for status, n in (
+            await db.execute(select(threads.c.status, func.count()).group_by(threads.c.status))
+        ).all()
+    }
+    channels = sorted(
+        c for c in (await db.execute(select(threads.c.channel_name).distinct())).scalars() if c
+    )
+    agents: set[str] = set()
+    for row in (
+        await db.execute(select(threads.c.agent_id, threads.c.agent_a, threads.c.agent_b).distinct())
+    ).all():
+        agents.update(a for a in row if a)
+    agents.update(a for _ts, a in (await db.execute(_repliers_of(threads, scope_for_reply))).all() if a)
+    return counts, channels, sorted(agents)
+
+
+async def _thread_page(db: AsyncSession, threads, conds: list[Any], page: int | None, scope: list[Any]) -> list[dict[str, Any]]:
+    """The filtered threads of one page (every one when ``page`` is None), with each
+    row's decision loaded for that page only."""
+    query = select(threads).where(*conds).order_by(
+        threads.c.grp, threads.c.created_at, threads.c.message_ts, threads.c.row_key
+    )
+    if page is not None:
+        query = query.limit(DISCUSSIONS_PAGE_SIZE).offset((page - 1) * DISCUSSIONS_PAGE_SIZE)
+    rows = (await db.execute(query)).all()
+    decision_ids = [r.decision_id for r in rows if r.decision_id is not None]
+    decisions = (
+        {d.id: d for d in (await db.execute(select(ThreadDecision).where(ThreadDecision.id.in_(decision_ids)))).scalars()}
+        if decision_ids else {}
+    )
+    page_ts = [r.message_ts for r in rows if r.grp == 0]
+    repliers: dict[str, set[str]] = {}
+    if page_ts:
+        for ts, agent in (
+            await db.execute(
+                select(AgentMessage.thread_ts, AgentMessage.agent_id)
+                .where(
+                    AgentMessage.phase == "thread_reply",
+                    AgentMessage.thread_ts.in_(page_ts),
+                    AgentMessage.agent_id.is_not(None),
+                    *scope,
+                )
+                .distinct()
+            )
+        ).all():
+            repliers.setdefault(ts, set()).add(agent)
+    return [
+        {
+            "message_ts": r.message_ts,
+            "channel_name": r.channel_name,
+            "agent_id": r.agent_id,
+            "created_at": r.created_at,
+            "reply_count": r.reply_count,
+            "replier": (
+                min(repliers.get(r.message_ts, set()) - {r.agent_id}, default=None)
+                if r.grp == 0 else r.agent_b
+            ),
+            "status": r.status,
+            "decision": decisions.get(r.decision_id),
+        }
+        for r in rows
+    ]
 
 
 async def build_discussions_view(
@@ -1021,25 +1082,27 @@ async def build_discussions_view(
     agent_filter: list[str],
     page: int | None = 1,
 ) -> dict[str, Any]:
-    """Discussion summary: threads grouped by status.
+    """Discussion summary: threads grouped by status, filtered and paged in SQL (C-15).
 
-    ``page=None`` returns every thread (the admin export); otherwise
-    ``threads`` is one page of ``DISCUSSIONS_PAGE_SIZE`` and the result carries
-    ``page``, ``page_count`` and ``thread_total`` (the filtered thread count).
-    ``counts``, ``channels`` and ``agents`` are computed over the whole
-    selection before any filter or paging.
+    ``page=None`` returns every thread (the admin export); otherwise ``threads`` is
+    one page of ``DISCUSSIONS_PAGE_SIZE`` and the result carries ``page``,
+    ``page_count`` and ``thread_total`` (the filtered thread count). ``counts``,
+    ``channels`` and ``agents`` cover the whole selection before any filter or paging.
+    ``all_runs_refused`` is True when ``run_id="all"`` is asked for a page and every
+    run together holds more than ``DISCUSSIONS_ALL_RUNS_MAX`` threads; ``threads`` is
+    then empty and the page asks for one run.
 
-    Stops before the router's ``if export:`` branch — export is admin-only,
-    returns a different response type (``PlainTextResponse`` / an export
-    template) entirely, and consumes ``threads`` from this function's return
-    value. The manager router will never pass an export parameter.
+    Thread semantics are those of the frozen oracle
+    (tests/unit/_frozen_discussions.py): a root post or an orphaned decision; the last
+    decision by ``decided_at``; replies across every run under ``run_id="all"``. Where
+    that version depended on set order, this one is deterministic: the shown
+    ``replier`` is the alphabetically first non-poster replier, the agent filter and
+    the agent list consider every non-poster replier, and an orphan sorts by its last
+    decision.
 
-    Both the "no simulation runs exist at all" early-return and the normal
-    return below yield the same keys (including ``agents`` and
-    ``agent_filter``, which the early return used to omit) so a template can
-    rely on their presence rather than on Jinja2's lenient ``Undefined``.
+    Stops before the router's ``if export:`` branch, and both the no-runs early return
+    and the normal return yield the same keys, so a template can rely on them.
     """
-    # Pick which simulation run to show
     runs = await runs_ordered(db)
     selected_run_id = _select_run(runs, run_id)
 
@@ -1057,36 +1120,42 @@ async def build_discussions_view(
             "page": 1,
             "page_count": 1,
             "thread_total": 0,
+            "all_runs_refused": False,
         }
 
-    inputs = await _load_thread_inputs(db, selected_run_id, run_id == "all")
-    threads, available_channels = _build_threads(*inputs)
-    counts = _status_counts(threads)
-    available_agents = _collect_agents(threads)
-    threads = _apply_filters(threads, channel_filter, status_filter, agent_filter)
+    show_all_runs = run_id == "all"
+    scope = _run_scope(AgentMessage.simulation_run_id, selected_run_id, show_all_runs)
 
-    thread_total = len(threads)
+    def scope_for_reply(rep):
+        return _run_scope(rep.simulation_run_id, selected_run_id, show_all_runs)
+
+    threads = _thread_rows(selected_run_id, show_all_runs)
+    counts, channels, agents = await _thread_summary(db, threads, scope_for_reply)
+    conds = _thread_conditions(threads, scope_for_reply, channel_filter, status_filter, agent_filter)
+    thread_total = (
+        await db.execute(select(func.count()).select_from(threads).where(*conds))
+    ).scalar_one()
     page_count = max(1, -(-thread_total // DISCUSSIONS_PAGE_SIZE))
-    if page is None:
-        page_out = 1
-    else:
-        page_out = max(1, page)
-        start = (page_out - 1) * DISCUSSIONS_PAGE_SIZE
-        threads = threads[start:start + DISCUSSIONS_PAGE_SIZE]
+    page_out = 1 if page is None else max(1, page)
+    refused = show_all_runs and page is not None and sum(counts.values()) > DISCUSSIONS_ALL_RUNS_MAX
+    listed = [] if refused else await _thread_page(
+        db, threads, conds, None if page is None else page_out, scope
+    )
 
     return {
         "runs": runs,
         "selected_run_id": selected_run_id,
-        "threads": threads,
+        "threads": listed,
         "counts": counts,
-        "channels": sorted(available_channels),
-        "agents": sorted(available_agents),
+        "channels": channels,
+        "agents": agents,
         "channel_filter": channel_filter,
         "status_filter": status_filter,
         "agent_filter": agent_filter or [],
         "page": page_out,
         "page_count": page_count,
         "thread_total": thread_total,
+        "all_runs_refused": refused,
     }
 
 
@@ -1132,7 +1201,8 @@ async def build_run_detail(
 
     The per-agent and per-channel stats are SQL aggregates over the whole run;
     ``messages`` is one page (``RUN_MESSAGES_PAGE_SIZE``) of column rows, with
-    no ``content``, ordered by time.
+    no ``content``, ordered by time. ``page`` is clamped to
+    ``1..page_count``.
     """
     run_result = await db.execute(
         select(SimulationRun).where(SimulationRun.id == run_id)
@@ -1141,10 +1211,13 @@ async def build_run_detail(
     if not run:
         return None
 
-    page = max(1, page)
     message_total = await db.scalar(
         select(func.count(AgentMessage.id)).where(AgentMessage.simulation_run_id == run_id)
     ) or 0
+    # D-27: clamp to the last page, so a stale or hand-edited ?page= past the end
+    # shows that page (and its pager) instead of an empty timeline with no way back.
+    page_count = max(1, -(-message_total // RUN_MESSAGES_PAGE_SIZE))
+    page = min(max(1, page), page_count)
     messages = (await db.execute(
         select(
             AgentMessage.agent_id,
@@ -1214,5 +1287,5 @@ async def build_run_detail(
         "channel_stats": channel_stats,
         "message_total": message_total,
         "page": page,
-        "page_count": max(1, -(-message_total // RUN_MESSAGES_PAGE_SIZE)),
+        "page_count": page_count,
     }

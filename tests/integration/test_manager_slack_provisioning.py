@@ -9,7 +9,7 @@ migration 0046) so a second staff account cannot land someone else's token.
 """
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from src.models import (
     USER_ROLE_ADMIN,
@@ -20,6 +20,7 @@ from src.models import (
 )
 from tests import factories
 from tests.flash_support import session_cookie_header, session_flashes
+from tests.integration._webui_helpers import follow
 from tests.integration.test_manager_access import auth_headers
 
 pytestmark = pytest.mark.integration
@@ -158,7 +159,7 @@ async def test_callback_completes_for_the_initiating_manager(
         headers=auth_headers(manager.id), follow_redirects=False,
     )
     assert r.status_code == 302
-    assert r.headers["location"] == f"/manager/pis/{pi.id}?slack_ok=1"
+    assert r.headers["location"] == f"/manager/pis/{pi.id}"
     await db_session.refresh(agent)
     assert agent.slack_bot_token == "xoxb-manager"
 
@@ -184,7 +185,7 @@ async def test_callback_redirects_an_admin_to_the_admin_surface(
         headers=auth_headers(admin.id), follow_redirects=False,
     )
     assert r.status_code == 302
-    assert r.headers["location"] == f"/admin/agents/{agent.id}?slack_ok=1"
+    assert r.headers["location"] == f"/admin/agents/{agent.id}"
 
 
 async def test_callback_refuses_a_different_user(client, db_session, monkeypatch):
@@ -339,7 +340,7 @@ async def test_the_callback_admits_an_impersonated_session(
         headers=headers, follow_redirects=False,
     )
     assert r.status_code == 302
-    assert r.headers["location"] == f"/manager/pis/{pi.id}?slack_ok=1"
+    assert r.headers["location"] == f"/manager/pis/{pi.id}"
     await db_session.refresh(agent)
     assert agent.slack_bot_token == "xoxb-imp-token"
 
@@ -408,7 +409,7 @@ async def test_callback_completes_a_null_initiator_row_for_an_admin(
         headers=auth_headers(admin.id), follow_redirects=False,
     )
     assert r.status_code == 302
-    assert r.headers["location"] == f"/admin/agents/{agent.id}?slack_ok=1"
+    assert r.headers["location"] == f"/admin/agents/{agent.id}"
     await db_session.refresh(agent)
     assert agent.slack_bot_token == "xoxb-bulk"
 
@@ -455,3 +456,90 @@ async def test_a_reviewer_cannot_render_a_fake_success_banner(client, db_session
     assert "Slack provisioning failed" not in r.text
     assert "Agent activated" not in r.text
     assert "Activation refused" not in r.text
+
+
+async def _grounded(db_session, pi):
+    await factories.make_profile(
+        db_session, user=pi, evidence_pmid_count=10, evidence_pub_count=8,
+    )
+    await db_session.flush()
+
+
+async def test_activate_does_not_overwrite_a_concurrent_suspend(client, db_session, monkeypatch):
+    import src.routers.manager as manager_routes
+
+    manager = await _manager(db_session)
+    pi, agent = await _pending_pi(db_session, agent_id="raced", slack_bot_token="xoxb-raced")
+    await _grounded(db_session, pi)
+    # Committed (a savepoint release under conftest's create_savepoint mode), so the
+    # route's rollback on a lost race cannot undo the fixtures (plan audit Q2-02).
+    await db_session.commit()
+    real_gate = manager_routes.ensure_activation_allowed
+
+    async def gate_then_suspend(db, a, **kwargs):
+        blockers = await real_gate(db, a, **kwargs)
+        # The concurrent writer: committed before the route's conditional UPDATE runs,
+        # so the route's own rollback leaves it in place.
+        await db.execute(text("UPDATE agents SET status = 'suspended' WHERE id = :id"), {"id": a.id})
+        await db.commit()
+        return blockers
+
+    monkeypatch.setattr(manager_routes, "ensure_activation_allowed", gate_then_suspend)
+    # Read before the call: the route's rollback expires every object of the shared
+    # session, and an expired attribute read here would be sync IO.
+    pi_id = pi.id
+    r = await client.post(
+        f"/manager/pis/{pi_id}/activate", headers=auth_headers(manager.id), follow_redirects=False,
+    )
+    assert r.status_code == 302
+    assert r.headers["location"] == f"/manager/pis/{pi_id}"
+    await db_session.refresh(agent)
+    assert agent.status == "suspended"
+    assert agent.approved_by is None
+    page = await follow(client, r)
+    assert "changed while you were activating it" in page.text
+
+
+async def test_activate_accepts_an_env_only_bot_token(client, db_session, monkeypatch):
+    monkeypatch.setattr(
+        "src.services.slack_tokens.env_token",
+        lambda aid: "xoxb-env-only" if aid == "envonly" else None,
+    )
+    manager = await _manager(db_session)
+    pi, agent = await _pending_pi(db_session, agent_id="envonly")
+    await _grounded(db_session, pi)
+    r = await client.post(
+        f"/manager/pis/{pi.id}/activate", headers=auth_headers(manager.id), follow_redirects=False,
+    )
+    assert r.headers["location"] == f"/manager/pis/{pi.id}?activated=1"
+    await db_session.refresh(agent)
+    assert agent.status == "active"
+
+
+async def test_pi_detail_offers_activate_for_an_env_only_token(client, db_session, monkeypatch):
+    monkeypatch.setattr(
+        "src.services.slack_tokens.env_token",
+        lambda aid: "xoxb-env-only" if aid == "envdetail" else None,
+    )
+    manager = await _manager(db_session)
+    pi, _agent = await _pending_pi(db_session, agent_id="envdetail")
+    r = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))
+    assert f'action="/manager/pis/{pi.id}/activate"' in r.text
+    assert f'action="/manager/pis/{pi.id}/slack/provision"' not in r.text
+
+
+async def test_unmute_accepts_an_env_only_bot_token(client, db_session, monkeypatch):
+    monkeypatch.setattr(
+        "src.services.slack_tokens.env_token",
+        lambda aid: "xoxb-env-only" if aid == "envmute" else None,
+    )
+    manager = await _manager(db_session)
+    pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)
+    agent = await factories.make_agent(db_session, user=pi, agent_id="envmute", status="inactive")
+    await _grounded(db_session, pi)
+    r = await client.post(
+        f"/manager/pis/{pi.id}/unmute", headers=auth_headers(manager.id), follow_redirects=False,
+    )
+    assert r.headers["location"] == f"/manager/pis/{pi.id}"
+    await db_session.refresh(agent)
+    assert agent.status == "active"

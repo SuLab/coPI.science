@@ -65,7 +65,7 @@
    conditional and the headline falls back to the short label. A pre-0043 row
    must render exactly as informative as it did before, with no empty states.
    --------------------------------------------------------------------------- #}
-<nav class="assessment-jump-nav sticky top-0 z-10 -mx-2 mb-4 flex flex-wrap gap-x-4 gap-y-1 bg-white/95 px-2 py-2 text-sm text-gray-600 backdrop-blur border-b border-gray-100">
+<nav aria-label="On this page" class="assessment-jump-nav sticky top-0 z-10 -mx-2 mb-4 flex flex-wrap gap-x-4 gap-y-1 bg-white/95 px-2 py-2 text-sm text-gray-600 backdrop-blur border-b border-gray-100">
     <a class="text-indigo-700 underline-offset-2 hover:underline" href="#brief">Brief</a>
     <a class="text-indigo-700 underline-offset-2 hover:underline" href="#signals">Evidence</a>
     {% if a.recommended_next_experiment %}<a class="text-indigo-700 underline-offset-2 hover:underline" href="#ask">Ask</a>{% endif %}
@@ -284,7 +284,7 @@
            lines instead of one truncated line (audit M3), so the qualifying
            clause of a risk's first sentence survives. #}
         <summary class="cursor-pointer list-none [&::-webkit-details-marker]:hidden flex flex-wrap items-baseline gap-x-2 gap-y-0.5 min-w-0">
-            <span class="{{ glyph[1] }} shrink-0" title="{{ glyph[2] }}" aria-label="{{ glyph[2] }}">{{ glyph[0] | safe }}</span>
+            <span class="{{ glyph[1] }} shrink-0" role="img" title="{{ glyph[2] }}" aria-label="{{ glyph[2] }}">{{ glyph[0] | safe }}</span>
             <span><span class="font-semibold">{{ item.label }}</span> &mdash; {{ item.detail }}</span>
             {% if item.note %}<span class="signal-note whitespace-nowrap rounded-full border border-gray-300 px-2 text-sm text-gray-700">{{ item.note }}</span>{% endif %}
             <span class="ml-auto text-sm text-gray-600 select-none"><span class="group-open:hidden">show</span><span class="hidden group-open:inline">hide</span></span>
@@ -312,7 +312,7 @@
     </details>
     {% else %}
     <div class="flex items-baseline gap-x-2 min-w-0">
-        <span class="{{ glyph[1] }} shrink-0" title="{{ glyph[2] }}" aria-label="{{ glyph[2] }}">{{ glyph[0] | safe }}</span>
+        <span class="{{ glyph[1] }} shrink-0" role="img" title="{{ glyph[2] }}" aria-label="{{ glyph[2] }}">{{ glyph[0] | safe }}</span>
         <span><span class="font-semibold">{{ item.label }}</span> &mdash; {{ item.detail }}{% if item.source == 'dimension' and item.body %} <span class="text-sm text-gray-600">&middot; {{ item.body | join(' ') }}</span>{% endif %}</span>
         {% if item.note %}<span class="signal-note shrink-0 whitespace-nowrap rounded-full border border-gray-300 px-2 text-sm text-gray-700">{{ item.note }}</span>{% endif %}
         {% if item.source == 'gating' and item.body %}<span class="shrink-0 text-sm text-gray-600" aria-hidden="true">&#9432;</span>{% endif %}
@@ -521,7 +521,7 @@
 {% macro tool_turn(turn, signal_chip) %}
 <div class="mb-2">
     <div class="text-sm text-gray-600 mb-1">
-        tool round &middot; <span data-utc="{{ turn.created_at.isoformat() }}" data-utc-fmt="time">{{ turn.created_at.strftime('%H:%M:%S') }}</span>
+        tool round &middot; {{ turn.created_at | ts("second") }}
         &middot; {{ turn.chips | length }} call{{ '' if turn.chips | length == 1 else 's' }}
     </div>
     <div class="space-y-1.5">
@@ -599,7 +599,7 @@
             <div class="text-sm text-gray-600 mt-1">
                 Lab: <span class="font-medium text-gray-700">{{ pi_link(a) }}</span>
                 &middot; Screened by {{ a.agent_id }}
-                &middot; <span data-utc="{{ a.created_at.isoformat() }}" data-utc-fmt="short">{{ a.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+                &middot; {{ a.created_at | ts }}
                 &middot; #{{ a.channel_name }}
             </div>
         </div>
@@ -776,13 +776,13 @@
                title is a hover affordance a touch user never gets, and the
                legend below is the visible answer for everyone. #}
             {% if gate_state == 'met' %}
-                <span class="text-green-700" title="Met" aria-label="Met">&#9989;</span>
+                <span class="text-green-700" role="img" title="Met" aria-label="Met">&#9989;</span>
             {% elif gate_state == 'not_met' %}
-                <span class="text-red-600" title="Not met" aria-label="Not met">&#10060;</span>
+                <span class="text-red-600" role="img" title="Not met" aria-label="Not met">&#10060;</span>
             {% elif gate_state == 'unconfirmed' %}
-                <span class="text-blue-700" title="Unconfirmed — never asked" aria-label="Unconfirmed — never asked">&#10067;</span>
+                <span class="text-blue-700" role="img" title="Unconfirmed — never asked" aria-label="Unconfirmed — never asked">&#10067;</span>
             {% else %}
-                <span class="text-gray-600" title="Unrecognized gating value: {{ gate_state }}" aria-label="Unrecognized gating value">&bull;</span>
+                <span class="text-gray-600" role="img" title="Unrecognized gating value: {{ gate_state }}" aria-label="Unrecognized gating value">&bull;</span>
             {% endif %}
             {{ key.replace("_", " ") }}
             {% if gate_meta %}
@@ -1046,7 +1046,7 @@
                     {% endif %}
                     by {{ event.actor_name }}
                     &middot;
-                    <span data-utc="{{ event.created_at.isoformat() }}" data-utc-fmt="short">{{ event.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+                    {{ event.created_at | ts }}
                 </li>
                 {% endfor %}
             </ul>
@@ -1082,7 +1082,7 @@
                         </span>
                     {% endif %}
                     {% if review.edited %}<span class="text-gray-600 italic">(edited)</span>{% endif %}
-                    <span data-utc="{{ review.created_at.isoformat() }}" data-utc-fmt="short">{{ review.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+                    {{ review.created_at | ts }}
                 </div>
                 {% if review.comment %}
                 <p class="review-comment mt-1 text-base leading-relaxed text-gray-700 whitespace-pre-line max-w-[68ch]">{{ review.comment }}</p>
@@ -1117,10 +1117,12 @@
                             <select id="{{ edit_prefix }}score" name="score" class="border rounded px-1 py-0.5 text-sm">
                                 {% for n in range(1, 6) %}<option value="{{ n }}" {% if review.score == n %}selected{% endif %}>{{ n }}</option>{% endfor %}
                             </select>
-                            <label class="block text-sm font-medium text-gray-600 mb-1 mt-3">Rubric dimensions (optional)</label>
-                            {{ dimension_score_rows(review_rubric, review.dimension_scores or {}, edit_prefix) }}
+                            <fieldset class="mt-3">
+                                <legend class="block text-sm font-medium text-gray-600 mb-1">Rubric dimensions (optional)</legend>
+                                {{ dimension_score_rows(review_rubric, review.dimension_scores or {}, edit_prefix) }}
+                            </fieldset>
                             <label for="{{ edit_prefix }}comment" class="block text-sm font-medium text-gray-600 mb-1 mt-3">Comment</label>
-                            <textarea id="{{ edit_prefix }}comment" name="comment" rows="2" class="w-full border rounded px-2 py-1 text-sm">{{ review.comment }}</textarea>
+                            <textarea id="{{ edit_prefix }}comment" name="comment" maxlength="10000" rows="2" class="w-full border rounded px-2 py-1 text-sm">{{ review.comment }}</textarea>
                             <label for="{{ edit_prefix }}mode" class="block text-sm font-medium text-gray-600 mb-1 mt-3">Feedback mode</label>
                             <select id="{{ edit_prefix }}mode" name="feedback_mode" class="border rounded px-1 py-0.5 text-sm">
                                 <option value="learn" {% if review.feedback_mode == 'learn' %}selected{% endif %}>Learn</option>
@@ -1155,10 +1157,12 @@
                 <option value="" disabled selected>&mdash;</option>
                 {% for n in range(1, 6) %}<option value="{{ n }}">{{ n }}</option>{% endfor %}
             </select>
-            <label class="block text-sm font-medium text-gray-600 mb-1 mt-3">Rubric dimensions (optional)</label>
-            {{ dimension_score_rows(review_rubric, {}, 'add-') }}
+            <fieldset class="mt-3">
+                <legend class="block text-sm font-medium text-gray-600 mb-1">Rubric dimensions (optional)</legend>
+                {{ dimension_score_rows(review_rubric, {}, 'add-') }}
+            </fieldset>
             <label for="add-comment" class="block text-sm font-medium text-gray-600 mb-1 mt-3">Comment</label>
-            <textarea id="add-comment" name="comment" rows="2" placeholder="Comment" class="w-full border rounded px-2 py-1 text-sm"></textarea>
+            <textarea id="add-comment" name="comment" maxlength="10000" rows="2" placeholder="Comment" class="w-full border rounded px-2 py-1 text-sm"></textarea>
             <label for="add-mode" class="block text-sm font-medium text-gray-600 mb-1 mt-3">Feedback mode</label>
             <select id="add-mode" name="feedback_mode" required class="border rounded px-1 py-0.5 text-sm">
                 <option value="" disabled selected>&mdash;</option>

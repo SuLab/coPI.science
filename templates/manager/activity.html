@@ -33,7 +33,7 @@
 </div>
 
 <!-- Simulation runs table -->
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto">
     <div class="px-6 py-4 border-b border-gray-200">
         <h2 class="font-semibold text-gray-800">Simulation Runs</h2>
     </div>
@@ -56,9 +56,9 @@
             {% for run in runs %}
             <tr class="hover:bg-gray-50 cursor-pointer"
                 data-row-href="/manager/activity/{{ run.id }}">
-                <td class="px-4 py-3 text-sm"><a href="/manager/activity/{{ run.id }}" class="text-indigo-700 hover:underline"><span data-utc="{{ run.started_at.isoformat() }}" data-utc-fmt="short">{{ run.started_at.strftime('%b %d %H:%M') }}</span></a></td>
+                <td class="px-4 py-3 text-sm"><a href="/manager/activity/{{ run.id }}" class="text-indigo-700 hover:underline">{{ run.started_at | ts }}</a></td>
                 <td class="px-4 py-3 text-sm text-gray-500">
-                    {% if run.ended_at %}<span data-utc="{{ run.ended_at.isoformat() }}" data-utc-fmt="short">{{ run.ended_at.strftime('%b %d %H:%M') }}</span>{% else %}—{% endif %}
+                    {% if run.ended_at %}{{ run.ended_at | ts }}{% else %}—{% endif %}
                 </td>
                 <td class="px-4 py-3">
                     {% set sc = {'running': 'bg-blue-100 text-blue-700', 'completed': 'bg-green-100 text-green-700', 'stopped': 'bg-gray-100 text-gray-600'} %}

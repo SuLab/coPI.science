@@ -8,7 +8,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
-from src.dependencies import get_current_user, get_pi_user, refuse_impersonation
+from src.dependencies import (
+    get_current_user,
+    get_pi_user,
+    impersonation_note,
+    refuse_impersonation,
+    staff_landing_redirect,
+)
 from src.models import AgentRegistry, Publication, ResearcherProfile, User
 from src.models.job import INTERACTIVE_PRIORITY
 from src.services.admin_invariant import LastAdminError, ensure_admin_remains
@@ -20,6 +26,7 @@ from src.services.profile_edit import (
 from src.services.profile_jobs import enqueue_profile_job_if_absent
 from src.services.tenure_scope import scoped_publications_for
 from src.services.user_deletion import delete_user_account
+from src.web.flash import flash
 from src.web.templating import make_templates
 
 logger = logging.getLogger(__name__)
@@ -49,12 +56,12 @@ async def profile_view(
     current_user: User = Depends(get_current_user),
 ):
     """View user's profile page."""
-    # A REVIEWER is neither staff nor PI and has no lab profile to
-    # view — bounce before the onboarding check, which would otherwise send
-    # it to a page it can never complete (get_pi_user gates the only writer
-    # of onboarding_complete).
-    if current_user.is_reviewer:
-        return RedirectResponse(url="/manager/assessments", status_code=302)
+    # A manager or reviewer has no lab profile to view (M-08) — bounce before the
+    # onboarding check, which would otherwise send it to a page it can never
+    # complete (get_pi_user gates the only writer of onboarding_complete).
+    bounce = staff_landing_redirect(current_user)
+    if bounce is not None:
+        return bounce
 
     # Redirect to onboarding if not complete
     if not current_user.onboarding_complete:
@@ -110,10 +117,11 @@ async def profile_edit(
     current_user: User = Depends(get_current_user),
 ):
     """Edit profile page."""
-    # Same reviewer bounce as GET /profile: without it a reviewer renders a
+    # Same bounce as GET /profile: without it a manager or reviewer renders a
     # profile-edit form whose POST /profile/save 403s (get_pi_user).
-    if current_user.is_reviewer:
-        return RedirectResponse(url="/manager/assessments", status_code=302)
+    bounce = staff_landing_redirect(current_user)
+    if bounce is not None:
+        return bounce
 
     profile_result = await db.execute(
         select(ResearcherProfile).where(ResearcherProfile.user_id == current_user.id)
@@ -152,6 +160,7 @@ async def profile_save(
     acceptance binds to (E1.3). Managers keep POST
     /manager/pis/{user_id}/profile, which calls the same service function.
     """
+    note = impersonation_note(current_user)
     error = await apply_profile_edits(
         db, target_user=current_user, changed_by_user_id=current_user.id,
         form={
@@ -160,10 +169,13 @@ async def profile_save(
             **list_fields_from_form(await request.form()),
         },
         expected_version=parse_expected_version(profile_version),
+        change_summary=note,
+        mechanism="web_impersonated" if note else "web",
     )
     if error:
         return RedirectResponse(url=f"/profile/edit?error={error}", status_code=302)
-    return RedirectResponse(url="/profile?saved=1", status_code=302)
+    flash(request, "Profile saved.", "success")
+    return RedirectResponse(url="/profile", status_code=302)
 
 
 @router.post("/refresh")

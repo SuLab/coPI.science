@@ -6,7 +6,7 @@ import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import distinct, func, select, tuple_
 from sqlalchemy.exc import IntegrityError
@@ -20,6 +20,7 @@ from src.dependencies import (
     get_current_user,
     get_pi_user,
     impersonation_note,
+    staff_landing_redirect,
 )
 from src.models import (
     AgentDelegate,
@@ -31,6 +32,7 @@ from src.models import (
 )
 from src.services.agent_identity import derive_agent_identity
 from src.services.conversation_feed import own_or_gated, resolve_agent_gate
+from src.services.directory import MAX_PAGE
 from src.services.email import build_delegate_invitation, send_transactional_email
 from src.services.profile_edit import (
     apply_profile_edits,
@@ -55,6 +57,16 @@ SLACK_INVITE_URL = (
 # longer consume slots, so this surfaces more distinct conversations than the
 # previous flat 100-message window did.
 _ROOT_LIMIT = 50
+#: Conversations page number (D-26); a module singleton so the default is not a
+#: call in the signature (scripts/ci.sh SRC_LINT_MAX).
+_CONV_PAGE = Query(1, ge=1, le=MAX_PAGE)
+
+#: Delegate-invite caps (SN-02): per submission, and per agent over any rolling
+#: 24 hours. The window counts every delegate_invitations row created in it,
+#: whatever its status, so revoke-and-resend cannot get around it; the rows are
+#: the ledger, no table of their own.
+_INVITES_PER_SUBMISSION = 10
+_INVITES_PER_AGENT_PER_DAY = 25
 
 
 async def _visible_channels(db: AsyncSession, run_id, aid: str) -> list[str]:
@@ -102,6 +114,11 @@ async def agent_landing(
     current_user: User = Depends(get_current_user),
 ):
     """Agent landing page — lists all agents the user has access to."""
+    # M-08: a manager or reviewer has no lab; the request form here would 403.
+    bounce = staff_landing_redirect(current_user)
+    if bounce is not None:
+        return bounce
+
     # Own agent
     result = await db.execute(
         select(AgentRegistry).where(AgentRegistry.user_id == current_user.id)
@@ -314,6 +331,7 @@ async def request_agent(
 async def agent_conversations(
     agent_id: str,
     request: Request,
+    page: int = _CONV_PAGE,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -324,6 +342,8 @@ async def agent_conversations(
     other human-PI-to-bot interaction surface. This is now purely a
     Slack-independent window onto what the agent's workspace is discussing.
     See specs/local-db-conversations.md.
+
+    Paged by ``page`` (D-26): ``_ROOT_LIMIT`` roots per page, newest first.
     """
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
     if agent.status not in ("active", "inactive"):
@@ -333,6 +353,7 @@ async def agent_conversations(
     run_id = await latest_run_id(db)
     channels: list[str] = []
     messages: list[dict] = []
+    has_older = False
     if run_id:
         channels = await _visible_channels(db, run_id, aid)
         # What this PI may read == what their bot may act on. Filtering happens in
@@ -369,9 +390,13 @@ async def agent_conversations(
             )
             .order_by(AgentMessage.posted_at.desc(), AgentMessage.created_at.desc(),
                       AgentMessage.id.desc())
-            .limit(_ROOT_LIMIT)
+            .limit(_ROOT_LIMIT + 1)
+            .offset((page - 1) * _ROOT_LIMIT)
         )
-        roots = list(reversed(root_rows.scalars().all()))
+        # One row past the page says whether an older page exists.
+        fetched = root_rows.scalars().all()
+        has_older = len(fetched) > _ROOT_LIMIT
+        roots = list(reversed(fetched[:_ROOT_LIMIT]))
 
         # Reply counts, gated with the SAME clause (including the own-post
         # carve-out) so the badge can never promise turns the expansion will not
@@ -422,6 +447,7 @@ async def agent_conversations(
         _template_context(
             request, current_user, agent=agent, is_owner=is_owner,
             messages=messages, has_run=run_id is not None,
+            page=page, has_older=has_older,
         ),
     )
 
@@ -544,7 +570,6 @@ async def view_public_profile(
         _template_context(
             request, current_user, agent=agent, is_owner=is_owner,
             profile=profile, pi_user=pi_user, editing=False,
-            saved=request.query_params.get("saved"),
         ),
     )
 
@@ -584,6 +609,14 @@ async def edit_public_profile(
     )
 
 
+def _has_content(value) -> bool:
+    """True for a non-blank string, or a list holding one (the tag fields post
+    one hidden input per tag since Phase 1, D-16)."""
+    if isinstance(value, str):
+        return bool(value.strip())
+    return any(isinstance(v, str) and v.strip() for v in (value or []))
+
+
 @router.post("/{agent_id}/public-profile/save")
 async def save_public_profile(
     agent_id: str,
@@ -607,14 +640,25 @@ async def save_public_profile(
             detail="This lab is no longer linked to a PI account",
         )
 
+    fields = {
+        "research_summary": research_summary,
+        **list_fields_from_form(await request.form()),
+    }
+    profile_exists = await db.scalar(
+        select(ResearcherProfile.id).where(ResearcherProfile.user_id == agent.user_id)
+    )
+    if profile_exists is None and not any(_has_content(v) for v in fields.values()):
+        # D-15: an all-blank first save would mint an empty ResearcherProfile; the
+        # profile job, or a save with content, creates it instead.
+        flash(request, "There is nothing to save yet — fill in at least one field.", "error")
+        return RedirectResponse(
+            url=f"/agent/{agent_id}/public-profile/edit", status_code=302
+        )
     note = impersonation_note(current_user)
     pi_user = (await db.execute(select(User).where(User.id == agent.user_id))).scalar_one()
     error = await apply_profile_edits(
         db, target_user=pi_user, changed_by_user_id=current_user.id,
-        form={
-            "research_summary": research_summary,
-            **list_fields_from_form(await request.form()),
-        },
+        form=fields,
         expected_version=parse_expected_version(profile_version),
         export_agent=agent,
         change_summary=note,
@@ -630,9 +674,8 @@ async def save_public_profile(
         agent.agent_id, current_user.name, note or "direct",
     )
 
-    return RedirectResponse(
-        url=f"/agent/{agent_id}/public-profile?saved=1", status_code=302
-    )
+    flash(request, "Public profile saved and exported.", "success")
+    return RedirectResponse(url=f"/agent/{agent_id}/public-profile", status_code=302)
 
 
 # --------------------------------------------------------------------------
@@ -653,7 +696,10 @@ async def invite_delegate(
     The agent row is locked FOR UPDATE for the request, so two concurrent invites
     serialize and the "already pending" check sees the first one's row (there is no
     unique constraint on pending invitations). The emails go out only after the
-    commit, so none announces an invitation that then rolls back.
+    commit, so none announces an invitation that then rolls back. At most
+    ``_INVITES_PER_SUBMISSION`` addresses per submission (else nothing is created)
+    and ``_INVITES_PER_AGENT_PER_DAY`` invitation rows per agent in any 24 hours
+    (SN-02).
     """
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
     agent = (await db.execute(
@@ -675,6 +721,22 @@ async def invite_delegate(
         for e in re.split(r"[,\n]+", emails)
         if e.strip()
     ]
+    if len(email_list) > _INVITES_PER_SUBMISSION:
+        flash(
+            request,
+            f"At most {_INVITES_PER_SUBMISSION} addresses per invitation; nothing was sent.",
+            "error",
+        )
+        return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
+    # The agent row is locked FOR UPDATE above, so this count and the inserts
+    # below cannot interleave with another invite for the same agent.
+    created_last_day = await db.scalar(
+        select(func.count(DelegateInvitation.id)).where(
+            DelegateInvitation.agent_registry_id == agent.id,
+            DelegateInvitation.created_at >= datetime.now(UTC) - timedelta(hours=24),
+        )
+    ) or 0
+    remaining_today = max(0, _INVITES_PER_AGENT_PER_DAY - created_last_day)
 
     errors = []
     to_send: list[tuple[str, str]] = []
@@ -714,6 +776,13 @@ async def invite_delegate(
             errors.append(f"Invitation already pending for {email}.")
             continue
 
+        if remaining_today <= 0:
+            errors.append(
+                f"Daily limit of {_INVITES_PER_AGENT_PER_DAY} invitations per agent "
+                f"reached; {email} was not invited."
+            )
+            continue
+
         # Create invitation
         token = secrets.token_urlsafe(48)
         invitation = DelegateInvitation(
@@ -726,19 +795,35 @@ async def invite_delegate(
         )
         db.add(invitation)
         await db.flush()  # Get the ID
+        remaining_today -= 1
 
         to_send.append((email, f"{settings.base_url}/invite/{token}"))
 
     await db.commit()
 
-    # The invitation exists regardless of whether the email gets through.
+    # The invitation exists regardless of whether the email gets through; the PI
+    # is told which ones did not go out (D-21). send_transactional_email returns
+    # False when the outbound allowlist suppresses the address or SES fails.
+    unsent: list[str] = []
     for email, invite_url in to_send:
-        await send_transactional_email(
+        sent = await send_transactional_email(
             build_delegate_invitation(email, agent.pi_name, agent.bot_name, invite_url)
         )
+        if not sent:
+            unsent.append(email)
 
     if errors:
         flash(request, "; ".join(errors), "error")
+    if unsent:
+        # A count plus the first three addresses, as its own flash: flash text is
+        # capped at MAX_FLASH_CHARS, so a full list, or one appended after the
+        # other errors, could be cut off (plan audit Q2-12).
+        shown = ", ".join(unsent[:3]) + (f" and {len(unsent) - 3} more" if len(unsent) > 3 else "")
+        flash(
+            request,
+            f"Invitation saved, but no email was sent to {len(unsent)} address(es): {shown}.",
+            "error",
+        )
     return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
 
 

@@ -18,7 +18,7 @@
                     </button>
                 </form>
                 {% if target_user.agent.muted_at %}
-                    <p class="text-xs text-gray-600 mt-1">Muted {{ target_user.agent.muted_at.strftime('%Y-%m-%d %H:%M UTC') }}</p>
+                    <p class="text-xs text-gray-600 mt-1">Muted {{ target_user.agent.muted_at | ts }}</p>
                 {% endif %}
             </div>
         {% elif target_user.agent and target_user.agent.status == 'active' %}
@@ -47,7 +47,7 @@
                    Gated by the enclosing `effective_user.is_staff`, never on
                    `current_user` — an admin impersonating a reviewer must not
                    be shown a control that 403s on submit. #}
-                {% if not target_user.agent.slack_bot_token %}
+                {% if not has_bot_token %}
                 <form method="post" action="/manager/pis/{{ target_user.id }}/slack/provision" class="mt-1">
                     <button type="submit" class="text-sm px-3 py-1 rounded bg-indigo-600 text-white hover:opacity-90">Install Slack bot</button>
                 </form>
@@ -65,20 +65,14 @@
         {% endif %}
     </div>
 
-    {# The four status banners are STAFF-ONLY, and gated on the same
+    {# The status banners below are STAFF-ONLY, and gated on the same
        `effective_user.is_staff` the controls
        above use. Every one of them is driven purely by a query parameter the
        caller supplies, so ungated a reviewer — who may load this page
-       read-only — could summon "Slack bot installed" or "Agent activated"
+       read-only — could summon "Agent activated"
        out of a URL and produce a screenshot of something that never
        happened. #}
     {% if effective_user.is_staff %}
-    {% if slack_ok %}
-    <div class="mb-4 px-4 py-3 rounded-lg bg-green-50 border border-green-200 text-sm text-green-800">
-        ✅ Slack bot installed — the token is saved on this PI's agent. Click
-        <b>Activate agent</b> above to bring it live.
-    </div>
-    {% endif %}
     {% if activated %}
     <div class="mb-4 px-4 py-3 rounded-lg bg-green-50 border border-green-200 text-sm text-green-800">
         ✅ Agent activated — the running simulation picks it up on its next roster sync (~30s).
@@ -108,6 +102,8 @@
             {% elif request.query_params.get('error') == 'no_token' %}This agent can't be unmuted until its Slack bot is installed.
             {% elif request.query_params.get('error') == 'activation_blocked' %}This agent can't be unmuted yet: its profile doesn't pass the activation checks.
             {% elif request.query_params.get('error') == 'profile_generating' %}Profile is being generated — try again shortly.
+            {% elif request.query_params.get('error') == 'field_too_long' %}Name, institution and department are limited to 255 characters each.
+            {% elif request.query_params.get('error') == 'no_agent' %}This PI has no lab agent yet, so there is nothing to mute or unmute.
             {% else %}Something went wrong saving changes.{% endif %}
         </p>
     </div>
@@ -123,7 +119,7 @@
                 {% if target_user.email %}
                 <dd class="text-xs mt-1">
                     {% if target_user.email_verified_at %}
-                    <span class="text-green-700">Verified {{ target_user.email_verified_at.strftime('%b %d, %Y') }}</span>
+                    <span class="text-green-700">Verified {{ target_user.email_verified_at | ts("date") }}</span>
                     {% else %}
                     <span class="text-amber-700">Unverified</span>
                     {% if effective_user.is_staff and not impersonation_banner %}
@@ -160,11 +156,11 @@
             </div>
             <div>
                 <dt class="text-gray-500">Claimed At</dt>
-                <dd class="font-medium">{{ target_user.claimed_at.strftime('%b %d, %Y %H:%M') if target_user.claimed_at else 'Unclaimed' }}</dd>
+                <dd class="font-medium">{{ (target_user.claimed_at | ts) if target_user.claimed_at else 'Unclaimed' }}</dd>
             </div>
             <div>
                 <dt class="text-gray-500">Joined</dt>
-                <dd class="font-medium">{{ target_user.created_at.strftime('%b %d, %Y') }}</dd>
+                <dd class="font-medium">{{ target_user.created_at | ts("date") }}</dd>
             </div>
         </dl>
     </div>
@@ -177,7 +173,7 @@
         <div class="grid grid-cols-1 gap-4 mb-5">
             <div>
                 <label for="pi-name" class="block text-sm font-medium text-gray-700 mb-1">Display Name</label>
-                <input type="text" name="name" id="pi-name" value="{{ target_user.name }}"
+                <input type="text" name="name" maxlength="255" id="pi-name" value="{{ target_user.name }}"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
             </div>
             <div>
@@ -187,12 +183,12 @@
             </div>
             <div>
                 <label for="pi-institution" class="block text-sm font-medium text-gray-700 mb-1">Institution</label>
-                <input type="text" name="institution" id="pi-institution" value="{{ target_user.institution or '' }}"
+                <input type="text" name="institution" maxlength="255" id="pi-institution" value="{{ target_user.institution or '' }}"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
             </div>
             <div>
                 <label for="pi-department" class="block text-sm font-medium text-gray-700 mb-1">Department</label>
-                <input type="text" name="department" id="pi-department" value="{{ target_user.department or '' }}"
+                <input type="text" name="department" maxlength="255" id="pi-department" value="{{ target_user.department or '' }}"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
             </div>
             <div>
@@ -379,6 +375,7 @@
     {% if jobs %}
     <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
         <h2 class="font-semibold text-gray-800 mb-4">Jobs</h2>
+        <div class="overflow-x-auto">
         <table class="min-w-full text-sm">
             <thead>
                 <tr class="text-xs text-gray-500 uppercase">
@@ -399,8 +396,8 @@
                         <span class="{{ sc.get(job.status, '') }} font-medium">{{ job.status | capitalize }}</span>
                     </td>
                     <td class="py-2 text-gray-500">{{ job.attempts }}/{{ job.max_attempts }}</td>
-                    <td class="py-2 text-gray-500">{{ job.enqueued_at.strftime('%b %d %H:%M') }}</td>
-                    <td class="py-2 text-gray-500">{{ job.completed_at.strftime('%b %d %H:%M') if job.completed_at else '—' }}</td>
+                    <td class="py-2 text-gray-500">{{ job.enqueued_at | ts }}</td>
+                    <td class="py-2 text-gray-500">{{ job.completed_at | ts }}</td>
                 </tr>
                 {% if job.last_error %}
                 <tr>
@@ -412,6 +409,7 @@
                 {% endfor %}
             </tbody>
         </table>
+        </div>
     </div>
     {% endif %}
 </div>

@@ -174,7 +174,7 @@
    even when half the verdicts are positive routings. The band distribution
    still renders inside the "Dimension distribution" panel below. "Total"
    equals the four cards + rows with no/unknown recommendation. #}
-<div class="grid grid-cols-5 gap-4 mb-8">
+<div class="grid grid-cols-2 sm:grid-cols-5 gap-4 mb-8">
     <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
         <div class="text-3xl font-bold text-gray-900">{{ assessments | length }}</div>
         <div class="text-sm text-gray-500 mt-1">Total</div>
@@ -236,6 +236,7 @@
         detail pages, not here.
     </p>
     {% endif %}
+    <div class="overflow-x-auto">
     <table class="mt-3 w-full text-xs">
         <thead class="text-gray-600 text-left">
             <tr><th>Dimension</th><th>Weight</th><th>Specialist</th><th>n</th><th>Mean</th><th>Min</th><th>Max</th></tr>
@@ -254,6 +255,7 @@
         {% endfor %}
         </tbody>
     </table>
+    </div>
 </details>
 {% endif %}
 
@@ -287,6 +289,7 @@
 {% macro qs_filters() %}<input type="hidden" name="surface" value="{{ list_surface }}"><input type="hidden" name="run_id" value="{{ 'all' if show_all_runs else selected_run_id }}"><input type="hidden" name="sort" value="{{ sort }}"><input type="hidden" name="lab" value="{{ lab_filter or '' }}"><input type="hidden" name="review" value="{{ review }}">{% endmacro %}
 <div class="space-y-4">
 {% for a in assessments %}
+    {% set next_card = loop.nextitem %}
     {# `id` BEFORE `class` (contract C13): the quick-scoring forms post a
        `surface` token that src/routers/reviews.py turns into
        `.../assessments?...#a-<id>`, so every card needs a fragment target.
@@ -316,7 +319,7 @@
                 {% endif %}
                 <div class="text-xs text-gray-500 mt-1">
                     Lab: <span class="font-medium text-gray-700">{{ pi_link(a) }}</span>
-                    &middot; <span data-utc="{{ a.created_at.isoformat() }}" data-utc-fmt="short">{{ a.created_at.strftime("%Y-%m-%d %H:%M") }}</span>
+                    &middot; {{ a.created_at | ts }}
                     &middot;
                     {% if a.rubric_version %}
                         rubric <span class="font-mono"{% if a.rubric_content_hash %} title="content hash {{ a.rubric_content_hash }}"{% endif %}>{{ a.rubric_version }}</span>
@@ -327,7 +330,7 @@
                         {% set src_run = runs_by_id.get(a.simulation_run_id) %}
                         &middot;
                         {% if src_run %}
-                            run {{ src_run.started_at.strftime('%b %d %H:%M') }}{% if runs and src_run.id == runs[0].id %} (current){% endif %}
+                            run {{ src_run.started_at | ts }}{% if runs and src_run.id == runs[0].id %} (current){% endif %}
                         {% else %}
                             run unknown
                         {% endif %}
@@ -558,7 +561,7 @@
             {%- if a.dimension_rows %}
             <div class="mt-2 space-y-1">
                 {%- for d in a.dimension_rows %}
-                <div class="assessment-card-score-row flex items-center gap-2 text-xs"><span class="w-48 shrink-0 text-gray-700">{{ d.title }}</span><span class="w-8 shrink-0 text-right font-semibold text-gray-800">{% if d.score is none %}&mdash;{% else %}{{ "%g"|format(d.score) }}{% endif %}</span><span class="flex-1 h-1.5 bg-gray-100 rounded-full overflow-hidden">{% if d.pct is not none %}<span class="block h-1.5 rounded-full {% if d.weight and d.weight >= 10 %}bg-indigo-500{% else %}bg-indigo-300{% endif %}" style="width: {{ "%.0f"|format(d.pct) }}%"></span>{% endif %}</span><span class="w-24 shrink-0 text-gray-600">{% if d.weight_note %}{{ d.weight_note }} weight{% else %}&mdash;{% endif %}{% if d.score is none %} &middot; not scored{% endif %}</span></div>
+                <div class="assessment-card-score-row flex items-center gap-2 text-xs"><span class="w-32 sm:w-48 shrink-0 text-gray-700">{{ d.title }}</span><span class="w-8 shrink-0 text-right font-semibold text-gray-800">{% if d.score is none %}&mdash;{% else %}{{ "%g"|format(d.score) }}{% endif %}</span><span class="flex-1 h-1.5 bg-gray-100 rounded-full overflow-hidden">{% if d.pct is not none %}<span class="block h-1.5 rounded-full {% if d.weight and d.weight >= 10 %}bg-indigo-500{% else %}bg-indigo-300{% endif %}" style="width: {{ "%.0f"|format(d.pct) }}%"></span>{% endif %}</span><span class="w-24 shrink-0 text-gray-600">{% if d.weight_note %}{{ d.weight_note }} weight{% else %}&mdash;{% endif %}{% if d.score is none %} &middot; not scored{% endif %}</span></div>
                 {%- endfor %}
                 {# The bar carried a `title` attribute repeating this row's own
                    title and weight note. Dropped: unlike the detail page, every
@@ -618,13 +621,16 @@
                `list_surface` token and the other four carry this page's own
                filter state — run, sort, lab and review sub-tab — so
                src/routers/reviews.py can send the writer back to the list they
-               were reading, at this card's anchor. #}
+               were reading, at this card's anchor. `next_id` names the following
+               card ("" on the last): a score from the Unreviewed tab moves this
+               card off the list, so the redirect lands there instead (B-03). #}
             <form method="post" action="/reviews/assessments/{{ a.id }}/feedback" class="mt-2 space-y-2">
                 {{ qs_filters() }}
+                <input type="hidden" name="next_id" value="{{ next_card.id if next_card else '' }}">
                 <label for="{{ qs }}score" class="block text-sm font-medium text-gray-600 mb-1">Overall rating (1 = weak … 5 = strong)</label>
                 <select id="{{ qs }}score" name="score" required class="border rounded px-1 py-0.5 text-sm"><option value="" disabled selected>&mdash;</option>{% for n in range(1, 6) %}<option value="{{ n }}">{{ n }}</option>{% endfor %}</select>
                 <label for="{{ qs }}comment" class="block text-sm font-medium text-gray-600 mb-1 mt-3">Comment</label>
-                <textarea id="{{ qs }}comment" name="comment" rows="2" placeholder="Comment" class="w-full border rounded px-2 py-1 text-sm"></textarea>
+                <textarea id="{{ qs }}comment" name="comment" maxlength="10000" rows="2" placeholder="Comment" class="w-full border rounded px-2 py-1 text-sm"></textarea>
                 <label for="{{ qs }}mode" class="block text-sm font-medium text-gray-600 mb-1 mt-3">Feedback mode</label>
                 <select id="{{ qs }}mode" name="feedback_mode" required class="border rounded px-1 py-0.5 text-sm"><option value="" disabled selected>&mdash;</option><option value="learn">Learn</option><option value="log_only">Don't learn — log only</option></select>
                 <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Submit feedback</button>

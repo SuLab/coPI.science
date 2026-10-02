@@ -46,7 +46,7 @@ def _pct(part: float, whole_: float) -> float:
 def _details(inner_table: str, *, key: str) -> str:
     return (
         f'<details class="sc-chart-fallback" data-sc-key="{escape(key)}">'
-        f"<summary>Show as table</summary>{inner_table}</details>"
+        f'<summary>Show as table</summary><div class="overflow-x-auto">{inner_table}</div></details>'
     )
 
 

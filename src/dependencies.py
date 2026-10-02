@@ -6,6 +6,7 @@ import uuid
 from urllib.parse import quote
 
 from fastapi import Depends, HTTPException, Request, status
+from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -184,6 +185,20 @@ async def _impersonated_user(
             # Tag so templates can show impersonation banner
             imp_user._is_impersonated = True  # type: ignore[attr-defined]
             imp_user._real_admin = session_user  # type: ignore[attr-defined]
+            if request.method not in ("GET", "HEAD"):
+                # A-10: the one impersonation note every write gets, whatever
+                # table it lands in. Tables with a recorded_by column or a
+                # revision summary also carry it (impersonation_note below);
+                # for the rest (jobs, agents, cohort audit, allowlist,
+                # delegate invitations) this line is the record.
+                # The raw (still percent-encoded) path: the decoded one can carry a
+                # %0a that would forge a second log line.
+                raw_path = request.scope.get("raw_path")
+                path = raw_path.decode("latin-1") if raw_path else request.url.path
+                logger.warning(
+                    "Write %s %s by admin %s while impersonating %s",
+                    request.method, path, session_user.id, imp_user.id,
+                )
             return imp_user
     return None
 
@@ -268,6 +283,18 @@ async def get_pi_user(
             detail="Staff accounts have no lab profile or agent (PI accounts only)",
         )
     return current_user
+
+
+def staff_landing_redirect(user: User) -> RedirectResponse | None:
+    """Where a GET of a PI-only page sends an account with no lab (M-08): a
+    manager to /manager/pis, a reviewer to /manager/assessments. None for a PI or
+    an admin (``User.may_use_pi_surfaces``). The PI-only POSTs keep get_pi_user's
+    403; this is the navigation half."""
+    if user.may_use_pi_surfaces:
+        return None
+    return RedirectResponse(
+        url="/manager/pis" if user.is_manager else "/manager/assessments", status_code=302
+    )
 
 
 def refuse_impersonation(

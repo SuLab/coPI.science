@@ -4,7 +4,6 @@ import hashlib
 import re
 import uuid
 from datetime import UTC, datetime
-from urllib.parse import quote
 
 from fastapi import Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -16,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.run_marker import parse_announce_channels, template_body, validate_template
 from src.config import get_settings
+from src.dependencies import impersonation_note
 from src.models import AdminAuditEvent, AppSetting, SimulationCommand, SimulationRun, User
 from src.routers.admin._common import _ADMIN, _DB, _template_context, router, templates
 from src.services import display_format as fmt
@@ -66,6 +66,17 @@ def _hash12(text: str | None) -> str | None:
     if text is None:
         return None
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def _audit_payload(payload: dict | None, current_user: User) -> dict | None:
+    """The audit row's payload plus ``impersonation_note`` when an admin made this
+    request while impersonating another admin (A-10). ``actor_user_id`` stays the
+    worn account (operator decision 2026-09-10). Never applied to a command
+    payload: the supervisor reads those."""
+    note = impersonation_note(current_user)
+    if note is None:
+        return payload
+    return {**(payload or {}), "impersonation_note": note}
 
 
 
@@ -120,7 +131,6 @@ async def _simulation_context(
     request: Request,
     current_user: User,
     *,
-    msg: str | None = None,
     template_error: str | None = None,
     template_value_override: str | None = None,
 ) -> dict:
@@ -203,7 +213,6 @@ async def _simulation_context(
         channels_default=channels_default,
         template_value=template_value,
         audit_events=audit_events,
-        msg=msg,
         template_error=template_error,
         tick_at_display=tick_at_display,
         web_rubric_hash=RUBRIC_CONTENT_HASH,
@@ -228,22 +237,24 @@ async def admin_simulation(
     announce-channels + announce-template editors, and recent command/audit
     history, then the Live tab's stats sections — see the Live-tab comment
     block inside the template."""
-    ctx = await _simulation_context(
-        db,
-        request,
-        current_user,
-        msg=request.query_params.get("msg"),
-    )
+    ctx = await _simulation_context(db, request, current_user)
     return templates.TemplateResponse(request, "admin/simulation.html", ctx)
 
+
+_RUN_ID_FORM = Form(...)
+#: C-20: a run limit is a count of seconds or proposals; 0 means "no limit". One
+#: object per parameter: FastAPI names a form field after the first parameter a shared
+#: ``Form()`` is bound to, so a shared one would read max_runtime into both.
+_MAX_RUNTIME_FORM = Form(0, ge=0)
+_MAX_PROPOSALS_FORM = Form(0, ge=0)
 
 
 @router.post("/simulation/start")
 async def admin_simulation_start(
     request: Request,
     fresh: bool = Form(False),
-    max_runtime: int = Form(0),
-    max_proposals: int = Form(0),
+    max_runtime: int = _MAX_RUNTIME_FORM,
+    max_proposals: int = _MAX_PROPOSALS_FORM,
     db: AsyncSession = _DB,
     current_user: User = _ADMIN,
 ):
@@ -259,7 +270,26 @@ async def admin_simulation_start(
     refusals ARE the confirmation step — no JS confirm dialog — and the
     sharp CLI-only flags (`--all-agents`/`--reset-cursors`) are deliberately
     not exposed here; the page links no substitute.
+
+    Takes ``SELECT … FOR NO KEY UPDATE`` on the run row(s) before its checks (C-24):
+    it serializes start and finalize against each other without conflicting with
+    the FOR KEY SHARE locks the engine's inserts take on the referenced run row
+    (plan audit Q2-06).
     """
+    # C-24: lock the latest run row before any check. Finalize takes the same
+    # lock first (admin_simulation_finalize_run), so a start that would resume
+    # this run and a finalize of it serialize: the second waits for the first's
+    # commit, then sees its pending command and refuses.
+    latest_id = await latest_run_id(db)
+    latest = None
+    if latest_id is not None:
+        latest = (
+            await db.execute(
+                select(SimulationRun)
+                .where(SimulationRun.id == latest_id)
+                .with_for_update(key_share=True)
+            )
+        ).scalar_one_or_none()
     alive = await engine_alive(db)
     pending_start = (
         await db.execute(
@@ -286,8 +316,6 @@ async def admin_simulation_start(
         return _refuse_to(
             request, "/admin/simulation", "A Finalize run is pending; start after it finishes."
         )
-    latest_id = await latest_run_id(db)
-    latest = await db.get(SimulationRun, latest_id) if latest_id is not None else None
     if latest is not None and latest.finalized_at is not None:
         # A finalized run refuses a resume (RunFinalized); the form forces Fresh
         # and so does the route, so the operator never queues a doomed start.
@@ -301,14 +329,11 @@ async def admin_simulation_start(
         await db.rollback()
         return _refuse_to(request, "/admin/simulation", "A start is already pending.")
     await record_audit(
-        db, action="simulation_start_requested", actor_user_id=current_user.id, payload=payload
+        db, action="simulation_start_requested", actor_user_id=current_user.id,
+        payload=_audit_payload(payload, current_user),
     )
-    return RedirectResponse(
-        url=f"/admin/simulation?msg={quote('Start requested.')}", status_code=302
-    )
-
-
-_RUN_ID_FORM = Form(...)
+    flash(request, "Start requested.", "success")
+    return RedirectResponse(url="/admin/simulation", status_code=302)
 
 
 @router.post("/simulation/finalize-run")
@@ -326,7 +351,12 @@ async def admin_simulation_finalize_run(
     supervisor claims it and runs the finalize routine under the engine lock.
 
     The form must also carry ``confirm_run`` equal to the run id's
-    first 8 characters (case and surrounding spaces ignored)."""
+    first 8 characters (case and surrounding spaces ignored).
+
+    Takes ``SELECT … FOR NO KEY UPDATE`` on the run row(s) before its checks (C-24):
+    it serializes start and finalize against each other without conflicting with
+    the FOR KEY SHARE locks the engine's inserts take on the referenced run row
+    (plan audit Q2-06)."""
     def _refuse(message: str):
         return _refuse_to(request, f"/admin/activity/{run_id}", message)
 
@@ -336,6 +366,22 @@ async def admin_simulation_finalize_run(
         # in the browser's dialog.
         return _refuse(f"Type the run's short id ({short_id}) to confirm Finalize run.")
 
+    # C-24: the same latest-run lock admin_simulation_start takes, then this run's
+    # row. Always in that order, so the two routes cannot deadlock.
+    latest_id = await latest_run_id(db)
+    if latest_id is not None and latest_id != run_id:
+        await db.execute(
+            select(SimulationRun.id)
+            .where(SimulationRun.id == latest_id)
+            .with_for_update(key_share=True)
+        )
+    run = (
+        await db.execute(
+            select(SimulationRun)
+            .where(SimulationRun.id == run_id)
+            .with_for_update(key_share=True)
+        )
+    ).scalar_one_or_none()
     if await engine_alive(db):
         return _refuse("An engine is running — Finalize run applies to a stopped run.")
     pending_start = (
@@ -347,7 +393,6 @@ async def admin_simulation_finalize_run(
     ).scalar_one_or_none()
     if pending_start is not None:
         return _refuse("A start is pending — wait for it before finalizing.")
-    run = await db.get(SimulationRun, run_id)
     if run is None or run.status != "stopped" or run.finalized_at is not None:
         return _refuse("Only a stopped run that is not already finalized can be finalized.")
     payload = {"finalize": True, "run_id": str(run_id)}
@@ -359,11 +404,11 @@ async def admin_simulation_finalize_run(
         await db.rollback()
         return _refuse("A stop is already pending.")
     await record_audit(
-        db, action="simulation_finalize_requested", actor_user_id=current_user.id, payload=payload,
+        db, action="simulation_finalize_requested", actor_user_id=current_user.id,
+        payload=_audit_payload(payload, current_user),
     )
-    return RedirectResponse(
-        url=f"/admin/activity/{run_id}?msg={quote('Finalize run requested.')}", status_code=302,
-    )
+    flash(request, "Finalize run requested.", "success")
+    return RedirectResponse(url=f"/admin/activity/{run_id}", status_code=302)
 
 
 @router.post("/simulation/stop")
@@ -399,10 +444,12 @@ async def admin_simulation_stop(
         await db.rollback()
         return _refuse_to(request, "/admin/simulation", "A stop is already pending.")
     await record_audit(
-        db, action="simulation_stop_requested", actor_user_id=current_user.id, payload=payload
+        db, action="simulation_stop_requested", actor_user_id=current_user.id,
+        payload=_audit_payload(payload, current_user),
     )
     message = "Stop (hold open interviews) requested." if payload else "Stop requested."
-    return RedirectResponse(url=f"/admin/simulation?msg={quote(message)}", status_code=302)
+    flash(request, message, "success")
+    return RedirectResponse(url="/admin/simulation", status_code=302)
 
 
 
@@ -458,9 +505,10 @@ async def admin_simulation_announce_settings(
         db,
         action="simulation_announce_channels_updated",
         actor_user_id=current_user.id,
-        payload={"old": old_value, "new": new_value},
+        payload=_audit_payload({"old": old_value, "new": new_value}, current_user),
     )
-    return RedirectResponse(url=f"/admin/simulation?msg={quote(msg)}", status_code=302)
+    flash(request, msg, "success")
+    return RedirectResponse(url="/admin/simulation", status_code=302)
 
 
 
@@ -495,12 +543,12 @@ async def admin_simulation_announce_template(
                 db,
                 action="simulation_announce_template_reset",
                 actor_user_id=current_user.id,
-                payload={"old_hash": _hash12(old_value), "new_hash": None},
+                payload=_audit_payload(
+                    {"old_hash": _hash12(old_value), "new_hash": None}, current_user
+                ),
             )
-        return RedirectResponse(
-            url=f"/admin/simulation?msg={quote('Template reset to file default.')}",
-            status_code=302,
-        )
+        flash(request, "Template reset to file default.", "success")
+        return RedirectResponse(url="/admin/simulation", status_code=302)
 
     error = validate_template(body)
     if error:
@@ -514,6 +562,9 @@ async def admin_simulation_announce_template(
         db,
         action="simulation_announce_template_updated",
         actor_user_id=current_user.id,
-        payload={"old_hash": _hash12(old_value), "new_hash": _hash12(body)},
+        payload=_audit_payload(
+            {"old_hash": _hash12(old_value), "new_hash": _hash12(body)}, current_user
+        ),
     )
-    return RedirectResponse(url=f"/admin/simulation?msg={quote('Template saved.')}", status_code=302)
+    flash(request, "Template saved.", "success")
+    return RedirectResponse(url="/admin/simulation", status_code=302)

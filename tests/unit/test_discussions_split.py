@@ -67,3 +67,38 @@ async def test_pages_partition_the_threads(db_session, seeded, monkeypatch):
         assert v["thread_total"] == len(whole)
         assert v["page_count"] == 3
     assert [t["message_ts"] for t in paged] == [t["message_ts"] for t in whole]
+
+
+async def test_all_runs_parity_with_duplicate_ts_and_a_twice_decided_orphan(db_session):
+    from datetime import UTC, datetime
+
+    run_a = await factories.make_simulation_run(db_session)
+    run_b = await factories.make_simulation_run(db_session)
+    for run in (run_a, run_b):
+        root = await factories.make_agent_message(
+            db_session, run=run, phase="new_post", thread_ts=None,
+            message_ts="dup.1", channel_name="dup", agent_id="lab1",
+        )
+        await factories.make_agent_message(
+            db_session, run=run, phase="thread_reply", thread_ts=root.message_ts,
+            message_ts=f"dup.1.{run.id.hex[:4]}", agent_id="hub",
+        )
+    await factories.make_thread_decision(
+        db_session, run=run_a, thread_id="orphan.2", outcome="timeout",
+        agent_a="lab7", agent_b="hub", channel="c7", decided_at=datetime(2026, 9, 1, tzinfo=UTC),
+    )
+    # Distinct decided_at: inside one test transaction server_default now() ties, and
+    # "last decision" would then be the database's arbitrary pick in both versions.
+    await factories.make_thread_decision(
+        db_session, run=run_b, thread_id="orphan.2", outcome="proposal",
+        agent_a="lab7", agent_b="hub", channel="c7", decided_at=datetime(2026, 9, 2, tzinfo=UTC),
+    )
+    for kw in (
+        dict(run_id="all", channel_filter=None, status_filter=None, agent_filter=[]),
+        dict(run_id="all", channel_filter=None, status_filter=None, agent_filter=["lab7"]),
+        dict(run_id=str(run_a.id), channel_filter="dup", status_filter="active", agent_filter=["hub"]),
+    ):
+        new = await directory.build_discussions_view(db_session, page=None, **kw)
+        old = await frozen(db_session, **kw)
+        assert {k: new[k] for k in old if k != "threads"} == {k: old[k] for k in old if k != "threads"}
+        assert _by_ts(new["threads"]) == _by_ts(old["threads"])

@@ -176,7 +176,7 @@ def test_the_chat_script_accepts_only_its_own_citation_markers():
     # RSEC-3: the lock's bounded wait has a message.
     assert "busy:" in js
     # RS-5/RS-7: a stale failure paints nothing; a terminal refusal stops polling.
-    load = js.split("async function loadHistory()", 1)[1].split("\n  }\n", 1)[0]
+    load = js.split("async function loadHistory(isPoll)", 1)[1].split("\n  }\n", 1)[0]
     assert "if (stale()) {" in load
     assert "TERMINAL_CODES[code]" in load
 

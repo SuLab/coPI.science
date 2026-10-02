@@ -32,7 +32,7 @@ async def test_stop_works_when_unresponsive(client, db_session, monkeypatch):
     page = await client.get("/admin/simulation", headers=auth_headers(admin.id))
     assert "Unresponsive" in page.text and "Run in progress" in page.text
     resp = await client.post("/admin/simulation/stop", headers=auth_headers(admin.id), follow_redirects=False)
-    assert "msg=" in resp.headers["location"]
+    assert resp.headers["location"] == "/admin/simulation"
     cmd = (await db_session.execute(select(SimulationCommand))).scalar_one()
     assert cmd.command == "stop"
 

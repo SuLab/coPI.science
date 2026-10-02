@@ -162,7 +162,7 @@ Procedure:
    port.
 3. Human opens `http://localhost:8099/`, clicks **Provision**, **verifies the
    workspace name is the test workspace**, clicks **Allow**, and lands on
-   `/admin/agents/<id>?slack_ok=1`.
+   `/admin/agents/<id>`, where the "Slack bot provisioned" message is a one-time flash.
 4. Verify from **Slack's** side, not from our column: `auth.test` on the
    resulting `xoxb-` token must return `ok: true` with the test workspace's
    `team_id` and a `bot_id`. A set `slack_bot_token` column proves only that we

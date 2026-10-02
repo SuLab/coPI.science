@@ -110,7 +110,7 @@
                         <div class="text-sm">
                             <span class="font-medium text-gray-700">{{ wd.user.name }}</span>
                             <span class="text-gray-600 ml-1">({{ wd.user.email }})</span>
-                            <span class="text-xs text-gray-600 ml-2">added {{ wd.created_at.strftime('%b %d') }}</span>
+                            <span class="text-xs text-gray-600 ml-2">added {{ wd.created_at | ts("date") }}</span>
                         </div>
                         <form method="POST" action="/agent/{{ agent.agent_id }}/delegates/{{ wd.id }}/remove" class="inline">
                             <button type="submit" class="text-xs text-red-600 hover:text-red-700">Remove</button>
@@ -129,8 +129,8 @@
                     <div class="flex items-center justify-between bg-amber-50 rounded-lg px-3 py-2">
                         <div class="text-sm">
                             <span class="text-gray-700">{{ inv.email }}</span>
-                            <span class="text-xs text-gray-600 ml-2">sent {{ inv.created_at.strftime('%b %d') }}</span>
-                            <span class="text-xs text-gray-600 ml-1">· expires {{ inv.expires_at.strftime('%b %d') }}</span>
+                            <span class="text-xs text-gray-600 ml-2">sent {{ inv.created_at | ts("date") }}</span>
+                            <span class="text-xs text-gray-600 ml-1">· expires {{ inv.expires_at | ts("date") }}</span>
                         </div>
                         <form method="POST" action="/agent/{{ agent.agent_id }}/delegates/{{ inv.id }}/revoke" class="inline">
                             <button type="submit" class="text-xs text-amber-700 hover:text-amber-800">Revoke</button>

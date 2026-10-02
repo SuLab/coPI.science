@@ -28,6 +28,7 @@ from src.routers import (
 from src.routers import settings as settings_router
 from src.services.assessment_chat import drain_live_tasks
 from src.web.errors import install_error_handlers
+from src.web.head_requests import HeadAsGetMiddleware
 from src.web.security_headers import CSP_REPORT_PATH, SecurityHeadersMiddleware
 
 logging.basicConfig(
@@ -273,6 +274,10 @@ def create_app() -> FastAPI:
     # A state attribute rather than a Jinja global, because a global would have
     # to be registered in both routers' template setup.
     application.state.assessment_chat_enabled = settings.assessment_chat_enabled
+
+    # HEAD on every GET route (M-02). Added FIRST, so it is the innermost
+    # middleware and only routing sees the GET: see src/web/head_requests.py.
+    application.add_middleware(HeadAsGetMiddleware)
 
     # Session middleware (signed cookies via itsdangerous)
     application.add_middleware(

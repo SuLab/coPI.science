@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from src.models import USER_ROLE_ADMIN, USER_ROLE_MANAGER, USER_ROLE_PI, User
 from tests import factories
@@ -398,5 +399,30 @@ async def test_manager_can_correct_the_tenure_year_from_the_edit_form(
         data={"name": pi.name, "research_summary": "S", "jhu_tenure_start": "2014"},
         headers=auth_headers(manager.id), follow_redirects=False,
     )
-    assert r.status_code == 302 and "saved=1" in r.headers["location"]
+    assert r.status_code == 302 and r.headers["location"] == f"/manager/pis/{pi.id}"
     assert await get_tenure_start(db_session, pi.id) == 2014
+
+
+async def test_a_concurrent_add_of_the_same_orcid_reports_exists(client, db_session):
+    manager = await _manager(db_session)
+    dup = IntegrityError(
+        "INSERT INTO users", None,
+        Exception('duplicate key value violates unique constraint "users_orcid_key"'),
+    )
+    with patch(
+        "src.routers.manager.find_or_create_pi_by_orcid", new=AsyncMock(side_effect=dup)
+    ):
+        r = await client.post(
+            "/manager/pis", data={"orcid": "0000-0012-0000-0001"},
+            headers=auth_headers(manager.id), follow_redirects=False,
+        )
+    assert r.status_code == 302
+    assert r.headers["location"] == "/manager/pis?error=exists"
+
+
+async def test_the_users_orcid_unique_constraint_is_named_users_orcid_key(db_session):
+    await factories.make_user(db_session, orcid="0000-0012-0000-0002")
+    with pytest.raises(IntegrityError) as exc:
+        async with db_session.begin_nested():
+            await factories.make_user(db_session, orcid="0000-0012-0000-0002")
+    assert "users_orcid_key" in str(exc.value.orig)

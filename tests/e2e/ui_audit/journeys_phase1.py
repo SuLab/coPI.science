@@ -177,7 +177,8 @@ async def _ui_abort(route) -> None:
 
 async def journey_ui_behaviours(h) -> dict:
     """Each ui.js behaviour, driven in a real browser: a row click, a click on a link
-    inside a row, a filter change, a show/hide toggle, a submit-on-change select."""
+    inside a row, a filter applied with its button, a show/hide toggle, a sort select
+    applied with its button (FN-04 removed submit-on-change)."""
     context, page, _log = await h.page("admin")
     errors: list = []
     page.on("pageerror", lambda e: errors.append(e))
@@ -201,8 +202,9 @@ async def journey_ui_behaviours(h) -> dict:
         out["inner_link_kept_list"] = page.url == f"{base}/admin/users"
 
         await page.select_option("#status-filter", "complete")
-        await page.wait_for_url(f"{base}/admin/users?status_filter=complete")
-        out["filter_nav"] = page.url == f"{base}/admin/users?status_filter=complete"
+        await page.locator("form:has(#status-filter) button[type=submit]").click()
+        await page.wait_for_url("**status_filter=complete**")
+        out["filter_nav"] = "status_filter=complete" in page.url
 
         await page.goto(f"{base}/admin/cohorts", wait_until="networkidle")
         button = page.locator('[data-toggle-target="new-cohort-form"]')
@@ -219,6 +221,7 @@ async def journey_ui_behaviours(h) -> dict:
         values = await sort.locator("option").evaluate_all("(os) => os.map((o) => o.value)")
         other = next(v for v in values if v != current)
         await sort.select_option(other)
+        await page.locator("form:has(#assessments-sort-select) button[type=submit]").click()
         await page.wait_for_url(f"**sort={other}**")
         out["autosubmit"] = f"sort={other}" in page.url
     finally:
@@ -231,7 +234,7 @@ async def journey_ui_behaviours(h) -> dict:
 JOURNEYS += [journey_ui_behaviours]
 
 
-# --- §6.3 / §9: CSP report-only violations over a crawl --------------------------
+# --- §6.3 / §9: CSP violations over a crawl (report-only in Phase 1, enforced since Phase 2)
 
 CSP_PAGES: tuple[tuple[str, str], ...] = (
     ("admin", "/admin/users"),
@@ -282,8 +285,9 @@ async def _csp_agent_paths(page, base_url: str) -> list[str]:
 
 async def journey_csp_report_only(h) -> dict:
     """Every page with an inline script or a moved handler, per role, collecting each
-    report-only violation the browser raises. Phase 1 expects none; any entry is what
-    Phase 2's enforced policy would block, and is reviewed before deploy."""
+    CSP violation the browser raises. Phase 1 reported them (report-only); since Phase 2
+    the policy is enforced, so an entry is something the browser blocked. Either way
+    the journey expects none. The name is kept from Phase 1."""
     violations: list[dict] = []
     errors: list = []
     visited: list[str] = []
@@ -341,6 +345,14 @@ _PARITY_LINK = '<link rel="stylesheet" href="/static/css/app.css">'
 #: What base.html loaded before §6.1: the Play CDN as a parser-blocking head script.
 #: Injecting it later (an init script, after DOMContentLoaded) leaves the page unstyled.
 _PARITY_CDN_TAG = '<script src="https://cdn.tailwindcss.com"></script>'
+#: The plain CSS static/css/input.css adds after the utilities (tag widget, X-03, R-01,
+#: R-02). The Play CDN has no equivalent, so the CDN shot gets it too, as the last
+#: stylesheet, where the compiled file has it: the comparison is then Tailwind's
+#: compiled utilities against the CDN's, as §6.1 means.
+_PARITY_CUSTOM_CSS = "\n".join(
+    line for line in (REPO / "static" / "css" / "input.css").read_text(encoding="utf-8").splitlines()
+    if not line.startswith("@tailwind")
+)
 
 _PARITY_DIFF_JS = """async ([a, b]) => {
   const load = (data) => new Promise((resolve, reject) => {
@@ -372,7 +384,7 @@ _PARITY_DIFF_JS = """async ([a, b]) => {
 
 async def _parity_cdn_document(route) -> None:
     """Serve each HTML document with the compiled stylesheet link swapped for the CDN
-    script tag; every other request passes through."""
+    script tag and input.css's own rules appended; every other request passes through."""
     if route.request.resource_type != "document":
         await route.continue_()
         return
@@ -380,7 +392,9 @@ async def _parity_cdn_document(route) -> None:
     body = await response.text()
     if _PARITY_LINK not in body:
         raise AssertionError(f"no compiled stylesheet link in {route.request.url}")
-    await route.fulfill(response=response, body=body.replace(_PARITY_LINK, _PARITY_CDN_TAG))
+    body = body.replace(_PARITY_LINK, _PARITY_CDN_TAG)
+    body = body.replace("</body>", f"<style>{_PARITY_CUSTOM_CSS}</style></body>", 1)
+    await route.fulfill(response=response, body=body)
 
 
 async def _parity_shot(h, role: str, url: str, *, cdn: bool) -> bytes:

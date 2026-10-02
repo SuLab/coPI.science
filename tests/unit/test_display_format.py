@@ -71,3 +71,15 @@ def test_whole_mid_rounds_a_count_axis_mid_tick_to_an_integer():
     assert f.whole_mid(3.5) == "4"
     assert f.whole_mid(6) == "6"
     assert f.whole_mid(0.0) == "0"
+
+
+def test_timestamp_styles_always_name_the_zone():
+    dt = datetime(2026, 10, 1, 14, 5, 7, tzinfo=UTC)
+    assert f.timestamp(dt) == "2026-10-01 14:05 UTC"
+    assert f.timestamp(dt, "minute") == "2026-10-01 14:05 UTC"
+    assert f.timestamp(dt, "second") == "2026-10-01 14:05:07 UTC"
+    assert f.timestamp(dt, "date") == "2026-10-01 UTC"
+    assert f.timestamp(None, "date") == "—"
+    # A non-UTC aware value is converted, never printed in its own zone.
+    plus_two = datetime(2026, 10, 1, 16, 5, tzinfo=timezone(timedelta(hours=2)))
+    assert f.timestamp(plus_two) == "2026-10-01 14:05 UTC"

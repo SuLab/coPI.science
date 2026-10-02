@@ -32,6 +32,7 @@ from src.models import (
 )
 from src.services.star_topology import EXTRA_SPOKE_MEMBERS, ensure_star_spokes
 from tests import factories
+from tests.flash_support import session_flashes
 from tests.session_support import session_cookie_name
 
 pytestmark = pytest.mark.integration
@@ -231,7 +232,8 @@ async def test_the_wire_all_button_creates_the_missing_spokes(
     )
 
     assert r.status_code == 302
-    assert "notice" in r.headers["location"]
+    assert r.headers["location"] == "/admin/cohorts"
+    assert [f["kind"] for f in session_flashes(r)] == ["success"]
     for aid in labs:
         assert await _members(db_session, f"hub-{aid}") == {
             aid, "blackbird", *EXTRA_SPOKE_MEMBERS,

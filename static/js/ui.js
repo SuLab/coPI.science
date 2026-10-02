@@ -5,10 +5,6 @@
 //
 //   data-row-href="/path"    a click on the element navigates there, unless it
 //                            landed on (or inside) a control of its own
-//   data-autosubmit          a change on this control submits its form through
-//                            requestSubmit(), so submit listeners (confirm.js) run
-//   data-filter-nav="/path"  a change on a [data-filter-param] control inside it
-//                            navigates to /path?<param>=<value>…, empty values omitted
 //   data-toggle-target="id"  a click toggles `hidden` on #id, and aria-expanded on
 //                            the clicked element when it carries one
 //   button[data-toggles="id"]  a disclosure button (X-05): a click shows or hides
@@ -16,6 +12,10 @@
 //   tr[data-row-toggles]     a click elsewhere in the row clicks the row's
 //                            [data-toggles] button, so the whole row stays clickable
 //                            while the button is the keyboard path
+//   form[data-allow-resubmit]  opts a POST form out of the double-submit guard
+//                            (B-04, after the first IIFE)
+//   details [data-lazy-fragment]  on first open, the slot's link is fetched and its
+//                            HTML put in place (C-16, at the end of this file)
 (function () {
   "use strict";
 
@@ -77,26 +77,77 @@
     const rowButton = row.querySelector("button[data-toggles]");
     if (rowButton) rowButton.click();
   });
+})();
 
-  document.addEventListener("change", function (event) {
-    const control = event.target;
-    if (!(control instanceof Element)) return;
+// B-04: once a POST form's submission is under way its submit buttons are
+// disabled, so a double click sends one request. Deferred with setTimeout
+// because a control disabled during the submit event is left out of the form
+// data, and the clicked button's own name/value must still be sent. Left alone:
+// a submission a handler cancelled (confirm.js's dismissed dialog), GET forms,
+// forms that target another window, and forms marked data-allow-resubmit. The
+// server's duplicate check (assessment_reviews.submit_feedback) is the backstop.
+document.addEventListener('submit', function (event) {
+  var form = event.target;
+  if (event.defaultPrevented || !(form instanceof HTMLFormElement)) { return; }
+  if ((form.getAttribute('method') || 'get').toLowerCase() !== 'post') { return; }
+  if (form.hasAttribute('data-allow-resubmit')) { return; }
+  var target = form.getAttribute('target');
+  if (target && target !== '_self') { return; }
+  window.setTimeout(function () {
+    form.querySelectorAll('button[type="submit"], button:not([type]), input[type="submit"]')
+      .forEach(function (b) {
+        b.disabled = true;
+        b.setAttribute('data-submit-guarded', '');
+      });
+  }, 0);
+});
 
-    if (control.hasAttribute("data-autosubmit") && control.form) {
-      control.form.requestSubmit();
+// A page restored from the back-forward cache would keep those buttons disabled.
+window.addEventListener('pageshow', function (event) {
+  if (!event.persisted) { return; }
+  document.querySelectorAll('[data-submit-guarded]').forEach(function (b) {
+    b.disabled = false;
+    b.removeAttribute('data-submit-guarded');
+  });
+});
+
+// C-16: a <details> row holding [data-lazy-fragment] loads its body on first open
+// from the slot's link (also the no-JavaScript fallback). `toggle` does not bubble,
+// hence the capture listener. A redirect (expired session -> /login) or a non-HTML
+// answer leaves the link in place with a message rather than injecting that page.
+(function () {
+  "use strict";
+  document.addEventListener("toggle", function (event) {
+    const details = event.target;
+    if (!(details instanceof HTMLDetailsElement) || !details.open) {
       return;
     }
-
-    const nav = control.closest("[data-filter-nav]");
-    if (nav && control.hasAttribute("data-filter-param")) {
-      const base = nav.getAttribute("data-filter-nav");
-      if (!localPath(base)) return;
-      const params = new URLSearchParams();
-      nav.querySelectorAll("[data-filter-param]").forEach(function (field) {
-        if (field.value) params.set(field.getAttribute("data-filter-param"), field.value);
-      });
-      const query = params.toString();
-      window.location.assign(query ? base + "?" + query : base);
+    const slot = details.querySelector("[data-lazy-fragment]");
+    const link = slot ? slot.querySelector("a[href]") : null;
+    if (!link || slot.dataset.loaded) {
+      return;
     }
-  });
+    slot.dataset.loaded = "1";
+    slot.setAttribute("aria-busy", "true");
+    fetch(link.href, { credentials: "same-origin", headers: { Accept: "text/html" } })
+      .then(function (resp) {
+        const type = resp.headers.get("content-type") || "";
+        if (!resp.ok || resp.redirected || type.indexOf("text/html") !== 0) {
+          throw new Error("fragment");
+        }
+        return resp.text();
+      })
+      .then(function (html) {
+        // Parsed, not assigned as markup: DOMParser's nodes never run a script.
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        slot.replaceChildren(...doc.body.childNodes);
+      })
+      .catch(function () {
+        delete slot.dataset.loaded;
+        link.textContent = "Could not load here — open the prompt and response on their own page";
+      })
+      .finally(function () {
+        slot.removeAttribute("aria-busy");
+      });
+  }, true);
 })();

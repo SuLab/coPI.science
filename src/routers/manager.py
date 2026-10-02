@@ -42,13 +42,18 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.role_capabilities import requires_linked_user, roles_requiring_user
 from src.database import get_db
-from src.dependencies import get_review_user, get_staff_user, refuse_impersonation
+from src.dependencies import (
+    get_review_user,
+    get_staff_user,
+    impersonation_note,
+    refuse_impersonation,
+)
 from src.models import (
     USER_ROLE_PI,
     AgentRegistry,
@@ -58,8 +63,9 @@ from src.models import (
     ResearcherProfile,
     User,
 )
+from src.services import directory
 from src.services.admin_provisioning import ProvisioningError, start_provisioning
-from src.services.agent_activation import activate_agent, activation_blockers
+from src.services.agent_activation import activation_blockers, ensure_activation_allowed
 from src.services.agent_mute import set_agent_mute_state
 from src.services.assessment_detail import build_assessment_detail
 from src.services.assessment_reviews import (
@@ -70,13 +76,13 @@ from src.services.directory import (
     MAX_PAGE,
     build_discussions_view,
     build_run_detail,
+    count_pi_directory,
     list_assessments,
     list_pi_directory,
     list_runs_overview,
     load_user_detail,
 )
 from src.services.email_verification import mark_email_verified
-from src.services.grant_resolution import GrantRecord, derive_grant_titles
 from src.services.industry_evidence import rescore_user
 from src.services.jhu_rules import get_tenure_start
 from src.services.pi_onboarding import (
@@ -175,18 +181,23 @@ async def manager_pis(
     status_filter: str | None = None,
     institution_filter: str | None = None,
     claimed_filter: str | None = None,
+    page: int = _PAGE,
     db: AsyncSession = _DB,
     current_user: User = _REVIEW,
 ):
-    """PI directory. Unclaimed stubs included (D11) so recruitment coverage is
-    visible; staff accounts excluded so the admin roster is not enumerable."""
-    user_data = await list_pi_directory(
-        db,
+    """PI directory, one page of PI_DIRECTORY_PAGE_SIZE (C-15). Unclaimed stubs
+    included (D11) so recruitment coverage is visible; staff accounts excluded so the
+    admin roster is not enumerable."""
+    filters = dict(
         status_filter=status_filter,
         institution_filter=institution_filter,
         claimed_filter=claimed_filter,
         roles=(USER_ROLE_PI,),
     )
+    user_total = await count_pi_directory(db, **filters)
+    page_count = max(1, -(-user_total // directory.PI_DIRECTORY_PAGE_SIZE))
+    page = min(page, page_count)  # a page past the end shows the last one (D-27's rule)
+    user_data = await list_pi_directory(db, page=page, **filters)
     return templates.TemplateResponse(
         request,
         "manager/pis.html",
@@ -196,7 +207,11 @@ async def manager_pis(
             active_manager="pis",
             user_data=user_data,
             status_filter=status_filter,
+            institution_filter=institution_filter,
             claimed_filter=claimed_filter,
+            user_total=user_total,
+            page=page,
+            page_count=page_count,
         ),
     )
 
@@ -240,7 +255,7 @@ async def manager_pi_detail(
             industry_score=detail["industry_score"],
             industry_evidence=detail["industry_evidence"],
             tenure_start=tenure_start,
-            slack_ok=request.query_params.get("slack_ok"),
+            has_bot_token=bool(agent is not None and token_for_agent_row(agent)),
             activation_blocked=blocked,
             activated=request.query_params.get("activated"),
             blockers=blockers,
@@ -289,11 +304,15 @@ async def manager_create_pi(
             url=f"/manager/pis?error={_create_pi_error_code(exc)}",
             status_code=302,
         )
-    except IntegrityError:
+    except IntegrityError as exc:
         # Two managers adding same-surname PIs can race the identity
         # derivation's SELECT-then-INSERT; the loser rolls the WHOLE creation
         # back (User + Job + agent together — the atomicity is the feature).
         await db.rollback()
+        if "users_orcid_key" in str(exc.orig):
+            # Two adds of the SAME ORCID raced past the existence check (D-17):
+            # that is "already exists", not an agent-identity clash.
+            return RedirectResponse(url="/manager/pis?error=exists", status_code=302)
         logger.warning(
             "Add-PI race on agent identity for ORCID %r; rolled back",
             orcid.strip()[:40],
@@ -325,6 +344,7 @@ async def manager_edit_pi_profile(
     if detail is None or detail["user"].user_role != USER_ROLE_PI:
         raise HTTPException(status_code=404, detail="PI not found")
 
+    note = impersonation_note(current_user)
     error = await apply_profile_edits(
         db, target_user=detail["user"], changed_by_user_id=current_user.id,
         form={
@@ -334,10 +354,13 @@ async def manager_edit_pi_profile(
         },
         jhu_tenure_start=jhu_tenure_start,
         expected_version=parse_expected_version(profile_version),
+        change_summary=note,
+        mechanism="web_impersonated" if note else "web",
     )
     if error:
         return RedirectResponse(url=f"/manager/pis/{user_id}?error={error}", status_code=302)
-    return RedirectResponse(url=f"/manager/pis/{user_id}?saved=1", status_code=302)
+    flash(request, "Profile saved.", "success")
+    return RedirectResponse(url=f"/manager/pis/{user_id}", status_code=302)
 
 
 async def _manager_set_mute(
@@ -442,8 +465,11 @@ async def manager_veto_grant(
     """Mark a RePORTER grant as 'not this PI'. Persisted; re-runs respect it.
 
     The profile row is locked so a concurrent profile edit or veto cannot interleave
-    its grant_titles write (RA-13).
+    its grant_titles write (RA-13). Removes only the vetoed grant's title from
+    ``grant_titles`` (unless another un-vetoed grant carries the same title); a second
+    veto is a no-op. 404 for a non-PI account (A-17).
     """
+    await _require_pi(db, user_id)
     profile = (await db.execute(
         select(ResearcherProfile).where(ResearcherProfile.user_id == user_id)
         .with_for_update()
@@ -453,25 +479,21 @@ async def manager_veto_grant(
     )).scalar_one_or_none()
     if grant is None:
         raise HTTPException(status_code=404, detail="Grant not found")
+    if grant.vetoed_at is not None:
+        # Idempotent (D-19): a replayed veto keeps the first vetoed_at.
+        return RedirectResponse(url=f"/manager/pis/{user_id}#grants", status_code=302)
     grant.vetoed_at = datetime.now(UTC)
-    remaining = (await db.execute(
-        select(PiGrant).where(PiGrant.user_id == user_id, PiGrant.vetoed_at.is_(None))
-    )).scalars().all()
-    if profile is not None:
-        new_titles = derive_grant_titles([
-            GrantRecord(**{k: getattr(g, k) for k in GrantRecord.__dataclass_fields__})
-            for g in remaining
-        ])
-        if new_titles:
-            profile.grant_titles = new_titles
-        else:
-            # No RePORTER-derived grant remains eligible, but grant_titles
-            # may still carry ORCID/publication-sourced titles that never
-            # came from a PiGrant row at all — derive_grant_titles([]) == []
-            # would wipe those too, so only the vetoed title is removed.
-            profile.grant_titles = [
-                t for t in (profile.grant_titles or []) if t != grant.title
-            ]
+    still_backed = await db.scalar(
+        select(func.count(PiGrant.id)).where(
+            PiGrant.user_id == user_id, PiGrant.id != grant.id,
+            PiGrant.vetoed_at.is_(None), PiGrant.title == grant.title,
+        )
+    )
+    if profile is not None and not still_backed:
+        # Remove only the vetoed title (D-19). Re-deriving the list from the
+        # remaining PiGrant rows dropped every title that never came from one
+        # (ORCID- or publication-sourced).
+        profile.grant_titles = [t for t in (profile.grant_titles or []) if t != grant.title]
     await db.commit()
     await _reexport_profile_markdown_best_effort(db, user_id)
     return RedirectResponse(url=f"/manager/pis/{user_id}#grants", status_code=302)
@@ -485,6 +507,7 @@ async def manager_veto_industry_evidence(
     """'Not this PI / not industry' veto on one evidence row; persisted and
     rescored immediately. Idempotent: a replayed POST on an already-vetoed
     row is a no-op redirect, so a double-click never rescores twice."""
+    await _require_pi(db, user_id)
     row = (await db.execute(
         select(PiIndustryEvidence).where(
             PiIndustryEvidence.id == evidence_id, PiIndustryEvidence.user_id == user_id
@@ -513,6 +536,17 @@ async def manager_veto_industry_evidence(
     return RedirectResponse(url=f"/manager/pis/{user_id}#industry", status_code=302)
 
 
+async def _require_pi(db: AsyncSession, user_id: uuid.UUID) -> User:
+    """The PI account ``user_id``, or 404 — never a staff account, so a manager
+    cannot act on (or probe) an admin's row by UUID (A-17)."""
+    target = (
+        await db.execute(select(User).where(User.id == user_id))
+    ).scalar_one_or_none()
+    if target is None or target.user_role != USER_ROLE_PI:
+        raise HTTPException(status_code=404, detail="PI not found")
+    return target
+
+
 async def _pending_pi_agent(db: AsyncSession, user_id: uuid.UUID) -> AgentRegistry:
     """The pending ``pi_lab`` agent of a PI account, or 404.
 
@@ -528,11 +562,7 @@ async def _pending_pi_agent(db: AsyncSession, user_id: uuid.UUID) -> AgentRegist
     hand-linked on /admin/agents to a hub or specialist row would sail past
     the gate here with no profile check at all. 404 instead.
     """
-    target = (
-        await db.execute(select(User).where(User.id == user_id))
-    ).scalar_one_or_none()
-    if target is None or target.user_role != USER_ROLE_PI:
-        raise HTTPException(status_code=404, detail="PI not found")
+    await _require_pi(db, user_id)
     agent = (
         await db.execute(
             select(AgentRegistry).where(AgentRegistry.user_id == user_id)
@@ -583,17 +613,42 @@ async def manager_activate_agent(
     checkbox is a logged, admin-only escape hatch, and offering it on the
     manager surface would make the gate advisory for the role most likely to
     be working through a bulk onboarding list.
+
+    The status write is ``UPDATE … WHERE status = 'pending'`` (D-07). The token
+    check is ``token_for_agent_row`` (D-11), the predicate /manager/slack-bots shows.
     """
     agent = await _pending_pi_agent(db, user_id)
-    if not agent.slack_bot_token:
+    if not token_for_agent_row(agent):
         flash(request, "Slack provisioning failed: Install the Slack bot first.", "error")
         return RedirectResponse(url=f"/manager/pis/{user_id}", status_code=302)
-    blockers = await activate_agent(db, agent, actor=current_user, override=False)
+    blockers = await ensure_activation_allowed(
+        db, agent, new_role=agent.role, new_status="active"
+    )
     if blockers:
+        # Kept from Phase 1 Task 1C-6: the hub limit and profile checks name themselves.
         flash(request, "Activation refused: " + "; ".join(blockers), "error")
         return RedirectResponse(
             url=f"/manager/pis/{user_id}?activation_blocked=1", status_code=302
         )
+    # D-07: the write is conditional on the row still being pending, so a suspend
+    # (or any status change) committed after _pending_pi_agent read it is never
+    # overwritten. approved_at/approved_by are stamped here because this is the
+    # pending -> active transition (see activate_agent's docstring).
+    activated = await db.execute(
+        update(AgentRegistry)
+        .where(AgentRegistry.id == agent.id, AgentRegistry.status == "pending")
+        .values(status="active", approved_at=datetime.now(UTC), approved_by=current_user.id)
+        .execution_options(synchronize_session=False)
+    )
+    if activated.rowcount != 1:
+        await db.rollback()
+        flash(
+            request,
+            "This agent changed while you were activating it (someone else acted first). "
+            "Reload the page and check its status.",
+            "error",
+        )
+        return RedirectResponse(url=f"/manager/pis/{user_id}", status_code=302)
     await db.commit()
     return RedirectResponse(
         url=f"/manager/pis/{user_id}?activated=1", status_code=302
@@ -641,7 +696,6 @@ async def manager_slack_bots(
             active_manager="slack-bots",
             bots=bots,
             counts=counts,
-            slack_ok=request.query_params.get("slack_ok"),
         ),
     )
 

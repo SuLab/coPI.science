@@ -125,7 +125,11 @@ async def assessment_chat_history(
     if parsed_id is None:
         return _error(404, "not_found")
     try:
-        payload = await chat.list_history(db, assessment_id=parsed_id, user=current_user)
+        # B-08: the drawer's poll asks with ?poll=1 and skips the every-user sweep.
+        poll = request.query_params.get("poll") == "1"
+        payload = await chat.list_history(
+            db, assessment_id=parsed_id, user=current_user, sweep=not poll
+        )
         if payload is None:
             return _error(404, "not_found")
         await db.commit()  # the stale sweep's writes

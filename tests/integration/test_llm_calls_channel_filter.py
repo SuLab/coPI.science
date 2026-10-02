@@ -9,6 +9,7 @@ filtering by it is what turns "go read the log" into "read THIS interview".
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import select
 
 from src.models import USER_ROLE_ADMIN, LlmCallLog
 from tests import factories
@@ -17,6 +18,16 @@ from tests.integration.test_manager_access import auth_headers
 pytestmark = pytest.mark.integration
 
 HUB = "blackbird"
+
+
+async def _row_links(db_session, run) -> dict[str, str]:
+    """response_text -> the row's fragment link (C-16: bodies are no longer inline)."""
+    rows = (
+        await db_session.execute(
+            select(LlmCallLog.id, LlmCallLog.response_text).where(LlmCallLog.simulation_run_id == run.id)
+        )
+    ).all()
+    return {text: f"/admin/activity/{run.id}/llm-calls/{row_id}/bodies" for row_id, text in rows}
 
 
 @pytest.fixture
@@ -62,11 +73,12 @@ async def test_the_channel_filter_narrows_the_rows_to_one_interview(
         )
     ).text
 
-    assert "WANG-INTERVIEW-REPLY" in html
-    assert "WANG-CONSULT-OPINION" in html, "the interview's consults come with it"
-    assert "GORDY-INTERVIEW-REPLY" not in html
-    assert "UNATTRIBUTED-CALL" not in html
-    assert "Showing 2 of 2 calls" in html
+    links = await _row_links(db_session, run)
+    assert links["WANG-INTERVIEW-REPLY"] in html
+    assert links["WANG-CONSULT-OPINION"] in html, "the interview's consults come with it"
+    assert links["GORDY-INTERVIEW-REPLY"] not in html
+    assert links["UNATTRIBUTED-CALL"] not in html
+    assert "Showing 2 of 2 logged turns" in html
 
 
 async def test_the_unfiltered_page_still_shows_everything(client, db_session, admin):
@@ -80,9 +92,9 @@ async def test_the_unfiltered_page_still_shows_everything(client, db_session, ad
         )
     ).text
 
-    assert "WANG-INTERVIEW-REPLY" in html
-    assert "GORDY-INTERVIEW-REPLY" in html
-    assert "UNATTRIBUTED-CALL" in html
+    links = await _row_links(db_session, run)
+    for text in ("WANG-INTERVIEW-REPLY", "GORDY-INTERVIEW-REPLY", "UNATTRIBUTED-CALL"):
+        assert links[text] in html
 
 
 async def test_the_dropdown_lists_the_runs_channels_and_never_a_null(
@@ -125,7 +137,7 @@ async def test_the_channel_filter_is_scoped_to_the_run(client, db_session, admin
         )
     ).text
 
-    assert "OTHER-RUN-REPLY" not in html
+    assert (await _row_links(db_session, other))["OTHER-RUN-REPLY"] not in html
     assert "other-run-channel" not in html
 
 
@@ -167,4 +179,4 @@ async def test_pagination_links_carry_the_channel(client, db_session, admin):
     ).text
     assert "Page 2 of 2" in page2
     assert "?page=1&channel=scout-paged" in page2
-    assert "Showing 1 of 51 calls" in page2
+    assert "Showing 1 of 51 logged turns" in page2

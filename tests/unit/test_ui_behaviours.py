@@ -34,19 +34,15 @@ def test_base_loads_ui_js():
 
 def test_ui_js_delegates_every_behaviour_on_document():
     assert 'document.addEventListener("click"' in UI_JS
-    assert 'document.addEventListener("change"' in UI_JS
     assert 'const INTERACTIVE = "a, button, input, select, textarea, label, summary";' in UI_JS
     for needle in (
         '"[data-row-href]"',
         '"[data-toggle-target]"',
-        '"[data-filter-nav]"',
-        '"data-filter-param"',
-        '"data-autosubmit"',
-        "control.form.requestSubmit()",
         'classList.toggle("hidden")',
     ):
         assert needle in UI_JS, needle
     assert "innerHTML" not in UI_JS
+    assert "data-autosubmit" not in UI_JS and "data-filter-nav" not in UI_JS
 
 
 def test_row_hrefs_are_local_paths():
@@ -73,29 +69,3 @@ def test_every_toggle_target_names_an_id_in_the_same_template():
     assert {name for name, _, _ in pairs} == {"admin/cohorts.html"}
     for name, text, target in pairs:
         assert f'id="{target}"' in text, (name, target)
-
-
-def test_every_filter_nav_holds_its_params():
-    expected = {
-        "admin/users.html": ("/admin/users", {"status_filter", "claimed_filter"}),
-        "manager/pis.html": ("/manager/pis", {"status_filter", "claimed_filter"}),
-        "admin/jobs.html": ("/admin/jobs", {"status_filter", "type_filter"}),
-    }
-    found = {}
-    for name, text in _templates():
-        nav = re.search(r'data-filter-nav="([^"]+)"', text)
-        if nav:
-            found[name] = (nav.group(1), set(re.findall(r'data-filter-param="([^"]+)"', text)))
-    assert found == expected
-
-
-def test_autosubmit_replaces_every_form_submit_handler():
-    counts = {name: text.count("data-autosubmit") for name, text in _templates() if "data-autosubmit" in text}
-    assert counts == {
-        "admin/assessments.html": 3,
-        "manager/assessments.html": 3,
-        "admin/discussions.html": 1,
-        "manager/discussions.html": 1,
-        "manager/prompt_suggestions.html": 1,
-        "admin/simulation.html": 1,
-    }

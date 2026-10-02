@@ -283,8 +283,9 @@ class _Doc:
 
 
 def _minute(value: datetime) -> str:
-    # The page renders `created_at.strftime('%Y-%m-%d %H:%M')` with no conversion;
-    # asyncpg hands timestamptz back in UTC.
+    # The same UTC minute the page shows through display_format.timestamp, whose
+    # " UTC" suffix this record carries in its block labels instead; asyncpg hands
+    # timestamptz back in UTC.
     return value.strftime("%Y-%m-%d %H:%M")
 
 

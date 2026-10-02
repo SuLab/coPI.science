@@ -12,6 +12,8 @@ from src.database import get_db
 from src.dependencies import get_admin_user
 from src.models import AccessAllowlist, ResearcherProfile, User
 from src.models.job import INTERACTIVE_PRIORITY
+from src.services.admin_invariant import LastAdminError, ensure_admin_remains
+from src.services.pi_onboarding import normalize_orcid
 from src.routers.admin._common import _template_context, router, templates
 from src.services.profile_jobs import enqueue_profile_job_if_absent
 from src.services.session_epoch import bump_session_epoch
@@ -110,6 +112,22 @@ async def admin_deny_access(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    # A-07. "Your own account" is the session holder's: under impersonation
+    # `current_user` is the worn account, so the real admin is checked too.
+    real_admin = getattr(current_user, "_real_admin", None)
+    if user.id == current_user.id or (real_admin is not None and user.id == real_admin.id):
+        raise HTTPException(status_code=400, detail="Cannot deny your own access")
+    # Denying an allowed admin is a way out of adminhood, like a demotion; the
+    # invariant lock is held to the commit below. An admin who is already not
+    # allowed is not counted, so re-denying one is never refused.
+    if user.access_status == "allowed":
+        try:
+            await ensure_admin_remains(db, user=user)
+        except LastAdminError:
+            raise HTTPException(
+                status_code=400, detail="Cannot deny the last remaining admin"
+            ) from None
+
     user.access_status = "denied"
     # Ends every session the user holds (spec 2026-10-01 §6.7). get_current_user's
     # access check already bounces them; the bump keeps a later re-allow from
@@ -130,7 +148,7 @@ async def admin_allowlist_add(
     current_user: User = Depends(get_admin_user),
 ):
     """Add an ORCID to the allowlist."""
-    orcid_clean = orcid.strip()
+    orcid_clean = normalize_orcid(orcid)
     if not orcid_clean:
         return RedirectResponse(url="/admin/access-requests", status_code=302)
 
@@ -146,10 +164,12 @@ async def admin_allowlist_add(
             )
         )
 
-    # If a user with this ORCID already exists and is pending, promote them.
+    # Promote an existing PENDING request (SN-01). A denied user stays denied: a
+    # deny is reversed only by the Approve button on its row, never as a side
+    # effect of allowlisting the ORCID.
     user_result = await db.execute(select(User).where(User.orcid == orcid_clean))
     user = user_result.scalar_one_or_none()
-    if user and user.access_status != "allowed":
+    if user and user.access_status == "pending":
         user.access_status = "allowed"
         profile_result = await db.execute(
             select(ResearcherProfile.id).where(ResearcherProfile.user_id == user.id)
