@@ -11,8 +11,10 @@ import base64
 import json
 import re
 import tempfile
+import time
 from pathlib import Path
 
+from tests.e2e.ui_audit.harness import AXE_PATH
 from tests.e2e.ui_audit.journeys_phase1_1b import JOURNEYS_1B
 
 REPO = Path(__file__).resolve().parents[3]
@@ -455,3 +457,278 @@ JOURNEYS += [journey_css_parity]
 # --- Part 1B: sessions, impersonation, invites (journeys_phase1_1b.py) ---------
 
 JOURNEYS += [*JOURNEYS_1B]
+
+# --- Part 1C: confirm dialogs accepted and dismissed (announcing Stop, Reset to file
+# default, review delete, Finalize with a wrong and the right short id), the two-tab
+# topology save, chat focus after an answer, zero axe color-contrast violations.
+_ROLES = ("anon", "pi", "reviewer", "manager", "admin")
+
+
+class _Dialogs:
+    """Records every dialog and answers it with the current ``accept`` setting."""
+
+    def __init__(self, page):
+        # The page must come from h.page(..., answer_dialogs=False): a dialog answered
+        # twice raises "already handled".
+        self.messages: list[str] = []
+        self.accept = False
+        page.on("dialog", self._on_dialog)
+
+    async def _on_dialog(self, dialog):
+        self.messages.append(dialog.message)
+        if self.accept:
+            await dialog.accept()
+        else:
+            await dialog.dismiss()
+
+
+def _posts(page, path: str) -> list[str]:
+    seen: list[str] = []
+    page.on("request", lambda r: seen.append(r.url) if r.method == "POST" and r.url.endswith(path) else None)
+    return seen
+
+
+async def _flash_text(page) -> str:
+    region = page.locator("[data-flash-region]")
+    return (await region.inner_text()) if await region.count() else ""
+
+
+async def journey_confirm_stop(h) -> dict:
+    """FN-01: the announcing Stop asks first; "Stop — hold open interviews" does not (D11).
+    The harness runs no engine, so both buttons render disabled; the journey enables them in
+    the DOM to reach the dialog, and the server then refuses with "Nothing is running."."""
+    context, page, log = await h.page("admin", answer_dialogs=False)
+    dialogs = _Dialogs(page)
+    posts = _posts(page, "/admin/simulation/stop")
+    enable = """() => document.querySelectorAll('form[action="/admin/simulation/stop"] button')
+                         .forEach(b => { b.disabled = false; })"""
+    announcing = page.locator('form[action="/admin/simulation/stop"]:not(:has(input[name="hold_open"])) button')
+    hold = page.locator('form[action="/admin/simulation/stop"]:has(input[name="hold_open"]) button')
+
+    await page.goto(h.base_url + "/admin/simulation")
+    await page.evaluate(enable)
+    await announcing.click()
+    await page.wait_for_timeout(500)
+    dismissed_posted = len(posts)
+
+    dialogs.accept = True
+    async with page.expect_navigation():
+        await announcing.click()
+    accepted_posted = len(posts) - dismissed_posted
+    refusal = await _flash_text(page)
+
+    asked_before_hold = len(dialogs.messages)
+    await page.evaluate(enable)
+    async with page.expect_navigation():
+        await hold.click()
+    hold_asked = len(dialogs.messages) > asked_before_hold
+    await context.close()
+
+    first = dialogs.messages[0] if dialogs.messages else ""
+    ok = (first.startswith("Posts ") and "cannot be undone" in first
+          and dismissed_posted == 0 and accepted_posted == 1
+          and "Nothing is running." in refusal and not hold_asked)
+    return {"ok": ok, "dialogs": dialogs.messages, "dismissed_posted": dismissed_posted,
+            "accepted_posted": accepted_posted, "flash": refusal, "hold_asked": hold_asked,
+            "log": log}
+
+
+async def journey_confirm_reset_template(h) -> dict:
+    """FN-06: Reset to file default asks first; dismissing posts nothing."""
+    context, page, log = await h.page("admin", answer_dialogs=False)
+    dialogs = _Dialogs(page)
+    posts = _posts(page, "/admin/simulation/announce-template")
+    reset = page.locator('form[action="/admin/simulation/announce-template"]:has(input[name="reset"][value="true"]) button')
+    await page.goto(h.base_url + "/admin/simulation")
+    await reset.click()
+    await page.wait_for_timeout(500)
+    dismissed_posted = len(posts)
+    dialogs.accept = True
+    async with page.expect_navigation():
+        await reset.click()
+    url_after = page.url
+    confirmed = "Template reset to file default." in await page.content()
+    await context.close()
+    ok = (len(dialogs.messages) == 2 and dialogs.messages[0].startswith("Reset the run-start announcement")
+          and dismissed_posted == 0 and len(posts) == 1 and confirmed)
+    return {"ok": ok, "dialogs": dialogs.messages, "posts": posts, "url_after": url_after, "log": log}
+
+
+async def journey_confirm_review_delete(h) -> dict:
+    """B-10: deleting a review asks first; dismissing keeps it, accepting removes it."""
+    context, page, log = await h.page("admin", answer_dialogs=False)
+    dialogs = _Dialogs(page)
+    marker = f"journey-delete-{int(time.time())}"
+    url = f"{h.base_url}/admin/assessments/{h.ids['assessments'][0]}"
+    await page.goto(url)
+    await page.select_option("#add-score", "3")
+    await page.select_option("#add-mode", "learn")
+    await page.fill("#add-comment", marker)
+    async with page.expect_navigation():
+        await page.click('button:has-text("Submit feedback")')
+    await page.goto(url)
+    delete = page.locator(f'li:has-text("{marker}") form[action$="/delete"] button')
+    if await delete.count() != 1:
+        await context.close()
+        return {"ok": False, "error": "the submitted review or its delete form was not found", "log": log}
+    await delete.click()
+    await page.wait_for_timeout(500)
+    kept = await page.locator(f'li:has-text("{marker}")').count() == 1
+    dialogs.accept = True
+    async with page.expect_navigation():
+        await delete.click()
+    await page.goto(url)
+    gone = await page.locator(f'li:has-text("{marker}")').count() == 0
+    await context.close()
+    ok = (len(dialogs.messages) == 2
+          and dialogs.messages[0] == "Delete this review? This cannot be undone."
+          and kept and gone)
+    return {"ok": ok, "dialogs": dialogs.messages, "kept_after_dismiss": kept,
+            "gone_after_accept": gone, "log": log}
+
+
+async def journey_cohort_two_tab_save(h) -> dict:
+    """C-07: two tabs open the topology; each ticks a different box and saves; both
+    memberships survive."""
+    context, tab1, log = await h.page("admin")
+    name = f"two-tab-{int(time.time())}"
+    created = await tab1.request.post(
+        h.base_url + "/admin/cohorts/create", form={"name": name},
+        headers={"Origin": h.base_url}, max_redirects=0,
+    )
+    tab2 = await context.new_page()
+    topology = h.base_url + "/admin/cohorts/topology"
+    await tab1.goto(topology)
+    await tab2.goto(topology)
+    href = await tab1.locator(f'thead a:text-is("{name}")').get_attribute("href")
+    cohort_id = href.rsplit("/", 1)[1]
+    agents = await tab1.eval_on_selector_all(
+        'input[name="present_agent"]', "els => els.map(e => e.value)"
+    )
+    if len(agents) < 2:
+        await context.close()
+        return {"ok": False, "error": "the seed has fewer than two agents", "log": log}
+    first, second = f'input[name="cell"][value="{cohort_id}:{agents[0]}"]', f'input[name="cell"][value="{cohort_id}:{agents[1]}"]'
+    await tab1.check(first)
+    async with tab1.expect_navigation():
+        await tab1.click('button:has-text("Save topology")')
+    await tab2.check(second)
+    async with tab2.expect_navigation():
+        await tab2.click('button:has-text("Save topology")')
+    await tab1.goto(topology)
+    both = await tab1.is_checked(first) and await tab1.is_checked(second)
+    await context.close()
+    return {"ok": created.status == 302 and both, "cohort": name, "create_status": created.status,
+            "both_memberships_kept": both, "log": log}
+
+
+async def journey_chat_focus_after_answer(h) -> dict:
+    """B-06: the question box is read-only (not disabled) while answering and holds focus
+    once the answer finishes."""
+    context, page, log = await h.page("admin")
+    await page.goto(f"{h.base_url}/admin/assessments/{h.ids['assessments'][0]}")
+    opener = page.locator("[data-chat-open]").first
+    if await opener.count() == 0:
+        await context.close()
+        return {"ok": False, "error": "no chat opener: is the assessment chat enabled in the harness?", "log": log}
+    await opener.click()
+    box = page.locator("#assessment-chat-question")
+    await box.fill("What is being proposed, in plain terms?")
+    await box.press("Enter")
+    during = await page.evaluate(
+        """() => { const t = document.getElementById('assessment-chat-question');
+                   return {readOnly: t.readOnly, ariaBusy: t.getAttribute('aria-busy'),
+                           disabled: t.disabled, focused: document.activeElement === t}; }"""
+    )
+    await page.wait_for_function(
+        "() => !document.getElementById('assessment-chat-question').readOnly", timeout=60000
+    )
+    await page.wait_for_timeout(300)
+    focused_id = await page.evaluate("() => document.activeElement && document.activeElement.id")
+    await context.close()
+    ok = focused_id == "assessment-chat-question" and not during["disabled"]
+    return {"ok": ok, "during": during, "focused_after": focused_id, "log": log}
+
+
+async def journey_contrast_zero(h) -> dict:
+    """X-01: axe reports no color-contrast violation on the Phase 1 crawl pages, any role."""
+    if not AXE_PATH.exists():
+        return {"ok": False, "error": f"{AXE_PATH} is missing"}
+    axe = AXE_PATH.read_text(encoding="utf-8")
+    run, pi = h.ids["run"], h.ids["pi"]
+    routes = [
+        "/login", "/access-pending", "/settings", "/profile", "/profile/edit", "/agent",
+        "/admin/users", f"/admin/users/{pi}", "/admin/jobs", "/admin/activity",
+        f"/admin/activity/{run}", f"/admin/activity/{run}/llm-calls", "/admin/discussions",
+        "/admin/agents", "/admin/assessments", "/admin/cohorts", "/admin/cohorts/topology",
+        "/admin/access-requests", "/admin/simulation", "/manager/pis", f"/manager/pis/{pi}",
+        "/manager/assessments", "/manager/discussions", "/manager/activity",
+        f"/manager/activity/{run}", "/manager/slack-bots", "/manager/prompt-suggestions",
+        *[f"/admin/assessments/{a}" for a in h.ids["assessments"]],
+        *[f"/manager/assessments/{a}" for a in h.ids["assessments"]],
+    ]
+    violations: list[str] = []
+    for role in _ROLES:
+        # CSP bypassed: axe is injected as an inline script, which an enforced script-src
+        # (Phase 2) would block. CSP is checked by its own journeys.
+        context, page, log = await h.page(role, bypass_csp=True)
+        for route in routes:
+            response = await page.goto(h.base_url + route, wait_until="networkidle")
+            if response is None or "text/html" not in response.headers.get("content-type", ""):
+                continue
+            # Report-only CSP in Phase 1 lets the injected script run; Phase 2's enforced
+            # CSP needs a CSP-exempt injection (page.evaluate) instead.
+            await page.add_script_tag(content=axe)
+            found = await page.evaluate(
+                """async () => {
+                    const r = await axe.run(document, {runOnly: {type: 'rule', values: ['color-contrast']}});
+                    return r.violations.flatMap(v => v.nodes.map(n =>
+                        n.target.join(' ') + ' :: ' + ((n.any[0] && n.any[0].message) || '').slice(0, 160)));
+                }"""
+            )
+            violations += [f"{role} {route}: {v}" for v in found]
+        await context.close()
+    return {"ok": not violations, "count": len(violations), "violations": violations[:200]}
+
+
+async def journey_confirm_finalize(h) -> dict:
+    """C-10: Finalize asks first and the server refuses a wrong short id; the right one,
+    confirmed, enqueues the finalize."""
+    run_id = h.ids.get("stopped_run")
+    if not run_id:
+        return {"ok": False, "error": "the harness seed has no stopped_run id"}
+    context, page, log = await h.page("admin", answer_dialogs=False)
+    dialogs = _Dialogs(page)
+    posts = _posts(page, "/admin/simulation/finalize-run")
+    url = f"{h.base_url}/admin/activity/{run_id}"
+    button = page.locator('form[action="/admin/simulation/finalize-run"] button')
+
+    await page.goto(url)
+    dialogs.accept = True
+    await page.fill("#confirm-run", "00000000")
+    async with page.expect_navigation():
+        await button.click()
+    wrong_refused = f"Type the run's short id ({run_id[:8]})" in await _flash_text(page)
+
+    dialogs.accept = False
+    await page.fill("#confirm-run", run_id[:8])
+    await button.click()
+    await page.wait_for_timeout(500)
+    dismissed_posted = len(posts) - 1
+
+    dialogs.accept = True
+    async with page.expect_navigation():
+        await button.click()
+    requested = "Finalize run requested." in await page.content()
+    await context.close()
+    ok = (wrong_refused and dismissed_posted == 0 and requested and len(dialogs.messages) == 3
+          and all(m.startswith(f"Finalize run {run_id[:8]}: ") for m in dialogs.messages))
+    return {"ok": ok, "dialogs": dialogs.messages, "wrong_refused": wrong_refused,
+            "dismissed_posted": dismissed_posted, "requested": requested, "log": log}
+
+
+JOURNEYS += [
+    journey_confirm_stop, journey_confirm_reset_template, journey_confirm_review_delete,
+    journey_cohort_two_tab_save, journey_chat_focus_after_answer, journey_contrast_zero,
+    journey_confirm_finalize,
+]

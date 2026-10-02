@@ -66,7 +66,7 @@
             <tr class="hover:bg-gray-50 cursor-pointer"
                 data-row-href="/admin/users/{{ item.user.id }}">
                 <td class="px-4 py-3">
-                    <div class="text-sm font-medium text-gray-900">{{ item.user.name }}</div>
+                    <div class="text-sm font-medium text-gray-900"><a href="/admin/users/{{ item.user.id }}" class="hover:text-indigo-700 hover:underline">{{ item.user.name }}</a></div>
                     {% if item.user.department %}
                     <div class="text-xs text-gray-500">{{ item.user.department }}</div>
                     {% endif %}

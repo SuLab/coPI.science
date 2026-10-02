@@ -70,7 +70,7 @@ def test_every_toggle_target_names_an_id_in_the_same_template():
         for name, text in _templates()
         for m in re.finditer(r'data-toggle-target="([^"]+)"', text)
     ]
-    assert {name for name, _, _ in pairs} == {"admin/cohorts.html", "admin/_discussions_threads.html"}
+    assert {name for name, _, _ in pairs} == {"admin/cohorts.html"}
     for name, text, target in pairs:
         assert f'id="{target}"' in text, (name, target)
 

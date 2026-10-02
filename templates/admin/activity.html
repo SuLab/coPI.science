@@ -56,7 +56,7 @@
             {% for run in runs %}
             <tr class="hover:bg-gray-50 cursor-pointer"
                 data-row-href="/admin/activity/{{ run.id }}">
-                <td class="px-4 py-3 text-sm"><span data-utc="{{ run.started_at.isoformat() }}" data-utc-fmt="short">{{ run.started_at.strftime('%b %d %H:%M') }}</span></td>
+                <td class="px-4 py-3 text-sm"><a href="/admin/activity/{{ run.id }}" class="text-indigo-700 hover:underline"><span data-utc="{{ run.started_at.isoformat() }}" data-utc-fmt="short">{{ run.started_at.strftime('%b %d %H:%M') }}</span></a></td>
                 <td class="px-4 py-3 text-sm text-gray-500">
                     {% if run.ended_at %}<span data-utc="{{ run.ended_at.isoformat() }}" data-utc-fmt="short">{{ run.ended_at.strftime('%b %d %H:%M') }}</span>{% else %}—{% endif %}
                 </td>
