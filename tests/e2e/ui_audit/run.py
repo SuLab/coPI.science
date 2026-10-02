@@ -41,9 +41,13 @@ def load_axe() -> str:
     return data.decode()
 
 
-def _wait_http(url: str, timeout: float = 60) -> None:
+def _wait_http(url: str, timeout: float = 300, proc: subprocess.Popen | None = None) -> None:
+    """Poll ``url`` until it answers 200. Generous: importing the app over a slow
+    mount (sshfs) can take minutes. Fails fast if ``proc`` has exited."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        if proc is not None and proc.poll() is not None:
+            raise RuntimeError(f"the app server exited with {proc.returncode} before {url} came up")
         try:
             with urllib.request.urlopen(url, timeout=2) as r:  # noqa: S310 - localhost only
                 if r.status == 200:
@@ -80,7 +84,7 @@ class Stack:
         self.server = subprocess.Popen(
             [py, "-m", "tests.e2e.ui_audit.serve", "--port", str(self.port)],
             cwd=self.work, env=self.env())
-        _wait_http(self.base_url + "/api/health")
+        _wait_http(self.base_url + "/api/health", proc=self.server)
 
     def down(self) -> None:
         if self.server:
@@ -108,15 +112,23 @@ async def _run(stack: Stack, args) -> dict:
             from tests.e2e.ui_audit.crawl import crawl
 
             report["crawl"] = await crawl(h)
+        await browser.close()
         if args.command in ("journeys", "all"):
             module = importlib.import_module(f"tests.e2e.ui_audit.journeys_phase{args.phase}")
             report["journeys"] = {}
             for journey in module.JOURNEYS:
+                # A fresh browser per journey: one browser crash must not fail every
+                # journey after it (observed 2026-10-01, headless shell SIGILL).
+                h.browser = await launcher.launch(executable_path=args.executable or None)
                 try:
                     report["journeys"][journey.__name__] = await journey(h)
                 except Exception as exc:  # noqa: BLE001 - a crash is a failed journey
                     report["journeys"][journey.__name__] = {"ok": False, "error": str(exc)}
-        await browser.close()
+                finally:
+                    try:
+                        await h.browser.close()
+                    except Exception:  # noqa: BLE001 - already gone
+                        pass
     return report
 
 

@@ -30,7 +30,10 @@ class ThrowawayPostgres:
 
     def start(self) -> None:
         subprocess.run(
+            # --shm-size: Docker's 64 MB /dev/shm default can crash a Postgres backend
+            # under the crawl's parallel load ("database system is in recovery mode").
             ["docker", "run", "-d", "--rm", "--name", self.name, "--label", "uiaudit=1",
+             "--shm-size=256m",
              "-e", "POSTGRES_USER=copi", "-e", "POSTGRES_PASSWORD=copi",
              "-e", f"POSTGRES_DB={DB_NAME}", "-p", f"127.0.0.1:{self.port}:5432",
              "postgres:15"],
