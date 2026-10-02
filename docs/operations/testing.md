@@ -115,3 +115,25 @@ with `docker compose -f docker-compose.prod.yml exec -T postgres createdb -U
 copi copi_xN`, and give concurrent suites distinct names so they do not
 migrate each other's schema mid-run. Never point `TEST_DATABASE_URL` at `copi`,
 the dev database.
+
+## Browser harness (before every web deploy)
+
+`tests/e2e/ui_audit/` (spec `docs/specs/2026-10-01-web-ui-remediation-design.md`, D17) stands
+up a throwaway Postgres (`uiaudit-pg-<pid>`, removed at exit), the app with a fake model, and
+an adversarial seed, then runs a role × route crawl (no 5xx, XSS canary 0, no page errors,
+role gates, no enforced-CSP console errors) and the phase's browser journeys. It is not part
+of `ci.sh`; it gates every web deploy:
+
+```bash
+python -m tests.e2e.ui_audit.run all --phase <n>        # the phase being deployed
+python -m tests.e2e.ui_audit.run journeys --phase <m>   # every earlier phase
+```
+
+Both must exit 0. It never reads `.env` and never writes the repo's `profiles/` (it runs in a
+temp working directory with its own empty `profiles/`). **The production host cannot run it
+today:** Playwright's Chromium needs system libraries the host does not have (`libatk-1.0`
+and others), and installing packages on the shared host was deliberately not done
+(2026-10-01). Run it from a workstation that mounts the checkout, with a Python environment
+that has the project and `playwright` installed and a local Chromium
+(`--executable <path to chrome-headless-shell>`); see `tests/e2e/ui_audit/README.md`.
+

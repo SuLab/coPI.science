@@ -787,10 +787,41 @@ async def test_live_tab_timestamps_are_minute_precision_utc(client, db_session):
 
 async def test_live_tab_refresh_script_preserves_open_details_by_key(client, db_session):
     admin = await _admin(db_session, "sim-admin-js@example.org")
-    html = (await client.get("/admin/simulation", headers=auth_headers(admin.id))).text
+    html = (await client.get("/admin/simulation?msg=hello", headers=auth_headers(admin.id))).text
     assert "details[open][data-sc-key]" in html and "el.dataset.scKey" in html
-    # ... and never swaps the body out from under an in-progress form edit.
+    # Never replaces a unit holding focus or an edited form (C-01, C-09).
     assert "contains(document.activeElement)" in html
+    assert "formIsDirty" in html and "defaultValue" in html and "defaultChecked" in html
+    # Units, not #sim-body wholesale.
+    assert ":scope > nav.sim-jump-nav, :scope > section[id]" in html
+    assert "cur.innerHTML = next.innerHTML" not in html
+    # Fetches the canonical URL and refuses redirected/non-HTML/failed responses (C-08).
+    assert "new URL('/admin/simulation', location.origin)" in html
+    assert "fetch(location.href)" not in html
+    assert "r.redirected" in html and "r.ok" in html
+    assert 'id="sim-refresh-notice"' in html and 'role="status"' in html
+    # The flash is shown once (C-27) and the banner is a removable non-unit.
+    assert "history.replaceState" in html and 'data-sim-flash' in html
+    # A rejected template is kept, and a kept unit says it is not refreshed (Q1-04, Q1-13).
+    assert "[data-sim-keep]" in html and "data-sim-stale-note" in html
+
+
+async def test_a_rejected_template_marks_its_form_to_be_kept(client, db_session):
+    admin = await _admin(db_session, "sim-admin-keep@example.org")
+    resp = await client.post(
+        "/admin/simulation/announce-template",
+        data={"body": "Bad {nope} template", "reset": "false"},
+        headers=auth_headers(admin.id),
+    )
+    assert resp.status_code == 200
+    form = resp.text[resp.text.index('action="/admin/simulation/announce-template"'):]
+    assert "data-sim-keep" in form[: form.index(">")]
+
+
+async def test_run_selector_submits_to_the_page_route(client, db_session):
+    admin = await _admin(db_session, "sim-admin-sel@example.org")
+    html = (await client.get("/admin/simulation", headers=auth_headers(admin.id))).text
+    assert '<form method="get" action="/admin/simulation"' in html
 
 
 async def test_live_tab_latency_and_progress_render_with_real_data(client, db_session):

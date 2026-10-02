@@ -1868,9 +1868,9 @@ Expected: FAIL (`addEventListener('toggle'` absent).
         // Markdown renders asynchronously after this script; re-check late.
         setTimeout(check, 0); setTimeout(check, 500);
     });
-    // B-01 (spec 2026-10-01 §5.4): a message inside a closed <details> can measure
-    // 0 at load (browsers that give closed content no box), which hid its toggle for
-    // good. Re-measure when any <details> opens — by click, "Expand all", a
+    // B-01 (spec 2026-10-01 §5.4): a message inside a closed details element can
+    // measure 0 at load (browsers that give closed content no box), which hid its
+    // toggle for good. Re-measure when any details element opens — by click, "Expand all", a
     // data-open-details link or the chat's "Show in page". `toggle` does not bubble,
     // so this listens in the capture phase.
     document.addEventListener('toggle', function (event) {
@@ -1880,7 +1880,7 @@ Expected: FAIL (`addEventListener('toggle'` absent).
     }, true);
 ```
 
-The click handler is unchanged; the only behaviour change is `clampChecks` plus the `toggle` listener.
+The click handler is unchanged; the only behaviour change is `clampChecks` plus the `toggle` listener. The comment must not contain a literal `<details` tag: `tests/integration/test_assessment_detail_page.py`'s details scanner counts it (found executing, 2026-10-01).
 
 - [ ] **Step 4: Run the test and the existing detail-page suites**
 

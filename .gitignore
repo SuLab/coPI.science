@@ -97,3 +97,4 @@ backups/
 
 # Subagent-driven-development scratch workspace
 .superpowers/
+tests/e2e/ui_audit/axe.min.js

@@ -25,7 +25,7 @@
         </span>
         {% else %}
         <form method="POST" action="/admin/cohorts/{{ cohort.id }}/delete"
-              onsubmit="return confirm('Delete empty cohort “{{ cohort.name }}”?');">
+              data-confirm="Delete empty cohort “{{ cohort.name }}”?">
             <button type="submit" class="text-sm bg-red-600 hover:bg-red-700 text-white font-medium px-4 py-2 rounded">
                 Delete Cohort
             </button>

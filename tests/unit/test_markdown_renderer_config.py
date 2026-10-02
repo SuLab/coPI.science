@@ -48,10 +48,13 @@ def test_every_profile_disables_strikethrough():
 
 def test_chat_profile_keeps_its_raw_html_hardening():
     factory = JS[JS.index("function createSanitizingMarked"):JS.index("window.createSanitizingMarked =")]
-    chat = factory[factory.index('profile === "chat"'):factory.index('profile === "graph"')]
-    assert "tokenizer.tag = function" in chat
-    assert "inRawBlock: false" in chat
+    start = factory.index('profile === "chat"')
+    chat = factory[start:factory.index("} else", start)]
+    # The raw-block-free tag tokenizer is shared with the page profile (spec §5.2).
+    assert "tokenizer.tag = rawTagTokenizer" in chat
     assert "html: function (html)" in chat
+    tokenizer = JS[JS.index("function rawTagTokenizer"):JS.index("function createSanitizingMarked")]
+    assert "inRawBlock: false" in tokenizer
 
 
 def test_graph_profile_keeps_gfm_and_breaks():

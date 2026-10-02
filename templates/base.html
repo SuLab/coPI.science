@@ -10,6 +10,8 @@
     <style>
         [x-cloak] { display: none !important; }
     </style>
+    <!-- In <head>: the delete confirmations must be armed before any form is clickable. -->
+    <script src="/static/js/confirm.js"></script>
     {% block extra_head %}{% endblock %}
     {% if request.state.posthog_api_key %}
     <script>
