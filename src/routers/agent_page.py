@@ -56,6 +56,13 @@ SLACK_INVITE_URL = (
 # previous flat 100-message window did.
 _ROOT_LIMIT = 50
 
+#: Delegate-invite caps (SN-02): per submission, and per agent over any rolling
+#: 24 hours. The window counts every delegate_invitations row created in it,
+#: whatever its status, so revoke-and-resend cannot get around it; the rows are
+#: the ledger, no table of their own.
+_INVITES_PER_SUBMISSION = 10
+_INVITES_PER_AGENT_PER_DAY = 25
+
 
 async def _visible_channels(db: AsyncSession, run_id, aid: str) -> list[str]:
     """Channels this agent participates in (has authored a message in), plus
@@ -653,7 +660,10 @@ async def invite_delegate(
     The agent row is locked FOR UPDATE for the request, so two concurrent invites
     serialize and the "already pending" check sees the first one's row (there is no
     unique constraint on pending invitations). The emails go out only after the
-    commit, so none announces an invitation that then rolls back.
+    commit, so none announces an invitation that then rolls back. At most
+    ``_INVITES_PER_SUBMISSION`` addresses per submission (else nothing is created)
+    and ``_INVITES_PER_AGENT_PER_DAY`` invitation rows per agent in any 24 hours
+    (SN-02).
     """
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
     agent = (await db.execute(
@@ -675,6 +685,22 @@ async def invite_delegate(
         for e in re.split(r"[,\n]+", emails)
         if e.strip()
     ]
+    if len(email_list) > _INVITES_PER_SUBMISSION:
+        flash(
+            request,
+            f"At most {_INVITES_PER_SUBMISSION} addresses per invitation; nothing was sent.",
+            "error",
+        )
+        return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
+    # The agent row is locked FOR UPDATE above, so this count and the inserts
+    # below cannot interleave with another invite for the same agent.
+    created_last_day = await db.scalar(
+        select(func.count(DelegateInvitation.id)).where(
+            DelegateInvitation.agent_registry_id == agent.id,
+            DelegateInvitation.created_at >= datetime.now(UTC) - timedelta(hours=24),
+        )
+    ) or 0
+    remaining_today = max(0, _INVITES_PER_AGENT_PER_DAY - created_last_day)
 
     errors = []
     to_send: list[tuple[str, str]] = []
@@ -714,6 +740,13 @@ async def invite_delegate(
             errors.append(f"Invitation already pending for {email}.")
             continue
 
+        if remaining_today <= 0:
+            errors.append(
+                f"Daily limit of {_INVITES_PER_AGENT_PER_DAY} invitations per agent "
+                f"reached; {email} was not invited."
+            )
+            continue
+
         # Create invitation
         token = secrets.token_urlsafe(48)
         invitation = DelegateInvitation(
@@ -726,19 +759,35 @@ async def invite_delegate(
         )
         db.add(invitation)
         await db.flush()  # Get the ID
+        remaining_today -= 1
 
         to_send.append((email, f"{settings.base_url}/invite/{token}"))
 
     await db.commit()
 
-    # The invitation exists regardless of whether the email gets through.
+    # The invitation exists regardless of whether the email gets through; the PI
+    # is told which ones did not go out (D-21). send_transactional_email returns
+    # False when the outbound allowlist suppresses the address or SES fails.
+    unsent: list[str] = []
     for email, invite_url in to_send:
-        await send_transactional_email(
+        sent = await send_transactional_email(
             build_delegate_invitation(email, agent.pi_name, agent.bot_name, invite_url)
         )
+        if not sent:
+            unsent.append(email)
 
     if errors:
         flash(request, "; ".join(errors), "error")
+    if unsent:
+        # A count plus the first three addresses, as its own flash: flash text is
+        # capped at MAX_FLASH_CHARS, so a full list, or one appended after the
+        # other errors, could be cut off (plan audit Q2-12).
+        shown = ", ".join(unsent[:3]) + (f" and {len(unsent) - 3} more" if len(unsent) > 3 else "")
+        flash(
+            request,
+            f"Invitation saved, but no email was sent to {len(unsent)} address(es): {shown}.",
+            "error",
+        )
     return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
 
 

@@ -108,6 +108,7 @@
             {% elif request.query_params.get('error') == 'no_token' %}This agent can't be unmuted until its Slack bot is installed.
             {% elif request.query_params.get('error') == 'activation_blocked' %}This agent can't be unmuted yet: its profile doesn't pass the activation checks.
             {% elif request.query_params.get('error') == 'profile_generating' %}Profile is being generated — try again shortly.
+            {% elif request.query_params.get('error') == 'field_too_long' %}Name, institution and department are limited to 255 characters each.
             {% else %}Something went wrong saving changes.{% endif %}
         </p>
     </div>
@@ -177,7 +178,7 @@
         <div class="grid grid-cols-1 gap-4 mb-5">
             <div>
                 <label for="pi-name" class="block text-sm font-medium text-gray-700 mb-1">Display Name</label>
-                <input type="text" name="name" id="pi-name" value="{{ target_user.name }}"
+                <input type="text" name="name" maxlength="255" id="pi-name" value="{{ target_user.name }}"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
             </div>
             <div>
@@ -187,12 +188,12 @@
             </div>
             <div>
                 <label for="pi-institution" class="block text-sm font-medium text-gray-700 mb-1">Institution</label>
-                <input type="text" name="institution" id="pi-institution" value="{{ target_user.institution or '' }}"
+                <input type="text" name="institution" maxlength="255" id="pi-institution" value="{{ target_user.institution or '' }}"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
             </div>
             <div>
                 <label for="pi-department" class="block text-sm font-medium text-gray-700 mb-1">Department</label>
-                <input type="text" name="department" id="pi-department" value="{{ target_user.department or '' }}"
+                <input type="text" name="department" maxlength="255" id="pi-department" value="{{ target_user.department or '' }}"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
             </div>
             <div>

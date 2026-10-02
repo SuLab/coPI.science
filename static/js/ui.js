@@ -16,6 +16,8 @@
 //   tr[data-row-toggles]     a click elsewhere in the row clicks the row's
 //                            [data-toggles] button, so the whole row stays clickable
 //                            while the button is the keyboard path
+//   form[data-allow-resubmit]  opts a POST form out of the double-submit guard
+//                            (B-04, at the end of this file)
 (function () {
   "use strict";
 
@@ -100,3 +102,35 @@
     }
   });
 })();
+
+// B-04: once a POST form's submission is under way its submit buttons are
+// disabled, so a double click sends one request. Deferred with setTimeout
+// because a control disabled during the submit event is left out of the form
+// data, and the clicked button's own name/value must still be sent. Left alone:
+// a submission a handler cancelled (confirm.js's dismissed dialog), GET forms,
+// forms that target another window, and forms marked data-allow-resubmit. The
+// server's duplicate check (assessment_reviews.submit_feedback) is the backstop.
+document.addEventListener('submit', function (event) {
+  var form = event.target;
+  if (event.defaultPrevented || !(form instanceof HTMLFormElement)) { return; }
+  if ((form.getAttribute('method') || 'get').toLowerCase() !== 'post') { return; }
+  if (form.hasAttribute('data-allow-resubmit')) { return; }
+  var target = form.getAttribute('target');
+  if (target && target !== '_self') { return; }
+  window.setTimeout(function () {
+    form.querySelectorAll('button[type="submit"], button:not([type]), input[type="submit"]')
+      .forEach(function (b) {
+        b.disabled = true;
+        b.setAttribute('data-submit-guarded', '');
+      });
+  }, 0);
+});
+
+// A page restored from the back-forward cache would keep those buttons disabled.
+window.addEventListener('pageshow', function (event) {
+  if (!event.persisted) { return; }
+  document.querySelectorAll('[data-submit-guarded]').forEach(function (b) {
+    b.disabled = false;
+    b.removeAttribute('data-submit-guarded');
+  });
+});

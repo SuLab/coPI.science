@@ -29,6 +29,9 @@ PROFILE_FIELDS = (
 #: List-valued profile fields. Each tag is posted as its own form field (D-16): the
 #: comma split this replaced broke every tag containing a comma ("1,2-dichloroethane").
 _LIST_FIELDS = frozenset(PROFILE_FIELDS) - {"research_summary"}
+#: users.name / institution / department are String(255) (src/models/user.py).
+#: Checked before any write so an overlong value is a form error, not a 500 (A-15).
+USER_FIELD_MAX_CHARS = 255
 #: Each tag widget (templates/_tag_field.html) posts one marker naming its field, so a
 #: widget whose tags were all removed (posting no values) still clears the field, while
 #: a form without the widget, or a page rendered before it existed, changes nothing.
@@ -199,16 +202,21 @@ async def apply_profile_edits(
     ``expected_version`` is the profile-version check (``write_profile_text_fields``);
     None saves without it. ``export_agent`` skips the agent lookup when the caller
     already holds the agent. ``mechanism`` is the revision mechanism recorded
-    for the export (``web_impersonated`` for an impersonated session). Returns an
+    for the export (``web_impersonated`` for an impersonated session). A name,
+    institution or department longer than ``USER_FIELD_MAX_CHARS`` returns
+    ``field_too_long`` before anything is written. Returns an
     error code, or None after committing and exporting.
 
-    Every refusal comes before any write, because ``get_db`` commits on a clean return: a
-    ``generate_profile`` job pending or processing for ``target_user`` (``PROFILE_GENERATING``,
+    Every refusal comes before any write, because ``get_db`` commits on a clean return: an
+    overlong user field (A-15), a ``generate_profile`` job pending or processing for ``target_user`` (``PROFILE_GENERATING``,
     D-08), a malformed tenure year, then the email checks (D-02). The tenure year is written
     only when it differs from the recorded one (D-01). The profile-row insert runs under
     ``PROFILE_INSERT_LOCK_TIMEOUT``; a lock timeout rolls back and also returns
     ``PROFILE_GENERATING``.
     """
+    for field in ("name", "institution", "department"):
+        if len(form.get(field) or "") > USER_FIELD_MAX_CHARS:
+            return "field_too_long"
     if await _profile_generation_in_flight(db, target_user.id):
         return PROFILE_GENERATING
     # Optional JHU tenure-start correction (manager form only; the PI's own

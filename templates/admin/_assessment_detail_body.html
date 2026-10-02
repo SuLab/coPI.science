@@ -1120,7 +1120,7 @@
                             <label class="block text-sm font-medium text-gray-600 mb-1 mt-3">Rubric dimensions (optional)</label>
                             {{ dimension_score_rows(review_rubric, review.dimension_scores or {}, edit_prefix) }}
                             <label for="{{ edit_prefix }}comment" class="block text-sm font-medium text-gray-600 mb-1 mt-3">Comment</label>
-                            <textarea id="{{ edit_prefix }}comment" name="comment" rows="2" class="w-full border rounded px-2 py-1 text-sm">{{ review.comment }}</textarea>
+                            <textarea id="{{ edit_prefix }}comment" name="comment" maxlength="10000" rows="2" class="w-full border rounded px-2 py-1 text-sm">{{ review.comment }}</textarea>
                             <label for="{{ edit_prefix }}mode" class="block text-sm font-medium text-gray-600 mb-1 mt-3">Feedback mode</label>
                             <select id="{{ edit_prefix }}mode" name="feedback_mode" class="border rounded px-1 py-0.5 text-sm">
                                 <option value="learn" {% if review.feedback_mode == 'learn' %}selected{% endif %}>Learn</option>
@@ -1158,7 +1158,7 @@
             <label class="block text-sm font-medium text-gray-600 mb-1 mt-3">Rubric dimensions (optional)</label>
             {{ dimension_score_rows(review_rubric, {}, 'add-') }}
             <label for="add-comment" class="block text-sm font-medium text-gray-600 mb-1 mt-3">Comment</label>
-            <textarea id="add-comment" name="comment" rows="2" placeholder="Comment" class="w-full border rounded px-2 py-1 text-sm"></textarea>
+            <textarea id="add-comment" name="comment" maxlength="10000" rows="2" placeholder="Comment" class="w-full border rounded px-2 py-1 text-sm"></textarea>
             <label for="add-mode" class="block text-sm font-medium text-gray-600 mb-1 mt-3">Feedback mode</label>
             <select id="add-mode" name="feedback_mode" required class="border rounded px-1 py-0.5 text-sm">
                 <option value="" disabled selected>&mdash;</option>

@@ -81,7 +81,6 @@ from src.services.directory import (
     load_user_detail,
 )
 from src.services.email_verification import mark_email_verified
-from src.services.grant_resolution import GrantRecord, derive_grant_titles
 from src.services.industry_evidence import rescore_user
 from src.services.jhu_rules import get_tenure_start
 from src.services.pi_onboarding import (
@@ -450,8 +449,11 @@ async def manager_veto_grant(
     """Mark a RePORTER grant as 'not this PI'. Persisted; re-runs respect it.
 
     The profile row is locked so a concurrent profile edit or veto cannot interleave
-    its grant_titles write (RA-13).
+    its grant_titles write (RA-13). Removes only the vetoed grant's title from
+    ``grant_titles`` (unless another un-vetoed grant carries the same title); a second
+    veto is a no-op. 404 for a non-PI account (A-17).
     """
+    await _require_pi(db, user_id)
     profile = (await db.execute(
         select(ResearcherProfile).where(ResearcherProfile.user_id == user_id)
         .with_for_update()
@@ -461,25 +463,21 @@ async def manager_veto_grant(
     )).scalar_one_or_none()
     if grant is None:
         raise HTTPException(status_code=404, detail="Grant not found")
+    if grant.vetoed_at is not None:
+        # Idempotent (D-19): a replayed veto keeps the first vetoed_at.
+        return RedirectResponse(url=f"/manager/pis/{user_id}#grants", status_code=302)
     grant.vetoed_at = datetime.now(UTC)
-    remaining = (await db.execute(
-        select(PiGrant).where(PiGrant.user_id == user_id, PiGrant.vetoed_at.is_(None))
-    )).scalars().all()
-    if profile is not None:
-        new_titles = derive_grant_titles([
-            GrantRecord(**{k: getattr(g, k) for k in GrantRecord.__dataclass_fields__})
-            for g in remaining
-        ])
-        if new_titles:
-            profile.grant_titles = new_titles
-        else:
-            # No RePORTER-derived grant remains eligible, but grant_titles
-            # may still carry ORCID/publication-sourced titles that never
-            # came from a PiGrant row at all — derive_grant_titles([]) == []
-            # would wipe those too, so only the vetoed title is removed.
-            profile.grant_titles = [
-                t for t in (profile.grant_titles or []) if t != grant.title
-            ]
+    still_backed = await db.scalar(
+        select(func.count(PiGrant.id)).where(
+            PiGrant.user_id == user_id, PiGrant.id != grant.id,
+            PiGrant.vetoed_at.is_(None), PiGrant.title == grant.title,
+        )
+    )
+    if profile is not None and not still_backed:
+        # Remove only the vetoed title (D-19). Re-deriving the list from the
+        # remaining PiGrant rows dropped every title that never came from one
+        # (ORCID- or publication-sourced).
+        profile.grant_titles = [t for t in (profile.grant_titles or []) if t != grant.title]
     await db.commit()
     await _reexport_profile_markdown_best_effort(db, user_id)
     return RedirectResponse(url=f"/manager/pis/{user_id}#grants", status_code=302)
@@ -493,6 +491,7 @@ async def manager_veto_industry_evidence(
     """'Not this PI / not industry' veto on one evidence row; persisted and
     rescored immediately. Idempotent: a replayed POST on an already-vetoed
     row is a no-op redirect, so a double-click never rescores twice."""
+    await _require_pi(db, user_id)
     row = (await db.execute(
         select(PiIndustryEvidence).where(
             PiIndustryEvidence.id == evidence_id, PiIndustryEvidence.user_id == user_id
@@ -521,6 +520,17 @@ async def manager_veto_industry_evidence(
     return RedirectResponse(url=f"/manager/pis/{user_id}#industry", status_code=302)
 
 
+async def _require_pi(db: AsyncSession, user_id: uuid.UUID) -> User:
+    """The PI account ``user_id``, or 404 — never a staff account, so a manager
+    cannot act on (or probe) an admin's row by UUID (A-17)."""
+    target = (
+        await db.execute(select(User).where(User.id == user_id))
+    ).scalar_one_or_none()
+    if target is None or target.user_role != USER_ROLE_PI:
+        raise HTTPException(status_code=404, detail="PI not found")
+    return target
+
+
 async def _pending_pi_agent(db: AsyncSession, user_id: uuid.UUID) -> AgentRegistry:
     """The pending ``pi_lab`` agent of a PI account, or 404.
 
@@ -536,11 +546,7 @@ async def _pending_pi_agent(db: AsyncSession, user_id: uuid.UUID) -> AgentRegist
     hand-linked on /admin/agents to a hub or specialist row would sail past
     the gate here with no profile check at all. 404 instead.
     """
-    target = (
-        await db.execute(select(User).where(User.id == user_id))
-    ).scalar_one_or_none()
-    if target is None or target.user_role != USER_ROLE_PI:
-        raise HTTPException(status_code=404, detail="PI not found")
+    await _require_pi(db, user_id)
     agent = (
         await db.execute(
             select(AgentRegistry).where(AgentRegistry.user_id == user_id)

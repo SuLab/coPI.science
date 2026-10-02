@@ -624,7 +624,7 @@
                 <label for="{{ qs }}score" class="block text-sm font-medium text-gray-600 mb-1">Overall rating (1 = weak … 5 = strong)</label>
                 <select id="{{ qs }}score" name="score" required class="border rounded px-1 py-0.5 text-sm"><option value="" disabled selected>&mdash;</option>{% for n in range(1, 6) %}<option value="{{ n }}">{{ n }}</option>{% endfor %}</select>
                 <label for="{{ qs }}comment" class="block text-sm font-medium text-gray-600 mb-1 mt-3">Comment</label>
-                <textarea id="{{ qs }}comment" name="comment" rows="2" placeholder="Comment" class="w-full border rounded px-2 py-1 text-sm"></textarea>
+                <textarea id="{{ qs }}comment" name="comment" maxlength="10000" rows="2" placeholder="Comment" class="w-full border rounded px-2 py-1 text-sm"></textarea>
                 <label for="{{ qs }}mode" class="block text-sm font-medium text-gray-600 mb-1 mt-3">Feedback mode</label>
                 <select id="{{ qs }}mode" name="feedback_mode" required class="border rounded px-1 py-0.5 text-sm"><option value="" disabled selected>&mdash;</option><option value="learn">Learn</option><option value="log_only">Don't learn — log only</option></select>
                 <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Submit feedback</button>

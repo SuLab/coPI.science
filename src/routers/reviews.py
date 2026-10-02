@@ -33,6 +33,7 @@ from src.dependencies import (
 )
 from src.models import AssessmentReview, OpportunityAssessment, PromptChangeSuggestion, User
 from src.services.assessment_reviews import (
+    DuplicateFeedbackError,
     assign_reviewer,
     edit_feedback,
     enqueue_pending_analyses,
@@ -45,6 +46,7 @@ from src.services.directory import (
     ASSESSMENT_REVIEW_FILTERS,
     ASSESSMENT_SORTS,
 )
+from src.web.flash import flash
 
 #: Mirrors PromptChangeSuggestion.status's docstring (src/models/review.py).
 #: Kept local rather than shared with src/routers/manager.py's copy — see
@@ -302,6 +304,7 @@ async def submit_review_feedback(
     # make. `_list_filter_query` validates the value either way.
     form = await request.form()
     dimension_scores = _parse_dimension_scores(form)
+    duplicate = False
     try:
         await submit_feedback(
             db,
@@ -313,14 +316,25 @@ async def submit_review_feedback(
             dimension_scores=dimension_scores,
             recorded_by=recorded_by(current_user),
         )
+    except DuplicateFeedbackError:
+        duplicate = True
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await db.commit()
-    logger.info(
-        "Review feedback by %s (%s) on assessment %s: score=%s mode=%s dims=%d",
-        current_user.name, current_user.id, assessment_id, score, feedback_mode,
-        len(dimension_scores),
-    )
+    if duplicate:
+        # A double submit lands where the first did, with a note instead of a
+        # second row (B-04). Not an error page: the browser shows THIS response.
+        flash(
+            request,
+            "That feedback was already recorded a moment ago; it was not saved twice.",
+            "info",
+        )
+    else:
+        await db.commit()
+        logger.info(
+            "Review feedback by %s (%s) on assessment %s: score=%s mode=%s dims=%d",
+            current_user.name, current_user.id, assessment_id, score, feedback_mode,
+            len(dimension_scores),
+        )
     return _assessments_redirect(
         surface, current_user, assessment_id,
         run_id=_form_str(form, "run_id"),
