@@ -95,10 +95,10 @@
 </nav>
 
 {% if msg %}
-<div class="mb-4 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-base text-green-800">{{ msg }}</div>
+<div data-sim-flash class="mb-4 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-base text-green-800">{{ msg }}</div>
 {% endif %}
 {% if error %}
-<div class="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-base text-red-800">{{ error }}</div>
+<div data-sim-flash class="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-base text-red-800">{{ error }}</div>
 {% endif %}
 
 <!-- Status card -->
@@ -319,7 +319,7 @@
         {{ '{hub_prompts_version}' }}, {{ '{hub_prompts_hash}' }}, {{ '{pi_prompts_version}' }},
         {{ '{pi_prompts_hash}' }}, {{ '{rubric_version}' }}, {{ '{rubric_hash}' }}.
     </p>
-    <form action="/admin/simulation/announce-template" method="post" class="space-y-3">
+    <form action="/admin/simulation/announce-template" method="post" class="space-y-3"{% if template_error %} data-sim-keep{% endif %}>
         <textarea name="body" rows="10"
                   class="border border-gray-300 rounded px-3 py-2 text-base w-full font-mono">{{ template_value }}</textarea>
         <input type="hidden" name="reset" value="false">
@@ -405,7 +405,7 @@
 <section id="sec-run">
 <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5 mb-6">
     <h2 class="text-lg font-semibold text-gray-900 mb-3">Run selector</h2>
-    <form method="get" class="flex items-center gap-3">
+    <form method="get" action="/admin/simulation" class="flex items-center gap-3">
         <select name="run" onchange="this.form.submit()"
                 class="border border-gray-300 rounded px-2 py-1 text-base">
             {% for opt in run_options %}
@@ -726,30 +726,159 @@
 
 </div><!-- #sim-body -->
 
-<label class="mb-4 flex items-center gap-2 text-sm text-gray-600">
+<label class="mb-2 flex items-center gap-2 text-sm text-gray-600">
     <input type="checkbox" id="sim-refresh-pause" class="rounded border-gray-300">
-    Pause auto-refresh <span class="sc-meta">(refreshes every 30 s; open tables stay open)</span>
+    Pause auto-refresh <span class="sc-meta">(refreshes every 30 s; open tables stay open; your edits and focus are kept)</span>
+    <span id="sim-refresh-updated" class="sc-meta"></span>
 </label>
+<p id="sim-refresh-notice" role="status" hidden
+   class="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900"></p>
 <script>
-let inFlight = false;
-const simRefreshTimer = setInterval(() => {
-  if (document.getElementById('sim-refresh-pause')?.checked) return;
-  // Polite: skip a hidden tab and never stack a second fetch on a slow one.
-  if (document.hidden || inFlight) return;
-  // Never replace #sim-body while the operator is typing inside it: the swap
-  // would discard the in-progress announce-template or channel-list edit.
-  if (document.getElementById('sim-body')?.contains(document.activeElement)
-      && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) return;
-  inFlight = true;
-  fetch(location.href).then(r => r.text()).then(h => {
-    const d = new DOMParser().parseFromString(h, 'text/html');
-    const next = d.getElementById('sim-body');
-    const cur = document.getElementById('sim-body');
-    if (!next || !cur) { clearInterval(simRefreshTimer); return; }
-    const open = new Set([...cur.querySelectorAll('details[open][data-sc-key]')].map(el => el.dataset.scKey));
-    cur.innerHTML = next.innerHTML;
-    cur.querySelectorAll('details[data-sc-key]').forEach(el => { if (open.has(el.dataset.scKey)) el.open = true; });
-  }).finally(() => { inFlight = false; });
-}, 30000);
+(function () {
+  // Spec 2026-10-01 §5.3. Units are the jump nav and each top-level <section id>;
+  // a unit that holds focus or an edited form is never replaced or removed (C-01,
+  // C-09). The fetch targets the page route, never location.href, and a redirected,
+  // failed or non-HTML answer stops the refresh with a visible notice (C-08).
+  const REFRESH_MS = 30000;
+  const MAX_NETWORK_FAILURES = 3;
+  const body = document.getElementById('sim-body');
+  const notice = document.getElementById('sim-refresh-notice');
+  const updated = document.getElementById('sim-refresh-updated');
+  if (!body) return;
+
+  // C-27: a ?msg=/?error= flash is shown once; a reload must not repeat it.
+  const here = new URL(location.href);
+  if (here.searchParams.has('msg') || here.searchParams.has('error')) {
+    here.searchParams.delete('msg');
+    here.searchParams.delete('error');
+    history.replaceState(history.state, '', here.pathname + here.search + here.hash);
+  }
+
+  function refreshUrl() {
+    const target = new URL('/admin/simulation', location.origin);
+    const run = new URL(location.href).searchParams.get('run');
+    if (run !== null) target.searchParams.set('run', run);
+    return target.toString();
+  }
+
+  function unitsOf(root) {
+    return Array.from(root.querySelectorAll(':scope > nav.sim-jump-nav, :scope > section[id]'));
+  }
+
+  function unitKey(el) {
+    return el.tagName === 'NAV' ? 'nav' : el.id;
+  }
+
+  function formIsDirty(form) {
+    for (const el of Array.from(form.elements)) {
+      if (el.type === 'checkbox' || el.type === 'radio') {
+        if (el.checked !== el.defaultChecked) return true;
+      } else if (el.tagName === 'SELECT') {
+        for (const opt of Array.from(el.options)) {
+          if (opt.selected !== opt.defaultSelected) return true;
+        }
+      } else if ('defaultValue' in el && el.value !== el.defaultValue) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function isPinned(unit) {
+    const active = document.activeElement;
+    if (active && active !== document.body && unit.contains(document.activeElement)) return true;
+    // A rejected template re-rendered with its error (data-sim-keep) is never replaced.
+    if (unit.querySelector('[data-sim-keep]')) return true;
+    return Array.from(unit.querySelectorAll('form')).some(formIsDirty);
+  }
+
+  // A pinned unit says so, rather than silently showing figures older than the
+  // "last updated" time next to the pause box (plan audit Q1-13).
+  function markStale(unit) {
+    if (unit.querySelector('[data-sim-stale-note]')) return;
+    const note = document.createElement('p');
+    note.setAttribute('data-sim-stale-note', '');
+    note.setAttribute('role', 'status');
+    note.className = 'mb-2 text-sm text-amber-800';
+    note.textContent = 'Not refreshed while this section has unsaved edits or keyboard focus.';
+    unit.prepend(note);
+  }
+
+  function reconcile(next) {
+    const open = new Set(Array.from(body.querySelectorAll('details[open][data-sc-key]'))
+      .map(el => el.dataset.scKey));
+    const current = new Map(unitsOf(body).map(el => [unitKey(el), el]));
+    const fresh = unitsOf(next);
+    const freshKeys = new Set(fresh.map(unitKey));
+    for (const [key, el] of current) {
+      if (!freshKeys.has(key) && !isPinned(el)) el.remove();
+    }
+    let anchor = null;
+    for (const el of fresh) {
+      const old = current.get(unitKey(el));
+      const incoming = document.importNode(el, true);
+      if (old && old.isConnected) {
+        if (isPinned(old)) { markStale(old); anchor = old; continue; }
+        old.replaceWith(incoming);
+      } else if (anchor) {
+        anchor.after(incoming);
+      } else {
+        const first = unitsOf(body)[0];
+        if (first) first.before(incoming); else body.appendChild(incoming);
+      }
+      anchor = incoming;
+    }
+    body.querySelectorAll('details[data-sc-key]').forEach(el => {
+      if (open.has(el.dataset.scKey)) el.open = true;
+    });
+    body.querySelectorAll('[data-sim-flash]').forEach(el => el.remove());
+  }
+
+  let inFlight = false;
+  let failures = 0;
+  let timer = null;
+
+  function stop(message) {
+    clearInterval(timer);
+    if (notice) {
+      notice.textContent = message;
+      notice.hidden = false;
+    }
+  }
+
+  function tick() {
+    if (document.getElementById('sim-refresh-pause')?.checked) return;
+    // Polite: skip a hidden tab and never stack a second fetch on a slow one.
+    if (document.hidden || inFlight) return;
+    inFlight = true;
+    fetch(refreshUrl(), { credentials: 'same-origin', headers: { 'Accept': 'text/html' } })
+      .then(r => {
+        const type = r.headers.get('content-type') || '';
+        if (!r.ok || r.redirected || !type.includes('text/html')) {
+          stop('Auto-refresh stopped — reload the page ('
+               + (r.redirected ? 'your session has ended' : 'HTTP ' + r.status) + ').');
+          return null;
+        }
+        return r.text();
+      })
+      .then(h => {
+        if (h === null) return;
+        const next = new DOMParser().parseFromString(h, 'text/html').getElementById('sim-body');
+        if (!next) { stop('Auto-refresh stopped — reload the page.'); return; }
+        reconcile(next);
+        failures = 0;
+        if (updated) updated.textContent = '· last updated ' + new Date().toLocaleTimeString();
+      })
+      .catch(() => {
+        failures += 1;
+        if (failures >= MAX_NETWORK_FAILURES) {
+          stop('Auto-refresh stopped after repeated network errors — reload the page.');
+        }
+      })
+      .finally(() => { inFlight = false; });
+  }
+
+  timer = setInterval(tick, REFRESH_MS);
+})();
 </script>
 {% endblock %}
