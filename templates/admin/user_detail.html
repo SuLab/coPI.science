@@ -25,6 +25,7 @@
                     <span class="text-amber-700">Unverified</span>
                     {% if not impersonation_banner %}
                     <form method="POST" action="/admin/users/{{ target_user.id }}/verify-email" class="inline ml-2">
+                        <input type="hidden" name="email" value="{{ target_user.email }}">
                         <button type="submit" class="text-indigo-600 hover:underline">Mark verified</button>
                     </form>
                     {% endif %}
@@ -35,6 +36,8 @@
                 <dd class="text-xs text-green-700 mt-1">Email address marked verified.</dd>
                 {% elif request.query_params.get('error') == 'no_email' %}
                 <dd class="text-xs text-red-700 mt-1">This account has no email address to verify.</dd>
+                {% elif request.query_params.get('error') == 'email_changed' %}
+                <dd class="text-xs text-red-700 mt-1">The address changed after this page loaded. Check it, then verify again.</dd>
                 {% endif %}
             </div>
             <div>

@@ -69,11 +69,13 @@ async def test_the_announcing_stop_names_the_live_runs_counts(client, db_session
     newer = SimulationRun(status="stopped", started_at=now - timedelta(hours=1))
     db_session.add_all([live, newer])
     await db_session.flush()
-    # Live run: one closed and owed, one closed and posted, two still open -> 3 owed, 2 open.
+    # Live run: one closed and owed, one closed and posted, two still open, and one open
+    # interview an earlier Stop already announced (a resumed run) -> 3 owed, 2 open.
     db_session.add_all([
         _verdict(live, "closed-owed"), _closed(live, "closed-owed"),
         _verdict(live, "closed-posted", posted=True), _closed(live, "closed-posted"),
         _verdict(live, "open-1"), _verdict(live, "open-2"),
+        _verdict(live, "open-announced", posted=True),
     ])
     # The newer run is the page's default selection; its numbers must not leak in.
     db_session.add_all([_verdict(newer, f"newer-{n}") for n in range(5)])

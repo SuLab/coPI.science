@@ -114,6 +114,15 @@ async def test_the_profile_insert_gives_up_on_a_held_lock(db_session, engine, mo
     ) is None
 
 
+async def test_the_insert_bound_does_not_outlive_the_insert(db_session):
+    """The 5 s lock bound covers only the new profile row; later statements of the same
+    transaction get the session's own lock_timeout back."""
+    user = await factories.make_user(db_session)
+    before = await db_session.scalar(text("SHOW lock_timeout"))
+    assert await profile_edit._load_or_create_profile(db_session, user.id) is not None
+    assert await db_session.scalar(text("SHOW lock_timeout")) == before
+
+
 async def test_the_profile_page_explains_the_refusal(client, db_session):
     user = await factories.make_user(db_session)
     db_session.add(Job(type="generate_profile", user_id=user.id, status="pending",

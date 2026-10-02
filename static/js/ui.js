@@ -30,7 +30,8 @@
   }
 
   function localPath(value) {
-    return typeof value === "string" && value.charAt(0) === "/" && value.charAt(1) !== "/";
+    // A backslash after the slash is protocol-relative to a browser, like "//host".
+    return typeof value === "string" && /^\/(?![\/\\])/.test(value);
   }
 
   document.addEventListener("click", function (event) {

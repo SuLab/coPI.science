@@ -34,7 +34,8 @@ async def _user(db_session, role, **overrides):
 async def test_an_admin_verifies_any_users_address(client, db_session):
     admin = await _user(db_session, USER_ROLE_ADMIN)
     target = await _user(db_session, USER_ROLE_REVIEWER, email="rev@example.edu")
-    r = await client.post(f"/admin/users/{target.id}/verify-email", headers=auth_headers(admin.id))
+    r = await client.post(f"/admin/users/{target.id}/verify-email",
+                          data={"email": "Rev@Example.edu"}, headers=auth_headers(admin.id))
     assert r.status_code == 302
     assert r.headers["location"] == f"/admin/users/{target.id}?email_verified=1"
     await db_session.refresh(target)
@@ -77,12 +78,27 @@ async def test_the_admin_route_is_admin_only(client, db_session):
     assert missing.status_code == 404
 
 
+
+@pytest.mark.parametrize("route", ["/admin/users/{id}/verify-email", "/manager/pis/{id}/verify-email"])
+async def test_an_address_changed_after_the_page_loaded_is_not_verified(client, db_session, route):
+    """The form posts the address the verifier saw; a later change is refused unstamped."""
+    admin = await _user(db_session, USER_ROLE_ADMIN)
+    target = await _user(db_session, USER_ROLE_PI, email="now@example.edu")
+    r = await client.post(route.format(id=target.id), data={"email": "shown@example.edu"},
+                          headers=auth_headers(admin.id))
+    assert r.status_code == 302 and r.headers["location"].endswith("?error=email_changed")
+    missing = await client.post(route.format(id=target.id), headers=auth_headers(admin.id))
+    assert missing.headers["location"].endswith("?error=email_changed")
+    await db_session.refresh(target)
+    assert target.email_verified_at is None and await _events(db_session) == []
+
 # --- manager route --------------------------------------------------------------
 
 async def test_a_manager_verifies_a_pis_address(client, db_session):
     mgr = await _user(db_session, USER_ROLE_MANAGER)
     pi = await _user(db_session, USER_ROLE_PI, email="pi@example.edu")
-    r = await client.post(f"/manager/pis/{pi.id}/verify-email", headers=auth_headers(mgr.id))
+    r = await client.post(f"/manager/pis/{pi.id}/verify-email",
+                          data={"email": "pi@example.edu"}, headers=auth_headers(mgr.id))
     assert r.headers["location"] == f"/manager/pis/{pi.id}?email_verified=1"
     await db_session.refresh(pi)
     assert pi.email_verified_at is not None
@@ -126,7 +142,9 @@ async def test_the_admin_page_offers_verification_until_it_is_done(client, db_se
     action = f'action="/admin/users/{target.id}/verify-email"'
     page = (await client.get(f"/admin/users/{target.id}", headers=auth_headers(admin.id))).text
     assert action in page and "Unverified" in page
-    await client.post(f"/admin/users/{target.id}/verify-email", headers=auth_headers(admin.id))
+    assert 'name="email" value="ctl@example.edu"' in page
+    await client.post(f"/admin/users/{target.id}/verify-email",
+                      data={"email": "ctl@example.edu"}, headers=auth_headers(admin.id))
     page = (await client.get(f"/admin/users/{target.id}", headers=auth_headers(admin.id))).text
     assert action not in page and "Verified " in page
 

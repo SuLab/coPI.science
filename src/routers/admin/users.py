@@ -190,6 +190,7 @@ async def admin_set_user_role(
 @router.post("/users/{user_id}/verify-email")
 async def admin_verify_user_email(
     user_id: uuid.UUID,
+    email: str = Form(""),
     db: AsyncSession = _DB,
     current_user: User = _ADMIN,
 ):
@@ -202,7 +203,7 @@ async def admin_verify_user_email(
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
-    error = await mark_email_verified(db, target=user, actor=current_user)
+    error = await mark_email_verified(db, target=user, actor=current_user, shown_email=email)
     if error:
         return RedirectResponse(url=f"/admin/users/{user_id}?error={error}", status_code=302)
     logger.info("Admin %s verified the email address of user %s", current_user.id, user_id)

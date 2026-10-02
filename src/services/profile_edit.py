@@ -143,6 +143,9 @@ async def _load_or_create_profile(
             raise
         await db.rollback()
         return None
+    # The bound is for the INSERT only: the rest of the request's transaction (the
+    # field writes and the export) waits as it did before.
+    await db.execute(text("SET LOCAL lock_timeout TO DEFAULT"))
     return profile
 
 

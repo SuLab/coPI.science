@@ -102,15 +102,16 @@ async def _stop_counts(
     by ``started_at`` and need not be the one the engine is executing; the heartbeat
     row names the live run. A Stop announces every owed headline of that run, open
     interviews included: ``owed`` is the terminal ones owed plus the provisional
-    (still open) ones, ``open`` the provisional ones, ``posts`` what one Stop posts
-    (at most ``cap``). None when no engine holds the lock or the heartbeat has not
+    (still open) ones not yet announced, ``open`` those provisional ones, ``posts``
+    what one Stop posts (at most ``cap``). An open interview an earlier Stop already
+    announced (the run was resumed) is not owed again. None when no engine holds the lock or the heartbeat has not
     named a run yet; the dialog then words it without numbers.
     """
     if not engine_is_alive or status_row is None or status_row.simulation_run_id is None:
         return None
     live = await funnel(db, status_row.simulation_run_id)
-    owed = live.headlines_owed + live.provisional
-    return {"owed": owed, "open": live.provisional, "cap": STOP_ANNOUNCE_CAP,
+    owed = live.headlines_owed + live.provisional_unannounced
+    return {"owed": owed, "open": live.provisional_unannounced, "cap": STOP_ANNOUNCE_CAP,
             "posts": min(owed, STOP_ANNOUNCE_CAP)}
 
 

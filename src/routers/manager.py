@@ -382,7 +382,8 @@ async def manager_unmute_pi(
 
 @router.post("/pis/{user_id}/verify-email")
 async def manager_verify_pi_email(
-    user_id: uuid.UUID, db: AsyncSession = _DB, current_user: User = _STAFF,
+    user_id: uuid.UUID, email: str = Form(""), db: AsyncSession = _DB,
+    current_user: User = _STAFF,
 ):
     """Mark a PI's email address verified (spec 2026-10-01 §6.6).
 
@@ -395,7 +396,7 @@ async def manager_verify_pi_email(
     target = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if target is None or target.user_role != USER_ROLE_PI:
         raise HTTPException(status_code=404, detail="PI not found")
-    error = await mark_email_verified(db, target=target, actor=current_user)
+    error = await mark_email_verified(db, target=target, actor=current_user, shown_email=email)
     if error:
         return RedirectResponse(url=f"/manager/pis/{user_id}?error={error}", status_code=302)
     logger.info("Staff user %s verified the email address of PI %s", current_user.id, user_id)

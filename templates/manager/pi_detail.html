@@ -101,6 +101,7 @@
             {% if request.query_params.get('error') == 'invalid_email' %}Please enter a valid email address.
             {% elif request.query_params.get('error') == 'email_taken' %}That email address is already in use by another account.
             {% elif request.query_params.get('error') == 'no_email' %}This account has no email address to verify.
+            {% elif request.query_params.get('error') == 'email_changed' %}The address changed after this page loaded. Check it, then verify again.
             {% elif request.query_params.get('error') == 'invalid_tenure_year' %}JHU tenure start must be a 4-digit year (or blank to leave unchanged).
             {% elif request.query_params.get('error') == 'profile_changed' %}This profile changed while you were editing it (a regeneration or another edit saved first). Reload the page to see the current version, then re-apply your changes.
             {% elif request.query_params.get('error') == 'agent_not_mutable' %}This agent can't be muted or unmuted in its current state.
@@ -127,6 +128,7 @@
                     <span class="text-amber-700">Unverified</span>
                     {% if effective_user.is_staff and not impersonation_banner %}
                     <form method="post" action="/manager/pis/{{ target_user.id }}/verify-email" class="inline ml-2">
+                        <input type="hidden" name="email" value="{{ target_user.email }}">
                         <button type="submit" class="text-indigo-600 hover:underline">Mark verified</button>
                     </form>
                     {% endif %}

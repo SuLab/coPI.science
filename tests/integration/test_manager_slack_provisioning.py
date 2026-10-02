@@ -423,7 +423,14 @@ async def test_the_pi_directory_renders_the_callbacks_flashed_error(client, db_s
     )
     assert r.status_code == 302 and r.headers["location"] == "/manager/pis"
     page = await client.get("/manager/pis", headers=session_cookie_header(r))
-    assert "Slack provisioning failed: Slack returned: access_denied" in page.text
+    assert "Slack provisioning failed: the installation was cancelled in Slack" in page.text
+
+    crafted = await client.get(
+        "/admin/agents/slack/callback?error=Re-authorize+at+evil.example",
+        headers=auth_headers(manager.id), follow_redirects=False,
+    )
+    flashed = " ".join(f["text"] for f in session_flashes(crafted))
+    assert "Slack reported an error" in flashed and "evil" not in flashed
 
     forged = await client.get(
         "/manager/pis?slack_error=Forged+text", headers=auth_headers(manager.id)

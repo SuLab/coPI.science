@@ -392,6 +392,10 @@ async def admin_provision_slack(
 
 
 
+#: Slack OAuth ``error`` values the callback names; any other value gets a fixed sentence.
+_SLACK_OAUTH_ERRORS = {"access_denied": "the installation was cancelled in Slack"}
+
+
 @router.get("/agents/slack/callback")
 async def admin_provision_slack_callback(
     request: Request,
@@ -430,7 +434,8 @@ async def admin_provision_slack_callback(
         )
 
     if error:
-        return surface_error(f"Slack returned: {error}")
+        # A cross-site GET can set ``error`` to any text, so it is never echoed.
+        return surface_error(_SLACK_OAUTH_ERRORS.get(error, "Slack reported an error"))
     if not code or not state:
         return surface_error("Missing code or state from Slack")
 
