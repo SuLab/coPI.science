@@ -1,6 +1,5 @@
-"""Concurrent read-modify-writes on ResearcherProfile.profile_version and
-AgentRegistry.delegate_slack_ids. Pre-fix, both racers read the same prior
-value and one write is lost.
+"""Concurrent read-modify-writes on ResearcherProfile.profile_version. Pre-fix,
+both racers read the same prior value and one write is lost.
 
 These tests cannot use the rollback-scoped ``db_session`` fixture: a lost
 update only exists between two sessions committing independently, which is
@@ -17,7 +16,7 @@ import pytest
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from src.models import AgentRegistry, ResearcherProfile, User
+from src.models import ResearcherProfile, User
 
 pytestmark = pytest.mark.integration
 
@@ -112,119 +111,3 @@ async def test_first_ever_profile_still_reaches_version_one(engine):
         assert version == 1, f"a first-ever profile save did not land: version={version}"
     finally:
         await _drop_user(factory, user_id)
-
-
-async def _append_delegate(factory, agent_id, sid, gate):
-    from sqlalchemy import text as sa_text
-    from sqlalchemy import update as sa_update
-    async with factory() as db:
-        agent = (await db.execute(
-            select(AgentRegistry).where(AgentRegistry.id == agent_id)
-        )).scalar_one()
-        await gate.wait()  # both sessions hold the pre-append row
-        await db.execute(
-            sa_update(AgentRegistry)
-            .where(
-                AgentRegistry.id == agent.id,
-                sa_text(
-                    "NOT (coalesce(delegate_slack_ids, '{}'::varchar[]) @> ARRAY[:sid]::varchar[])"
-                ).bindparams(sid=sid),
-            )
-            .values(
-                delegate_slack_ids=sa_text(
-                    "array_append(coalesce(delegate_slack_ids, '{}'::varchar[]), :sid2)"
-                ).bindparams(sid2=sid)
-            )
-        )
-        await db.commit()
-
-
-@pytest.mark.asyncio
-async def test_concurrent_delegate_appends_both_land_and_dedup(engine):
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with factory() as db:
-        agent = AgentRegistry(
-            agent_id=f"race{uuid.uuid4().hex[:6]}", bot_name="RaceBot",
-            pi_name="Race PI", status="pending",
-        )
-        db.add(agent)
-        await db.commit()
-        agent_id = agent.id
-
-    try:
-        gate = asyncio.Barrier(2)
-        await asyncio.gather(
-            _append_delegate(factory, agent_id, "U1", gate),
-            _append_delegate(factory, agent_id, "U2", gate),
-        )
-        gate = asyncio.Barrier(2)
-        await asyncio.gather(
-            _append_delegate(factory, agent_id, "U3", gate),
-            _append_delegate(factory, agent_id, "U3", gate),
-        )
-        async with factory() as db:
-            ids = (await db.execute(
-                select(AgentRegistry.delegate_slack_ids).where(
-                    AgentRegistry.id == agent_id
-                )
-            )).scalar_one()
-        assert sorted(ids) == ["U1", "U2", "U3"], (
-            f"lost or duplicated a concurrent delegate append: {ids}"
-        )
-    finally:
-        async with factory() as db:
-            await db.execute(delete(AgentRegistry).where(AgentRegistry.id == agent_id))
-            await db.commit()
-
-
-@pytest.mark.asyncio
-async def test_concurrent_delegate_removal_leaves_the_other_id(engine):
-    """The removal site's mirror: array_remove must not clobber a concurrent
-    append, and an emptied array must come back as NULL (the shape the column
-    has always had — the old code wrote `current_ids if current_ids else None`).
-    """
-    from sqlalchemy import text as sa_text
-    from sqlalchemy import update as sa_update
-
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with factory() as db:
-        agent = AgentRegistry(
-            agent_id=f"race{uuid.uuid4().hex[:6]}", bot_name="RaceBot",
-            pi_name="Race PI", status="pending", delegate_slack_ids=["U1", "U2"],
-        )
-        db.add(agent)
-        await db.commit()
-        agent_id = agent.id
-
-    async def remove(sid, gate):
-        async with factory() as db:
-            await db.execute(
-                select(AgentRegistry).where(AgentRegistry.id == agent_id)
-            )
-            await gate.wait()  # both sessions hold the pre-removal row
-            await db.execute(
-                sa_update(AgentRegistry)
-                .where(AgentRegistry.id == agent_id)
-                .values(
-                    delegate_slack_ids=sa_text(
-                        "nullif(array_remove(coalesce(delegate_slack_ids, "
-                        "'{}'::varchar[]), :sid), '{}'::varchar[])"
-                    ).bindparams(sid=sid)
-                )
-            )
-            await db.commit()
-
-    try:
-        gate = asyncio.Barrier(2)
-        await asyncio.gather(remove("U1", gate), remove("U2", gate))
-        async with factory() as db:
-            ids = (await db.execute(
-                select(AgentRegistry.delegate_slack_ids).where(
-                    AgentRegistry.id == agent_id
-                )
-            )).scalar_one()
-        assert ids is None, f"an emptied delegate list must be NULL, not {ids!r}"
-    finally:
-        async with factory() as db:
-            await db.execute(delete(AgentRegistry).where(AgentRegistry.id == agent_id))
-            await db.commit()

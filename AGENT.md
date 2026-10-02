@@ -46,7 +46,7 @@ All specs are in `/specs/`:
 | Job queue | PostgreSQL-backed (jobs table) |
 | LLM | Anthropic Claude (Opus for profiles, Sonnet for agents) |
 | Slack | slack-bolt (Socket Mode) |
-| Styling | Tailwind CSS (CDN) |
+| Styling | Tailwind CSS v3.4.19, compiled (`scripts/build_css.sh`) |
 | Deployment | Docker Compose |
 
 ## Project Structure
@@ -100,6 +100,10 @@ Decisions made autonomously during implementation are recorded here for human re
 ### 2026-03-20: Tailwind via CDN
 **Decision:** Load Tailwind CSS from CDN (`cdn.tailwindcss.com`) rather than building locally.
 **Reason:** Avoids Node.js build step in a Python project. Acceptable for pilot; switch to compiled Tailwind for production if performance matters.
+
+### 2026-10-01: Compiled Tailwind replaces the CDN
+**Decision:** `static/css/app.css` is built by the pinned Tailwind v3.4.19 standalone CLI (`scripts/build_css.sh`), committed, and drift-checked in `scripts/ci.sh`.
+**Reason:** The Play CDN is unversioned, cannot carry SRI and is documented as development-only (web UI audit A-03; spec `docs/specs/2026-10-01-web-ui-remediation-design.md` §6.1). The standalone CLI needs no Node.
 
 ### 2026-03-20: Profile markdown export
 **Decision:** When a ResearcherProfile is saved/updated in the DB, automatically export it to `profiles/public/{lab}.md` if the user is one of the 8 pilot labs (matched by ORCID).

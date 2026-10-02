@@ -56,23 +56,6 @@
     </div>
     {% endif %}
 
-    {% if not is_owner and not delegate_has_slack %}
-    <!-- Slack connect notice for delegates -->
-    <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6 text-sm text-blue-800">
-        <p class="mb-2">
-            To interact with {{ agent.bot_name }} in Slack (DMs, thread replies, standing instructions),
-            join the <a href="{{ slack_invite_url }}" target="_blank" class="underline">Slack workspace</a>
-            and connect your account.
-        </p>
-        <form method="POST" action="/agent/{{ agent.agent_id }}/delegates/connect-slack" class="inline">
-            <button type="submit"
-                    class="px-3 py-1.5 bg-blue-600 text-white text-xs rounded-md hover:bg-blue-700">
-                Connect Slack Account
-            </button>
-        </form>
-    </div>
-    {% endif %}
-
     <!-- Stats cards -->
     <div class="grid grid-cols-2 gap-4 mb-8">
         <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
@@ -126,11 +109,11 @@
                     <div class="flex items-center justify-between bg-gray-50 rounded-lg px-3 py-2">
                         <div class="text-sm">
                             <span class="font-medium text-gray-700">{{ wd.user.name }}</span>
-                            <span class="text-gray-400 ml-1">({{ wd.user.email }})</span>
-                            <span class="text-xs text-gray-400 ml-2">added {{ wd.created_at.strftime('%b %d') }}</span>
+                            <span class="text-gray-600 ml-1">({{ wd.user.email }})</span>
+                            <span class="text-xs text-gray-600 ml-2">added {{ wd.created_at.strftime('%b %d') }}</span>
                         </div>
                         <form method="POST" action="/agent/{{ agent.agent_id }}/delegates/{{ wd.id }}/remove" class="inline">
-                            <button type="submit" class="text-xs text-red-500 hover:text-red-700">Remove</button>
+                            <button type="submit" class="text-xs text-red-600 hover:text-red-700">Remove</button>
                         </form>
                     </div>
                     {% endfor %}
@@ -146,11 +129,11 @@
                     <div class="flex items-center justify-between bg-amber-50 rounded-lg px-3 py-2">
                         <div class="text-sm">
                             <span class="text-gray-700">{{ inv.email }}</span>
-                            <span class="text-xs text-gray-400 ml-2">sent {{ inv.created_at.strftime('%b %d') }}</span>
-                            <span class="text-xs text-gray-400 ml-1">· expires {{ inv.expires_at.strftime('%b %d') }}</span>
+                            <span class="text-xs text-gray-600 ml-2">sent {{ inv.created_at.strftime('%b %d') }}</span>
+                            <span class="text-xs text-gray-600 ml-1">· expires {{ inv.expires_at.strftime('%b %d') }}</span>
                         </div>
                         <form method="POST" action="/agent/{{ agent.agent_id }}/delegates/{{ inv.id }}/revoke" class="inline">
-                            <button type="submit" class="text-xs text-amber-600 hover:text-amber-800">Revoke</button>
+                            <button type="submit" class="text-xs text-amber-700 hover:text-amber-800">Revoke</button>
                         </form>
                     </div>
                     {% endfor %}
@@ -158,29 +141,8 @@
             </div>
             {% endif %}
 
-            {% if delegates %}
-            <div class="mb-4">
-                <div class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-2">Slack-Only Delegates</div>
-                <p class="text-xs text-gray-400 mb-2">These delegates were added via Slack. Re-invite through the web for full access.</p>
-                <div class="space-y-2">
-                    {% for d in delegates %}
-                    <div class="flex items-center justify-between bg-gray-50 rounded-lg px-3 py-2">
-                        <div class="text-sm">
-                            <span class="font-medium text-gray-700">{{ d.name }}</span>
-                            <span class="text-gray-400 ml-1">({{ d.slack_id }})</span>
-                        </div>
-                    </div>
-                    {% endfor %}
-                </div>
-            </div>
-            {% endif %}
-
-            {% if delegate_error %}
-            <p class="text-sm text-red-600 mb-2">{{ delegate_error }}</p>
-            {% endif %}
-
             <form method="POST" action="/agent/{{ agent.agent_id }}/delegates/invite">
-                <textarea name="emails" rows="2" placeholder="Enter email addresses (comma or newline separated)"
+                <textarea name="emails" aria-label="Email addresses to invite" rows="2" placeholder="Enter email addresses (comma or newline separated)"
                           class="w-full text-sm border border-gray-300 rounded-md px-3 py-2 mb-2"></textarea>
                 <button type="submit"
                         class="px-4 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">
@@ -195,7 +157,7 @@
 {% endblock %}
 
 {% block scripts %}
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
 // [data-markdown] rendering is handled by the shared sanitizing renderer
 // (/static/js/markdown.js, loaded in extra_head) — see SEC-2.
 </script>

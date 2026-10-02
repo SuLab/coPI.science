@@ -931,3 +931,48 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > 6. `$DC up -d agent`.
 
 > **Deploy order for `0056_phase3_constraints_and_indexes`.** Step 0: `pg_dump` `copi` explicitly (§12; `run_migration.sh` dumps only at `--apply`, after the remediations). Run `scripts/migrate/remediate_0056.py --jobs --provisions --publications --emails` (dry run) from a one-off container off the NEW image; apply `--jobs --provisions` if they list rows (`--jobs` leaves a `processing` row alone unless `--worker-stopped` is passed, because the pre-Phase-3 worker still running never takes the worker lock: stop the worker first, then add `--worker-stopped`); the publications dedupe runs only with the owner's go-ahead (it changes the affected PIs' `## Recent Publications` at their next export); email case duplicates are resolved by hand. Then idle the worker (no `processing` job, or `$DC stop worker`) and confirm no live run on `/admin/simulation` — the migration builds `ix_agent_messages_agent_phase` inside the one transaction and preflight sizes it. Rehearse `./scripts/migrate/run_migration.sh`, then `--apply`. **Old code on the new schema:** safe; a racing second enqueue of a per-user job now raises instead of duplicating. **New code on the old schema:** unsafe — `Job.priority` is mapped, every `select(Job)` raises. **Agent image:** rebuild (the engine writes `rubric_documents` at start and imports the Phase 3 registries). **Downgrade** drops everything `0056` added (`rubric_documents` and its rows, the six indexes and constraints, `jobs.priority`).
+
+> **Deploy order for `0057_email_verification_and_session_epoch` — migrate BEFORE the
+> new code serves, with the WORKER IDLE; then web and worker; the AGENT image last and
+> only with no live run. Everyone is signed out once.** `0057` adds
+> `users.email_verified_at` (timestamptz, NULL) and `users.session_epoch` (integer, NULL)
+> and, by owner decision D8 — an explicit override of "NULL is not backfilled" — stamps
+> `email_verified_at = now()` on every user that has an `email` when it is applied.
+> *Old code on the new schema* is safe: nothing old reads either column; an address
+> changed through the old web image after `--apply` keeps its stamp, so bring the new web
+> image up straight after. *New code on the old schema* is not: `User` maps both
+> columns, so every `select(User)` raises `UndefinedColumn` — every signed-in page, the
+> worker and the engine. Design: `docs/specs/2026-10-01-web-ui-remediation-design.md`
+> §6.5-§6.7.
+>
+> **The worker must be idle** (no `processing` row) when `--apply` runs: `ALTER TABLE
+> users` queues behind any open transaction that has read `users`, the worker holds its
+> transaction across a whole pipeline run, and the chain's 10 s `lock_timeout` then rolls
+> the chain back. Check with
+> `$DC exec -T postgres psql -U copi -d copi -c "select count(*) from jobs where status='processing'"`
+> (must print 0), or `$DC stop worker` for the migration.
+>
+> **Everyone is signed out once.** The new web image names the session cookie
+> `__Host-copi-session` (production runs `ALLOW_HTTP_SESSIONS=false`) and keeps
+> impersonation inside the signed session, so the old `copi-session` and
+> `copi-impersonate` cookies are ignored from `up -d blackbird-app` on and expire on their
+> own. **Agent image:** rebuild in the same deploy — the engine's Slack poller now
+> mirrors only messages from known agent identities (A-02b, `src/agent/engine/slack_io.py`).
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     for s in blackbird-app worker agent; do
+>       docker image tag copi-blackbird-$s:latest copi-blackbird-$s:rollback-pre-webui-1
+>     done
+>     $DC build blackbird-app worker
+>     $DC --profile agent build agent
+>     ./scripts/migrate/run_migration.sh              # rehearse (writes nothing)
+>     ./scripts/migrate/run_migration.sh --apply      # dump → preflight → apply → postflight
+>     $DC run --rm blackbird-app alembic current      # must equal `alembic heads` (0057)
+>     $DC up -d blackbird-app worker
+>     $DC up -d agent                                 # ONLY when /admin/simulation shows no live run
+>
+> No prompt or rubric file changes in this deploy, so no fresh-run requirement.
+> Rollback: redeploy the `rollback-pre-webui-1` images; the columns are harmless to old
+> code, and rolling the web image back signs everyone out again (the cookie name
+> reverts). `alembic downgrade 0056` drops both columns and every verification stamp; a
+> later re-upgrade re-stamps only the addresses present then.

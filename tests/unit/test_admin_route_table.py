@@ -9,6 +9,7 @@ from src.routers import admin
 EXPECTED_ROUTES = {
     ("GET", ""), ("GET", "/users"), ("GET", "/users/{user_id}"),
     ("POST", "/users/{user_id}/delete"), ("POST", "/users/{user_id}/role"),
+    ("POST", "/users/{user_id}/verify-email"),
     ("GET", "/jobs"),
     ("GET", "/activity"), ("GET", "/activity/{run_id}"), ("GET", "/activity/{run_id}/llm-calls"),
     ("GET", "/discussions"),
@@ -38,7 +39,7 @@ def _routes():
 
 def test_the_admin_route_set_is_unchanged():
     assert {(m, p) for _i, m, p in _routes()} == EXPECTED_ROUTES
-    assert len(_routes()) == 43
+    assert len(_routes()) == 44
 
 
 def test_literal_routes_are_registered_before_parameterised_siblings():

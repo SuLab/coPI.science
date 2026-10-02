@@ -22,7 +22,6 @@ def _settings():
         anthropic_api_key="sk-ant-LEAKME",
         orcid_client_secret="orcid-LEAKME",
         slack_bot_token_su="xoxb-LEAKME",
-        posthog_api_key="phc-LEAKME",
     )
 
 
@@ -33,7 +32,6 @@ def test_repr_and_str_redact_secrets():
         assert "sk-ant-LEAKME" not in rendered
         assert "orcid-LEAKME" not in rendered
         assert "xoxb-LEAKME" not in rendered
-        assert "phc-LEAKME" not in rendered
         assert "***REDACTED***" in rendered
 
 

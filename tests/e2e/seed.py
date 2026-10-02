@@ -23,14 +23,13 @@ row                          used by
 ``SIGNUP_ORCID`` user        agent self-service signup (``POST /agent/request``)
 ``ONBOARDING_ORCID`` user    the onboarding walk (deliberately no profile/job)
 ``PROBE_AGENT_ID`` agent     Slack provisioning (``*ProbeBot``, status=pending)
-5 Scripps agents + edges     ``/scripps-graph`` and ``/cabo-graph`` render
+5 Scripps agents             the cohort/topology flow's ``su`` and ``wiseman`` cells
 ===========================  ====================================================
 """
 
 import asyncio
 import os
 import sys
-from datetime import UTC, datetime
 
 from sqlalchemy import delete, select
 
@@ -50,20 +49,8 @@ ONBOARDING_EMAIL = "e2e-onboarding@example.org"
 PROBE_AGENT_ID = "t12probe"
 PROBE_BOT_NAME = "T12ProbeBot"
 
-# Graph fixture. agent_ids are drawn from src/routers/public.py::_SCRIPPS so the
-# scripps_only node filter keeps them; the edge set is a connected component so
-# _largest_component() does not trim it.
-GRAPH_AGENTS = ["su", "wiseman", "grotjahn", "ward", "briney"]
-GRAPH_EDGES = [
-    ("su", "wiseman"),
-    ("su", "grotjahn"),
-    ("wiseman", "ward"),
-    ("grotjahn", "briney"),
-]
-# Inside the Cabo retreat window (Apr 27 - May 7 2026) that /cabo-graph slices
-# on, and after CABO_WINDOW_START (Mar 1 2026) which bounds /scripps-graph.
-POST_AT = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
-DECIDED_AT = datetime(2026, 4, 29, 12, 0, tzinfo=UTC)
+# Agents the cohort/topology flow ticks (FLOWS['admin_cohort_and_topology']).
+COHORT_AGENTS = ["su", "wiseman", "grotjahn", "ward", "briney"]
 
 # Guard rail: the production database has real users.
 ALLOWED_DATABASES = ("copi_slack_test", "copi_test", "copi_e2e")
@@ -114,13 +101,9 @@ async def seed(session) -> dict[str, str]:
     """Create every fixture row. Returns a summary keyed by flow."""
     from src.models import (
         USER_ROLE_ADMIN,
-        AgentChannel,
-        AgentMessage,
         AgentRegistry,
         Job,
         ResearcherProfile,
-        SimulationRun,
-        ThreadDecision,
     )
 
     out: dict[str, str] = {}
@@ -204,33 +187,8 @@ async def seed(session) -> dict[str, str]:
     out["probe_agent_row_id"] = str(probe.id)
     out["probe_agent_id"] = probe.agent_id
 
-    # --- graph fixture --------------------------------------------------
-    run = (
-        await session.execute(select(SimulationRun).limit(1))
-    ).scalar_one_or_none()
-    if run is None:
-        run = SimulationRun(status="completed", config={"seed": "tests.e2e.seed"})
-        session.add(run)
-        await session.flush()
-    out["simulation_run_id"] = str(run.id)
-
-    channel = (
-        await session.execute(
-            select(AgentChannel).where(AgentChannel.channel_name == "e2e-general")
-        )
-    ).scalar_one_or_none()
-    if channel is None:
-        channel = AgentChannel(
-            simulation_run_id=run.id,
-            channel_id="C0E2E0001",
-            channel_name="e2e-general",
-            channel_type="thematic",
-            created_by_agent=GRAPH_AGENTS[0],
-        )
-        session.add(channel)
-        await session.flush()
-
-    for i, agent_id in enumerate(GRAPH_AGENTS):
+    # --- cohort/topology agents -------------------------------------------
+    for i, agent_id in enumerate(COHORT_AGENTS):
         user, _ = await _get_or_create_user(
             session,
             f"0000-0002-0000-91{i:02d}",
@@ -255,59 +213,8 @@ async def seed(session) -> dict[str, str]:
                     status="active",
                 )
             )
-    await session.flush()
-
-    for i, (a, b) in enumerate(GRAPH_EDGES):
-        ts = f"17{i:08d}.000100"
-        existing = (
-            await session.execute(
-                select(AgentMessage).where(
-                    AgentMessage.simulation_run_id == run.id,
-                    AgentMessage.message_ts == ts,
-                )
-            )
-        ).scalar_one_or_none()
-        if existing is None:
-            session.add(
-                AgentMessage(
-                    simulation_run_id=run.id,
-                    agent_id=a,
-                    channel_id=channel.channel_id,
-                    channel_name=channel.channel_name,
-                    message_ts=ts,
-                    phase="new_post",
-                    visibility="public",
-                    content=f"{a} proposes work with {b}.",
-                    sender_name=f"{a.title()}Bot",
-                    message_length=40,
-                    posted_at=POST_AT.timestamp(),
-                    created_at=POST_AT,
-                )
-            )
-        decided = (
-            await session.execute(
-                select(ThreadDecision).where(ThreadDecision.thread_id == ts)
-            )
-        ).scalar_one_or_none()
-        if decided is None:
-            session.add(
-                ThreadDecision(
-                    simulation_run_id=run.id,
-                    thread_id=ts,
-                    channel=channel.channel_name,
-                    agent_a=a,
-                    agent_b=b,
-                    outcome="proposal",
-                    origin_visibility="public",
-                    summary_text=(
-                        f"{a.title()} and {b.title()} propose a joint study "
-                        "combining their platforms."
-                    ),
-                    decided_at=DECIDED_AT,
-                )
-            )
     await session.commit()
-    out["graph_edges"] = str(len(GRAPH_EDGES))
+    out["cohort_agents"] = str(len(COHORT_AGENTS))
     return out
 
 

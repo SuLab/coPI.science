@@ -52,6 +52,7 @@ from src.routers import settings as settings_router
 from src.services import profile_export
 from src.services.tenure_scope import scope_for_export
 from tests import factories
+from tests.session_support import session_cookie_name, session_headers
 
 pytestmark = pytest.mark.integration
 
@@ -65,24 +66,17 @@ def _auth(user_id) -> dict:
     """Forge the signed session cookie SessionMiddleware would issue."""
     signer = TimestampSigner(get_settings().secret_key)
     data = base64.b64encode(json.dumps({"user_id": str(user_id)}).encode())
-    return {"Cookie": f"copi-session={signer.sign(data).decode()}"}
+    return {"Cookie": f"{session_cookie_name()}={signer.sign(data).decode()}"}
 
 
 def _auth_as(user_id, impersonate_id) -> dict:
-    """Session for ``user_id`` plus the copi-impersonate cookie pointed at another user.
+    """Session for ``user_id`` with an impersonation of another user signed into it.
 
-    src/dependencies.get_current_user honours that cookie *only* when the session
-    user is an admin. It is the one handle any of these 10 endpoints gives a
+    src/dependencies.get_current_user honours that impersonation *only* when the
+    session user is an admin. It is the one handle any of these 10 endpoints gives a
     caller on somebody else's identity, so it is the vector the sweep attacks.
     """
-    signer = TimestampSigner(get_settings().secret_key)
-    data = base64.b64encode(json.dumps({"user_id": str(user_id)}).encode())
-    return {
-        "Cookie": (
-            f"copi-session={signer.sign(data).decode()}; "
-            f"copi-impersonate={impersonate_id}"
-        )
-    }
+    return session_headers(user_id, impersonate=impersonate_id)
 
 
 @pytest.fixture(autouse=True)
@@ -376,11 +370,12 @@ async def test_the_onboarding_walk_completes_only_at_the_final_step(
         data={
             "email": "nadia@example.org",
             "research_summary": "Edited by the PI during onboarding.",
-            "techniques": "cryo-EM, mass spec",
-            "experimental_models": "mouse",
-            "disease_areas": "cancer",
-            "key_targets": "KRAS",
-            "keywords": "kinase, structure",
+            "techniques": ["cryo-EM", "mass spec"],
+            "experimental_models": ["mouse"],
+            "disease_areas": ["cancer"],
+            "key_targets": ["KRAS"],
+            "keywords": ["kinase", "structure"],
+            "tag_fields": ["techniques", "experimental_models", "disease_areas", "key_targets", "keywords"],
         },
     )
     assert r.status_code == 302
@@ -424,6 +419,12 @@ async def test_skipping_to_a_step_does_not_complete_onboarding(
         r = await client.post(path, headers=h, data=data)
     assert r.status_code in (200, 302)
     assert await _flag(db_session, newcomer.id) is False, f"{method} {path} completed onboarding"
+
+    # The retry leg enqueues a generate_profile job; a real save happens after the worker
+    # ran it, and a save during generation is refused (D-08).
+    for job in (await db_session.execute(select(Job).where(Job.user_id == newcomer.id))).scalars():
+        job.status = "completed"
+    await db_session.flush()
 
     r = await client.post(
         "/onboarding/save-profile",
@@ -566,7 +567,7 @@ async def test_the_terminal_step_resumes_a_pending_invite_before_the_default_red
     cookie = signer.sign(base64.b64encode(json.dumps(payload).encode())).decode()
     r = await client.post(
         "/onboarding/save-profile",
-        headers={"Cookie": f"copi-session={cookie}"},
+        headers={"Cookie": f"{session_cookie_name()}={cookie}"},
         data=data,
     )
     assert r.headers["location"] == "/invite/tok-123"
@@ -576,7 +577,7 @@ def _session_cookie(user_id, **extra) -> dict:
     signer = TimestampSigner(get_settings().secret_key)
     payload = {"user_id": str(user_id), **extra}
     cookie = signer.sign(base64.b64encode(json.dumps(payload).encode())).decode()
-    return {"Cookie": f"copi-session={cookie}"}
+    return {"Cookie": f"{session_cookie_name()}={cookie}"}
 
 
 async def test_finishing_onboarding_resumes_only_a_safe_post_login_destination(
@@ -698,11 +699,12 @@ async def test_profile_save_persists_user_and_profile_fields_and_bumps_the_versi
             "institution": "New Institute",
             "department": "New Dept",
             "research_summary": "new summary",
-            "techniques": "t1, t2",
-            "experimental_models": "m1",
-            "disease_areas": "d1, d2",
-            "key_targets": "k1",
-            "keywords": "kw1, kw2",
+            "techniques": ["t1", "t2"],
+            "experimental_models": ["m1"],
+            "disease_areas": ["d1", "d2"],
+            "key_targets": ["k1"],
+            "keywords": ["kw1", "kw2"],
+            "tag_fields": ["techniques", "experimental_models", "disease_areas", "key_targets", "keywords"],
         },
     )
     assert r.status_code == 302 and r.headers["location"] == "/profile?saved=1"
@@ -956,7 +958,8 @@ async def test_saving_the_profile_writes_the_export_and_records_a_public_revisio
             "name": "Route Pi",
             "email": user.email,
             "research_summary": "EXPORTED-VIA-ROUTE",
-            "techniques": "route-technique",
+            "techniques": ["route-technique"],
+            "tag_fields": ["techniques"],
         },
     )
     assert r.status_code == 302
@@ -1046,7 +1049,7 @@ async def test_no_logged_in_user_can_read_or_write_another_users_data(client, db
     """Half two, the one worth most, per endpoint.
 
     None of these routes takes a target user id, so the only handle a caller has
-    on another identity is the ``copi-impersonate`` cookie, which
+    on another identity is the session's ``impersonate_user_id``, which
     get_current_user honours for admins only. Each case fires the attacker's
     request with that cookie pointed at the victim and asserts the effect landed
     on the attacker; then fires the identical request as a real admin and
@@ -1132,7 +1135,7 @@ async def test_no_logged_in_user_can_read_or_write_another_users_data(client, db
     if ep.method == "GET":
         assert r2.status_code == 200, ep.label
         assert "Viewing as Victim Alpha" in r2.text, (
-            "the copi-impersonate cookie is inert even for an admin, so the "
+            "impersonation is inert even for an admin, so the "
             "negative assertions above are not testing anything"
         )
     else:
@@ -1150,6 +1153,6 @@ async def test_no_logged_in_user_can_read_or_write_another_users_data(client, db
             )
         else:
             assert control_after != control_before, (
-                "the copi-impersonate cookie is inert even for an admin, so the "
+                "impersonation is inert even for an admin, so the "
                 "negative assertions above are not testing anything"
             )

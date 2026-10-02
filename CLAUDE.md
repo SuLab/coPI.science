@@ -22,7 +22,8 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
 ## Testing
 
 - `./scripts/ci.sh` is the whole gate; there is no server-side CI. It runs alembic
-  sanity (one head, no duplicate revision ids), an upgrade→downgrade→upgrade round trip
+  sanity (one head, no duplicate revision ids), the compiled-CSS drift check
+  (`scripts/build_css.sh --check`), an upgrade→downgrade→upgrade round trip
   on a throwaway Postgres, `ruff check` on `tests/` (zero findings) and on `src/` (a
   ratcheted ceiling), then the full pytest run with a branch-coverage floor. Run it
   before committing. `scripts/install-hooks.sh` installs it as a `pre-push` hook.

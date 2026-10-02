@@ -66,7 +66,6 @@ METHOD_SCOPES = {
     # the manifest so every provisioned app keeps the same scope set.
     "conversations.history (private)": "groups:history",
     "users.info": "users:read",
-    "users.lookupByEmail": "users:read.email",
 }
 
 # The two modules test_slack_boundary.py allows to import slack_sdk, and the call that
@@ -150,7 +149,8 @@ def test_manifest_requests_no_scope_nothing_needs():
 def test_method_scope_table_is_not_trivially_satisfiable():
     """Control for the table above: it must name scopes that are genuinely required,
     not an empty set. An empty table would make the invariant vacuous."""
-    assert len({s for s in METHOD_SCOPES.values() if s}) >= 8
+    # 7 since users:read.email left with Connect Slack (D16).
+    assert len({s for s in METHOD_SCOPES.values() if s}) >= 7
 
 
 def test_create_app_manifest_shape(monkeypatch):
@@ -219,7 +219,7 @@ def test_create_app_retries_only_on_rate_limit(monkeypatch):
 
 def test_exchange_code_never_echoes_the_token(monkeypatch):
     """SEC-9. This error string reaches the server log and a user-facing
-    ?slack_error= redirect, so any fragment of the value is a leak."""
+    flash message, so any fragment of the value is a leak."""
     monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp(
         {"ok": True, "access_token": "xoxp-WRONGTYPE-abcdefghijklmnop"}))
     with pytest.raises(RuntimeError) as ei:

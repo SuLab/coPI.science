@@ -75,10 +75,6 @@ ALLOWLIST: dict[str, str] = {
         "Starlette BaseHTTPMiddleware hook: the framework calls self.dispatch for every "
         "request; create_app registers the class with add_middleware, never the method."
     ),
-    "src.main:PostHogContextMiddleware.dispatch": (
-        "Starlette BaseHTTPMiddleware hook: the framework calls self.dispatch for every "
-        "request; create_app registers the class with add_middleware, never the method."
-    ),
     "src.services.blackbird_rubric:parse_rubric": (
         "Public validator for scratch rubric documents (its docstring). The import-time "
         "load reads the bytes once and calls parse_rubric_bytes, so rubric_documents "
@@ -109,10 +105,6 @@ ALLOWLIST: dict[str, str] = {
     ),
     "src.agent.ids:default_writer_id": (
         "Used only by tests/unit/test_ids.py. "
-        "Outside the 2026-09-24 RCA's scope, so kept for now; deletion is follow-up 2026-09-25/R-dead-code in docs/audits/open-findings.md."
-    ),
-    "src.routers.profile:_parse_list": (
-        "Never called in profile.py; the calls in agent_page.py are to that module's own _parse_list. "
         "Outside the 2026-09-24 RCA's scope, so kept for now; deletion is follow-up 2026-09-25/R-dead-code in docs/audits/open-findings.md."
     ),
     "src.services.llm:make_decision": (
@@ -428,7 +420,6 @@ def _describe(result: ScanResult, key: str) -> str:
 ENTRY_POINTS: frozenset[str] = frozenset(
     {
         "src.main:OriginGuardMiddleware.dispatch",
-        "src.main:PostHogContextMiddleware.dispatch",
     }
 )
 

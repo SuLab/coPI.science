@@ -16,7 +16,7 @@
         ('dead', 'Dead', 'gray'),
     ] %}
     <div class="bg-white border rounded-lg p-3 text-center">
-        <div class="text-2xl font-bold text-{{ color }}-600">{{ counts.get(status, 0) }}</div>
+        <div class="text-2xl font-bold text-{{ color }}-700">{{ counts.get(status, 0) }}</div>
         <div class="text-xs text-gray-500 mt-1">{{ label }}</div>
     </div>
     {% endfor %}
@@ -27,10 +27,10 @@
 </div>
 
 <!-- Filters -->
-<div class="bg-white border border-gray-200 rounded-lg p-4 mb-4 flex gap-4">
+<div data-filter-nav="/admin/jobs" class="bg-white border border-gray-200 rounded-lg p-4 mb-4 flex gap-4">
     <div>
-        <label class="text-xs font-medium text-gray-600 block mb-1">Status</label>
-        <select onchange="applyFilter()" id="status-filter"
+        <label for="status-filter" class="text-xs font-medium text-gray-600 block mb-1">Status</label>
+        <select data-filter-param="status_filter" id="status-filter"
                 class="border border-gray-300 rounded px-2 py-1 text-sm">
             <option value="">All</option>
             {% for s in ['pending', 'processing', 'completed', 'failed', 'dead'] %}
@@ -39,8 +39,8 @@
         </select>
     </div>
     <div>
-        <label class="text-xs font-medium text-gray-600 block mb-1">Type</label>
-        <select onchange="applyFilter()" id="type-filter"
+        <label for="type-filter" class="text-xs font-medium text-gray-600 block mb-1">Type</label>
+        <select data-filter-param="type_filter" id="type-filter"
                 class="border border-gray-300 rounded px-2 py-1 text-sm">
             <option value="">All</option>
             <option value="generate_profile" {% if type_filter == 'generate_profile' %}selected{% endif %}>Generate Profile</option>
@@ -67,7 +67,7 @@
         <tbody class="divide-y divide-gray-100">
             {% set sc = {'pending': 'bg-yellow-100 text-yellow-700', 'processing': 'bg-blue-100 text-blue-700',
                 'completed': 'bg-green-100 text-green-700', 'failed': 'bg-red-100 text-red-700',
-                'dead': 'bg-gray-100 text-gray-500'} %}
+                'dead': 'bg-gray-100 text-gray-600'} %}
             {% for job in jobs %}
             <tr class="hover:bg-gray-50">
                 <td class="px-4 py-3 text-sm">{{ job.type | replace('_', ' ') | title }}</td>
@@ -94,7 +94,7 @@
             </tr>
             {% else %}
             <tr>
-                <td colspan="7" class="px-4 py-8 text-center text-gray-400 text-sm">No jobs found</td>
+                <td colspan="7" class="px-4 py-8 text-center text-gray-600 text-sm">No jobs found</td>
             </tr>
             {% endfor %}
         </tbody>
@@ -112,14 +112,4 @@
 </div>
 {% endif %}
 
-<script>
-function applyFilter() {
-    const status = document.getElementById('status-filter').value;
-    const type = document.getElementById('type-filter').value;
-    const params = new URLSearchParams();
-    if (status) params.set('status_filter', status);
-    if (type) params.set('type_filter', type);
-    location.href = '/admin/jobs?' + params.toString();
-}
-</script>
 {% endblock %}

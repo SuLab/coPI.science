@@ -65,7 +65,7 @@
     .assessment-prose { max-width: none; }
   }
 </style>
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
   // CSS cannot open a <details>, and a collapsed section prints as its summary
   // alone. Open every one for the print, then put back exactly what the reader
   // had open.
@@ -99,7 +99,7 @@
        single hidden input or a hand-assembled query string. #}
     <form method="GET" action="/admin/assessments" class="flex flex-wrap items-center gap-2 justify-end">
         <label for="assessments-run-select" class="text-sm text-gray-500">Run:</label>
-        <select id="assessments-run-select" name="run_id" onchange="this.form.submit()"
+        <select id="assessments-run-select" name="run_id" data-autosubmit
                 class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
             {% for run in runs %}
             <option value="{{ run.id }}" {% if not show_all_runs and run.id == selected_run_id %}selected{% endif %}>
@@ -113,7 +113,7 @@
            not accept would silently render the default order with the wrong
            option showing as selected. #}
         <label for="assessments-sort-select" class="text-sm text-gray-500">Sort:</label>
-        <select id="assessments-sort-select" name="sort" onchange="this.form.submit()"
+        <select id="assessments-sort-select" name="sort" data-autosubmit
                 class="assessment-sort-select text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
             {% for value, label in sort_options %}
             <option value="{{ value }}" {% if sort == value %}selected{% endif %}>{{ label }}</option>
@@ -124,7 +124,7 @@
            own "Lab:" line — "WangBot" here against "wang" on the cards it
            filters would read as two different things. #}
         <label for="assessments-lab-select" class="text-sm text-gray-500">Lab:</label>
-        <select id="assessments-lab-select" name="lab" onchange="this.form.submit()"
+        <select id="assessments-lab-select" name="lab" data-autosubmit
                 class="assessment-lab-select text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
             <option value="">All labs</option>
             {% for option in lab_options %}
@@ -152,7 +152,7 @@
     <em>route-to-incubation</em>, which the computed band never does); the two
     can legitimately disagree.
 </p>
-<p class="text-xs text-gray-400 mb-2">
+<p class="text-xs text-gray-600 mb-2">
     {% if show_all_runs %}
         Showing every run on record.
     {% else %}

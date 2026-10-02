@@ -113,10 +113,11 @@ ROUTE_ALLOWLIST: dict[tuple[str, str], str] = {
     # unauthenticated inventory of every path and form field back on the public
     # internet — see test_public_routes.py::test_the_openapi_schema_is_not_public.
     #
-    # /api/health is no longer allowlisted here (issue #25 P1, middleware
-    # short-circuit): PostHogContextMiddleware.dispatch compares request.url.path
-    # against the literal string "/api/health", which makes src_referenced_paths()
-    # pick it up as src/-referenced — genuinely so, not a false positive.
+    ("GET", "/api/health"): (
+        "Container healthcheck: docker-compose.prod.yml's web service GETs "
+        "http://127.0.0.1:8000/api/health. Nothing in the app links it. Its only src/ "
+        "reference was PostHogContextMiddleware's skip list, removed with PostHog (D13)."
+    ),
     ("GET", "/admin"): (
         "Bare-URL alias an admin types by hand: src/routers/admin.py stacks "
         "@router.get('') and @router.get('/users') on the same admin_users handler, and "
@@ -126,23 +127,6 @@ ROUTE_ALLOWLIST: dict[tuple[str, str], str] = {
     ("GET", "/auth/callback"): (
         "ORCID OAuth redirect_uri — the caller is orcid.org. The value we register with "
         "ORCID is settings.orcid_redirect_uri (src/config.py), not a link in this app."
-    ),
-    ("GET", "/cabo-graph"): (
-        "Public collaboration-graph page shared by URL (retreat handout / email), "
-        "deliberately unlinked from the nav. nginx/nginx.conf:111 whitelists it "
-        "alongside the other three graph URLs, which is the external caller."
-    ),
-    ("GET", "/scripps-graph"): (
-        "Same as /cabo-graph: hand-shared public graph URL, whitelisted in "
-        "nginx/nginx.conf:111, intentionally not in the nav."
-    ),
-    ("GET", "/schultz-alumni-pilot"): (
-        "Same as /cabo-graph: hand-shared public graph URL for the Schultz alumni "
-        "pilot cohort, whitelisted in nginx/nginx.conf:111."
-    ),
-    ("GET", "/schultz-group-alumni"): (
-        "Same as /cabo-graph: hand-shared public graph URL for the Schultz group "
-        "alumni cohort, whitelisted in nginx/nginx.conf:111."
     ),
     ("POST", "/reviews/assessments/{assessment_id}/status"): (
         "Deliberately caller-less, which is a NEW category on this list: every "
@@ -984,11 +968,12 @@ def test_static_link_resolution_coverage_is_reported():
     # without the matcher changing (the Phase 0b retirements took it from 80.4% to
     # 79.9% with the same 43 unresolvable values). Phase 3's run-detail pager (RA-08)
     # added two query-only links (`?page=…`): the partial serves both the admin and
-    # the manager run pages, so it cannot name either path.
+    # the manager run pages, so it cannot name either path. The error page (M-01)
+    # added its back link, `{{ back_href }}`: the referring page, or the role's home.
     unresolvable = len(values) - len(resolvable)
-    assert unresolvable <= 45, (
+    assert unresolvable <= 46, (
         f"{unresolvable} of {len(values)} href/action values do not resolve to a "
-        "checkable local path (was 45) — the matcher probably regressed, or a new "
+        "checkable local path (was 46) — the matcher probably regressed, or a new "
         "link is built from a variable"
     )
 

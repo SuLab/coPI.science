@@ -530,6 +530,16 @@ class AgentSlackClient:
     def is_connected(self) -> bool:
         return self._client is not None
 
+    @property
+    def bot_id(self) -> str | None:
+        """This token's bot id (``B…``) from ``auth.test`` at connect; None before."""
+        return self._bot_id
+
+    @property
+    def bot_user_id(self) -> str | None:
+        """This token's bot user id (``U…``) from ``auth.test`` at connect; None before."""
+        return self._bot_user_id
+
     # ------------------------------------------------------------------
     # Polling
     # ------------------------------------------------------------------

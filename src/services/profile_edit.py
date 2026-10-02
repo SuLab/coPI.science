@@ -7,13 +7,15 @@ changed_by_user_id parameter already supports that attribution without any
 schema change."""
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.datastructures import FormData
 
-from src.models import AgentRegistry, ResearcherProfile, User
-from src.services.jhu_rules import set_tenure_start
+from src.models import AgentRegistry, Job, ResearcherProfile, User
+from src.services.jhu_rules import get_tenure_start, set_tenure_start
 from src.services.profile_publish import export_and_record
 from src.services.tenure_scope import scoped_publications_for_export
 from src.services.user_email import assign_user_email
@@ -24,12 +26,32 @@ PROFILE_FIELDS = (
     "research_summary", "techniques", "experimental_models",
     "disease_areas", "key_targets", "keywords",
 )
-#: List-valued profile fields (comma-separated in the forms).
+#: List-valued profile fields. Each tag is posted as its own form field (D-16): the
+#: comma split this replaced broke every tag containing a comma ("1,2-dichloroethane").
 _LIST_FIELDS = frozenset(PROFILE_FIELDS) - {"research_summary"}
+#: Each tag widget (templates/_tag_field.html) posts one marker naming its field, so a
+#: widget whose tags were all removed (posting no values) still clears the field, while
+#: a form without the widget, or a page rendered before it existed, changes nothing.
+TAG_FIELDS_MARKER = "tag_fields"
 
 
-def _parse_list(val: str) -> list[str]:
-    return [s.strip() for s in val.split(",") if s.strip()]
+def list_fields_from_form(form: FormData) -> dict[str, list[str] | None]:
+    """The list fields of a posted profile form: the repeated values of each field whose
+    widget marker was posted, else None (leave unchanged)."""
+    present = set(form.getlist(TAG_FIELDS_MARKER))
+    return {
+        field: ([v for v in form.getlist(field) if isinstance(v, str)]
+                if field in present else None)
+        for field in PROFILE_FIELDS if field in _LIST_FIELDS
+    }
+
+
+def _clean_tags(values: Sequence[str]) -> list[str]:
+    """Stripped, non-empty tags. A ``str`` is refused: it would iterate as characters,
+    and a comma string is exactly the format this replaced."""
+    if isinstance(values, str):
+        raise TypeError("list fields take a list of tags, not a comma-separated string")
+    return [v.strip() for v in values if v.strip()]
 
 
 def parse_expected_version(raw: str | None) -> int | None:
@@ -43,6 +65,88 @@ def parse_expected_version(raw: str | None) -> int | None:
     if not re.fullmatch(r"[0-9]{1,9}", text):
         return None
     return int(text)
+
+
+#: The refusal code for a save that would race a profile generation (D-08); every profile
+#: form maps it to "Profile is being generated — try again shortly".
+PROFILE_GENERATING = "profile_generating"
+#: ``SET LOCAL lock_timeout`` for the profile-row insert (D-08). A generation job holds the
+#: uncommitted row for this user for its whole run (the worker keeps one transaction across
+#: the pipeline), so without a bound the insert waits on the unique key until the run ends.
+PROFILE_INSERT_LOCK_TIMEOUT = "5s"
+#: Postgres SQLSTATE ``lock_not_available``: what an expired ``lock_timeout`` raises.
+_LOCK_NOT_AVAILABLE = "55P03"
+
+
+async def _profile_generation_in_flight(db: AsyncSession, user_id: uuid.UUID) -> bool:
+    """True while a ``generate_profile`` job for ``user_id`` is pending or processing."""
+    return await db.scalar(
+        select(Job.id).where(
+            Job.user_id == user_id,
+            Job.type == "generate_profile",
+            Job.status.in_(("pending", "processing")),
+        ).limit(1)
+    ) is not None
+
+
+async def _apply_email(
+    db: AsyncSession, target_user: User, raw: str | None, email_required: bool,
+) -> str | None:
+    """Validate, then assign, the posted address; an error code or None. A refusal writes
+    nothing: the checks run first, and ``assign_user_email`` writes nothing when another
+    user holds the address."""
+    email_clean = (raw or "").strip().lower()
+    if email_required and not email_clean:
+        return "email_required"
+    changed = email_clean != (target_user.email or "")
+    if email_clean and (changed or email_required) and not is_valid_email(email_clean):
+        return "invalid_email"
+    if changed and not await assign_user_email(db, target_user, email_clean or None):
+        return "email_taken"
+    return None
+
+
+async def _write_tenure_if_changed(
+    db: AsyncSession, user: User, year: int, export_agent: AgentRegistry | None,
+) -> None:
+    """Upsert a ``manual`` tenure entry only when ``year`` differs from the recorded one
+    (D-01). The manager form re-posts the displayed year on every save; relabelling a
+    machine-derived entry ``manual`` made the re-derivation script skip it."""
+    agent_slug = export_agent.agent_id if export_agent is not None else await db.scalar(
+        select(AgentRegistry.agent_id).where(AgentRegistry.user_id == user.id)
+    )
+    if await get_tenure_start(db, user.id, agent_id=agent_slug) != year:
+        await set_tenure_start(user.id, year, "manual", db=db)
+
+
+async def _load_or_create_profile(
+    db: AsyncSession, user_id: uuid.UUID,
+) -> ResearcherProfile | None:
+    """The user's profile row, inserted when missing; None when the insert's lock wait
+    timed out (the session is then rolled back)."""
+    profile = (await db.execute(
+        select(ResearcherProfile).where(ResearcherProfile.user_id == user_id)
+    )).scalar_one_or_none()
+    if profile is not None:
+        return profile
+    # Before db.add(): an execute autoflushes, and the INSERT must run under the bound.
+    await db.execute(text(f"SET LOCAL lock_timeout = '{PROFILE_INSERT_LOCK_TIMEOUT}'"))
+    profile = ResearcherProfile(user_id=user_id)
+    db.add(profile)
+    try:
+        # Flush the row into existence before the SQL-side bump in
+        # write_profile_text_fields: on a pending object the expression would render
+        # inside the INSERT's VALUES, which cannot reference its own target table.
+        await db.flush()
+    except DBAPIError as exc:
+        if getattr(exc.orig, "sqlstate", None) != _LOCK_NOT_AVAILABLE:
+            raise
+        await db.rollback()
+        return None
+    # The bound is for the INSERT only: the rest of the request's transaction (the
+    # field writes and the export) waits as it did before.
+    await db.execute(text("SET LOCAL lock_timeout TO DEFAULT"))
+    return profile
 
 
 async def write_profile_text_fields(
@@ -79,7 +183,7 @@ async def write_profile_text_fields(
 
 async def apply_profile_edits(
     db: AsyncSession, *, target_user: User, changed_by_user_id: uuid.UUID,
-    form: Mapping[str, str | None], expected_version: int | None,
+    form: Mapping[str, str | Sequence[str] | None], expected_version: int | None,
     jhu_tenure_start: str | None = None, email_required: bool = False,
     change_summary: str | None = None, export_agent: AgentRegistry | None = None,
     mechanism: str = "web",
@@ -91,31 +195,35 @@ async def apply_profile_edits(
     the public-profile and onboarding forms have no institution field, and
     blanking it would drop the export's header lines (FA3-V5). A key carried as
     "" clears a user field (``or None``) exactly as the full forms always did.
+    List fields take a list of tags (``list_fields_from_form``).
     ``expected_version`` is the profile-version check (``write_profile_text_fields``);
     None saves without it. ``export_agent`` skips the agent lookup when the caller
     already holds the agent. ``mechanism`` is the revision mechanism recorded
     for the export (``web_impersonated`` for an impersonated session). Returns an
     error code, or None after committing and exporting.
+
+    Every refusal comes before any write, because ``get_db`` commits on a clean return: a
+    ``generate_profile`` job pending or processing for ``target_user`` (``PROFILE_GENERATING``,
+    D-08), a malformed tenure year, then the email checks (D-02). The tenure year is written
+    only when it differs from the recorded one (D-01). The profile-row insert runs under
+    ``PROFILE_INSERT_LOCK_TIMEOUT``; a lock timeout rolls back and also returns
+    ``PROFILE_GENERATING``.
     """
+    if await _profile_generation_in_flight(db, target_user.id):
+        return PROFILE_GENERATING
     # Optional JHU tenure-start correction (manager form only; the PI's own
     # /profile/save never sends the field). Blank = leave unchanged.
     tenure_field = (jhu_tenure_start or "").strip()
-    if tenure_field:
-        if not re.fullmatch(r"\d{4}", tenure_field):
-            return "invalid_tenure_year"
-        await set_tenure_start(
-            target_user.id, int(tenure_field), "manual", db=db
-        )
-
+    if tenure_field and not re.fullmatch(r"\d{4}", tenure_field):
+        return "invalid_tenure_year"
     if form.get("email") is not None:
-        email_clean = (form["email"] or "").strip().lower()
-        if email_required and not email_clean:
-            return "email_required"
-        changed = email_clean != (target_user.email or "")
-        if email_clean and (changed or email_required) and not is_valid_email(email_clean):
-            return "invalid_email"
-        if changed and not await assign_user_email(db, target_user, email_clean or None):
-            return "email_taken"
+        email_error = await _apply_email(db, target_user, form["email"], email_required)
+        if email_error:
+            return email_error
+    # Only after every refusal: get_db commits on a clean return, so a tenure upsert made
+    # before a refused email used to be committed with the refusal (D-02).
+    if tenure_field:
+        await _write_tenure_if_changed(db, target_user, int(tenure_field), export_agent)
 
     if form.get("name"):
         target_user.name = form["name"]
@@ -123,19 +231,12 @@ async def apply_profile_edits(
         if form.get(field) is not None:
             setattr(target_user, field, form[field] or None)
 
-    profile = (await db.execute(
-        select(ResearcherProfile).where(ResearcherProfile.user_id == target_user.id)
-    )).scalar_one_or_none()
-    if not profile:
-        profile = ResearcherProfile(user_id=target_user.id)
-        db.add(profile)
-        # Flush the row into existence before the SQL-side bump below: on a
-        # pending object the expression would render inside the INSERT's
-        # VALUES, which cannot reference its own target table.
-        await db.flush()
+    profile = await _load_or_create_profile(db, target_user.id)
+    if profile is None:
+        return PROFILE_GENERATING
 
     values = {
-        f: (_parse_list(form[f]) if f in _LIST_FIELDS else form[f])
+        f: (_clean_tags(form[f]) if f in _LIST_FIELDS else form[f])
         for f in PROFILE_FIELDS if form.get(f) is not None
     }
     if not await write_profile_text_fields(db, profile, values, expected_version):

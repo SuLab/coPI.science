@@ -11,8 +11,11 @@ from tests.integration.test_manager_access import auth_headers
 
 pytestmark = pytest.mark.integration
 
-_FORM = {"research_summary": "New summary", "techniques": "a, b", "experimental_models": "m",
-         "disease_areas": "d", "key_targets": "k", "keywords": "x, y"}
+_FORM = {"research_summary": "New summary", "techniques": ["a", "b"], "experimental_models": ["m"],
+         "disease_areas": ["d"], "key_targets": ["k"], "keywords": ["x", "y"]}
+#: What a rendered form posts: the tag lists as repeated fields plus one marker per widget.
+_POSTED = {**_FORM, "tag_fields": ["techniques", "experimental_models", "disease_areas",
+                                   "key_targets", "keywords"]}
 
 
 async def test_missing_institution_is_left_unchanged(db_session, tmp_path, monkeypatch):
@@ -60,11 +63,11 @@ def test_fields_tuple():
 
 
 def _routes(user, agent):
-    full = {"name": user.name, "email": user.email, "institution": "JHU", "department": "Bio", **_FORM}
+    full = {"name": user.name, "email": user.email, "institution": "JHU", "department": "Bio", **_POSTED}
     return [
         ("/profile/save", user, full, None),
-        ("/onboarding/save-profile", user, {"email": user.email, **_FORM}, "Profile saved during onboarding"),
-        (f"/agent/{agent.agent_id}/public-profile/save", user, dict(_FORM), None),
+        ("/onboarding/save-profile", user, {"email": user.email, **_POSTED}, "Profile saved during onboarding"),
+        (f"/agent/{agent.agent_id}/public-profile/save", user, dict(_POSTED), None),
     ]
 
 
@@ -83,7 +86,7 @@ async def test_each_route_exports_the_same_bytes_as_the_export_function(
     if which < 3:
         route, actor, form, summary = _routes(user, agent)[which]
     else:
-        full = {"name": user.name, "email": user.email, "institution": "JHU", "department": "Bio", **_FORM}
+        full = {"name": user.name, "email": user.email, "institution": "JHU", "department": "Bio", **_POSTED}
         route, actor, form, summary = f"/manager/pis/{user.id}/profile", manager, full, None
     r = await client.post(route, data={**form, "profile_version": "1"},
                           headers=auth_headers(actor.id), follow_redirects=False)

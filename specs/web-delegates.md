@@ -150,6 +150,10 @@ WHERE agent_delegate.user_id = :user_id
 
 ## Slack Linkage
 
+> **Removed 2026-10-01 (D16 of `docs/specs/2026-10-01-web-ui-remediation-design.md`).** Nothing
+> reads or writes `delegate_slack_ids` any more; the column and its data are kept. The text
+> below describes the removed behaviour.
+
 Web delegation implies Slack delegation. When an AgentDelegate relationship is created or removed, the `delegate_slack_ids` column on AgentRegistry is synced:
 
 **On delegation created:**

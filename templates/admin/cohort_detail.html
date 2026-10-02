@@ -34,9 +34,6 @@
     </div>
 </div>
 
-{% if error %}
-<div class="mb-4 rounded-md bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">{{ error }}</div>
-{% endif %}
 {% if notice %}
 <div class="mb-4 rounded-md bg-green-50 border border-green-200 px-4 py-3 text-sm text-green-800">{{ notice }}</div>
 {% endif %}
@@ -73,7 +70,7 @@
                         {% elif agent.status == 'suspended' %}bg-red-100 text-red-700
                         {% else %}bg-gray-100 text-gray-600{% endif %}">{{ agent.status }}</span>
                     {% else %}
-                    <span class="text-xs text-amber-600" title="No AgentRegistry row for this slug">unknown</span>
+                    <span class="text-xs text-amber-700" title="No AgentRegistry row for this slug">unknown</span>
                     {% endif %}
                 </td>
                 <td class="px-4 py-3 text-sm text-gray-600">{{ adder_map.get(m.added_by | string, '—') }}</td>
@@ -98,8 +95,8 @@
 <form method="POST" action="/admin/cohorts/{{ cohort.id }}/add-agent"
       class="bg-white rounded-xl border border-gray-200 p-4 mb-8 flex items-end gap-3">
     <div class="flex-1 max-w-md">
-        <label class="block text-sm font-medium text-gray-700">Agent</label>
-        <select name="agent_id" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm text-sm">
+        <label for="add-agent-id" class="block text-sm font-medium text-gray-700">Agent</label>
+        <select name="agent_id" id="add-agent-id" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm text-sm">
             <option value="" disabled selected>Select agent…</option>
             {% for a in available_agents %}
             <option value="{{ a.agent_id }}">{{ a.bot_name }} — {{ a.pi_name }} ({{ a.status }})</option>
@@ -128,7 +125,7 @@
                 <td class="px-4 py-3 text-sm font-medium text-gray-900">{{ a.bot_name }}</td>
                 <td class="px-4 py-3 text-sm text-gray-600">
                     {% set names = agent_cohort_map.get(a.agent_id) %}
-                    {% if names %}{{ names | join(', ') }}{% else %}<span class="text-gray-400 italic">(none)</span>{% endif %}
+                    {% if names %}{{ names | join(', ') }}{% else %}<span class="text-gray-600 italic">(none)</span>{% endif %}
                 </td>
             </tr>
             {% endfor %}

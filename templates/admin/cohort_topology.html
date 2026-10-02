@@ -11,14 +11,11 @@
 </div>
 <p class="text-sm text-gray-500 mb-6">
     Every agent × cohort pair. Tick to add a membership, untick to remove, then save
-    once — a whole re-shaping in a single audited step. Only the cells shown here are
-    compared, so a filtered or stale view can never delete a membership it did not
-    display.
+    once — a whole re-shaping in a single audited step. Only boxes you change are
+    saved: a box shown ticked and unticked by you is removed, a box you tick is added,
+    so a second tab or a stale view never undoes another save.
 </p>
 
-{% if error %}
-<div class="mb-4 rounded-md bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">{{ error }}</div>
-{% endif %}
 {% if notice %}
 <div class="mb-4 rounded-md bg-green-50 border border-green-200 px-4 py-3 text-sm text-green-800">{{ notice }}</div>
 {% endif %}
@@ -56,7 +53,7 @@
                     <th class="px-3 py-3 text-center text-xs font-medium text-gray-500">
                         <a href="/admin/cohorts/{{ c.id }}" class="text-indigo-600 hover:underline">{{ c.name }}</a>
                         <div class="mt-1">
-                            <button type="button" class="text-[10px] font-normal text-gray-400 hover:text-gray-600"
+                            <button type="button" class="text-[10px] font-normal text-gray-600 hover:text-gray-600"
                                     data-toggle-col="{{ c.id }}">all / none</button>
                         </div>
                     </th>
@@ -70,7 +67,7 @@
                 <tr class="hover:bg-gray-50">
                     <td class="px-4 py-3 text-sm font-medium text-gray-900 sticky left-0 bg-white">
                         {{ a.bot_name }}
-                        <div class="text-xs font-normal text-gray-400">{{ a.pi_name }}</div>
+                        <div class="text-xs font-normal text-gray-600">{{ a.pi_name }}</div>
                     </td>
                     <td class="px-3 py-3">
                         <span class="px-2 py-0.5 text-xs rounded-full
@@ -84,7 +81,8 @@
                     {% for c in cohorts %}
                     {% set cell = c.id | string ~ ':' ~ a.agent_id %}
                     <td class="px-3 py-3 text-center">
-                        <input type="checkbox" name="cell" value="{{ cell }}"
+                        {% if cell in membership_set %}<input type="hidden" name="was_checked" value="{{ cell }}">{% endif %}
+                        <input type="checkbox" name="cell" value="{{ cell }}" aria-label="{{ a.bot_name }} in {{ c.name }}"
                                data-col="{{ c.id }}"
                                class="h-4 w-4 rounded border-gray-300 text-indigo-600"
                                {% if cell in membership_set %}checked{% endif %}>
@@ -92,9 +90,9 @@
                     {% endfor %}
                     <td class="px-4 py-3 text-xs text-gray-500">
                         {% if a.status != 'active' %}
-                        <span class="text-gray-400 italic">not active — the engine will not load this agent</span>
+                        <span class="text-gray-600 italic">not active — the engine will not load this agent</span>
                         {% elif preview == '__absent__' %}
-                        <span class="text-gray-400 italic">—</span>
+                        <span class="text-gray-600 italic">—</span>
                         {% elif preview is none %}
                         <span class="text-gray-600">everyone (gate off for this agent)</span>
                         {% elif not preview %}
@@ -115,13 +113,13 @@
             Save topology
         </button>
         <a href="/admin/cohorts/topology" class="text-sm text-gray-500 hover:text-gray-700">Reset</a>
-        <p class="text-xs text-gray-400">
+        <p class="text-xs text-gray-600">
             The “Acts on” column shows the gate as of page load; save to recompute.
         </p>
     </div>
 </form>
 
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
 // Column toggle: tick/untick a whole cohort at once. Purely a convenience over the
 // checkboxes — the form still posts one cell per ticked box, so the server-side diff is
 // unchanged.

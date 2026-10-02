@@ -31,10 +31,10 @@
         {% endif %}
         <form method="POST" action="/profile/delete-account">
             <div class="mb-4">
-                <label class="block text-sm font-medium text-gray-700 mb-2">
+                <label for="delete-confirm" class="block text-sm font-medium text-gray-700 mb-2">
                     Type <strong>delete</strong> to confirm
                 </label>
-                <input type="text" name="confirm" required
+                <input type="text" name="confirm" id="delete-confirm" required
                        placeholder="delete"
                        class="w-full border border-red-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-red-500">
             </div>

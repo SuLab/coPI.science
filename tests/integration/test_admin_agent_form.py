@@ -4,6 +4,7 @@ import pytest
 from src.models import USER_ROLE_ADMIN
 from src.services.agent_form import agent_form_version
 from tests import factories
+from tests.flash_support import session_flashes
 from tests.integration.test_manager_access import auth_headers
 
 pytestmark = pytest.mark.integration
@@ -71,7 +72,10 @@ async def test_provision_error_is_quoted(client, db_session, monkeypatch):
     monkeypatch.setattr(admin_provisioning, "start_provisioning", boom)
     r = await client.post(f"/admin/agents/{agent.id}/slack/provision", headers=auth_headers(admin.id),
                           follow_redirects=False)
-    assert "slack_error=bad%20%26%20worse%20%23fragment" in r.headers["location"]
+    assert r.headers["location"] == f"/admin/agents/{agent.id}"
+    assert session_flashes(r) == [
+        {"text": "Slack provisioning failed: bad & worse #fragment", "kind": "error"}
+    ]
 
 
 @pytest.mark.parametrize("slug", ["../escape", "has space", "x" * 51, "dot.slug"])

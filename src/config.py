@@ -291,9 +291,6 @@ class Settings(BaseSettings):
     slack_bot_token_yliu: str = ""
     slack_bot_token_magliery: str = ""
 
-    # Analytics
-    posthog_api_key: str = ""
-
     # LLM models
     #
     # Opus 4.6 -> Opus 5 and Sonnet 4.6 -> Sonnet 5 (2026-08-19). Two silent

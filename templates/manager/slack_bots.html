@@ -21,11 +21,6 @@
     ✅ Slack bot installed — the token is saved on the agent. Click <b>Activate</b> to bring it live.
 </div>
 {% endif %}
-{% if slack_error %}
-<div class="mb-4 px-4 py-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800">
-    ⚠️ Slack provisioning failed: {{ slack_error }}
-</div>
-{% endif %}
 
 <div class="bg-white rounded-lg border border-gray-200 overflow-hidden">
     <table class="min-w-full divide-y divide-gray-200">
@@ -46,10 +41,10 @@
                     {% if row.pi %}
                         <a href="/manager/pis/{{ row.pi.id }}" class="text-indigo-600 hover:underline font-medium">{{ row.pi.name }}</a>
                     {% else %}
-                        <span class="text-gray-400">{{ agent.pi_name or '—' }} <span class="text-xs">(no linked PI)</span></span>
+                        <span class="text-gray-600">{{ agent.pi_name or '—' }} <span class="text-xs">(no linked PI)</span></span>
                     {% endif %}
                 </td>
-                <td class="px-4 py-3 text-sm text-gray-700">{{ agent.bot_name }} <span class="text-xs text-gray-400">{{ agent.agent_id }}</span></td>
+                <td class="px-4 py-3 text-sm text-gray-700">{{ agent.bot_name }} <span class="text-xs text-gray-600">{{ agent.agent_id }}</span></td>
                 <td class="px-4 py-3 text-sm">
                     {% if agent.status == 'active' %}
                         <span class="px-2 py-0.5 rounded text-xs bg-green-100 text-green-800">active</span>
@@ -63,7 +58,7 @@
                 </td>
                 <td class="px-4 py-3 text-sm">
                     {% if row.has_token %}<span class="text-green-700">installed</span>
-                    {% else %}<span class="text-gray-400">not installed</span>{% endif %}
+                    {% else %}<span class="text-gray-600">not installed</span>{% endif %}
                 </td>
                 <td class="px-4 py-3 text-sm">
                     {% if effective_user.is_staff and row.pi %}
@@ -73,26 +68,26 @@
                         </form>
                         {% elif agent.status == 'pending' %}
                         <form method="post" action="/manager/pis/{{ row.pi.id }}/activate" class="inline">
-                            <button type="submit" class="text-xs px-3 py-1 rounded bg-green-600 text-white hover:opacity-90">Activate</button>
+                            <button type="submit" class="text-xs px-3 py-1 rounded bg-green-700 text-white hover:opacity-90">Activate</button>
                         </form>
                         {% elif agent.status == 'active' %}
                         <form method="post" action="/manager/pis/{{ row.pi.id }}/mute" class="inline">
-                            <button type="submit" class="text-xs px-3 py-1 rounded bg-yellow-600 text-white hover:opacity-90">Mute</button>
+                            <button type="submit" class="text-xs px-3 py-1 rounded bg-yellow-700 text-white hover:opacity-90">Mute</button>
                         </form>
                         {% elif agent.status == 'inactive' %}
                         <form method="post" action="/manager/pis/{{ row.pi.id }}/unmute" class="inline">
-                            <button type="submit" class="text-xs px-3 py-1 rounded bg-green-600 text-white hover:opacity-90">Unmute</button>
+                            <button type="submit" class="text-xs px-3 py-1 rounded bg-green-700 text-white hover:opacity-90">Unmute</button>
                         </form>
                         {% else %}
-                        <span class="text-xs text-gray-400">{{ agent.status }} — an admin can change this on /admin/agents</span>
+                        <span class="text-xs text-gray-600">{{ agent.status }} — an admin can change this on /admin/agents</span>
                         {% endif %}
                     {% elif not row.pi %}
-                        <span class="text-xs text-gray-400">Link a PI on /admin/agents first</span>
+                        <span class="text-xs text-gray-600">Link a PI on /admin/agents first</span>
                     {% endif %}
                 </td>
             </tr>
             {% else %}
-            <tr><td colspan="5" class="px-4 py-6 text-sm text-gray-400 text-center">No PI lab bots yet.</td></tr>
+            <tr><td colspan="5" class="px-4 py-6 text-sm text-gray-600 text-center">No PI lab bots yet.</td></tr>
             {% endfor %}
         </tbody>
     </table>

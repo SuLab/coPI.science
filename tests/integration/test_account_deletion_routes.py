@@ -15,6 +15,7 @@ from src.config import get_settings
 from src.models import User
 from src.services import user_deletion
 from tests import factories
+from tests.session_support import session_cookie_name, session_headers
 
 pytestmark = pytest.mark.asyncio
 
@@ -32,24 +33,12 @@ def teardown_dirs(tmp_path, monkeypatch):
 def _auth(user_id) -> dict:
     signer = TimestampSigner(get_settings().secret_key)
     data = base64.b64encode(json.dumps({"user_id": str(user_id)}).encode())
-    return {"Cookie": f"copi-session={signer.sign(data).decode()}"}
+    return {"Cookie": f"{session_cookie_name()}={signer.sign(data).decode()}"}
 
 
 def _auth_as(admin_id, impersonate_id) -> dict:
-    """Admin session plus the copi-impersonate cookie.
-
-    Byte-identical to tests/integration/test_onboarding_flow.py:74 — the
-    impersonate cookie is a PLAIN unsigned UUID (src/dependencies.py reads it
-    with uuid.UUID(cookie_value), no signer).
-    """
-    signer = TimestampSigner(get_settings().secret_key)
-    data = base64.b64encode(json.dumps({"user_id": str(admin_id)}).encode())
-    return {
-        "Cookie": (
-            f"copi-session={signer.sign(data).decode()}; "
-            f"copi-impersonate={impersonate_id}"
-        )
-    }
+    """Admin session with an impersonation of ``impersonate_id`` signed into it."""
+    return session_headers(admin_id, impersonate=impersonate_id)
 
 
 async def test_impersonated_delete_is_refused(client, db_session):

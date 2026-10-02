@@ -11,12 +11,13 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import PlainTextResponse
 
 from src.agent.ids import WRITER_WEB, set_default_writer_id
-from src.config import get_settings
+from src.config import Settings, get_settings
 from src.routers import (
     admin,
     agent_page,
     assessment_chat,
     auth,
+    csp_report,
     invite,
     manager,
     onboarding,
@@ -26,6 +27,8 @@ from src.routers import (
 )
 from src.routers import settings as settings_router
 from src.services.assessment_chat import drain_live_tasks
+from src.web.errors import install_error_handlers
+from src.web.security_headers import CSP_REPORT_PATH, SecurityHeadersMiddleware
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,8 +41,19 @@ logger = logging.getLogger(__name__)
 #: it came from one of our own pages.
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
-#: The session cookie, spelled the same way create_app() configures it below.
-SESSION_COOKIE = "copi-session"
+#: The session cookie's name over plain HTTP (``ALLOW_HTTP_SESSIONS=true``: local
+#: development and the browser harness).
+SESSION_COOKIE_HTTP = "copi-session"
+#: Its name when the cookie is Secure. The ``__Host-`` prefix makes a browser refuse
+#: the cookie unless it is Secure, has ``Path=/`` and carries no ``Domain``, so a
+#: sibling host on the shared registrable domain cannot set or overwrite it (A-05).
+#: SessionMiddleware's defaults (path "/", no domain) satisfy all three.
+SESSION_COOKIE_HTTPS = "__Host-copi-session"
+
+
+def session_cookie_name(settings: Settings) -> str:
+    """The session cookie name create_app() configures for ``settings``."""
+    return SESSION_COOKIE_HTTP if settings.allow_http_sessions else SESSION_COOKIE_HTTPS
 
 #: Ports a URL of that scheme omits by default. An origin does not include its
 #: default port (RFC 6454 §4), so both sides are normalised against this.
@@ -107,7 +121,7 @@ class OriginGuardMiddleware(BaseHTTPMiddleware):
     (an unrelated production tenant) and ``devel.copi.science``. SameSite is
     computed on the REGISTRABLE domain, so all three count as the same site — a
     page on either sibling could auto-submit a top-level POST and the victim's
-    ``copi-session`` cookie would ride along. ``POST /profile/delete-account``
+    session cookie would ride along. ``POST /profile/delete-account``
     (cascades nine tables) and, against a signed-in admin, ``POST
     /admin/users/{id}/role`` were both reachable that way (E1.1).
 
@@ -124,10 +138,14 @@ class OriginGuardMiddleware(BaseHTTPMiddleware):
 
     Anything else is a 403.
 
-    Added LAST in create_app(), because Starlette's ``add_middleware``
-    *prepends*: last added is outermost. Outermost is both correct and cheaper
-    here — this reads headers only and needs no session, so it refuses before
-    the session is decoded or any route runs.
+    Added after SessionMiddleware in create_app(), because Starlette's
+    ``add_middleware`` *prepends*: later added is further out. Only
+    SecurityHeadersMiddleware sits outside it, and that layer refuses nothing.
+    Outside the session is both correct and cheaper here — this reads headers
+    only, so it refuses before the session is decoded or any route runs.
+
+    One exemption, by exact path: ``POST CSP_REPORT_PATH`` (the CSP report sink),
+    pinned by test_origin_guard.py::test_only_the_csp_report_path_is_exempt_from_the_origin_check.
 
     Not affected, verified rather than assumed: the ORCID callback is a GET;
     there is no inbound Slack POST route, and there is no CORSMiddleware.
@@ -138,6 +156,13 @@ class OriginGuardMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         path = request.url.path
+
+        if path == CSP_REPORT_PATH and request.method.upper() == "POST":
+            # The CSP report sink (src/routers/csp_report.py): a browser's violation
+            # report is not a form post from one of our pages and may carry no Origin
+            # or an opaque one. Exact path and POST only; that route reads no session
+            # and writes nothing but a bounded log line.
+            return await call_next(request)
 
         expected = normalized_origin(get_settings().base_url)
         origin_raw = request.headers.get("origin")
@@ -204,24 +229,6 @@ class OriginGuardMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-class PostHogContextMiddleware(BaseHTTPMiddleware):
-    """Put the PostHog project key on ``request.state`` for ``templates/base.html``.
-
-    ``base.html`` renders the PostHog snippet only when
-    ``request.state.posthog_api_key`` is truthy, and nothing else sets it.
-
-    Asset and health probes render no page, so they skip the settings read —
-    nginx has no ``location /static`` block, so every asset reaches uvicorn.
-    """
-
-    async def dispatch(self, request: Request, call_next):
-        path = request.url.path
-        if path.startswith("/static/") or path == "/api/health":
-            return await call_next(request)
-        request.state.posthog_api_key = get_settings().posthog_api_key
-        return await call_next(request)
-
-
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     """No startup work of its own. On shutdown, give assessment-chat answers still
@@ -267,30 +274,34 @@ def create_app() -> FastAPI:
     # to be registered in both routers' template setup.
     application.state.assessment_chat_enabled = settings.assessment_chat_enabled
 
-    # PostHog context (added first, so it runs innermost, inside the session
-    # middleware).
-    application.add_middleware(PostHogContextMiddleware)
-
     # Session middleware (signed cookies via itsdangerous)
     application.add_middleware(
         SessionMiddleware,
         secret_key=settings.secret_key,
-        session_cookie=SESSION_COOKIE,
+        session_cookie=session_cookie_name(settings),
         max_age=30 * 24 * 3600,  # 30 days
         https_only=not settings.allow_http_sessions,
         same_site="lax",
     )
 
-    # CSRF guard. Added LAST, so it is the OUTERMOST middleware: Starlette's
-    # add_middleware prepends. It reads headers only and needs no session, so
-    # running it outside SessionMiddleware is both correct and cheaper — a
-    # forged POST is refused before the session middleware decodes a cookie.
+    # CSRF guard: the outermost middleware that can REFUSE a request (Starlette's
+    # add_middleware prepends, so later calls wrap earlier ones). It reads headers
+    # only and needs no session, so running it outside SessionMiddleware is both
+    # correct and cheaper — a forged POST is refused before the session middleware
+    # decodes a cookie.
     #
-    # Outermost is a REQUIREMENT, not a preference, and no request-level
+    # Outside the session is a REQUIREMENT, not a preference, and no request-level
     # assertion can see it (a refused request never modifies the session, so
-    # SessionMiddleware emits no Set-Cookie either way). It is pinned
-    # structurally by test_origin_guard.py::test_the_guard_is_the_outermost_middleware.
+    # SessionMiddleware emits no Set-Cookie either way). Pinned structurally by
+    # test_origin_guard.py::test_the_guard_is_the_outermost_refusing_middleware.
     application.add_middleware(OriginGuardMiddleware)
+
+    # Security headers and the per-request CSP nonce (spec §6.3). Added after the
+    # guard, so it is the one layer OUTSIDE it: the guard's own 403 carries the
+    # headers too, and every template sees request.state.csp_nonce. It refuses
+    # nothing and reads no session or body, so the guard still refuses before any
+    # session is decoded.
+    application.add_middleware(SecurityHeadersMiddleware)
 
     # Static files. Served with `Cache-Control: no-cache` so a browser revalidates
     # against the ETag on every load and picks up a redeployed asset immediately.
@@ -314,6 +325,7 @@ def create_app() -> FastAPI:
     # Include routers
     application.include_router(public.router, tags=["public"])
     application.include_router(auth.router, tags=["auth"])
+    application.include_router(csp_report.router, tags=["csp"])
     application.include_router(onboarding.router, prefix="/onboarding", tags=["onboarding"])
     application.include_router(profile.router, prefix="/profile", tags=["profile"])
     application.include_router(agent_page.router, prefix="/agent", tags=["agent"])
@@ -325,6 +337,8 @@ def create_app() -> FastAPI:
     )
     application.include_router(invite.router, tags=["invite"])
     application.include_router(settings_router.router, prefix="/settings", tags=["settings"])
+    # HTML error pages for browser navigation; JSON stays for scripts (src/web/errors.py).
+    install_error_handlers(application)
 
     @application.get("/api/health")
     async def health():

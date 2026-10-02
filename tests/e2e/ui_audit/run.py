@@ -106,7 +106,8 @@ async def _run(stack: Stack, args) -> dict:
     os.environ.update(stack.env())
     from playwright.async_api import async_playwright
 
-    from src.main import SESSION_COOKIE
+    from src.config import get_settings
+    from src.main import session_cookie_name
 
     report: dict = {"phase": args.phase, "browser": args.browser, "base_url": stack.base_url}
     async with async_playwright() as p:
@@ -114,8 +115,8 @@ async def _run(stack: Stack, args) -> dict:
         browser = await launcher.launch(executable_path=args.executable or None)
         axe = load_axe()
         h = Harness(base_url=stack.base_url, ids=stack.ids, browser=browser,
-                    cookie_name=SESSION_COOKIE, secret_key=stack.secret, axe_source=axe,
-                    env=stack.env())
+                    cookie_name=session_cookie_name(get_settings()),
+                    secret_key=stack.secret, axe_source=axe, env=stack.env())
         if args.command in ("crawl", "all"):
             from tests.e2e.ui_audit.crawl import crawl
 

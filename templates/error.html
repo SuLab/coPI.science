@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{# Browser error page (src/web/errors.py, M-01). Rendered with no current_user, so the
+   nav shows no links; the account block is emptied too, so a signed-in user is not
+   offered "Sign in". #}
+{% block title %}{{ title }} — Blackbird{% endblock %}
+{% block account %}{% endblock %}
+{% block content %}
+<div class="max-w-xl mx-auto text-center py-16">
+    <p class="text-sm font-medium text-gray-600">Error {{ status_code }}</p>
+    <h1 class="mt-2 text-2xl font-bold text-gray-900">{{ title }}</h1>
+    {% if detail %}<p class="mt-4 text-base text-gray-700">{{ detail }}</p>{% endif %}
+    <div class="mt-8 flex justify-center gap-6 text-base">
+        <a href="{{ back_href }}" class="text-indigo-700 hover:underline">Back</a>
+        <a href="/" class="text-indigo-700 hover:underline">Home</a>
+    </div>
+</div>
+{% endblock %}

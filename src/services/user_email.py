@@ -1,17 +1,22 @@
 """The one writer of ``users.email``.
 
 ``users.email`` is a plain, case-sensitive UNIQUE column that delegate-invitation
-acceptance binds to and ``users.lookupByEmail`` reads. A login whose ORCID
+acceptance binds to. A login whose ORCID
 address another account already held used to 500 on the unique violation, and a
 case variant was silently stored as a second account's address.
 
 ``assign_user_email`` stores the address EXACTLY as its caller hands it — each
 caller keeps its own normalisation (profile edits and onboarding strip and
 lowercase; the ORCID login and the CLI store ORCID's value as-is), so no stored
-address and no ``lookupByEmail`` input changes. It refuses an address another
+address changes. It refuses an address another
 user holds in ANY case, and confines a racing unique violation to a savepoint.
 tests/unit/test_email_writer_tripwire.py fails on any other ``users.email``
 write in src/.
+
+It also owns the rule that verification follows the address (spec 2026-10-01
+§6.6): ``users.email_verified_at`` is cleared whenever the address changes,
+compared case-insensitively as invitation acceptance compares it, and when it is
+cleared. A refused assignment changes neither.
 """
 from __future__ import annotations
 
@@ -31,10 +36,12 @@ async def assign_user_email(db: AsyncSession, user: User, email: str | None) -> 
 
     ``None`` clears the address and always succeeds. ``user`` must already be
     flushed (it needs an id). Never raises on a conflict: the login path must be
-    able to proceed without an email.
+    able to proceed without an email. A different address (case-insensitively), or
+    none, also clears ``user.email_verified_at``.
     """
     if email is None:
         user.email = None
+        user.email_verified_at = None
         return True
     holder = await db.scalar(
         select(User.id)
@@ -53,9 +60,12 @@ async def assign_user_email(db: AsyncSession, user: User, email: str | None) -> 
     # Read before the savepoint: its rollback expires the user's attributes, and a
     # lazy load of an expired attribute is not allowed under asyncio.
     user_id = user.id
+    same_address = (user.email or "").lower() == email.lower()
     try:
         async with db.begin_nested():
             user.email = email
+            if not same_address:
+                user.email_verified_at = None
             await db.flush()
     except IntegrityError:
         logger.warning(

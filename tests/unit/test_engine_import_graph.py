@@ -196,6 +196,7 @@ EXPECTED_METHOD_OWNER: dict[str, str] = {
     "_slack_parent_ts": "slack_io", "_next_poll_client": "slack_io",
     "_poll_slack_for_bot_messages": "slack_io", "_log_poll_error": "slack_io",
     "_seed_slack_cursors_without_ingest": "slack_io",
+    "_bot_identity_maps": "slack_io", "_known_sender": "slack_io",
     "_record_specialist_consult": "panel", "_post_panel_note": "panel",
     "_seed_consults_from_db": "panel", "_record_consult": "panel", "_note_consult": "panel",
     "_consulted_domains": "panel", "_computed_score_and_band": "panel",

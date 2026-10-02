@@ -1,0 +1,26 @@
+{# Tag widgets (D-16). Every tag is its own hidden <input name="{{ name }}">, and one
+   `tag_fields` marker says the widget was on the page, so a field whose tags were all
+   removed still posts the marker and is cleared (src/services/profile_edit.py,
+   list_fields_from_form). Behaviour: static/js/tag_widget.js; styles: static/css/input.css. #}
+{% macro tag_field(name, label, values, hint, wrapper_class="mb-5") %}
+<div class="{{ wrapper_class }}" data-tag-field="{{ name }}">
+    <input type="hidden" name="tag_fields" value="{{ name }}">
+    <label for="tag-input-{{ name }}" class="block text-sm font-medium text-gray-700 mb-1">{{ label }}</label>
+    <div class="tag-container border border-gray-300 rounded-lg px-2 py-1.5 flex flex-wrap gap-1.5 min-h-[38px] focus-within:ring-2 focus-within:ring-indigo-500 focus-within:border-transparent cursor-text">
+        {% for t in values %}
+        <span class="tag-pill">{{ t }}<input type="hidden" name="{{ name }}" value="{{ t }}"><button type="button" class="tag-remove" aria-label="Remove {{ t }}">&times;</button></span>
+        {% endfor %}
+        <input type="text" id="tag-input-{{ name }}" class="tag-input" placeholder="Type and press Enter to add...">
+    </div>
+    {% if hint %}<p class="text-xs text-gray-600 mt-1">{{ hint }}</p>{% endif %}
+</div>
+{% endmacro %}
+
+{# The five list fields of a ResearcherProfile, as every profile form shows them. #}
+{% macro profile_tag_fields(profile, wrapper_class="mb-5") %}
+{{ tag_field("techniques", "Techniques & Methods", (profile.techniques if profile else None) or [], "e.g. RNA-seq, CRISPR-Cas9, mass spectrometry", wrapper_class) }}
+{{ tag_field("experimental_models", "Model Systems", (profile.experimental_models if profile else None) or [], "Cell lines, model organisms, databases", wrapper_class) }}
+{{ tag_field("disease_areas", "Disease Areas", (profile.disease_areas if profile else None) or [], "e.g. neurodegeneration, osteoarthritis", wrapper_class) }}
+{{ tag_field("key_targets", "Key Molecular Targets", (profile.key_targets if profile else None) or [], "e.g. ATF6, UPR, FoxO", wrapper_class) }}
+{{ tag_field("keywords", "Keywords", (profile.keywords if profile else None) or [], "Additional MeSH-style keywords", wrapper_class) }}
+{% endmacro %}

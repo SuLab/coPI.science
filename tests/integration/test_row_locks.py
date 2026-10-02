@@ -5,6 +5,7 @@ function in another, then reads ``pg_stat_activity`` for a backend waiting on a
 ``FOR UPDATE`` query. Without the lock the route would not wait at all."""
 import asyncio
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -71,7 +72,8 @@ async def test_cohort_delete_waits_for_a_concurrent_holder(engine):
         async with factory() as s1:
             await s1.execute(text("SELECT 1 FROM cohorts WHERE id = :id FOR UPDATE"), {"id": cohort.id})
             async with factory() as s2:
-                task = asyncio.create_task(routes.admin_cohort_delete(cohort.id, db=s2, current_user=_admin()))
+                task = asyncio.create_task(routes.admin_cohort_delete(
+                    cohort.id, request=SimpleNamespace(session={}), db=s2, current_user=_admin()))
                 await asyncio.sleep(0.5)
                 assert await _is_waiting_on_for_update(factory)
                 await s1.rollback()

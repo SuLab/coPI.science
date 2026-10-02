@@ -151,9 +151,8 @@ def test_an_env_token_for_an_undeclared_agent_is_ignored(monkeypatch):
 @pytest.mark.integration
 async def test_get_any_bot_token_ignores_invalid_rows(db_session, monkeypatch):
     """A placeholder row must not satisfy 'any usable token'. The web tier's
-    workspace-wide lookups (delegate names, users.lookupByEmail, provisioning's team
-    lookup) use whatever this returns, so a placeholder would reach Slack as a
-    credential."""
+    workspace-wide calls (provisioning's team lookup) use whatever this returns, so a
+    placeholder would reach Slack as a credential."""
     _blank_all_bot_tokens(monkeypatch)
     _clear_settings_cache()
     try:

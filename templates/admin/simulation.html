@@ -97,9 +97,6 @@
 {% if msg %}
 <div data-sim-flash class="mb-4 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-base text-green-800">{{ msg }}</div>
 {% endif %}
-{% if error %}
-<div data-sim-flash class="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-base text-red-800">{{ error }}</div>
-{% endif %}
 
 <!-- Status card -->
 <section id="sec-status">
@@ -217,13 +214,13 @@
             </label>
             {% endif %}
             <div>
-                <label class="block text-sm font-medium text-gray-600 mb-1">Max runtime (minutes, 0 = indefinite)</label>
-                <input type="number" name="max_runtime" value="0" min="0"
+                <label for="start-max-runtime" class="block text-sm font-medium text-gray-600 mb-1">Max runtime (minutes, 0 = indefinite)</label>
+                <input type="number" name="max_runtime" id="start-max-runtime" value="0" min="0"
                        class="border border-gray-300 rounded px-2 py-1 text-base w-40">
             </div>
             <div>
-                <label class="block text-sm font-medium text-gray-600 mb-1">Max proposals (0 = no limit)</label>
-                <input type="number" name="max_proposals" value="0" min="0"
+                <label for="start-max-proposals" class="block text-sm font-medium text-gray-600 mb-1">Max proposals (0 = no limit)</label>
+                <input type="number" name="max_proposals" id="start-max-proposals" value="0" min="0"
                        class="border border-gray-300 rounded px-2 py-1 text-base w-40">
             </div>
             <button type="submit"
@@ -238,13 +235,14 @@
         <h2 class="text-lg font-semibold text-gray-900 mb-3">Stop the run</h2>
         <p class="text-base text-gray-700 max-w-[68ch] mb-3">
             Sends a graceful stop to the live engine. Refused unless an engine is
-            running (including a starting or unresponsive one). <strong>Stop</strong> announces every owed headline, open
-            interviews included, as it always has. <strong>Stop — hold open
+            running (including a starting or unresponsive one). <strong>Stop</strong> announces owed headlines, open
+            interviews included, at most 25 per stop. <strong>Stop — hold open
             interviews</strong> announces only interviews that have ended; the others
             wait for a resume or a finalize.
         </p>
         <div class="flex flex-wrap gap-3">
-            <form action="/admin/simulation/stop" method="post">
+            <form action="/admin/simulation/stop" method="post"
+                  data-confirm="{% if stop_counts %}Posts {{ stop_counts.posts }} of {{ stop_counts.owed }} owed headlines to Slack ({{ stop_counts.open }} from interviews still open; at most {{ stop_counts.cap }} per stop); cannot be undone{% else %}Posts every owed headline to Slack, including interviews still open; cannot be undone{% endif %}">
                 <button type="submit"
                         class="inline-flex items-center px-4 py-2 rounded-md bg-red-600 text-white text-base font-medium hover:bg-red-700 disabled:opacity-50"
                         {% if not engine_is_alive %}disabled{% endif %}>
@@ -289,8 +287,8 @@
     <form action="/admin/simulation/announce-settings" method="post" class="space-y-3">
         <div class="flex items-end gap-3">
             <div class="flex-1">
-                <label class="block text-sm font-medium text-gray-600 mb-1">Channels</label>
-                <input type="text" name="channels" value="{{ channels_value }}"
+                <label for="announce-channels" class="block text-sm font-medium text-gray-600 mb-1">Channels</label>
+                <input type="text" name="channels" id="announce-channels" value="{{ channels_value }}"
                        class="border border-gray-300 rounded px-2 py-1 text-base w-full">
             </div>
             <button type="submit"
@@ -320,7 +318,7 @@
         {{ '{pi_prompts_hash}' }}, {{ '{rubric_version}' }}, {{ '{rubric_hash}' }}.
     </p>
     <form action="/admin/simulation/announce-template" method="post" class="space-y-3"{% if template_error %} data-sim-keep{% endif %}>
-        <textarea name="body" rows="10"
+        <textarea name="body" aria-label="Run-start announcement template" rows="10"
                   class="border border-gray-300 rounded px-3 py-2 text-base w-full font-mono">{{ template_value }}</textarea>
         <input type="hidden" name="reset" value="false">
         <button type="submit"
@@ -328,7 +326,8 @@
             Validate &amp; save
         </button>
     </form>
-    <form action="/admin/simulation/announce-template" method="post" class="mt-2">
+    <form action="/admin/simulation/announce-template" method="post" class="mt-2"
+          data-confirm="Reset the run-start announcement to the file default? The saved custom template is deleted; this cannot be undone.">
         <input type="hidden" name="body" value="">
         <input type="hidden" name="reset" value="true">
         <button type="submit"
@@ -406,7 +405,7 @@
 <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5 mb-6">
     <h2 class="text-lg font-semibold text-gray-900 mb-3">Run selector</h2>
     <form method="get" action="/admin/simulation" class="flex items-center gap-3">
-        <select name="run" onchange="this.form.submit()"
+        <select name="run" aria-label="Simulation run" data-autosubmit
                 class="border border-gray-300 rounded px-2 py-1 text-base">
             {% for opt in run_options %}
             <option value="{{ opt.id }}" {% if opt.is_selected %}selected{% endif %}>
@@ -733,7 +732,7 @@
 </label>
 <p id="sim-refresh-notice" role="status" hidden
    class="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900"></p>
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
 (function () {
   // Spec 2026-10-01 §5.3. Units are the jump nav and each top-level <section id>;
   // a unit that holds focus or an edited form is never replaced or removed (C-01,

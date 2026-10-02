@@ -519,6 +519,33 @@ def test_role_set_round_trips_through_all_roles(db, runner):
     assert _role(target_orcid) == USER_ROLE_PI
 
 
+def test_cli_role_changes_bump_the_session_epoch_only_on_a_change(db, runner):
+    """A role change signs the account out everywhere (spec 2026-10-01 §6.7); a no-op
+    role:set does not."""
+    target_orcid = _orcid("role-epoch")
+
+    async def _seed(session):
+        await factories.make_user(
+            session, orcid=target_orcid, name="Epoch Target", user_role=USER_ROLE_PI
+        )
+
+    db(_seed)
+
+    def _epoch():
+        return db(lambda s: _user_by_orcid(s, target_orcid)).session_epoch
+
+    _ok(runner.invoke(cli_app, ["role:set", "--orcid", target_orcid, "--role", "pi"]))
+    assert _epoch() is None
+    _ok(runner.invoke(cli_app, ["role:set", "--orcid", target_orcid, "--role", "manager"]))
+    assert _epoch() == 1
+    _ok(runner.invoke(cli_app, ["admin:grant", "--orcid", target_orcid]))
+    assert _epoch() == 2
+    _ok(runner.invoke(cli_app, ["admin:grant", "--orcid", target_orcid]))
+    assert _epoch() == 2
+    _ok(runner.invoke(cli_app, ["admin:revoke", "--orcid", target_orcid]))
+    assert _epoch() == 3
+
+
 def test_role_set_rejects_an_invalid_role_and_leaves_the_row_untouched(db, runner):
     target_orcid = _orcid("role-invalid")
 

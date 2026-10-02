@@ -25,11 +25,11 @@ async def test_applies_edits_and_creates_a_profile_row_if_none_existed(db_sessio
             name="New Name", email="new@example.edu",
             institution="New U", department="New Dept",
             research_summary="Studies new things.",
-            techniques="crispr, sequencing",
-            experimental_models="mouse",
-            disease_areas="cancer",
-            key_targets="TP53",
-            keywords="oncology",
+            techniques=["crispr", "sequencing"],
+            experimental_models=["mouse"],
+            disease_areas=["cancer"],
+            key_targets=["TP53"],
+            keywords=["oncology"],
         ),
         expected_version=None,
     )
@@ -70,8 +70,8 @@ async def test_a_manager_editing_a_pi_attributes_the_revision_to_the_manager(db_
                     name=pi.name, email=pi.email or "",
                     institution="", department="",
                     research_summary="Edited by a manager.",
-                    techniques="", experimental_models="",
-                    disease_areas="", key_targets="", keywords="",
+                    techniques=[], experimental_models=[],
+                    disease_areas=[], key_targets=[], keywords=[],
                 ),
                 expected_version=None,
             )
@@ -94,8 +94,8 @@ async def test_rejects_an_email_already_used_by_someone_else(db_session):
         form=dict(
             name=pi.name, email="taken@example.edu",
             institution="", department="", research_summary="",
-            techniques="", experimental_models="", disease_areas="",
-            key_targets="", keywords="",
+            techniques=[], experimental_models=[], disease_areas=[],
+            key_targets=[], keywords=[],
         ),
         expected_version=None,
     )

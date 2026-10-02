@@ -3,6 +3,7 @@ through separate committed sessions, and deletes the rows it created."""
 import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import func, select, text
@@ -19,7 +20,8 @@ async def _committed(engine, *, bot_token=None):
     f = async_sessionmaker(engine, expire_on_commit=False)
     async with f() as s:
         pi = await factories.make_user(s, name="Inv Pi", email=f"pi{uuid.uuid4().hex[:6]}@x.edu")
-        d = await factories.make_user(s, name="Del", email=f"d{uuid.uuid4().hex[:6]}@x.edu")
+        d = await factories.make_user(s, name="Del", email=f"d{uuid.uuid4().hex[:6]}@x.edu",
+                                      email_verified_at=datetime.now(UTC))
         agent = await factories.make_agent(s, user=pi, agent_id=f"inv{uuid.uuid4().hex[:6]}", status="active",
                                            slack_bot_token=bot_token)
         inv = DelegateInvitation(agent_registry_id=agent.id, invited_by_user_id=pi.id, email=d.email,
@@ -40,22 +42,11 @@ async def _cleanup(f, users, agent_ids):
         await s.commit()
 
 
-async def test_double_accept_creates_one_delegate(engine, monkeypatch):
+async def test_double_accept_creates_one_delegate(engine):
     """Review Focus 3."""
     from src.routers import invite as invite_routes
 
     f, pi, d, agent, inv = await _committed(engine, bot_token="xoxb-test-accept")
-    seen_delegates = []
-
-    async def lookup(token, email):
-        # Runs only after the accept commits: a separate session already sees the row.
-        async with f() as probe:
-            seen_delegates.append((await probe.execute(
-                select(func.count()).select_from(AgentDelegate)
-                .where(AgentDelegate.agent_registry_id == agent.id))).scalar_one())
-        return None
-
-    monkeypatch.setattr("src.services.slack_web.lookup_user_by_email_async", lookup)
     try:
         async def accept():
             async with f() as s:
@@ -69,8 +60,6 @@ async def test_double_accept_creates_one_delegate(engine, monkeypatch):
             n = (await s.execute(select(func.count()).select_from(AgentDelegate)
                                  .where(AgentDelegate.agent_registry_id == agent.id))).scalar_one()
         assert n == 1
-        # One accept won and looked the delegate up in Slack, after its commit.
-        assert seen_delegates == [1]
     finally:
         await _cleanup(f, [pi.id, d.id], [agent.id])
 
@@ -117,7 +106,8 @@ async def test_double_invite_creates_one_invitation_and_one_email(engine, monkey
             async with f() as s:
                 user = await s.get(User, pi.id)
                 return await routes.invite_delegate(
-                    agent.agent_id, request=None, emails="fresh@x.edu", db=s, current_user=user)
+                    agent.agent_id, request=SimpleNamespace(session={}), emails="fresh@x.edu", db=s,
+                    current_user=user)
 
         results = await asyncio.gather(invite(), invite(), return_exceptions=True)
         assert not [r for r in results if isinstance(r, Exception)], results

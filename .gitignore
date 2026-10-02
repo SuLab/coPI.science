@@ -98,3 +98,6 @@ backups/
 # Subagent-driven-development scratch workspace
 .superpowers/
 tests/e2e/ui_audit/axe.min.js
+
+# Pinned build tools fetched by scripts/build_css.sh (the Tailwind standalone CLI).
+.tools/

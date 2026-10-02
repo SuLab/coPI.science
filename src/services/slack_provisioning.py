@@ -40,7 +40,6 @@ BOT_SCOPES = [
     # https://docs.slack.dev/reference/scopes/groups.read
     "groups:history",
     "users:read",         # users.info
-    "users:read.email",   # users.lookupByEmail
 ]
 
 
@@ -192,6 +191,6 @@ def exchange_code(
     token = data.get("access_token", "")
     if not token.startswith("xoxb-"):
         # Do NOT echo any part of the token — this message can surface in logs
-        # and a user-facing ?slack_error= redirect. See SEC-9.
+        # and a user-facing flash message. See SEC-9.
         raise RuntimeError("Unexpected token format from Slack (expected xoxb-...)")
     return token

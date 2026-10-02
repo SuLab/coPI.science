@@ -29,7 +29,9 @@ from src.services.simulation_control import (
     record_audit,
 )
 from src.services.simulation_control import panel_state as read_panel_state
+from src.services.simulation_stats import funnel
 from src.services.simulation_view import live_tab_context
+from src.web.flash import flash
 
 # ---------------------------------------------------------------------------
 # /admin/simulation — the control-plane panel (Task 7 of
@@ -84,13 +86,41 @@ async def _kv_delete(db: AsyncSession, key: str) -> None:
 
 
 
+#: The engine posts at most this many owed headlines on a Stop
+#: (src/agent/engine/constants.py HEADLINES_MAX_AT_SHUTDOWN). Duplicated, not
+#: imported: that module imports src.agent.agent; the equality is pinned by
+#: tests/unit/test_stop_announce_cap.py.
+STOP_ANNOUNCE_CAP = 25
+
+
+async def _stop_counts(
+    db: AsyncSession, status_row, engine_is_alive: bool
+) -> dict[str, int] | None:
+    """The announcing Stop's dialog numbers, from the LIVE run's funnel (FN-01).
+
+    The page's Live tab shows the ``?run=`` selection, which defaults to the newest run
+    by ``started_at`` and need not be the one the engine is executing; the heartbeat
+    row names the live run. A Stop announces every owed headline of that run, open
+    interviews included: ``owed`` is the terminal ones owed plus the provisional
+    (still open) ones not yet announced, ``open`` those provisional ones, ``posts``
+    what one Stop posts (at most ``cap``). An open interview an earlier Stop already
+    announced (the run was resumed) is not owed again. None when no engine holds the lock or the heartbeat has not
+    named a run yet; the dialog then words it without numbers.
+    """
+    if not engine_is_alive or status_row is None or status_row.simulation_run_id is None:
+        return None
+    live = await funnel(db, status_row.simulation_run_id)
+    owed = live.headlines_owed + live.provisional_unannounced
+    return {"owed": owed, "open": live.provisional_unannounced, "cap": STOP_ANNOUNCE_CAP,
+            "posts": min(owed, STOP_ANNOUNCE_CAP)}
+
+
 async def _simulation_context(
     db: AsyncSession,
     request: Request,
     current_user: User,
     *,
     msg: str | None = None,
-    error: str | None = None,
     template_error: str | None = None,
     template_value_override: str | None = None,
 ) -> dict:
@@ -140,6 +170,7 @@ async def _simulation_context(
     audit_events = audit_result.scalars().all()
 
     live_tab = await live_tab_context(db, request, status_row, now)
+    stop_counts = await _stop_counts(db, status_row, engine_is_alive)
 
     # The heartbeat's `tick_at` is an ISO string with microseconds; every other
     # time on this page is minute-precision UTC. An unparseable value is shown
@@ -162,6 +193,7 @@ async def _simulation_context(
         status_row=status_row,
         latest_run=latest_run,
         held_counts=held_counts,
+        stop_counts=stop_counts,
         latest_finalized=latest_finalized,
         pending_commands=pending_commands,
         pending_start=pending_start,
@@ -172,13 +204,18 @@ async def _simulation_context(
         template_value=template_value,
         audit_events=audit_events,
         msg=msg,
-        error=error,
         template_error=template_error,
         tick_at_display=tick_at_display,
         web_rubric_hash=RUBRIC_CONTENT_HASH,
         **live_tab,
     )
 
+
+
+def _refuse_to(request: Request, url: str, message: str) -> RedirectResponse:
+    """Flash ``message`` as an error and redirect to ``url`` (A-14: never in the query)."""
+    flash(request, message, "error")
+    return RedirectResponse(url=url, status_code=302)
 
 
 @router.get("/simulation", response_class=HTMLResponse)
@@ -196,7 +233,6 @@ async def admin_simulation(
         request,
         current_user,
         msg=request.query_params.get("msg"),
-        error=request.query_params.get("error"),
     )
     return templates.TemplateResponse(request, "admin/simulation.html", ctx)
 
@@ -234,9 +270,8 @@ async def admin_simulation_start(
         )
     ).scalar_one_or_none()
     if alive or pending_start is not None:
-        return RedirectResponse(
-            url=f"/admin/simulation?error={quote('A run is already starting or in progress.')}",
-            status_code=302,
+        return _refuse_to(
+            request, "/admin/simulation", "A run is already starting or in progress."
         )
     pending_stop = (
         await db.execute(
@@ -248,9 +283,8 @@ async def admin_simulation_start(
     ).scalar_one_or_none()
     if pending_stop is not None and is_finalize_stop(pending_stop):
         # The finalize would stamp the run a start is about to resume or replace.
-        return RedirectResponse(
-            url=f"/admin/simulation?error={quote('A Finalize run is pending; start after it finishes.')}",
-            status_code=302,
+        return _refuse_to(
+            request, "/admin/simulation", "A Finalize run is pending; start after it finishes."
         )
     latest_id = await latest_run_id(db)
     latest = await db.get(SimulationRun, latest_id) if latest_id is not None else None
@@ -265,10 +299,7 @@ async def admin_simulation_start(
         )
     except IntegrityError:
         await db.rollback()
-        return RedirectResponse(
-            url=f"/admin/simulation?error={quote('A start is already pending.')}",
-            status_code=302,
-        )
+        return _refuse_to(request, "/admin/simulation", "A start is already pending.")
     await record_audit(
         db, action="simulation_start_requested", actor_user_id=current_user.id, payload=payload
     )
@@ -284,6 +315,7 @@ _RUN_ID_FORM = Form(...)
 async def admin_simulation_finalize_run(
     request: Request,
     run_id: uuid.UUID = _RUN_ID_FORM,
+    confirm_run: str = Form(""),
     db: AsyncSession = _DB,
     current_user: User = _ADMIN,
 ):
@@ -291,11 +323,18 @@ async def admin_simulation_finalize_run(
     command carrying `{"finalize": true, "run_id": ...}`, the existing enum
     value, so no enum migration. Refused while an engine holds the lock or a
     start is pending; a live engine would only fail it. With no engine alive the
-    supervisor claims it and runs the finalize routine under the engine lock."""
+    supervisor claims it and runs the finalize routine under the engine lock.
+
+    The form must also carry ``confirm_run`` equal to the run id's
+    first 8 characters (case and surrounding spaces ignored)."""
     def _refuse(message: str):
-        return RedirectResponse(
-            url=f"/admin/activity/{run_id}?error={quote(message)}", status_code=302,
-        )
+        return _refuse_to(request, f"/admin/activity/{run_id}", message)
+
+    short_id = str(run_id)[:8]
+    if confirm_run.strip().lower() != short_id:
+        # C-10: the run's short id, typed, is the confirmation; checked here, not only
+        # in the browser's dialog.
+        return _refuse(f"Type the run's short id ({short_id}) to confirm Finalize run.")
 
     if await engine_alive(db):
         return _refuse("An engine is running — Finalize run applies to a stopped run.")
@@ -350,9 +389,7 @@ async def admin_simulation_stop(
     double-click/race guard as the start route.
     """
     if not await engine_alive(db):
-        return RedirectResponse(
-            url=f"/admin/simulation?error={quote('Nothing is running.')}", status_code=302
-        )
+        return _refuse_to(request, "/admin/simulation", "Nothing is running.")
     payload = {"hold_open": True} if hold_open == "1" else None
     try:
         await enqueue_command(
@@ -360,10 +397,7 @@ async def admin_simulation_stop(
         )
     except IntegrityError:
         await db.rollback()
-        return RedirectResponse(
-            url=f"/admin/simulation?error={quote('A stop is already pending.')}",
-            status_code=302,
-        )
+        return _refuse_to(request, "/admin/simulation", "A stop is already pending.")
     await record_audit(
         db, action="simulation_stop_requested", actor_user_id=current_user.id, payload=payload
     )
@@ -410,9 +444,8 @@ async def admin_simulation_announce_settings(
         names = parse_announce_channels(channels)
         bad = [n for n in names if not _ANNOUNCE_CHANNEL_RE.match(n)]
         if bad:
-            return RedirectResponse(
-                url=f"/admin/simulation?error={quote('Invalid channel name(s): ' + ', '.join(bad))}",
-                status_code=302,
+            return _refuse_to(
+                request, "/admin/simulation", "Invalid channel name(s): " + ", ".join(bad)
             )
         new_value = ",".join(names) or None
         if new_value is None:

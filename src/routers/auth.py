@@ -1,6 +1,7 @@
 """ORCID OAuth flow — /login, /auth/callback, /logout."""
 
 import logging
+import uuid
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
@@ -19,6 +20,12 @@ from src.models import AccessAllowlist, User
 from src.models.job import INTERACTIVE_PRIORITY
 from src.services.orcid import fetch_orcid_profile
 from src.services.profile_jobs import enqueue_profile_job_if_absent
+from src.services.session_epoch import (
+    SESSION_EPOCH_KEY,
+    bump_session_epoch,
+    current_epoch,
+    epoch_in_session,
+)
 from src.services.user_email import assign_user_email
 from src.web.templating import make_templates
 
@@ -26,6 +33,9 @@ templates = make_templates()
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+# Module-level dependency singleton (no Depends(...) in an argument default; the
+# src/ lint ratchet counts each one).
+_DB = Depends(get_db)
 
 ORCID_AUTH_URL = "https://orcid.org/oauth/authorize"
 ORCID_TOKEN_URL = "https://orcid.org/oauth/token"
@@ -100,6 +110,24 @@ def pop_post_login_redirect(request: Request) -> str | None:
     """Return the stored post-login destination if present and safe."""
     target = request.session.pop(POST_LOGIN_KEY, None)
     return target if is_safe_next_url(request, target) else None
+
+
+def _start_fresh_session(request: Request) -> None:
+    """Clear the session at login, keeping only what the login itself must carry.
+
+    Nothing from a session that predates the login — an anonymous visitor's, or one
+    planted by someone else (session fixation, A-11) — reaches the signed-in session:
+    the post-login destination is re-stored only if it passes is_safe_next_url, and a
+    pending delegate-invite token survives so the invite flow (src/routers/invite.py)
+    can resume after ORCID. Every other key, an impersonation included, is dropped.
+    """
+    next_url = pop_post_login_redirect(request)
+    pending_token = request.session.get("pending_invite_token")
+    request.session.clear()
+    if next_url:
+        request.session[POST_LOGIN_KEY] = next_url
+    if isinstance(pending_token, str) and pending_token:
+        request.session["pending_invite_token"] = pending_token
 
 
 def _get_oauth_client() -> AsyncOAuth2Client:
@@ -230,8 +258,10 @@ async def _find_or_create_user(
 
 def _post_login_redirect(request: Request, user: User) -> RedirectResponse:
     """Where a freshly logged-in, allowed user goes; writes the session keys."""
-    # Set session
+    # Set session. The epoch is what get_current_user compares with
+    # users.session_epoch on every request (spec 2026-10-01 §6.7).
     request.session["user_id"] = str(user.id)
+    request.session[SESSION_EPOCH_KEY] = current_epoch(user)
     request.session.pop("pending_access", None)
 
     # Check for pending invite token — skip onboarding, go straight to acceptance
@@ -340,6 +370,10 @@ async def auth_callback(
 
     await db.commit()
 
+    # Session fixation (A-11): nothing from the pre-login session survives the
+    # login except what _start_fresh_session keeps.
+    _start_fresh_session(request)
+
     # Access gate: users who aren't allowed do not get a session
     if user.access_status != "allowed":
         # Stash ORCID + any known email in session for the /access-pending page
@@ -354,9 +388,20 @@ async def auth_callback(
     return _post_login_redirect(request, user)
 
 
+def _session_user_id(request: Request) -> uuid.UUID | None:
+    """``session["user_id"]`` as a UUID; None when absent or malformed."""
+    raw = request.session.get("user_id")
+    if not raw:
+        return None
+    try:
+        return uuid.UUID(str(raw))
+    except ValueError:
+        return None
+
+
 @router.post("/logout")
-async def logout(request: Request):
-    """Clear session and redirect to login.
+async def logout(request: Request, db: AsyncSession = _DB):
+    """Sign out on every device and redirect to login.
 
     POST-only: logout mutates session state, so exposing it over GET made it a
     cross-site request-forgery target (a third-party page could log a victim
@@ -364,8 +409,20 @@ async def logout(request: Request):
     forged cross-site POSTs but not same-site ones from a sibling subdomain;
     OriginGuardMiddleware (src/main.py) refuses those. The "Sign out" control
     posts this form (see base.html). (SEC-8)
+
+    Bumping ``users.session_epoch`` makes get_current_user refuse every other
+    session of the account (spec 2026-10-01 §6.7). The account comes from
+    ``session["user_id"]`` directly, never from get_current_user: a denied user is
+    bounced from every authenticated route to /access-pending and must still be
+    able to sign out, and an auth dependency here would turn that bounce into a
+    loop (tests/integration/test_access_revocation.py). Only a session still
+    holding the current epoch bumps it, so replaying an already-revoked cookie
+    cannot sign the account out of its newer sessions.
     """
+    user_id = _session_user_id(request)
+    epoch = epoch_in_session(request.session)
+    if user_id is not None and epoch is not None:
+        await bump_session_epoch(db, user_id, expected_epoch=epoch)
+        await db.commit()
     request.session.clear()
-    response = RedirectResponse(url="/login", status_code=302)
-    response.delete_cookie("copi-impersonate")
-    return response
+    return RedirectResponse(url="/login", status_code=302)

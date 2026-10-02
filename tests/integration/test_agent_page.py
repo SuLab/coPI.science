@@ -1,4 +1,4 @@
-"""Live integration tests for the agent page — all 12 endpoints of routers/agent_page.py.
+"""Live integration tests for the agent page — all 11 endpoints of routers/agent_page.py.
 
 Real ASGI requests, real Postgres, real Jinja templates, real invitation
 flows.
@@ -23,8 +23,8 @@ import json
 import re
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from types import SimpleNamespace
-from urllib.parse import unquote
 
 import pytest
 from itsdangerous import TimestampSigner
@@ -37,8 +37,9 @@ from src.models import (
     DelegateInvitation,
     ResearcherProfile,
 )
-from src.services.slack_tokens import is_valid_token
 from tests import factories
+from tests.flash_support import session_flashes
+from tests.session_support import session_cookie_name
 
 pytestmark = pytest.mark.integration
 
@@ -47,7 +48,7 @@ def _auth(user_id) -> dict:
     """Forge the signed session cookie SessionMiddleware would issue."""
     signer = TimestampSigner(get_settings().secret_key)
     data = base64.b64encode(json.dumps({"user_id": str(user_id)}).encode())
-    return {"Cookie": f"copi-session={signer.sign(data).decode()}"}
+    return {"Cookie": f"{session_cookie_name()}={signer.sign(data).decode()}"}
 
 
 # ---------------------------------------------------------------------------
@@ -116,12 +117,8 @@ def _no_env_bot_tokens(monkeypatch):
     ``env_token`` (per agent, via ``token_for_agent_row``) and ``get_any_bot_token``
     (workspace-wide: the first valid token of ANY agent, DB rows first, then
     ``.env``). The fictitious `tstowner`/`tstother` ids dodge the per-agent lookup but
-    not the workspace-wide one, so a dev host with a real live-tier ``.env`` (e.g.
-    ``SLACK_BOT_TOKEN_WISEMAN`` set for the live tier) would hand the dashboard's
-    delegate-name lookup a real token, and it would call the real workspace. Stubbed
-    to ``{}``, the only tokens a route can find are the DB rows and a test's own
-    ``world.agent.slack_bot_token``. Pinned by
-    ``test_env_bot_tokens_never_reach_the_delegate_lookup``.
+    not the workspace-wide one. Stubbed to ``{}``, the only tokens a route can find
+    are the DB rows and a test's own ``world.agent.slack_bot_token``.
     """
     from src.config import Settings
 
@@ -234,7 +231,7 @@ async def _invite(client, world, email):
         headers=_auth(world.pi.id),
     )
     assert r.status_code == 302, r.text
-    assert "delegate_error" not in r.headers["location"], r.headers["location"]
+    assert session_flashes(r) == [], session_flashes(r)
     return r
 
 
@@ -256,7 +253,8 @@ async def delegated(client, db_session, world):
     the fixture itself proves the add path works before anything asserts on it.
     """
     delegate = await factories.make_user(
-        db_session, name="Dee Legate", email="dee@example.org"
+        db_session, name="Dee Legate", email="dee@example.org",
+        email_verified_at=datetime.now(UTC),
     )
     await _invite(client, world, "dee@example.org")
     token = await _token_for(db_session, world.agent, "dee@example.org")
@@ -398,8 +396,8 @@ async def test_inviting_a_delegate_creates_a_pending_invitation_and_one_email(
         headers=_auth(world.pi.id),
     )
     assert r.status_code == 302
-    assert "delegate_error" in r.headers["location"]
-    assert "not-an-email" in unquote(r.headers["location"])
+    assert r.headers["location"] == f"/agent/{OWNER_AGENT}/dashboard"
+    assert session_flashes(r) == [{"text": "Invalid email: not-an-email", "kind": "error"}]
 
     rows = (await db_session.execute(
         select(DelegateInvitation).where(
@@ -426,7 +424,8 @@ async def test_a_duplicate_pending_invitation_is_refused(client, db_session, wor
         headers=_auth(world.pi.id),
     )
     assert r.status_code == 302
-    assert "Invitation+already+pending" in r.headers["location"].replace("%20", "+")
+    assert r.headers["location"] == f"/agent/{OWNER_AGENT}/dashboard"
+    assert any("Invitation already pending" in f["text"] for f in session_flashes(r))
     rows = (await db_session.execute(
         select(DelegateInvitation).where(DelegateInvitation.email == "dee@example.org")
     )).scalars().all()
@@ -483,8 +482,10 @@ async def test_removing_a_delegate_revokes_their_access(
 
 
 async def test_revoking_an_invitation_kills_that_token_only(client, db_session, world):
-    doomed = await factories.make_user(db_session, name="Dana Doomed", email="doomed@example.org")
-    keeper = await factories.make_user(db_session, name="Kim Keeper", email="keeper@example.org")
+    doomed = await factories.make_user(db_session, name="Dana Doomed", email="doomed@example.org",
+                                       email_verified_at=datetime.now(UTC))
+    keeper = await factories.make_user(db_session, name="Kim Keeper", email="keeper@example.org",
+                                       email_verified_at=datetime.now(UTC))
     await db_session.flush()
     await _invite(client, world, "doomed@example.org")
     await _invite(client, world, "keeper@example.org")
@@ -524,43 +525,6 @@ async def test_revoking_an_invitation_kills_that_token_only(client, db_session, 
     assert holders == {keeper.id}
 
 
-async def test_a_delegate_can_link_their_slack_account(client, db_session, world, delegated, slack):
-    """POST /delegates/connect-slack, with the Slack lookup stubbed."""
-    world.agent.slack_bot_token = "xoxb-fake-for-tests"
-    await db_session.flush()
-    slack.stub("users_lookupByEmail", {"user": {"id": "U-DELEGATE"}})
-
-    r = await client.post(
-        f"/agent/{OWNER_AGENT}/delegates/connect-slack",
-        headers=_auth(delegated.user.id),
-    )
-    assert r.status_code == 302 and "slack_error" not in r.headers["location"]
-    assert ("users_lookupByEmail", {"email": "dee@example.org"}) in slack.calls
-
-    agent = (await db_session.execute(
-        select(AgentRegistry).where(AgentRegistry.agent_id == OWNER_AGENT)
-    )).scalar_one()
-    assert agent.delegate_slack_ids == ["U-DELEGATE"]
-
-
-async def test_accepting_an_invitation_syncs_the_delegates_slack_id(
-    client, db_session, world, slack
-):
-    world.agent.slack_bot_token = "xoxb-fake-for-tests"
-    await db_session.flush()
-    slack.stub("users_lookupByEmail", {"user": {"id": "U-DELEGATE"}})
-    delegate = await factories.make_user(db_session, name="Dee Legate", email="dee@example.org")
-    await _invite(client, world, "dee@example.org")
-    token = await _token_for(db_session, world.agent, "dee@example.org")
-
-    assert (await client.post(f"/invite/{token}/accept",
-                              headers=_auth(delegate.id))).status_code == 302
-    agent = (await db_session.execute(
-        select(AgentRegistry).where(AgentRegistry.agent_id == OWNER_AGENT)
-    )).scalar_one()
-    assert agent.delegate_slack_ids == ["U-DELEGATE"]
-
-
 # ===========================================================================
 # 5. The remaining read/write routes — enough behaviour to make the auth matrix
 #    mean something (an endpoint that 403s everyone would satisfy authorization
@@ -589,41 +553,61 @@ async def test_the_dashboard_counts_only_this_agents_activity(client, db_session
     assert re.search(r'text-blue-600">\s*1\s*<', page.text), "threads_count was not 1"
 
 
-async def test_env_bot_tokens_never_reach_the_delegate_lookup(
-    client, db_session, world, slack, monkeypatch, request
+async def test_the_dashboard_makes_no_slack_call_for_slack_only_delegates(
+    client, db_session, world, slack
 ):
-    """The dashboard resolves Slack-only delegate names with ``get_any_bot_token``,
-    whose ``.env`` fallback `_no_env_bot_tokens` must keep shut. With a valid env token
-    set and no usable DB token anywhere, the page must make no Slack call and show
-    the raw id."""
-    monkeypatch.setenv("SLACK_BOT_TOKEN_SU", "xoxb-env-token-that-must-not-be-used")
-    get_settings.cache_clear()
-
-    # This finalizer can run before monkeypatch undoes the env var, so it drops the var
-    # itself: a Settings rebuilt in between would otherwise cache the fake token for the
-    # rest of the session (tests/conftest.py never clears the cache).
-    def _restore():
-        monkeypatch.delenv("SLACK_BOT_TOKEN_SU", raising=False)
-        get_settings.cache_clear()
-
-    request.addfinalizer(_restore)
-    # Control: the env token really is configured, so only the stub keeps it out.
-    assert get_settings().slack_bot_token_su == "xoxb-env-token-that-must-not-be-used"
-
+    """D-05: agents.delegate_slack_ids stays in the database, unread (D16), so a
+    dashboard view costs no Slack lookup and lists no Slack-only delegate."""
+    world.agent.slack_bot_token = "xoxb-fake-for-tests"
     world.agent.delegate_slack_ids = ["U1"]
     await db_session.flush()
-    # get_any_bot_token walks EVERY agent row before the .env fallback, so no row in
-    # the database may hold a usable token, not just the owner's.
-    db_tokens = (await db_session.execute(select(AgentRegistry.slack_bot_token))).scalars()
-    assert not any(is_valid_token(t) for t in db_tokens)
 
     page = await client.get(f"/agent/{OWNER_AGENT}/dashboard", headers=_auth(world.pi.id))
     assert page.status_code == 200
-    assert "users_info" not in slack.methods, slack.calls
-    # The Slack-only delegate is listed under its raw id, the no-token fallback.
-    assert re.search(r'font-medium text-gray-700">U1<', page.text), (
-        "the Slack-only delegate was not rendered under its raw id"
+    assert slack.calls == []
+    assert "Slack-Only Delegates" not in page.text
+    assert "(U1)" not in page.text
+
+
+async def test_a_delegate_sees_no_connect_slack_banner(client, world, delegated):
+    """D-03/D-04: the banner whose errors were never shown and which never cleared."""
+    page = await client.get(
+        f"/agent/{OWNER_AGENT}/dashboard", headers=_auth(delegated.user.id)
     )
+    assert page.status_code == 200
+    # Control: this really is the delegate's view of the dashboard.
+    assert "as a delegate of" in page.text
+    assert "Connect Slack Account" not in page.text
+    assert "/delegates/connect-slack" not in page.text
+
+    gone = await client.post(
+        f"/agent/{OWNER_AGENT}/delegates/connect-slack", headers=_auth(delegated.user.id)
+    )
+    assert gone.status_code == 404
+
+
+async def test_removing_a_delegate_makes_no_slack_call(
+    client, db_session, world, delegated, slack
+):
+    """The Slack-id cleanup on remove is gone; the column keeps its data."""
+    world.agent.slack_bot_token = "xoxb-fake-for-tests"
+    world.agent.delegate_slack_ids = ["U-LEGACY"]
+    await db_session.flush()
+
+    r = await client.post(
+        f"/agent/{OWNER_AGENT}/delegates/{delegated.row.id}/remove",
+        headers=_auth(world.pi.id),
+    )
+    assert r.status_code == 302
+    assert slack.calls == []
+    agent = (await db_session.execute(
+        select(AgentRegistry).where(AgentRegistry.agent_id == OWNER_AGENT)
+    )).scalar_one()
+    assert agent.delegate_slack_ids == ["U-LEGACY"]
+    remaining = (await db_session.execute(
+        select(AgentDelegate).where(AgentDelegate.agent_registry_id == agent.id)
+    )).scalars().all()
+    assert remaining == []
 
 
 async def test_saving_the_public_profile_updates_the_pis_profile_not_the_editors(
@@ -637,8 +621,9 @@ async def test_saving_the_public_profile_updates_the_pis_profile_not_the_editors
         f"/agent/{OWNER_AGENT}/public-profile/save",
         data={
             "research_summary": "Chemical biology of proteostasis.",
-            "techniques": "cryo-EM, mass spec",
-            "keywords": "proteostasis",
+            "techniques": ["cryo-EM", "mass spec"],
+            "keywords": ["proteostasis"],
+            "tag_fields": ["techniques", "keywords"],
         },
         headers=_auth(delegated.user.id),
     )
@@ -659,7 +644,7 @@ async def test_saving_the_public_profile_updates_the_pis_profile_not_the_editors
 
 
 # ===========================================================================
-# 6. Authorization, all 12 endpoints
+# 6. Authorization, all 11 endpoints
 # ===========================================================================
 
 
@@ -686,9 +671,8 @@ ENDPOINTS: list[Ep] = [
     Ep("GET", "/agent/{agent_id}/public-profile", "/agent/{agent}/public-profile"),
     Ep("GET", "/agent/{agent_id}/public-profile/edit", "/agent/{agent}/public-profile/edit"),
     Ep("POST", "/agent/{agent_id}/public-profile/save", "/agent/{agent}/public-profile/save",
-       {"research_summary": "s", "techniques": "a,b", "keywords": "k"}),
-    Ep("POST", "/agent/{agent_id}/delegates/connect-slack",
-       "/agent/{agent}/delegates/connect-slack"),
+       {"research_summary": "s", "techniques": ["a", "b"], "keywords": ["k"],
+        "tag_fields": ["techniques", "keywords"]}),
     Ep("POST", "/agent/{agent_id}/delegates/invite", "/agent/{agent}/delegates/invite",
        {"emails": "fresh@example.org"}, owner_only=True),
     Ep("POST", "/agent/{agent_id}/delegates/{invitation_id}/revoke",
@@ -719,7 +703,7 @@ def test_the_endpoint_table_matches_the_registered_routes():
         f"missing from ENDPOINTS: {sorted(registered - listed)}; "
         f"stale entries: {sorted(listed - registered)}"
     )
-    assert len(ENDPOINTS) == 12
+    assert len(ENDPOINTS) == 11
 
 
 def _path(ep: Ep, world, delegated=None, ts: str = "0.0000") -> str:
@@ -776,11 +760,10 @@ async def test_a_stranger_cannot_touch_an_agent_they_do_not_own(
     is not rejected, so a route that 403s everyone (or one that 404s because the
     fixture URL is wrong) cannot pass this.
     """
-    slack.stub("users_lookupByEmail", {"user": {"id": "U-PI"}})
     path = _path(ep, world, delegated, ts=thread_root)
 
     denied = await client.request(ep.method, path, data=ep.data,
-                                  headers=_auth(world.stranger.id))
+                                  headers={**_auth(world.stranger.id), "Accept": "application/json"})
     assert denied.status_code == 403, (
         f"{ep.id} let a stranger through with {denied.status_code}"
     )
@@ -797,15 +780,14 @@ async def test_a_stranger_cannot_touch_an_agent_they_do_not_own(
 async def test_delegate_write_access_matches_the_spec(
     client, world, delegated, ep, slack, thread_root
 ):
-    """Delegates get everything except delegate management and Slack linking of
-    the PI's own account (specs/web-delegates.md §Write access differentiation).
+    """Delegates get everything except delegate management
+    (specs/web-delegates.md §Write access differentiation).
 
     Both halves are in this one parametrisation: the owner-only endpoints must
     reject, and every other endpoint must accept.
     """
-    slack.stub("users_lookupByEmail", {"user": {"id": "U-DELEGATE"}})
     r = await client.request(ep.method, _path(ep, world, delegated, ts=thread_root),
-                             data=ep.data, headers=_auth(delegated.user.id))
+                             data=ep.data, headers={**_auth(delegated.user.id), "Accept": "application/json"})
     if ep.owner_only:
         assert r.status_code == 403, f"{ep.id} should be PI-only, got {r.status_code}"
         assert "Only the PI" in r.json()["detail"]

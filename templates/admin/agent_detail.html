@@ -20,11 +20,6 @@
         ✅ Slack bot provisioned — the token is saved on the agent (it is not shown).
     </div>
     {% endif %}
-    {% if slack_error %}
-    <div class="mb-4 px-4 py-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800">
-        ⚠️ Slack provisioning failed: {{ slack_error }}
-    </div>
-    {% endif %}
     {% if form_error %}
     <div class="bg-red-50 border border-red-200 rounded-lg p-4 mb-4">
         <p class="text-red-800 text-sm">
@@ -32,6 +27,7 @@
             {% if form_error == 'stale_form' %}This agent changed after the page loaded. Nothing was saved; review the current values and save again.
             {% elif form_error == 'slug_read_only' %}The agent ID (slug) is fixed once the agent is approved.
             {% elif form_error == 'slug_taken' %}That agent ID (slug) is already in use by another agent.
+            {% elif form_error == 'pending_not_allowed' %}An approved agent cannot be returned to pending.
             {% elif form_error == 'invalid_slug' %}An agent ID (slug) is 1–50 lowercase letters, digits, hyphens or underscores.
             {% else %}The form could not be saved.{% endif %}
         </p>
@@ -82,28 +78,28 @@
             <input type="hidden" name="form_version" value="{{ form_version }}">
             <div class="space-y-4">
                 <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Agent ID (slug)</label>
-                    <input type="text" name="agent_slug" value="{{ agent.agent_id or '' }}"
+                    <label for="agent-slug" class="block text-sm font-medium text-gray-700 mb-1">Agent ID (slug)</label>
+                    <input type="text" name="agent_slug" id="agent-slug" value="{{ agent.agent_id or '' }}"
                            placeholder="e.g. wiseman"
                            {% if agent.status != 'pending' %}readonly{% endif %}
                            class="w-full text-sm">
-                    <p class="text-xs text-gray-400 mt-1">Lowercase, no spaces. Fixed once the agent is approved (file paths and env vars use it).</p>
+                    <p class="text-xs text-gray-600 mt-1">Lowercase, no spaces. Fixed once the agent is approved (file paths and env vars use it).</p>
                 </div>
                 <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Bot Name</label>
-                    <input type="text" name="bot_name" value="{{ agent.bot_name }}"
+                    <label for="agent-bot-name" class="block text-sm font-medium text-gray-700 mb-1">Bot Name</label>
+                    <input type="text" name="bot_name" id="agent-bot-name" value="{{ agent.bot_name }}"
                            placeholder="e.g. WisemanBot"
                            class="w-full text-sm">
                 </div>
                 {% if agent.status != 'pending' %}
                 <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Status</label>
-                    <select name="agent_status" class="w-full text-sm">
-                        {% for s in valid_statuses %}
+                    <label for="agent-status" class="block text-sm font-medium text-gray-700 mb-1">Status</label>
+                    <select name="agent_status" id="agent-status" class="w-full text-sm">
+                        {% for s in valid_statuses if s != 'pending' %}
                         <option value="{{ s }}" {% if agent.status == s %}selected{% endif %}>{{ s | capitalize }}</option>
                         {% endfor %}
                     </select>
-                    <p class="text-xs text-gray-400 mt-1">
+                    <p class="text-xs text-gray-600 mt-1">
                         Only <b>active</b> agents run in the simulation; <b>inactive</b> /
                         <b>suspended</b> park them (reversible). A running sim picks up the
                         change live — no restart needed.
@@ -111,9 +107,9 @@
                 </div>
                 {% endif %}
                 <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Slack Bot Token</label>
+                    <label for="agent-token" class="block text-sm font-medium text-gray-700 mb-1">Slack Bot Token</label>
                     <div class="flex items-center gap-2">
-                        <input type="password" name="replace_slack_bot_token" value=""
+                        <input type="password" name="replace_slack_bot_token" id="agent-token" value=""
                                placeholder="{{ 'xoxb-… (set; leave blank to keep)' if agent.slack_bot_token else 'xoxb-…' }}"
                                autocomplete="off"
                                class="flex-1 text-sm font-mono">
@@ -122,7 +118,7 @@
                             Provision
                         </button>
                     </div>
-                    <p class="text-xs text-gray-400 mt-1">
+                    <p class="text-xs text-gray-600 mt-1">
                         Stored on the agent record and never shown again; paste a value only to
                         replace it. Click <b>Provision</b> to create the Slack app and install
                         the bot — you'll be sent to Slack and returned here with the token saved.
@@ -160,7 +156,7 @@
                             {{ spoke_state }}
                             {% if spoke_state == 'missing' %}
                             <button form="ensure-spoke-form" type="submit"
-                                    class="ml-2 px-2 py-0.5 bg-amber-600 hover:bg-amber-700 text-white rounded text-xs">
+                                    class="ml-2 px-2 py-0.5 bg-amber-700 hover:bg-amber-800 text-white rounded text-xs">
                                 Wire spoke
                             </button>
                             {% endif %}
@@ -195,7 +191,7 @@
 
             <div class="flex items-center gap-3 mt-6 pt-4 border-t border-gray-200">
                 <button type="submit"
-                        class="px-5 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700">
+                        class="px-5 py-2 bg-green-700 text-white text-sm font-medium rounded-lg hover:bg-green-800">
                     {% if agent.status == 'pending' %}Approve & Activate{% else %}Save Changes{% endif %}
                 </button>
                 {% if blockers %}
@@ -220,13 +216,13 @@
         <form method="POST" action="/admin/agents/{{ agent.id }}/role"
               class="mt-3 pt-4 border-t border-gray-200 flex items-end gap-2">
             <div class="flex-1">
-                <label class="block text-sm font-medium text-gray-700 mb-1">Role</label>
-                <select name="role" class="w-full text-sm">
+                <label for="agent-role" class="block text-sm font-medium text-gray-700 mb-1">Role</label>
+                <select name="role" id="agent-role" class="w-full text-sm">
                     {% for r in available_roles %}
                     <option value="{{ r }}" {% if agent.role == r %}selected{% endif %}>{{ r }}</option>
                     {% endfor %}
                 </select>
-                <p class="text-xs text-gray-400 mt-1">
+                <p class="text-xs text-gray-600 mt-1">
                     Selects the agent's per-role prompt overrides and tool allow-list
                     (<code>prompts/roles/&lt;role&gt;/</code>). <b>pi_lab</b> is the legacy
                     default. A running sim picks up the change on its next roster sync.

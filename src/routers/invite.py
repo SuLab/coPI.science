@@ -11,6 +11,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
+from src.dependencies import get_current_user, refuse_impersonation
 from src.models import AgentDelegate, AgentRegistry, DelegateInvitation, User
 from src.web.templating import make_templates
 
@@ -22,6 +23,12 @@ _INVITE_EMAIL_MISMATCH_MSG = (
     "This invitation was sent to a different email address. Please sign in with "
     "the ORCID account whose email matches the invitation."
 )
+_INVITE_UNVERIFIED_MSG = (
+    "An administrator must verify your email address before you can accept this "
+    "invitation."
+)
+_INVITE_NOT_PI_MSG = "Only a PI account can accept a delegate invitation."
+_INVITE_IMPERSONATION_DETAIL = "Invitations cannot be accepted while impersonating."
 
 
 def _invite_matches_user(invitation: DelegateInvitation, user: User) -> bool:
@@ -35,6 +42,24 @@ def _invite_matches_user(invitation: DelegateInvitation, user: User) -> bool:
     invited = (invitation.email or "").strip().lower()
     account = (getattr(user, "email", None) or "").strip().lower()
     return bool(invited) and bool(account) and invited == account
+
+
+def _invite_refusal(invitation: DelegateInvitation, user: User) -> str | None:
+    """Why ``user`` may not accept ``invitation``, or None when they may.
+
+    Spec 2026-10-01 §6.6: a PI-surface account (D-06: a manager or reviewer has no
+    lab to delegate into), holding the invited address (SEC-6), verified by an
+    administrator or manager (A-04: ``users.email`` is user-editable and the
+    verification is cleared whenever it changes). Every branch refuses; the order
+    only picks the most useful message.
+    """
+    if not user.may_use_pi_surfaces:
+        return _INVITE_NOT_PI_MSG
+    if not _invite_matches_user(invitation, user):
+        return _INVITE_EMAIL_MISMATCH_MSG
+    if user.email_verified_at is None:
+        return _INVITE_UNVERIFIED_MSG
+    return None
 
 
 @router.get("/invite/{token}", response_class=HTMLResponse)
@@ -80,33 +105,31 @@ async def accept_invite(
             {"request": request, "error": messages.get(invitation.status, "This invitation is no longer valid.")},
         )
 
-    # Valid invitation — check if user is logged in
-    user_id_str = request.session.get("user_id")
-    if not user_id_str:
-        # Store token and redirect to login
+    # Valid invitation. An anonymous visitor signs in first and is brought back
+    # here: the token survives the login's session reset
+    # (src/routers/auth.py::_start_fresh_session).
+    if not request.session.get("user_id"):
         request.session["pending_invite_token"] = token
         return RedirectResponse(url="/login/start", status_code=302)
 
-    # User is logged in — check onboarding
-    user_result = await db.execute(
-        select(User).where(User.id == user_id_str)
-    )
-    user = user_result.scalar_one_or_none()
-    if not user:
-        request.session["pending_invite_token"] = token
-        return RedirectResponse(url="/login/start", status_code=302)
+    # A signed-in visitor is resolved through get_current_user (A-09), so a
+    # denied, pending, signed-out-elsewhere or deleted account is bounced exactly
+    # as on every other page rather than read from the raw session.
+    user = await get_current_user(request, db)
+    refuse_impersonation(user, _INVITE_IMPERSONATION_DETAIL)
 
     # Bind the invite to the address it was sent to — a forwarded/leaked link
     # opened by a different account must not reach the acceptance page.
-    if not _invite_matches_user(invitation, user):
+    refusal = _invite_refusal(invitation, user)
+    if refusal is not None:
         logger.warning(
-            "Invite %s (for %r) opened by user %s (%r) — email mismatch",
-            invitation.id, invitation.email, user.id, user.email,
+            "Invite %s (for %r) refused for user %s (%r): %s",
+            invitation.id, invitation.email, user.id, user.email, refusal,
         )
         return templates.TemplateResponse(
             request,
             "invite/error.html",
-            {"request": request, "error": _INVITE_EMAIL_MISMATCH_MSG},
+            {"request": request, "error": refusal},
         )
 
     # Show confirmation page (no onboarding required for delegates)
@@ -156,14 +179,11 @@ async def confirm_accept_invite(
             {"request": request, "error": "This invitation has expired. Ask the PI to send a new one."},
         )
 
-    user_id_str = request.session.get("user_id")
-    if not user_id_str:
+    if not request.session.get("user_id"):
         return RedirectResponse(url=f"/invite/{token}", status_code=302)
 
-    user_result = await db.execute(select(User).where(User.id == user_id_str))
-    user = user_result.scalar_one_or_none()
-    if not user:
-        return RedirectResponse(url=f"/invite/{token}", status_code=302)
+    user = await get_current_user(request, db)
+    refuse_impersonation(user, _INVITE_IMPERSONATION_DETAIL)
 
     return await _accept_invitation(invitation, user, db, request)
 
@@ -175,18 +195,19 @@ async def _accept_invitation(
     request: Request,
 ) -> HTMLResponse | RedirectResponse:
     """Create the delegation relationship and mark invitation accepted."""
-    # Enforce the email binding at the mutation chokepoint (defense in depth
-    # behind the GET-side check): never grant delegate access to an account
-    # whose email differs from the invited address. See SEC-6.
-    if not _invite_matches_user(invitation, user):
+    # Enforce the binding at the mutation chokepoint (defense in depth behind the
+    # GET-side check): a PI-surface account whose verified address is the invited
+    # one, or nothing. See SEC-6 and spec 2026-10-01 §6.6.
+    refusal = _invite_refusal(invitation, user)
+    if refusal is not None:
         logger.warning(
-            "Rejecting invite acceptance: invitation %s for %r, user %s has %r",
-            invitation.id, invitation.email, user.id, user.email,
+            "Rejecting invite acceptance: invitation %s for %r, user %s (%r): %s",
+            invitation.id, invitation.email, user.id, user.email, refusal,
         )
         return templates.TemplateResponse(
             request,
             "invite/error.html",
-            {"request": request, "error": _INVITE_EMAIL_MISMATCH_MSG},
+            {"request": request, "error": refusal},
         )
 
     # Claim the invitation with a conditional UPDATE: of two racing accepts only one
@@ -214,48 +235,6 @@ async def _accept_invitation(
                 user_id=user.id, invitation_id=invitation.id)
         .on_conflict_do_nothing(constraint="uq_agent_delegate_agent_user")
     )
-    await db.commit()
-
-    # Slack sync runs after the commit: the delegation must not wait on (or roll
-    # back with) a network call. Best-effort, as before.
-    if user.email:
-        try:
-            from src.services.slack_tokens import token_for_agent_row
-            from src.services.slack_web import lookup_user_by_email_async
-
-            bot_token = token_for_agent_row(agent)
-            if bot_token:
-                sid = await lookup_user_by_email_async(bot_token, user.email)
-                if sid:
-                    # Atomic, self-deduplicating append: the read-append-reassign
-                    # this replaces wrote the WHOLE array back, so two delegates
-                    # accepting at once each dropped the other's id (issue #22
-                    # C1). The dedup guard has to live in the SQL — a
-                    # check-then-append in Python just re-races.
-                    from sqlalchemy import text as sa_text
-                    await db.execute(
-                        update(AgentRegistry)
-                        .where(
-                            AgentRegistry.id == agent.id,
-                            sa_text(
-                                "NOT (coalesce(delegate_slack_ids, '{}'::varchar[]) @> ARRAY[:sid]::varchar[])"
-                            ).bindparams(sid=sid),
-                        )
-                        .values(
-                            delegate_slack_ids=sa_text(
-                                "array_append(coalesce(delegate_slack_ids, '{}'::varchar[]), :sid2)"
-                            ).bindparams(sid2=sid)
-                        )
-                    )
-        except Exception as exc:
-            # Best-effort by design (specs/web-delegates.md §Slack Linkage): a
-            # delegate is useful without a Slack id. But LOG it — a bare `pass`
-            # here hid an ImportError for an unknown length of time, and the
-            # whole sync was dead code with nothing to show for it.
-            logger.warning(
-                "Delegate Slack-ID sync failed for agent %s: %s", agent.agent_id, exc
-            )
-
     await db.commit()
 
     logger.info(

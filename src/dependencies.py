@@ -1,6 +1,7 @@
 """FastAPI dependencies for auth and DB access."""
 
 import logging
+import time
 import uuid
 from urllib.parse import quote
 
@@ -11,8 +12,18 @@ from sqlalchemy.orm import selectinload
 
 from src.database import get_db
 from src.models import User
+from src.services.session_epoch import current_epoch, epoch_in_session
 
 logger = logging.getLogger(__name__)
+
+#: Session keys holding an admin's impersonation (spec 2026-10-01 §6.7). They live
+#: in the signed session, so only POST /admin/impersonate writes them; the old
+#: unsigned ``copi-impersonate`` cookie is neither read nor written.
+IMPERSONATE_KEY = "impersonate_user_id"
+IMPERSONATE_EXPIRES_KEY = "impersonate_expires_at"
+#: An impersonation lapses this many seconds after it starts: the 24 h the old
+#: cookie's max_age gave it.
+IMPERSONATION_MAX_AGE = 24 * 3600
 
 
 def _login_location(request: Request) -> str:
@@ -42,9 +53,11 @@ async def get_current_user(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    """
-    Auth dependency. Checks session cookie for user_id.
-    Handles impersonation via copi-impersonate cookie (admin only).
+    """Auth dependency: the user the signed session holds, or a 302 to /login or
+    /access-pending.
+
+    For an admin session holding an impersonation (``IMPERSONATE_KEY``, set by
+    POST /admin/impersonate), returns the impersonated user, tagged for the banner.
     """
     user_id_str = request.session.get("user_id")
     if not user_id_str:
@@ -74,12 +87,12 @@ async def get_current_user(
             headers={"Location": "/login"},
         )
 
-    # Revocation. Sessions are unkeyed signed cookies with a 30-day max_age and
-    # no server-side store, so there is no session to invalidate and
-    # `access_status` is the ONLY revocation signal there is. Nothing read it
-    # after login, so admin_deny_access set the column and changed nothing a
-    # signed-in user could observe: a denied user's GET /profile returned 200
-    # for up to thirty more days (E1.2).
+    # Revocation by access status. Sessions are signed cookies with a 30-day
+    # max_age and no server-side store, and nothing read `access_status` after
+    # login, so admin_deny_access set the column and changed nothing a signed-in
+    # user could observe: a denied user's GET /profile returned 200 for up to
+    # thirty more days (E1.2). The session-epoch check below is the other
+    # revocation signal.
     #
     # Checked on `session_user`, the account that actually holds the session —
     # deliberately BEFORE the impersonation block below, and never on the
@@ -114,24 +127,65 @@ async def get_current_user(
             headers={"Location": "/access-pending"},
         )
 
-    # Impersonation: admin can view as another user
-    impersonate_id = request.cookies.get("copi-impersonate")
-    if impersonate_id and session_user.is_admin:
-        try:
-            imp_uuid = uuid.UUID(impersonate_id)
-            result = await db.execute(
-                select(User).options(selectinload(User.profile)).where(User.id == imp_uuid)
-            )
-            imp_user = result.scalar_one_or_none()
-            if imp_user:
-                # Tag so templates can show impersonation banner
-                imp_user._is_impersonated = True  # type: ignore[attr-defined]
-                imp_user._real_admin = session_user  # type: ignore[attr-defined]
-                return imp_user
-        except (ValueError, Exception) as exc:
-            logger.warning("Invalid impersonate cookie: %s", exc)
+    # Revocation by session epoch (spec 2026-10-01 §6.7). Login copies
+    # users.session_epoch into the session; logout, access denial and a role
+    # change bump it, so a session holding any other epoch is over, on every
+    # device. After the access check above, so a denied user still lands on
+    # /access-pending; before impersonation, because the epoch belongs to the
+    # account that holds the session.
+    if epoch_in_session(request.session) != current_epoch(session_user):
+        request.session.clear()
+        raise HTTPException(
+            status_code=status.HTTP_302_FOUND,
+            headers={"Location": _login_location(request)},
+        )
 
-    return session_user
+    # Impersonation: admin can view as another user
+    impersonated = await _impersonated_user(request, db, session_user)
+    return impersonated if impersonated is not None else session_user
+
+
+def start_impersonation(request: Request, target_id: uuid.UUID) -> None:
+    """Record in the signed session that this admin session views the site as
+    ``target_id``, for IMPERSONATION_MAX_AGE seconds."""
+    request.session[IMPERSONATE_KEY] = str(target_id)
+    request.session[IMPERSONATE_EXPIRES_KEY] = int(time.time()) + IMPERSONATION_MAX_AGE
+
+
+def end_impersonation(request: Request) -> None:
+    """Drop the session's impersonation, if it holds one."""
+    request.session.pop(IMPERSONATE_KEY, None)
+    request.session.pop(IMPERSONATE_EXPIRES_KEY, None)
+
+
+async def _impersonated_user(
+    request: Request, db: AsyncSession, session_user: User
+) -> User | None:
+    """The user an admin session is viewing as, tagged for the banner; None when the
+    session is not impersonating, its holder is not an admin, the impersonation has
+    lapsed or is malformed (both dropped from the session), or the target is gone."""
+    impersonate_id = request.session.get(IMPERSONATE_KEY)
+    if impersonate_id and session_user.is_admin:
+        expires_at = request.session.get(IMPERSONATE_EXPIRES_KEY)
+        if not isinstance(expires_at, int) or expires_at <= time.time():
+            end_impersonation(request)
+            return None
+        try:
+            imp_uuid = uuid.UUID(str(impersonate_id))
+        except ValueError:
+            logger.warning("Invalid impersonate_user_id in session: %r", impersonate_id)
+            end_impersonation(request)
+            return None
+        result = await db.execute(
+            select(User).options(selectinload(User.profile)).where(User.id == imp_uuid)
+        )
+        imp_user = result.scalar_one_or_none()
+        if imp_user:
+            # Tag so templates can show impersonation banner
+            imp_user._is_impersonated = True  # type: ignore[attr-defined]
+            imp_user._real_admin = session_user  # type: ignore[attr-defined]
+            return imp_user
+    return None
 
 
 async def get_agent_with_access(

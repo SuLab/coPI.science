@@ -2,7 +2,6 @@
 
 import re
 import uuid
-from urllib.parse import quote
 
 from fastapi import Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -23,9 +22,14 @@ from src.routers.admin._common import (
     router,
     templates,
 )
-from src.services.agent_activation import activate_agent, activation_blockers
+from src.services.agent_activation import (
+    activate_agent,
+    activation_blockers,
+    ensure_activation_allowed,
+)
 from src.services.agent_form import agent_form_version
 from src.services.jhu_rules import get_tenure_start
+from src.web.flash import flash
 
 #: The slug names profile files (profiles/public/<slug>.md) and must pass
 #: user_deletion's _SAFE_AGENT_ID: a slug outside it could escape the profiles
@@ -165,7 +169,6 @@ async def admin_agent_detail(
             activation_blocked=request.query_params.get("activation_blocked"),
             valid_statuses=VALID_AGENT_STATUSES,
             available_roles=available_roles(),
-            slack_error=request.query_params.get("slack_error"),
             form_error=request.query_params.get("error"),
             form_version=agent_form_version(agent),
             slack_ok=request.query_params.get("slack_ok"),
@@ -264,6 +267,10 @@ async def admin_approve_agent(
     writer changed it after the page rendered, so nothing is written. The slug is
     editable only while the agent is pending (RA-14), and the Slack bot token is
     write-only: a blank ``replace_slack_bot_token`` keeps the stored one (RA-03).
+
+    ``agent_status=pending`` is refused for an agent that is no longer pending
+    (C-04). A hub-role activation is refused while another hub is active, override or not
+    (D14).
     """
     result = await db.execute(
         select(AgentRegistry)
@@ -277,6 +284,11 @@ async def admin_approve_agent(
 
     if form_version != agent_form_version(agent):
         return RedirectResponse(url=f"/admin/agents/{agent_id}?error=stale_form", status_code=302)
+    if agent_status == "pending" and agent.status != "pending":
+        # C-04: `pending` re-opens the slug rename and the auto-activation branch.
+        return RedirectResponse(
+            url=f"/admin/agents/{agent_id}?error=pending_not_allowed", status_code=302
+        )
     new_slug = agent_slug.strip().lower()
     if new_slug and new_slug != agent.agent_id:
         if agent.status != "pending":
@@ -306,6 +318,7 @@ async def admin_approve_agent(
             override=bool(activation_override.strip()),
         )
         if blockers:
+            flash(request, "Activation refused: " + "; ".join(blockers), "error")
             return RedirectResponse(
                 url=f"/admin/agents/{agent_id}?activation_blocked=1",
                 status_code=302,
@@ -373,12 +386,14 @@ async def admin_provision_slack(
     try:
         oauth_url = await start_provisioning(db, agent, initiated_by=current_user)
     except ProvisioningError as exc:
-        return RedirectResponse(
-            url=f"/admin/agents/{agent_id}?slack_error={quote(str(exc)[:200])}",
-            status_code=302,
-        )
+        flash(request, f"Slack provisioning failed: {exc}", "error")
+        return RedirectResponse(url=f"/admin/agents/{agent_id}", status_code=302)
     return RedirectResponse(url=oauth_url, status_code=302)
 
+
+
+#: Slack OAuth ``error`` values the callback names; any other value gets a fixed sentence.
+_SLACK_OAUTH_ERRORS = {"access_denied": "the installation was cancelled in Slack"}
 
 
 @router.get("/agents/slack/callback")
@@ -413,13 +428,14 @@ async def admin_provision_slack_callback(
     is_admin = bool(current_user.is_admin)
 
     def surface_error(msg: str) -> RedirectResponse:
-        base = "/admin/agents" if is_admin else "/manager/pis"
+        flash(request, f"Slack provisioning failed: {msg}", "error")
         return RedirectResponse(
-            url=f"{base}?slack_error={quote(msg[:200])}", status_code=302
+            url="/admin/agents" if is_admin else "/manager/pis", status_code=302
         )
 
     if error:
-        return surface_error(f"Slack returned: {error}")
+        # A cross-site GET can set ``error`` to any text, so it is never echoed.
+        return surface_error(_SLACK_OAUTH_ERRORS.get(error, "Slack reported an error"))
     if not code or not state:
         return surface_error("Missing code or state from Slack")
 
@@ -477,6 +493,9 @@ async def admin_set_agent_role(
     allow-list (src/agent/roles.py). Validated against the same role set the
     admin's <select> was built from, so a stale or hand-crafted form can never
     write a role the runtime does not know how to resolve.
+
+    On an ACTIVE agent the new role must pass the activation gate,
+    including the one-active-hub limit (D14); an inactive agent may take any valid role.
     """
     result = await db.execute(
         select(AgentRegistry).where(AgentRegistry.id == agent_id)
@@ -489,6 +508,14 @@ async def admin_set_agent_role(
         return RedirectResponse(
             url=f"/admin/agents/{agent_id}?role_error=Unknown+role", status_code=302
         )
+
+    if role != agent.role and agent.status == "active":
+        blockers = await ensure_activation_allowed(
+            db, agent, new_role=role, new_status="active"
+        )
+        if blockers:
+            flash(request, "Role not changed: " + "; ".join(blockers), "error")
+            return RedirectResponse(url=f"/admin/agents/{agent_id}", status_code=302)
 
     agent.role = role
     await db.commit()

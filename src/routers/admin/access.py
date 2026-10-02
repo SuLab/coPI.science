@@ -14,6 +14,7 @@ from src.models import AccessAllowlist, ResearcherProfile, User
 from src.models.job import INTERACTIVE_PRIORITY
 from src.routers.admin._common import _template_context, router, templates
 from src.services.profile_jobs import enqueue_profile_job_if_absent
+from src.services.session_epoch import bump_session_epoch
 
 logger = logging.getLogger("src.routers.admin")
 
@@ -110,6 +111,10 @@ async def admin_deny_access(
         raise HTTPException(status_code=404, detail="User not found")
 
     user.access_status = "denied"
+    # Ends every session the user holds (spec 2026-10-01 §6.7). get_current_user's
+    # access check already bounces them; the bump keeps a later re-allow from
+    # reviving those sessions.
+    await bump_session_epoch(db, user.id)
     await db.commit()
     logger.info("Admin %s denied access for user %s", current_user.name, user.id)
     return RedirectResponse(url="/admin/access-requests", status_code=302)

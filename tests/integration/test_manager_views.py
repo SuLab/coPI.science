@@ -54,15 +54,17 @@ def _manager_get_paths(param_values: dict[str, str] | None = None) -> list[str]:
 
 def test_manager_router_mutations_are_an_explicit_allowlist():
     """D12 amended, not abolished (design decision D1): the manager router may
-    have non-GET routes now, but only these eight, named exactly. A future
-    accidental ninth write route still fails this test loudly. The two
+    have non-GET routes now, but only these nine, named exactly. A future
+    accidental tenth write route still fails this test loudly. The two
     provisioning routes joined the list with F2 (2026-09-10): a manager may
     install a PI's Slack bot and activate the agent from /manager/pis/{id}.
     The grant veto joined 2026-09-11 (Task 5 of
     docs/plans/2026-09-11-pi-external-enrichment-implementation-plan.md): a
     manager may mark one NIH RePORTER grant as "not this PI". The
     industry-evidence veto joined the same day (Task 9): a manager may mark
-    one industry-evidence row as "not this PI / not industry".
+    one industry-evidence row as "not this PI / not industry". The email
+    verification joined 2026-10-01 (web UI remediation spec §6.6): a manager
+    may vouch for a PI's address, which delegate-invitation acceptance requires.
     """
     allowed_post_paths = {
         "/pis",
@@ -73,6 +75,7 @@ def test_manager_router_mutations_are_an_explicit_allowlist():
         "/pis/{user_id}/activate",
         "/pis/{user_id}/grants/{grant_id}/veto",
         "/pis/{user_id}/industry/{evidence_id}/veto",
+        "/pis/{user_id}/verify-email",
     }
     methods = {m for r in manager_router.router.routes for m in getattr(r, "methods", ())}
     assert methods == {"GET", "POST"}, f"unexpected method on the manager router: {methods}"
@@ -291,8 +294,7 @@ async def test_a_hand_set_impersonate_cookie_is_ignored_for_a_manager(client, db
     it only for is_admin, which a manager never satisfies."""
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER, name="Mgr")
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, name="TheAdmin")
-    headers = auth_headers(mgr.id)
-    headers["Cookie"] += f"; copi-impersonate={admin.id}"
+    headers = auth_headers(mgr.id, impersonate=admin.id)
     r = await client.get("/manager/pis", headers=headers, follow_redirects=False)
     assert r.status_code == 200          # still the manager, not the admin
     r2 = await client.get("/admin/users", headers=headers, follow_redirects=False)
@@ -310,8 +312,7 @@ async def test_admin_impersonating_a_manager_has_a_way_back(client, db_session):
     "Impersonating", so a revert of the fix fails this test."""
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, name="Adm One")
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER, name="Mgr Two")
-    headers = auth_headers(admin.id)
-    headers["Cookie"] += f"; copi-impersonate={mgr.id}"
+    headers = auth_headers(admin.id, impersonate=mgr.id)
     r = await client.get("/manager/pis", headers=headers)
     assert r.status_code == 200
     assert 'action="/admin/impersonate/stop"' in r.text
@@ -326,8 +327,7 @@ async def test_admin_impersonating_another_admin_has_a_way_back(client, db_sessi
     other_admin = await factories.make_user(
         db_session, user_role=USER_ROLE_ADMIN, name="Adm Borrowed"
     )
-    headers = auth_headers(admin.id)
-    headers["Cookie"] += f"; copi-impersonate={other_admin.id}"
+    headers = auth_headers(admin.id, impersonate=other_admin.id)
     r = await client.get("/admin/users", headers=headers)
     assert r.status_code == 200
     assert 'action="/admin/impersonate/stop"' in r.text
@@ -350,8 +350,7 @@ async def test_admin_impersonating_a_manager_sees_the_manager_nav_link(client, d
     is test_a_plain_admin_has_no_manager_nav_link below.)"""
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, name="Adm Nav")
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER, name="Mgr Nav")
-    headers = auth_headers(admin.id)
-    headers["Cookie"] += f"; copi-impersonate={mgr.id}"
+    headers = auth_headers(admin.id, impersonate=mgr.id)
     r = await client.get("/manager/pis", headers=headers)
     assert r.status_code == 200
     assert 'href="/manager"' in r.text
@@ -369,8 +368,7 @@ async def test_admin_impersonating_a_pi_has_no_manager_nav_link(client, db_sessi
     call, not an accidental omission."""
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, name="Adm PI Nav")
     pi = await factories.make_user(db_session, user_role=USER_ROLE_PI, name="Impersonated PI")
-    headers = auth_headers(admin.id)
-    headers["Cookie"] += f"; copi-impersonate={pi.id}"
+    headers = auth_headers(admin.id, impersonate=pi.id)
 
     r = await client.get("/settings", headers=headers)
     assert r.status_code == 200
@@ -768,8 +766,7 @@ async def test_impersonating_admin_sees_every_manager_control(client, db_session
     await factories.make_agent(db_session, user=pi, status="active")
     await db_session.flush()
     db_session.expire(pi)  # so the detail page's `target_user.agent` loads the new row
-    headers = auth_headers(admin.id)
-    headers["Cookie"] += f"; copi-impersonate={mgr.id}"
+    headers = auth_headers(admin.id, impersonate=mgr.id)
 
     pis_body = (await client.get("/manager/pis", headers=headers)).text
     assert 'action="/manager/pis"' in pis_body

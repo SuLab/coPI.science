@@ -1,6 +1,5 @@
 """My Agent page router."""
 
-import asyncio
 import logging
 import re
 import secrets
@@ -10,8 +9,6 @@ from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import distinct, func, select, tuple_
-from sqlalchemy import text as sa_text
-from sqlalchemy import update as sa_update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -35,11 +32,14 @@ from src.models import (
 from src.services.agent_identity import derive_agent_identity
 from src.services.conversation_feed import own_or_gated, resolve_agent_gate
 from src.services.email import build_delegate_invitation, send_transactional_email
-from src.services.profile_edit import apply_profile_edits, parse_expected_version
+from src.services.profile_edit import (
+    apply_profile_edits,
+    list_fields_from_form,
+    parse_expected_version,
+)
 from src.services.runs import latest_run_id
-from src.services.slack_tokens import get_any_bot_token
-from src.services.slack_web import get_user_info, lookup_user_by_email_async
 from src.services.validators import is_valid_email
+from src.web.flash import flash
 from src.web.templating import make_templates
 
 logger = logging.getLogger(__name__)
@@ -191,7 +191,6 @@ async def agent_dashboard(
         return RedirectResponse(url="/agent", status_code=302)
 
     aid = agent.agent_id
-    slack_error = request.query_params.get("slack_error")
 
     # Stats
     posts_count_result = await db.execute(
@@ -209,18 +208,6 @@ async def agent_dashboard(
         )
     )
     threads_count = threads_count_result.scalar() or 0
-
-    # Resolve delegate display names (legacy Slack-only delegates)
-    delegates = []
-    if agent.delegate_slack_ids:
-        # to_thread because _resolve_delegate_names is sync and calls
-        # slack_web.get_user_info once per delegate, each of which can retry with
-        # backoff. Run inline it would block the event loop for every other
-        # request the process is serving, not just this dashboard render.
-        delegates = await asyncio.to_thread(
-            _resolve_delegate_names,
-            agent.delegate_slack_ids, await get_any_bot_token(db),
-        )
 
     # Pending invitations (for PI view)
     pending_invitations = []
@@ -241,18 +228,6 @@ async def agent_dashboard(
     )
     web_delegates = web_delegates_result.scalars().all()
 
-    # Check if current delegate user has Slack linked
-    delegate_has_slack = True
-    if not is_owner:
-        delegate_slack_ids = agent.delegate_slack_ids or []
-        # Check if any of the delegate's possible Slack IDs are in the list
-        # For now, we check by trying to find their user in the web delegates
-        delegate_has_slack = any(
-            _user_slack_id_in_list(wd.user, delegate_slack_ids)
-            for wd in web_delegates
-            if wd.user_id == current_user.id
-        )
-
     return templates.TemplateResponse(
         request,
         "agent/dashboard.html",
@@ -264,21 +239,10 @@ async def agent_dashboard(
             posts_count=posts_count,
             threads_count=threads_count,
             slack_invite_url=SLACK_INVITE_URL,
-            slack_error=slack_error,
-            delegates=delegates,
             web_delegates=web_delegates,
             pending_invitations=pending_invitations,
-            delegate_has_slack=delegate_has_slack,
-            delegate_error=request.query_params.get("delegate_error"),
         ),
     )
-
-
-def _user_slack_id_in_list(user: User, slack_ids: list[str]) -> bool:
-    """Check if a user's email maps to any Slack ID in the list (heuristic)."""
-    # We can't check without calling Slack API, so for now always return False
-    # This gets properly resolved in Step 5 (Slack sync)
-    return False
 
 
 # --------------------------------------------------------------------------
@@ -625,11 +589,6 @@ async def save_public_profile(
     agent_id: str,
     request: Request,
     research_summary: str = Form(""),
-    techniques: str = Form(""),
-    experimental_models: str = Form(""),
-    disease_areas: str = Form(""),
-    key_targets: str = Form(""),
-    keywords: str = Form(""),
     profile_version: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -653,9 +612,8 @@ async def save_public_profile(
     error = await apply_profile_edits(
         db, target_user=pi_user, changed_by_user_id=current_user.id,
         form={
-            "research_summary": research_summary, "techniques": techniques,
-            "experimental_models": experimental_models, "disease_areas": disease_areas,
-            "key_targets": key_targets, "keywords": keywords,
+            "research_summary": research_summary,
+            **list_fields_from_form(await request.form()),
         },
         expected_version=parse_expected_version(profile_version),
         export_agent=agent,
@@ -674,108 +632,6 @@ async def save_public_profile(
 
     return RedirectResponse(
         url=f"/agent/{agent_id}/public-profile?saved=1", status_code=302
-    )
-
-
-def _resolve_delegate_names(slack_ids: list[str], bot_token: str | None) -> list[dict]:
-    """Resolve Slack user IDs to display names using the given bot token.
-
-    A name that will not resolve falls back to the raw id — this only feeds the
-    dashboard's delegate list, so one unresolvable id must not blank the rest.
-    """
-    if not bot_token:
-        return [{"slack_id": sid, "name": sid} for sid in slack_ids]
-
-    delegates = []
-    for sid in slack_ids:
-        info = None
-        try:
-            # Returns None for a user Slack does not know, so the fallback below
-            # covers both "no such user" and a failed call.
-            info = get_user_info(bot_token, sid)
-        except Exception as exc:
-            logger.warning("Could not resolve Slack display name for %s: %s", sid, exc)
-        info = info or {}
-        delegates.append({
-            "slack_id": sid,
-            "name": info.get("real_name") or info.get("name") or sid,
-        })
-    return delegates
-
-
-# --------------------------------------------------------------------------
-# Delegate Slack connection
-# --------------------------------------------------------------------------
-
-
-@router.post("/{agent_id}/delegates/connect-slack")
-async def delegate_connect_slack(
-    agent_id: str,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Let a delegate link their Slack account to this agent."""
-    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
-    note = impersonation_note(current_user)
-    logger.info("agent %s: Slack connect by %s (%s)", agent.agent_id, current_user.id, note or "direct")
-
-    if not current_user.email:
-        return RedirectResponse(
-            url=f"/agent/{agent_id}/dashboard?slack_error=No email on your account.",
-            status_code=302,
-        )
-
-    error = None
-    try:
-        bot_token = await get_any_bot_token(db)
-        if not bot_token:
-            error = "No Slack bot token available."
-        else:
-            # None means Slack has no such user (the boundary translates
-            # users_not_found), so the "join the workspace first" message is
-            # driven by a value rather than by a substring of an exception.
-            sid = await lookup_user_by_email_async(bot_token, current_user.email)
-            if not sid:
-                error = (
-                    f"No Slack account found for {current_user.email}. "
-                    "Please join the workspace first."
-                )
-            else:
-                # Atomic, self-deduplicating append: the read-append-reassign
-                # this replaces wrote the WHOLE array back, so two delegates
-                # linking at once each dropped the other's id (issue #22 C1).
-                # The dedup guard has to live in the SQL — a check-then-append
-                # in Python just re-races. Commit unconditionally now: when the
-                # id is already present the UPDATE matches no row and the
-                # commit is a no-op.
-                await db.execute(
-                    sa_update(AgentRegistry)
-                    .where(
-                        AgentRegistry.id == agent.id,
-                        sa_text(
-                            "NOT (coalesce(delegate_slack_ids, '{}'::varchar[]) @> ARRAY[:sid]::varchar[])"
-                        ).bindparams(sid=sid),
-                    )
-                    .values(
-                        delegate_slack_ids=sa_text(
-                            "array_append(coalesce(delegate_slack_ids, '{}'::varchar[]), :sid2)"
-                        ).bindparams(sid2=sid)
-                    )
-                )
-                await db.commit()
-                return RedirectResponse(
-                    url=f"/agent/{agent_id}/dashboard", status_code=302
-                )
-    except Exception as exc:
-        logger.warning(
-            "Delegate Slack lookup failed for %s: %s", current_user.email, exc
-        )
-        error = f"Slack lookup failed: {str(exc)[:100]}"
-
-    return RedirectResponse(
-        url=f"/agent/{agent_id}/dashboard?slack_error=" + (error or "Unknown error"),
-        status_code=302,
     )
 
 
@@ -881,12 +737,8 @@ async def invite_delegate(
             build_delegate_invitation(email, agent.pi_name, agent.bot_name, invite_url)
         )
 
-    error_msg = "; ".join(errors) if errors else ""
-    if error_msg:
-        return RedirectResponse(
-            url=f"/agent/{agent_id}/dashboard?delegate_error={error_msg}",
-            status_code=302,
-        )
+    if errors:
+        flash(request, "; ".join(errors), "error")
     return RedirectResponse(url=f"/agent/{agent_id}/dashboard", status_code=302)
 
 
@@ -944,29 +796,6 @@ async def remove_delegate(
     )
     delegate = result.scalar_one_or_none()
     if delegate:
-        # Remove Slack ID if present
-        if delegate.user.email and agent.delegate_slack_ids:
-            try:
-                bot_token = await get_any_bot_token(db)
-                if bot_token:
-                    sid = await lookup_user_by_email_async(bot_token, delegate.user.email)
-                    # Atomic removal, for the same reason as the append above:
-                    # the read-remove-reassign wrote the whole array back and
-                    # lost a concurrent append (issue #22 C1). NULLIF preserves
-                    # the old "empty means NULL" shape of this column.
-                    if sid:
-                        await db.execute(
-                            sa_update(AgentRegistry)
-                            .where(AgentRegistry.id == agent.id)
-                            .values(
-                                delegate_slack_ids=sa_text(
-                                    "nullif(array_remove(coalesce(delegate_slack_ids, '{}'::varchar[]), :sid), '{}'::varchar[])"
-                                ).bindparams(sid=sid)
-                            )
-                        )
-            except Exception as exc:
-                logger.warning("Delegate Slack sync is best-effort; skipped: %s", exc)
-
         await db.delete(delegate)
         await db.commit()
         logger.info(

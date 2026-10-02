@@ -239,6 +239,10 @@ class Funnel:
     #: done, so it is not counted as done.
     terminal: int
     provisional: int
+    #: Provisional verdicts with no headline yet: what a Stop that announces open
+    #: interviews still owes them. Excludes an open interview an earlier Stop of this
+    #: run already announced (a resumed run), which ``provisional`` still counts.
+    provisional_unannounced: int
     announced: int
     #: TERMINAL verdicts with no headline yet — the KPI that should read 0 on a
     #: healthy run. A provisional (still in-flight) verdict is not "owed" a
@@ -741,6 +745,11 @@ async def funnel(db: AsyncSession, run_id: uuid.UUID) -> Funnel:
         1 for tid, _ in assessment_rows if tid is not None and tid in closed_ids
     )
     provisional = verdicts_stored - terminal
+    provisional_unannounced = sum(
+        1
+        for tid, posted in assessment_rows
+        if not (tid is not None and tid in closed_ids) and posted is None
+    )
     announced = sum(1 for _, posted in assessment_rows if posted is not None)
     headlines_owed = sum(
         1
@@ -771,6 +780,7 @@ async def funnel(db: AsyncSession, run_id: uuid.UUID) -> Funnel:
         verdicts_stored=verdicts_stored,
         terminal=terminal,
         provisional=provisional,
+        provisional_unannounced=provisional_unannounced,
         announced=announced,
         headlines_owed=headlines_owed,
         drops_by_reason={reason: int(n) for reason, n in drop_rows},

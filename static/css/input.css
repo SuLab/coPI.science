@@ -1,0 +1,48 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Tag widgets (templates/_tag_field.html), moved from three inline <style> blocks. */
+.tag-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background-color: #eef2ff;
+    color: #4338ca;
+    font-size: 0.8125rem;
+    padding: 2px 8px;
+    border-radius: 9999px;
+    white-space: nowrap;
+    line-height: 1.5;
+}
+.tag-remove {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: transparent;
+    border: none;
+    color: #4f46e5;
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0;
+}
+.tag-remove:hover {
+    background-color: #c7d2fe;
+    color: #3730a3;
+}
+.tag-input {
+    flex: 1 1 120px;
+    min-width: 120px;
+    border: none;
+    outline: none;
+    font-size: 0.875rem;
+    padding: 2px 4px;
+    background: transparent;
+}
+.tag-input::placeholder {
+    color: #4b5563;
+}

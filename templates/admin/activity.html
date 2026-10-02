@@ -18,7 +18,7 @@
         <div class="text-sm text-gray-500 mt-1">Simulation Runs</div>
     </div>
     <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
-        <div class="text-3xl font-bold text-green-600">{{ total_messages }}</div>
+        <div class="text-3xl font-bold text-green-700">{{ total_messages }}</div>
         <div class="text-sm text-gray-500 mt-1">Total Messages</div>
     </div>
     <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
@@ -28,7 +28,7 @@
     <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
         <div class="text-lg font-bold text-purple-600">{{ most_active_agent or '—' }}</div>
         <div class="text-sm text-gray-500 mt-1">Most Active Agent</div>
-        {% if most_active_count %}<div class="text-xs text-gray-400">{{ most_active_count }} msgs</div>{% endif %}
+        {% if most_active_count %}<div class="text-xs text-gray-600">{{ most_active_count }} msgs</div>{% endif %}
     </div>
 </div>
 
@@ -55,8 +55,8 @@
         <tbody class="divide-y divide-gray-100">
             {% for run in runs %}
             <tr class="hover:bg-gray-50 cursor-pointer"
-                onclick="location.href='/admin/activity/{{ run.id }}'">
-                <td class="px-4 py-3 text-sm"><span data-utc="{{ run.started_at.isoformat() }}" data-utc-fmt="short">{{ run.started_at.strftime('%b %d %H:%M') }}</span></td>
+                data-row-href="/admin/activity/{{ run.id }}">
+                <td class="px-4 py-3 text-sm"><a href="/admin/activity/{{ run.id }}" class="text-indigo-700 hover:underline"><span data-utc="{{ run.started_at.isoformat() }}" data-utc-fmt="short">{{ run.started_at.strftime('%b %d %H:%M') }}</span></a></td>
                 <td class="px-4 py-3 text-sm text-gray-500">
                     {% if run.ended_at %}<span data-utc="{{ run.ended_at.isoformat() }}" data-utc-fmt="short">{{ run.ended_at.strftime('%b %d %H:%M') }}</span>{% else %}—{% endif %}
                 </td>
@@ -75,7 +75,7 @@
             </tr>
             {% else %}
             <tr>
-                <td colspan="6" class="px-4 py-8 text-center text-gray-400 text-sm">No simulation runs yet</td>
+                <td colspan="6" class="px-4 py-8 text-center text-gray-600 text-sm">No simulation runs yet</td>
             </tr>
             {% endfor %}
         </tbody>

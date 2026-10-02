@@ -7,18 +7,6 @@
     <span class="text-sm text-gray-500">{{ user_data | length }} PIs</span>
 </div>
 
-{# Same markup as manager/pi_detail.html's: the callback redirects a manager
-   here on every error it reports (an admin goes to the agents page instead);
-   it attributes none of them to one PI (an unknown state, or an initiator
-   mismatch, has no PI to return to). Staff-gated for the same reason the detail page's
-   banners are: a reviewer never reaches the callback, so a banner they can
-   summon from a query string could only ever be a fake. #}
-{% if slack_error and effective_user.is_staff %}
-<div class="mb-4 px-4 py-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800">
-    ⚠️ Slack provisioning failed: {{ slack_error }}
-</div>
-{% endif %}
-
 <!-- Add PI -->
 {% if effective_user.is_staff %}
 <form method="post" action="/manager/pis" class="mb-6 flex items-end gap-2">
@@ -52,10 +40,10 @@
 {% endif %}
 
 <!-- Filters -->
-<div class="bg-white rounded-lg border border-gray-200 p-4 mb-4 flex flex-wrap gap-4">
+<div data-filter-nav="/manager/pis" class="bg-white rounded-lg border border-gray-200 p-4 mb-4 flex flex-wrap gap-4">
     <div>
-        <label class="text-xs font-medium text-gray-600 block mb-1">Profile Status</label>
-        <select onchange="applyFilter()" id="status-filter"
+        <label for="status-filter" class="text-xs font-medium text-gray-600 block mb-1">Profile Status</label>
+        <select data-filter-param="status_filter" id="status-filter"
                 class="border border-gray-300 rounded px-2 py-1 text-sm">
             <option value="">All</option>
             <option value="no_profile" {% if status_filter == 'no_profile' %}selected{% endif %}>No Profile</option>
@@ -65,8 +53,8 @@
         </select>
     </div>
     <div>
-        <label class="text-xs font-medium text-gray-600 block mb-1">Claimed</label>
-        <select onchange="applyFilter()" id="claimed-filter"
+        <label for="claimed-filter" class="text-xs font-medium text-gray-600 block mb-1">Claimed</label>
+        <select data-filter-param="claimed_filter" id="claimed-filter"
                 class="border border-gray-300 rounded px-2 py-1 text-sm">
             <option value="">All</option>
             <option value="claimed" {% if claimed_filter == 'claimed' %}selected{% endif %}>Claimed</option>
@@ -97,9 +85,9 @@
         <tbody class="divide-y divide-gray-100">
             {% for item in user_data %}
             <tr class="hover:bg-gray-50 cursor-pointer"
-                onclick="location.href='/manager/pis/{{ item.user.id }}'">
+                data-row-href="/manager/pis/{{ item.user.id }}">
                 <td class="px-4 py-3">
-                    <div class="text-sm font-medium text-gray-900">{{ item.user.name }}</div>
+                    <div class="text-sm font-medium text-gray-900"><a href="/manager/pis/{{ item.user.id }}" class="hover:text-indigo-700 hover:underline">{{ item.user.name }}</a></div>
                     {% if item.user.department %}
                     <div class="text-xs text-gray-500">{{ item.user.department }}</div>
                     {% endif %}
@@ -109,8 +97,7 @@
                 </td>
                 <td class="px-4 py-3 hidden lg:table-cell">
                     <a href="https://orcid.org/{{ item.user.orcid }}" target="_blank"
-                       onclick="event.stopPropagation()"
-                       class="text-xs text-green-600 hover:underline">{{ item.user.orcid }}</a>
+                       class="text-xs text-green-700 hover:underline">{{ item.user.orcid }}</a>
                 </td>
                 <td class="px-4 py-3">
                     {% set status_colors = {
@@ -126,13 +113,13 @@
                 </td>
                 <td class="px-4 py-3 hidden md:table-cell">
                     {% set agent_colors = {
-                        'not_requested': 'bg-gray-100 text-gray-500',
+                        'not_requested': 'bg-gray-100 text-gray-600',
                         'awaiting_token': 'bg-amber-100 text-amber-700',
                         'active': 'bg-green-100 text-green-700',
                         'suspended': 'bg-red-100 text-red-700'
                     } %}
                     <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium
-                        {{ agent_colors.get(item.agent_status, 'bg-gray-100 text-gray-500') }}">
+                        {{ agent_colors.get(item.agent_status, 'bg-gray-100 text-gray-600') }}">
                         {{ item.agent_status | replace('_', ' ') | title }}
                     </span>
                 </td>
@@ -140,11 +127,11 @@
                     {% if item.pub_scope and item.pub_scope.scoped %}
                         {{ item.pub_scope.in_tenure }}
                         {% if item.pub_scope.undated_excluded %}
-                        <span class="text-xs text-amber-600" title="Undated rows excluded from the tenure count">·{{ item.pub_scope.undated_excluded }} undated</span>
+                        <span class="text-xs text-amber-700" title="Undated rows excluded from the tenure count">·{{ item.pub_scope.undated_excluded }} undated</span>
                         {% endif %}
                     {% else %}
                         {{ item.pub_count }}
-                        <span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs bg-gray-100 text-gray-500" title="No JHU tenure start recorded — showing full career">full career</span>
+                        <span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs bg-gray-100 text-gray-600" title="No JHU tenure start recorded — showing full career">full career</span>
                     {% endif %}
                 </td>
                 <td class="px-4 py-3 text-sm text-gray-600 hidden md:table-cell">
@@ -155,9 +142,9 @@
                 </td>
                 <td class="px-4 py-3 hidden lg:table-cell">
                     {% if item.user.claimed_at %}
-                    <span class="text-xs text-green-600">✓ {{ item.user.claimed_at.strftime('%b %d') }}</span>
+                    <span class="text-xs text-green-700">✓ {{ item.user.claimed_at.strftime('%b %d') }}</span>
                     {% else %}
-                    <span class="text-xs text-gray-400">No</span>
+                    <span class="text-xs text-gray-600">No</span>
                     {% endif %}
                 </td>
                 <td class="px-4 py-3 text-xs text-gray-500 hidden md:table-cell">
@@ -167,27 +154,17 @@
                     {% if item.user.last_login_at %}
                         {{ item.user.last_login_at.strftime('%b %d, %Y') }}
                     {% else %}
-                        <span class="text-gray-400">—</span>
+                        <span class="text-gray-600">—</span>
                     {% endif %}
                 </td>
             </tr>
             {% else %}
             <tr>
-                <td colspan="11" class="px-4 py-8 text-center text-gray-400 text-sm">No PIs found</td>
+                <td colspan="11" class="px-4 py-8 text-center text-gray-600 text-sm">No PIs found</td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
 </div>
 
-<script>
-function applyFilter() {
-    const status = document.getElementById('status-filter').value;
-    const claimed = document.getElementById('claimed-filter').value;
-    const params = new URLSearchParams();
-    if (status) params.set('status_filter', status);
-    if (claimed) params.set('claimed_filter', claimed);
-    location.href = '/manager/pis?' + params.toString();
-}
-</script>
 {% endblock %}

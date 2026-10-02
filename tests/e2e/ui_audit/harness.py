@@ -36,8 +36,11 @@ class Harness:
 
         return forge_session_cookie(self.ids[role])
 
-    async def page(self, role: str | None, width: int = 1280, bypass_csp: bool = False):
-        """A fresh context signed in as ``role`` (an ``ids`` key); None or "anon" = no session."""
+    async def page(self, role: str | None, width: int = 1280, bypass_csp: bool = False,
+                   answer_dialogs: bool = True):
+        """A fresh context signed in as ``role`` (an ``ids`` key); None or "anon" = no session.
+        Every dialog is logged and dismissed, unless ``answer_dialogs`` is False: then the
+        caller installs the page's only dialog handler (a dialog answered twice raises)."""
         ctx = await self.browser.new_context(
             viewport={"width": width, "height": 900}, bypass_csp=bypass_csp)
         # None and "anon" both mean a visitor with no session cookie (later phases'
@@ -55,5 +58,6 @@ class Harness:
             log["dialogs"].append(f"{d.type}: {d.message[:160]}")
             await d.dismiss()
 
-        page.on("dialog", _dialog)
+        if answer_dialogs:
+            page.on("dialog", _dialog)
         return ctx, page, log

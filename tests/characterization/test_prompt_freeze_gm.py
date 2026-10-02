@@ -659,11 +659,13 @@ def _export_papers():
 
 _EXPORT_FORM = {
     "research_summary": "We build isogenic organoid panels for colorectal targets.",
-    "techniques": "organoids, base editing",
-    "experimental_models": "patient-derived organoids",
-    "disease_areas": "colorectal cancer",
-    "key_targets": "KRAS G12D",
-    "keywords": "organoids, screening",
+    "techniques": ["organoids", "base editing"],
+    "experimental_models": ["patient-derived organoids"],
+    "disease_areas": ["colorectal cancer"],
+    "key_targets": ["KRAS G12D"],
+    "keywords": ["organoids", "screening"],
+    # What the rendered tag widgets post (D-16): one marker per widget.
+    "tag_fields": ["techniques", "experimental_models", "disease_areas", "key_targets", "keywords"],
 }
 
 

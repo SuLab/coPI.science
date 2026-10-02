@@ -10,7 +10,7 @@ def test_fixed_key_is_signed_big_endian_sha256_prefix():
 
 
 def test_fixed_keys_are_distinct_from_each_other_and_the_spend_lock():
-    keys = [al.ENGINE_LOCK_KEY, al.WORKER_LOCK_KEY, al.ADMIN_INVARIANT_LOCK_KEY, _SPEND_LOCK_KEY]
+    keys = [al.ENGINE_LOCK_KEY, al.WORKER_LOCK_KEY, al.ADMIN_INVARIANT_LOCK_KEY, al.HUB_ROSTER_LOCK_KEY, _SPEND_LOCK_KEY]
     assert len(set(keys)) == len(keys)
 
 

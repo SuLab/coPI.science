@@ -448,8 +448,7 @@ async def test_an_impersonating_admin_reviews_as_the_impersonated_user(client, d
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     assessment = await _seed_assessment(db_session)
-    headers = auth_headers(admin.id)
-    headers["Cookie"] += f"; copi-impersonate={mgr.id}"
+    headers = auth_headers(admin.id, impersonate=mgr.id)
 
     r = await client.post(
         f"/reviews/assessments/{assessment.id}/feedback",
@@ -478,8 +477,7 @@ async def test_an_impersonating_admin_still_cannot_assign(client, db_session):
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     assessment = await _seed_assessment(db_session)
-    headers = auth_headers(admin.id)
-    headers["Cookie"] += f"; copi-impersonate={mgr.id}"
+    headers = auth_headers(admin.id, impersonate=mgr.id)
     r = await client.post(
         f"/reviews/assessments/{assessment.id}/assign",
         data={"assignee_user_id": str(mgr.id)},
@@ -952,8 +950,7 @@ async def test_an_impersonating_admin_cannot_generate_prompt_suggestions(
         )
     )
     await db_session.flush()
-    headers = auth_headers(admin.id)
-    headers["Cookie"] += f"; copi-impersonate={mgr.id}"
+    headers = auth_headers(admin.id, impersonate=mgr.id)
 
     r = await client.post(
         "/reviews/suggestions/generate",

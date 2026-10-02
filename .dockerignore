@@ -41,3 +41,4 @@ dist
 .idea
 .vscode
 .build_info.json
+.tools

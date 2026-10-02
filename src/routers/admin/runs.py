@@ -80,7 +80,6 @@ async def admin_activity_detail(
             held_counts=held_counts,
             in_doubt=in_doubt,
             msg=request.query_params.get("msg"),
-            error=request.query_params.get("error"),
         ),
     )
 

@@ -8,6 +8,8 @@
 #   1. Alembic sanity: exactly one head, no duplicate revision ids. Cheap, offline,
 #      and first because it catches the one class of breakage that a clean `git merge`
 #      and a fully green test suite both miss. See specs/cohort-system-v2.md §14.
+#   1b. Compiled-CSS drift: static/css/app.css must equal a fresh build by the pinned
+#      Tailwind standalone CLI (scripts/build_css.sh --check). No Node needed.
 #   2. Alembic round trip: upgrade -> downgrade -> upgrade against a THROWAWAY
 #      Postgres that this step starts and destroys itself. On by default since
 #      2026-08-04; set CI_MIGRATION_DB=none to skip.
@@ -126,6 +128,14 @@ if [ "$heads_n" -ne 1 ]; then
   exit 1
 fi
 echo "    single head: $(printf '%s\n' "$heads_out" | tr -d '\n')"
+
+echo "==> compiled CSS drift (static/css/app.css vs a fresh Tailwind build)"
+# The stylesheet is generated (spec §6.1). scripts/build_css.sh runs the pinned Tailwind
+# standalone CLI, a single self-contained binary (the host has no Node), fetched once to
+# .tools/ and refused unless its sha256 matches. Cheap and offline after the first run,
+# so it runs before the database round trip. A template, script or src/ string that adds
+# or drops a utility class changes the build: commit the rebuilt file with that change.
+bash "$REPO_ROOT/scripts/build_css.sh" --check
 
 # Round trip against a THROWAWAY database. ON BY DEFAULT since 2026-08-04.
 #

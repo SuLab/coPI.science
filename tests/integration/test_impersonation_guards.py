@@ -11,8 +11,7 @@ pytestmark = pytest.mark.integration
 
 
 def _imp(admin, target):
-    h = auth_headers(admin.id)
-    h["Cookie"] += f"; copi-impersonate={target.id}"
+    h = auth_headers(admin.id, impersonate=target.id)
     return h
 
 

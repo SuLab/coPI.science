@@ -308,8 +308,8 @@ async def test_timeline_messages_render_via_data_markdown_on_both_surfaces(
         html = resp.text
         assert 'data-markdown="A **bold** claim' in html
         assert "/static/js/markdown.js" in html
-        assert "marked@12.0.2/marked.min.js" in html
-        assert "dompurify@3.1.6/dist/purify.min.js" in html
+        assert "/static/vendor/marked-12.0.2.min.js" in html
+        assert re.search(r"/static/vendor/purify-3\.4\.\d+\.min\.js", html)
 
 
 async def test_sidecar_prose_stays_plain_text(client, db_session, admin, manager):
@@ -1773,7 +1773,7 @@ async def test_the_detail_body_uses_readable_type_sizes(client, db_session, mana
     ).text
     # Scoped to `<main>...</main>`: base.html's footer ("Blackbird
     # Laboratories") is site-wide chrome this task does not own and
-    # legitimately carries its own `text-gray-400`.
+    # carries its own muted text class.
     body = html.split("Assessment detail", 1)[1].split("</main>", 1)[0]
     # Measured after the sweep: 11 `text-xs` remain, all inside `rounded-full`
     # chip spans (the reserved exception). +2 slack.

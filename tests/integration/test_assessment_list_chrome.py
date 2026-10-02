@@ -47,21 +47,9 @@ async def test_both_list_pages_carry_the_sanitizing_markdown_scripts(
     client, db_session
 ):
     for html in await _both_surfaces(client, db_session):
-        assert (
-            'src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"' in html
-        )
-        assert (
-            "integrity=\"sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi\""
-            in html
-        )
-        assert (
-            'src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"'
-            in html
-        )
-        assert (
-            "integrity=\"sha384-+VfUPEb0PdtChMwmBcBmykRMDd+v6D/oFmB3rZM/puCMDYcIvF968OimRh4KQY9a\""
-            in html
-        )
+        assert 'src="/static/vendor/marked-12.0.2.min.js"' in html
+        assert re.search(r'src="/static/vendor/purify-3\.4\.\d+\.min\.js"', html)
+        assert "cdn.jsdelivr.net" not in html
         assert 'src="/static/js/markdown.js"' in html
 
 

@@ -30,6 +30,7 @@ from src.models import (
 from src.routers.admin._common import _ADMIN, _DB, _template_context, router, templates
 from src.services.cohort_gate_inputs import load_gate_inputs
 from src.services.cohorts import compute_gates, record_cohort_audit_event, summarise_gates
+from src.web.flash import flash
 
 # ---------------------------------------------------------------------------
 # Cohorts — admin-managed groups gating which agents interact during simulation.
@@ -144,7 +145,6 @@ async def admin_cohorts(
             cohorts=cohorts,
             creator_map=creator_map,
             spokes_missing=spokes_missing,
-            error=request.query_params.get("error"),
             notice=request.query_params.get("notice"),
             gate=await _cohort_gate_context(db),
         ),
@@ -163,16 +163,12 @@ async def admin_cohort_create(
     """Create a new cohort."""
     name = name.strip().lower()
     if not _COHORT_NAME_RE.match(name):
-        return RedirectResponse(
-            url="/admin/cohorts?error=Invalid+name+(lowercase+letters,+numbers,+hyphens;+max+48)",
-            status_code=302,
-        )
+        flash(request, "Invalid name (lowercase letters, numbers, hyphens; max 48)", "error")
+        return RedirectResponse(url="/admin/cohorts", status_code=302)
     existing = await db.execute(select(Cohort).where(Cohort.name == name))
     if existing.scalar_one_or_none():
-        return RedirectResponse(
-            url="/admin/cohorts?error=A+cohort+with+that+name+already+exists",
-            status_code=302,
-        )
+        flash(request, "A cohort with that name already exists", "error")
+        return RedirectResponse(url="/admin/cohorts", status_code=302)
     cohort = Cohort(
         name=name,
         description=description.strip() or None,
@@ -229,7 +225,6 @@ async def admin_cohort_topology(
             cohorts=cohorts,
             agents=agents,
             membership_set=membership_set,
-            error=request.query_params.get("error"),
             notice=request.query_params.get("notice"),
             gate=await _cohort_gate_context(db),
         ),
@@ -243,15 +238,18 @@ async def admin_cohort_topology_save(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
-    """Apply a whole-matrix edit as a diff against the cells that were rendered.
+    """Apply a whole-matrix edit as a diff against what the form SHOWED (C-07).
 
-    The form posts one ``cell`` value per ticked box (``{cohort_id}:{agent_id}``),
-    one ``present_agent`` per rendered row and one ``present_cohort`` per rendered
-    column; the rendered cell set is their cross product, which is what the
-    template renders (an unconditional nested loop). Sending markers instead of one
-    hidden input per cell keeps the payload at agents+cohorts fields rather than
-    agents*cohorts — 60x56 posted 3,528 fields and hit Starlette's
-    ``max_fields=1000``, which is why the matrix could not be saved at all.
+    The form posts one ``cell`` per box ticked now (``{cohort_id}:{agent_id}``), one
+    ``was_checked`` per box it rendered ticked, one ``present_agent`` per rendered row and one
+    ``present_cohort`` per rendered column; the rendered cell set is the cross product of the
+    markers, which is what the template renders (an unconditional nested loop). A cell is
+    added only when ticked now and not rendered ticked, and removed only when rendered ticked
+    and unticked now. Diffing against the current table instead let a second tab, rendered
+    before another tab's save, delete every membership that save added. A form from before
+    this field existed posts no ``was_checked`` and can therefore only add. Markers instead
+    of one hidden input per cell keep the payload at agents + cohorts + memberships fields:
+    60x56 posted 3,528 fields and hit Starlette's ``max_fields=1000``.
 
     Diffing against ``rendered`` rather than against the whole table means a stale
     or partial form can never delete memberships for a cohort or agent it did not
@@ -266,8 +264,8 @@ async def admin_cohort_topology_save(
     magnitude larger than either list — e.g. 25,000 garbage ids on each side is
     50,000 form fields (under the cap) but a 625-million-entry ``rendered`` set.
     Filtering first bounds the product by the real ``Cohort``/``AgentRegistry`` row
-    counts instead. ``ticked`` is filtered the same way for the same reason, and so
-    that a ticked cell naming an id that no longer exists is silently ignored
+    counts instead. ``ticked`` and ``was_checked`` are filtered the same way for the
+    same reason, and so that a ticked cell naming an id that no longer exists is silently ignored
     (as it always was) rather than tripping the "malformed submission" guard below,
     which is reserved for a cell that names two otherwise-valid ids but was never
     part of the rendered cross product at all.
@@ -276,14 +274,14 @@ async def admin_cohort_topology_save(
     ticked = {v for v in form.getlist("cell") if isinstance(v, str)}
     present_agents = {v for v in form.getlist("present_agent") if isinstance(v, str)}
     present_cohorts = {v for v in form.getlist("present_cohort") if isinstance(v, str)}
+    was_checked = {v for v in form.getlist("was_checked") if isinstance(v, str)}
     # Checked on the raw, unfiltered marker sets: a genuinely empty submission (no
     # rows or no columns rendered at all) is an error, but a submission naming only
     # since-deleted rows/columns is not — that is just every cell turning out inert,
     # handled below by the (empty) diff loop, not by this guard.
     if not present_agents or not present_cohorts:
-        return RedirectResponse(
-            url="/admin/cohorts/topology?error=Nothing+to+save", status_code=302
-        )
+        flash(request, "Nothing to save", "error")
+        return RedirectResponse(url="/admin/cohorts/topology", status_code=302)
 
     cohorts_by_id = {
         str(c.id): c for c in (await db.execute(select(Cohort))).scalars().all()
@@ -301,12 +299,12 @@ async def admin_cohort_topology_save(
     present_cohorts &= cohorts_by_id.keys()
     present_agents &= valid_agents
     ticked = {t for t in ticked if _known_cell(t)}
+    was_checked = {t for t in was_checked if _known_cell(t)}
 
     rendered = {f"{cid}:{aid}" for cid in present_cohorts for aid in present_agents}
-    if ticked - rendered:
-        return RedirectResponse(
-            url="/admin/cohorts/topology?error=Malformed+submission", status_code=302
-        )
+    if (ticked | was_checked) - rendered:
+        flash(request, "Malformed submission", "error")
+        return RedirectResponse(url="/admin/cohorts/topology", status_code=302)
 
     existing = {
         (str(cid), aid): mid
@@ -322,8 +320,9 @@ async def admin_cohort_topology_save(
         if not cid or not aid or cid not in cohorts_by_id or aid not in valid_agents:
             continue  # stale form referencing something that no longer exists
         want = cell in ticked
+        was = cell in was_checked
         have = (cid, aid) in existing
-        if want and not have:
+        if want and not was and not have:
             db.add(CohortMembership(
                 cohort_id=uuid.UUID(cid), agent_id=aid, added_by=current_user.id,
             ))
@@ -336,7 +335,7 @@ async def admin_cohort_topology_save(
                 actor=current_user,
             )
             added += 1
-        elif have and not want:
+        elif was and not want and have:
             await db.execute(
                 sa_delete(CohortMembership).where(
                     CohortMembership.id == existing[(cid, aid)]
@@ -381,9 +380,8 @@ async def admin_ensure_star_spokes(
     try:
         report = await ensure_star_spokes(db, apply=True, actor=current_user)
     except ValueError as exc:
-        return RedirectResponse(
-            url=f"/admin/cohorts?error={quote(str(exc)[:200])}", status_code=302
-        )
+        flash(request, str(exc), "error")
+        return RedirectResponse(url="/admin/cohorts", status_code=302)
     await db.commit()
     notice = (
         f"Star spokes: {len(report.created_cohorts)} cohort(s) created, "
@@ -392,7 +390,8 @@ async def admin_ensure_star_spokes(
     )
     url = f"/admin/cohorts?notice={quote(notice)}"
     if report.anomalies:
-        url += "&error=" + quote("; ".join(report.anomalies)[:300])
+        # MAX_FLASH_CHARS (src/web/flash.py) bounds the joined text.
+        flash(request, "; ".join(report.anomalies), "error")
     return RedirectResponse(url=url, status_code=302)
 
 
@@ -463,7 +462,6 @@ async def admin_cohort_detail(
             all_agents=all_agents,
             agent_cohort_map=agent_cohort_map,
             audit_events=audit_events,
-            error=request.query_params.get("error"),
             notice=request.query_params.get("notice"),
             gate=await _cohort_gate_context(db),
         ),
@@ -474,6 +472,7 @@ async def admin_cohort_detail(
 @router.post("/cohorts/{cohort_id}/delete")
 async def admin_cohort_delete(
     cohort_id: uuid.UUID,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
@@ -499,11 +498,12 @@ async def admin_cohort_delete(
     if not cohort:
         raise HTTPException(status_code=404, detail="Cohort not found")
     if cohort.memberships:
-        return RedirectResponse(
-            url=f"/admin/cohorts/{cohort_id}?error=Remove+all+"
-                f"{len(cohort.memberships)}+members+before+deleting+this+cohort",
-            status_code=302,
+        flash(
+            request,
+            f"Remove all {len(cohort.memberships)} members before deleting this cohort",
+            "error",
         )
+        return RedirectResponse(url=f"/admin/cohorts/{cohort_id}", status_code=302)
     name = cohort.name
     await record_cohort_audit_event(
         db,
@@ -523,6 +523,7 @@ async def admin_cohort_delete(
 @router.post("/cohorts/{cohort_id}/add-agent")
 async def admin_cohort_add_agent(
     cohort_id: uuid.UUID,
+    request: Request,
     agent_id: str = Form(...),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
@@ -542,10 +543,8 @@ async def admin_cohort_add_agent(
         select(AgentRegistry.id).where(AgentRegistry.agent_id == agent_id)
     )
     if not agent_exists.scalar_one_or_none():
-        return RedirectResponse(
-            url=f"/admin/cohorts/{cohort_id}?error=Unknown+agent",
-            status_code=302,
-        )
+        flash(request, "Unknown agent", "error")
+        return RedirectResponse(url=f"/admin/cohorts/{cohort_id}", status_code=302)
     # Reject duplicate membership.
     dup = await db.execute(
         select(CohortMembership.id).where(
@@ -554,10 +553,8 @@ async def admin_cohort_add_agent(
         )
     )
     if dup.scalar_one_or_none():
-        return RedirectResponse(
-            url=f"/admin/cohorts/{cohort_id}?error=Agent+is+already+a+member",
-            status_code=302,
-        )
+        flash(request, "Agent is already a member", "error")
+        return RedirectResponse(url=f"/admin/cohorts/{cohort_id}", status_code=302)
     db.add(CohortMembership(
         cohort_id=cohort_id,
         agent_id=agent_id,
