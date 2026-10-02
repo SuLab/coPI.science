@@ -60,3 +60,18 @@ def test_rows_without_a_usable_reason_render_exactly_as_the_frozen_record(stored
     new, old = rec._verdict_doc(detail, tier), frozen._verdict_doc(detail, tier)
     assert new.blocks == old.blocks
     assert new.targets == old.targets
+
+
+def test_a_multi_line_reason_is_quoted_as_one_line():
+    """Security review L1: the label promises the LAST quoted line is the hub's
+    reason, so a reason spanning lines is folded onto one; otherwise its earlier
+    lines would sit among the rubric definition's lines."""
+    detail = synthetic_detail()
+    detail["assessment"].gating_rationales = {
+        "credible_science": "First line of the reason.\nSecond line\n\n  third.",
+    }
+    record = rec.build_chat_record(detail, tier="staff")
+    assert _gate_blocks(record, "credible science") == [
+        f"[Gate — credible science{REASON_LABEL}]\n> not met\n> GATE-DESC-SCIENCE"
+        "\n> First line of the reason. Second line third."
+    ]

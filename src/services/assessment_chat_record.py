@@ -508,7 +508,10 @@ def _gating_section(doc: _Doc, a: Any, detail: dict[str, Any]) -> None:
             label = f"Gate — {_label_safe(str(key).replace('_', ' '))}"
             reason = reasons.get(key.strip().lower()) if isinstance(key, str) else None
             if reason:
-                lines.append(reason)
+                # One line, so the label's "last quoted line" really is the whole
+                # reason: a multi-line reason would otherwise put hub text among the
+                # rubric definition's lines.
+                lines.append(" ".join(reason.split()))
                 label += "; the last quoted line is the hub's own reason for this state"
             doc.add(label, lines, anchor="gating")
     else:
