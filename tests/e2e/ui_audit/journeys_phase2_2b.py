@@ -200,17 +200,20 @@ async def journey_poll_rerender_keeps_scroll_and_focus(h) -> dict:
         await page.wait_for_selector("#chat-sources-toggle-turn-0")
         await page.evaluate("document.querySelector('[data-chat-log]').scrollTop = 0")
         await page.focus("#chat-sources-toggle-turn-0")
+        # Focusing the toggle scrolls it into view, so the reader's position is read
+        # after the focus: the property is that a poll re-render leaves it unchanged.
+        read_state = """() => ({focus: document.activeElement && document.activeElement.id,
+                                top: document.querySelector('[data-chat-log]').scrollTop})"""
+        before_poll = await page.evaluate(read_state)
         before = len(answered)
         await page.wait_for_timeout(6500)
-        state = await page.evaluate(
-            """() => ({focus: document.activeElement && document.activeElement.id,
-                       top: document.querySelector('[data-chat-log]').scrollTop})"""
-        )
+        state = await page.evaluate(read_state)
         polls = len(answered) - before
     finally:
         await context.close()
-    ok = polls >= 1 and state["focus"] == "chat-sources-toggle-turn-0" and state["top"] < 50
-    return {"ok": ok, "polls": polls, "after_poll": state,
+    ok = (polls >= 1 and state["focus"] == "chat-sources-toggle-turn-0"
+          and abs(state["top"] - before_poll["top"]) < 50)
+    return {"ok": ok, "polls": polls, "before_poll": before_poll, "after_poll": state,
             "poll_urls": answered[-2:], "log": log}
 
 

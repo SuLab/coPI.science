@@ -191,9 +191,13 @@ async def _impersonated_user(
                 # revision summary also carry it (impersonation_note below);
                 # for the rest (jobs, agents, cohort audit, allowlist,
                 # delegate invitations) this line is the record.
+                # The raw (still percent-encoded) path: the decoded one can carry a
+                # %0a that would forge a second log line.
+                raw_path = request.scope.get("raw_path")
+                path = raw_path.decode("latin-1") if raw_path else request.url.path
                 logger.warning(
                     "Write %s %s by admin %s while impersonating %s",
-                    request.method, request.url.path, session_user.id, imp_user.id,
+                    request.method, path, session_user.id, imp_user.id,
                 )
             return imp_user
     return None

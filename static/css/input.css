@@ -78,6 +78,9 @@ main table {
 }
 .tag-pill {
   max-width: 100%;
+  /* The pill's own nowrap (tag widget block above) would keep a long tag on one line
+     past the pill's edge; at full width it wraps like any other text. */
+  white-space: normal;
 }
 /* R-01: a select is never wider than its row (long run labels). */
 select {

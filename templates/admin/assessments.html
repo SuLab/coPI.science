@@ -97,7 +97,7 @@
        current values as ordinary form fields — that is what preserves run_id
        when the sort changes, and the sort when the run changes, without a
        single hidden input or a hand-assembled query string. #}
-    <form method="GET" action="/admin/assessments" class="flex flex-wrap items-center gap-2 justify-end">
+    <form method="GET" action="/admin/assessments" class="flex flex-wrap items-center gap-2 justify-end min-w-0 max-w-full">
         <label for="assessments-run-select" class="text-sm text-gray-500">Run:</label>
         <select id="assessments-run-select" name="run_id"
                 class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">

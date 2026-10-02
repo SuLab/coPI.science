@@ -39,6 +39,19 @@ async def test_a_write_under_impersonation_is_logged_with_both_identities(client
     )
 
 
+async def test_an_encoded_newline_in_the_path_cannot_forge_a_log_line(client, db_session, caplog):
+    real = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+    worn = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+    caplog.set_level(logging.WARNING, logger="src.dependencies")
+    await client.post(
+        "/agent/x%0aWrite%20POST%20by%20admin%20someone-else/delegates/invite",
+        data={"emails": "a@example.org"},
+        headers=impersonation_headers(real.id, worn.id), follow_redirects=False,
+    )
+    writes = [m for m in caplog.messages if m.startswith("Write ")]
+    assert len(writes) == 1 and "\n" not in writes[0] and "%0a" in writes[0], writes
+
+
 async def test_a_read_under_impersonation_is_not_logged_as_a_write(client, db_session, caplog):
     real = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     worn = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)

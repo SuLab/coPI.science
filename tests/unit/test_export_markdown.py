@@ -27,3 +27,14 @@ def test_a_javascript_link_is_not_a_link():
 
 def test_empty_text_renders_empty():
     assert render_export_markdown("") == ""
+
+
+def test_only_web_mail_and_fragment_links_survive():
+    """The export is opened from disk with no CSP: only the page sanitizer's schemes."""
+    kept = render_export_markdown("[a](https://x.example/) [b](mailto:a@x.example) [c](#top)")
+    assert 'href="https://x.example/"' in kept and 'href="mailto:a@x.example"' in kept
+    assert 'href="#top"' in kept
+    for url in ("search-ms:query=x", "ms-msdt:/id", "../../etc/passwd", "file:///etc/passwd",
+                "//evil.example/x", "data:text/html,x"):
+        assert "href=" not in render_export_markdown(f"[x]({url})"), url
+    assert "href=" not in render_export_markdown("<search-ms:query=x>")
