@@ -471,11 +471,14 @@ async def admin_provision_slack_callback(
 
 
 
+_LINK_USER_FORM = Form("")
+
+
 @router.post("/agents/{agent_id}/link")
 async def admin_link_agent(
     agent_id: uuid.UUID,
     request: Request,
-    user_id: str = Form(""),
+    user_id: str = _LINK_USER_FORM,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):

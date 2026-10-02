@@ -266,9 +266,11 @@
             </tr>
             {% endif %}
             {% else %}
+            {% if not all_runs_refused %}
             <tr>
                 <td colspan="7" class="px-4 py-8 text-center text-gray-600 text-sm">No discussions found</td>
             </tr>
+            {% endif %}
             {% endfor %}
         </tbody>
     </table>

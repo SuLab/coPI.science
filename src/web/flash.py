@@ -48,10 +48,18 @@ def pop_flashes(request: Request) -> list[dict[str, str]]:
     return list(request.session.pop(FLASH_SESSION_KEY, None) or [])
 
 
+#: Sent by a page's own background refresh (the simulation page's fetch keeps only
+#: #sim-body), whose render must leave the queue for the next real page view.
+BACKGROUND_REFRESH_HEADER = "x-background-refresh"
+
+
 def flash_context(request: Request) -> dict[str, Any]:
-    """Context processor: ``get_flashes()`` drains the queue when ``base.html`` calls it."""
+    """Context processor: ``get_flashes()`` drains the queue when ``base.html`` calls it,
+    except on a background refresh, which shows none and takes none."""
 
     def get_flashes() -> list[dict[str, str]]:
+        if request.headers.get(BACKGROUND_REFRESH_HEADER):
+            return []
         return pop_flashes(request)
 
     return {"get_flashes": get_flashes}

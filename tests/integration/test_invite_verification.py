@@ -126,3 +126,12 @@ async def test_an_anonymous_visitor_is_sent_to_sign_in_with_the_token_kept(clien
     r = await client.get(f"/invite/{token}")
     assert r.status_code == 302 and r.headers["location"] == "/login/start"
     assert session_from_response(r) == {"pending_invite_token": token}
+
+
+async def test_an_accept_without_a_session_ends_on_the_sign_in_page(client, db_session):
+    """Not on ORCID: the enforced form-action admits no orcid.org, and every redirect of
+    the Accept form's submission is checked against it. The token survives for login."""
+    _agent, token = await _invitation(db_session, "anon@example.org")
+    r = await client.post(f"/invite/{token}/accept", follow_redirects=False)
+    assert r.status_code == 302 and r.headers["location"] == "/login"
+    assert session_from_response(r)["pending_invite_token"] == token

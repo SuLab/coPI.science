@@ -33,3 +33,13 @@ def test_garbage_falls_back_to_the_newest_run():
 
 def test_no_runs_selects_nothing():
     assert _resolve_run_selection([], str(uuid.uuid4())) == (False, None)
+
+
+def test_the_discussions_pages_use_the_same_fallback():
+    """B-13 on /admin/discussions and /manager/discussions (``_select_run``)."""
+    from src.services.directory import _select_run
+
+    runs = _runs(2)
+    assert _select_run(runs, str(uuid.uuid4())) == runs[0].id
+    assert _select_run(runs, str(runs[1].id)) == runs[1].id
+    assert _select_run(runs, "all") == "all"

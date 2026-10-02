@@ -219,7 +219,11 @@ async def confirm_accept_invite(
     if request.state.viewer_bounce is not None:
         raise request.state.viewer_bounce
     if viewer is None:
-        return RedirectResponse(url=f"/invite/{token}", status_code=302)
+        # Our sign-in page, not /invite -> /login/start -> ORCID: each redirect of a
+        # form submission is checked against the enforced form-action, which does not
+        # list orcid.org. The token brings the visitor back here after login.
+        request.session["pending_invite_token"] = token
+        return RedirectResponse(url="/login", status_code=302)
 
     user = viewer
     refuse_impersonation(user, _INVITE_IMPERSONATION_DETAIL)

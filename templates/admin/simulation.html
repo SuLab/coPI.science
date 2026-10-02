@@ -854,7 +854,7 @@
     // Polite: skip a hidden tab and never stack a second fetch on a slow one.
     if (document.hidden || inFlight) return;
     inFlight = true;
-    fetch(refreshUrl(), { credentials: 'same-origin', headers: { 'Accept': 'text/html' } })
+    fetch(refreshUrl(), { credentials: 'same-origin', headers: { 'Accept': 'text/html', 'X-Background-Refresh': '1' } })
       .then(r => {
         const type = r.headers.get('content-type') || '';
         if (!r.ok || r.redirected || !type.includes('text/html')) {

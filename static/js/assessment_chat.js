@@ -351,6 +351,7 @@
       }
     }
     const lastInserted = new Map(); // outer ancestor -> node already placed after it
+    let citeSeq = 0; // B-17: a stable id per citation link, so render() can refocus it
     nodes.forEach(function (node) {
       let outer = null;
       let p = node.parentNode;
@@ -368,6 +369,7 @@
           const sup = el("sup");
           const link = el("a", "text-indigo-700", "[" + inner + "]");
           link.setAttribute("href", "#chat-src-" + turnKey + "-" + inner);
+          link.id = "chat-cite-" + turnKey + "-" + (citeSeq++);
           // The entry may be in a collapsed Sources list: open it before the jump.
           link.addEventListener("click", function () { revealSources(turnKey); });
           sup.appendChild(link);

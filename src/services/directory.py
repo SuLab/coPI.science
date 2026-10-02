@@ -859,16 +859,9 @@ async def list_assessments(
 
 
 def _select_run(runs: list[SimulationRun], run_id: str | None) -> uuid.UUID | str | None:
-    """The run (or ``"all"``) the page shows: the requested one, else the newest."""
-    selected_run_id: uuid.UUID | str | None = "all" if run_id == "all" else None
-    if run_id != "all" and run_id:
-        try:
-            selected_run_id = uuid.UUID(run_id)
-        except ValueError:
-            pass
-    if not selected_run_id and runs:
-        selected_run_id = runs[0].id
-    return selected_run_id
+    """The run (or ``"all"``) the page shows: the requested one when it names a run in
+    ``runs``, else the newest (B-13, the assessments pages' rule)."""
+    return _resolve_run_selection(runs, run_id)[1]
 
 
 def _run_scope(column, selected_run_id, show_all_runs: bool) -> list[Any]:

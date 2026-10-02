@@ -53,3 +53,21 @@ async def test_the_users_page_shows_the_total_and_a_pager(client, db_session, mo
     total = await directory.count_pi_directory(db_session)
     assert f"{total} users" in html
     assert f"Page 2 of {total}" in html
+
+
+async def test_the_manager_pager_keeps_the_institution_filter_and_a_late_page_is_clamped(
+    client, db_session, monkeypatch
+):
+    from src.models import USER_ROLE_MANAGER
+
+    monkeypatch.setattr(directory, "PI_DIRECTORY_PAGE_SIZE", 1)
+    for i in range(2):
+        await factories.make_user(db_session, name=f"Kept {i}", institution="Kept University")
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    await db_session.flush()
+    first = await client.get("/manager/pis?institution_filter=Kept+University",
+                             headers=auth_headers(mgr.id))
+    assert "institution_filter=" in first.text.split("Next", 1)[0].rsplit("<a ", 1)[-1]
+    late = await client.get("/manager/pis?institution_filter=Kept+University&page=9",
+                            headers=auth_headers(mgr.id))
+    assert late.status_code == 200 and "Kept 1" in late.text

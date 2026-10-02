@@ -68,3 +68,13 @@ def test_context_processor_pops_only_when_called():
     assert FLASH_SESSION_KEY in session
     assert context["get_flashes"]() == [{"text": "kept for the next page", "kind": "info"}]
     assert FLASH_SESSION_KEY not in session
+
+
+def test_a_background_refresh_neither_shows_nor_takes_the_queue():
+    session = Session()
+    queued = _request(session)
+    flash(queued, "for the next real page")
+    scope = {"type": "http", "method": "GET", "path": "/", "query_string": b"",
+             "headers": [(b"x-background-refresh", b"1")], "session": session}
+    assert flash_context(Request(scope))["get_flashes"]() == []
+    assert pop_flashes(_request(session)) == [{"text": "for the next real page", "kind": "info"}]

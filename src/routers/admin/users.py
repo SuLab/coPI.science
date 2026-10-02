@@ -46,8 +46,10 @@ async def admin_users(
         institution_filter=institution_filter,
         claimed_filter=claimed_filter,
     )
-    user_data = await list_pi_directory(db, page=page, **filters)
     user_total = await count_pi_directory(db, **filters)
+    page_count = max(1, -(-user_total // directory.PI_DIRECTORY_PAGE_SIZE))
+    page = min(page, page_count)  # a page past the end shows the last one (D-27's rule)
+    user_data = await list_pi_directory(db, page=page, **filters)
 
     return templates.TemplateResponse(
         request,
@@ -62,7 +64,7 @@ async def admin_users(
             claimed_filter=claimed_filter,
             user_total=user_total,
             page=page,
-            page_count=max(1, -(-user_total // directory.PI_DIRECTORY_PAGE_SIZE)),
+            page_count=page_count,
         ),
     )
 
