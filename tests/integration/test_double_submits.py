@@ -3,6 +3,7 @@ through separate committed sessions, and deletes the rows it created."""
 import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import func, select, text
@@ -105,7 +106,8 @@ async def test_double_invite_creates_one_invitation_and_one_email(engine, monkey
             async with f() as s:
                 user = await s.get(User, pi.id)
                 return await routes.invite_delegate(
-                    agent.agent_id, request=None, emails="fresh@x.edu", db=s, current_user=user)
+                    agent.agent_id, request=SimpleNamespace(session={}), emails="fresh@x.edu", db=s,
+                    current_user=user)
 
         results = await asyncio.gather(invite(), invite(), return_exceptions=True)
         assert not [r for r in results if isinstance(r, Exception)], results
