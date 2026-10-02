@@ -13,19 +13,19 @@ pytestmark = pytest.mark.integration
 
 
 def _nonce(response) -> str:
-    m = re.search(r"'nonce-([A-Za-z0-9_-]+)'", response.headers["content-security-policy-report-only"])
-    assert m, response.headers["content-security-policy-report-only"]
+    m = re.search(r"'nonce-([A-Za-z0-9_-]+)'", response.headers["content-security-policy"])
+    assert m, response.headers["content-security-policy"]
     return m.group(1)
 
 
 def _assert_headers(response) -> None:
-    assert response.headers["content-security-policy"] == ENFORCED_POLICY
+    assert "content-security-policy-report-only" not in response.headers
+    assert response.headers["content-security-policy"] == (
+        ENFORCED_POLICY + "; " + REPORT_ONLY_POLICY.format(nonce=_nonce(response))
+    )
     assert response.headers["x-frame-options"] == "DENY"
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["referrer-policy"] == "strict-origin-when-cross-origin"
-    assert response.headers["content-security-policy-report-only"] == REPORT_ONLY_POLICY.format(
-        nonce=_nonce(response)
-    )
     assert len(response.headers.get_list("content-security-policy")) == 1
 
 

@@ -4,14 +4,14 @@
 ``request.state.csp_nonce`` (templates mark each inline ``<script>`` with it) and sets,
 on every response it sends:
 
-* ``Content-Security-Policy: ENFORCED_POLICY`` — framing, ``<base>`` and plugins off;
-* ``Content-Security-Policy-Report-Only`` — ``REPORT_ONLY_POLICY`` with this request's
-  nonce, reporting to ``CSP_REPORT_PATH``;
+* ``Content-Security-Policy: ENFORCED_POLICY; REPORT_ONLY_POLICY`` — framing,
+  ``<base>`` and plugins off, plus the script policy with this request's nonce,
+  reporting violations to ``CSP_REPORT_PATH``;
 * ``X-Frame-Options``, ``X-Content-Type-Options`` and ``Referrer-Policy``.
 
-Phase 2 enforces the script policy by setting ``SCRIPT_POLICY_ENFORCED = True``: the
-same directives then travel in the enforced header and the report-only header is no
-longer sent. Nothing else changes.
+The script policy is enforced since Phase 2 (``SCRIPT_POLICY_ENFORCED = True``, spec
+§7): no ``Content-Security-Policy-Report-Only`` header is sent. ``REPORT_ONLY_POLICY``
+keeps its Phase 1 name so no caller changes.
 
 A plain ASGI middleware, not ``BaseHTTPMiddleware``: it only rewrites the
 ``http.response.start`` message, so a streamed body passes through untouched. A 500
@@ -35,15 +35,19 @@ CSP_REPORT_PATH = "/api/csp-report"
 #: Always enforced (spec §6.3).
 ENFORCED_POLICY = "frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
 
-#: The script policy: a ``str.format`` template with one ``{nonce}`` field.
+#: The script policy: a ``str.format`` template with one ``{nonce}`` field. Enforced
+#: since Phase 2 despite the name. ``form-action`` admits Slack because both
+#: provisioning forms answer with a 302 to Slack's OAuth URL, and Chromium applies
+#: ``form-action`` to a form submission's redirect.
 REPORT_ONLY_POLICY = (
     "default-src 'self'; script-src 'self' 'nonce-{nonce}'; "
     "style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; "
     "connect-src 'self'; form-action 'self' https://slack.com https://*.slack.com; report-uri " + CSP_REPORT_PATH
 )
 
-#: False in Phase 1 (report only). Phase 2 sets it True and changes nothing else.
-SCRIPT_POLICY_ENFORCED = False
+#: True since Phase 2 (spec §7): the script policy is enforced together with
+#: ENFORCED_POLICY in one Content-Security-Policy header, `report-uri` kept.
+SCRIPT_POLICY_ENFORCED = True
 
 _NONCE_BYTES = 16
 
@@ -57,7 +61,11 @@ def new_nonce() -> str:
 def security_header_items(
     nonce: str, *, enforce_script_policy: bool = SCRIPT_POLICY_ENFORCED
 ) -> list[tuple[str, str]]:
-    """The headers every response carries, for one request's nonce."""
+    """The headers every response carries, for one request's nonce.
+
+    ``enforce_script_policy=False`` is the Phase 1 split (script policy report-only),
+    kept as the rollback switch.
+    """
     script_policy = REPORT_ONLY_POLICY.format(nonce=nonce)
     items = [
         ("X-Frame-Options", "DENY"),

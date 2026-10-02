@@ -234,7 +234,7 @@ async def journey_ui_behaviours(h) -> dict:
 JOURNEYS += [journey_ui_behaviours]
 
 
-# --- §6.3 / §9: CSP report-only violations over a crawl --------------------------
+# --- §6.3 / §9: CSP violations over a crawl (report-only in Phase 1, enforced since Phase 2)
 
 CSP_PAGES: tuple[tuple[str, str], ...] = (
     ("admin", "/admin/users"),
@@ -285,8 +285,9 @@ async def _csp_agent_paths(page, base_url: str) -> list[str]:
 
 async def journey_csp_report_only(h) -> dict:
     """Every page with an inline script or a moved handler, per role, collecting each
-    report-only violation the browser raises. Phase 1 expects none; any entry is what
-    Phase 2's enforced policy would block, and is reviewed before deploy."""
+    CSP violation the browser raises. Phase 1 reported them (report-only); since Phase 2
+    the policy is enforced, so an entry is something the browser blocked. Either way
+    the journey expects none. The name is kept from Phase 1."""
     violations: list[dict] = []
     errors: list = []
     visited: list[str] = []

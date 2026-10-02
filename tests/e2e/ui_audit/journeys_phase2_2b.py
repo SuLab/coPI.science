@@ -238,10 +238,60 @@ async def journey_show_in_page_clears_the_drawer(h) -> dict:
     return {"ok": ok, **geometry, "log": log}
 
 
+_CSP_PROBE = """
+  window.__cspViolations = [];
+  document.addEventListener('securitypolicyviolation', function (e) {
+    window.__cspViolations.push(e.violatedDirective + ' ' + (e.blockedURI || 'inline'));
+  });
+"""
+
+
+async def journey_enforced_csp_crawl_has_no_violations(h) -> dict:
+    """Spec §9 Phase 2: with the policy enforced, no crawled page logs a CSP violation,
+    every HTML response carries the enforced header and no report-only header, and
+    the two script-driven interactions (an LLM-call body loaded on expand, the chat
+    drawer opened) run clean."""
+    async def on_page(page, role, url, response):
+        headers = response.headers if response else {}
+        problems = []
+        if "html" in headers.get("content-type", ""):
+            if "script-src" not in headers.get("content-security-policy", ""):
+                problems.append("no enforced script-src")
+            if "content-security-policy-report-only" in headers:
+                problems.append("report-only header still sent")
+        if url.endswith("/llm-calls") and await page.locator("details summary").count():
+            await page.locator("details summary").first.click()
+            await page.wait_for_timeout(800)
+        if "/admin/assessments/" in url and await page.locator("[data-chat-bubble]").count():
+            await page.locator("[data-chat-bubble]").click()
+            await page.wait_for_timeout(800)
+        problems += await page.evaluate("window.__cspViolations || []")
+        problems += [m for m in console if "Content Security Policy" in m]
+        console.clear()
+        return {"role": role, "url": url, "problems": problems} if problems else None
+
+    console: list[str] = []
+    failing = []
+    for role, paths in _routes(h.ids).items():
+        context, page, _log = await h.page(role, width=WIDE)
+        page.on("console", lambda m: console.append(m.text))
+        await page.add_init_script(_CSP_PROBE)
+        try:
+            for path in paths:
+                response = await page.goto(h.base_url + path, wait_until="networkidle")
+                result = await on_page(page, role, page.url.replace(h.base_url, ""), response)
+                if result is not None:
+                    failing.append(result)
+        finally:
+            await context.close()
+    return {"ok": not failing, "failing_pages": failing}
+
+
 JOURNEYS = [
     journey_drawer_modality_follows_resize,
     journey_poll_rerender_keeps_scroll_and_focus,
     journey_show_in_page_clears_the_drawer,
     journey_landmarks_headings_and_link_underlines,
     journey_narrow_crawl_has_no_overflow,
+    journey_enforced_csp_crawl_has_no_violations,
 ]
