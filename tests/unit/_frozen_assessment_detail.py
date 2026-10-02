@@ -229,30 +229,47 @@ def derive_strengths_and_risks(
     # Gating. The tri-state strings, plus a fourth branch for anything else —
     # `gating` is JSONB with no CHECK constraint behind it.
     gating = getattr(assessment, "gating", None)
-    # Gate title/description come from the LIVE rubric document and are shown
-    # only when this row was scored against it (`PROVENANCE_LIVE`) — an older
-    # row's gating key may not even exist in the live document, and rendering
-    # today's title/description against yesterday's decision would mislabel
-    # it the same way a hardcoded score threshold would.
-    live_gating = load_rubric().gating if revision_provenance == PROVENANCE_LIVE else {}
+    # REVIEWED UPDATE, hub 1.10.0 (docs/specs/2026-10-02-hub-1-10-summary-risks-
+    # gates-design.md §5.2-§5.3; the only change to this file): written out
+    # independently of the live helpers so this copy stays an oracle. Every gate
+    # state takes the rubric title as its label and the description as its body
+    # whenever the row's revision defines the gate (the live document for
+    # PROVENANCE_LIVE, the registry's [revision.gating.*] for PROVENANCE_ARCHIVED,
+    # nothing otherwise), and the hub's stored reason (`gating_rationales`, 0058,
+    # matched on .strip().lower()) as its rationale.
+    if revision_provenance == PROVENANCE_LIVE:
+        gate_source = load_rubric().gating
+    elif revision_provenance == PROVENANCE_ARCHIVED:
+        gate_source = getattr(revision, "gating", None)
+    else:
+        gate_source = {}
+    if not isinstance(gate_source, dict):
+        gate_source = {}
+    stored_reasons = getattr(assessment, "gating_rationales", None)
+    gate_reasons = (
+        {
+            k.strip().lower(): t.strip()
+            for k, t in stored_reasons.items()
+            if isinstance(k, str) and isinstance(t, str) and t.strip()
+        }
+        if isinstance(stored_reasons, dict)
+        else {}
+    )
     if isinstance(gating, dict):
         for key, value in gating.items():
-            label = str(key).replace("_", " ")
-            gate_meta = live_gating.get(key) if isinstance(key, str) else None
+            gate_meta = gate_source.get(key) if isinstance(key, str) else None
+            label = gate_meta["title"] if gate_meta is not None else str(key).replace("_", " ")
+            body = [gate_meta["description"]] if gate_meta is not None else []
+            reason = gate_reasons.get(key.strip().lower()) if isinstance(key, str) else None
             if value == "met":
-                if gate_meta is not None:
-                    _add(strengths, "gating", gate_meta["title"], "met", body=[gate_meta["description"]])
-                else:
-                    _add(strengths, "gating", label, "met")
+                _add(strengths, "gating", label, "met", body=body, rationale=reason)
             elif value == "not_met":
-                if gate_meta is not None:
-                    _add(risks, "gating", gate_meta["title"], "not met", body=[gate_meta["description"]])
-                else:
-                    _add(risks, "gating", label, "not met")
+                _add(risks, "gating", label, "not met", body=body, rationale=reason)
             elif value == "unconfirmed":
-                _add(unestablished, "gating", label, "never asked")
+                _add(unestablished, "gating", label, "never asked", body=body, rationale=reason)
             else:
-                _add(unestablished, "gating", label, _UNRECOGNISED_GATING_DETAIL)
+                _add(unestablished, "gating", label, _UNRECOGNISED_GATING_DETAIL, body=body,
+                     rationale=reason)
 
     # Red flags, full text. A non-string entry is skipped rather than coerced:
     # a rendered `None` or `{}` would read as a flag the hub never wrote.

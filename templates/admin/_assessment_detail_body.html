@@ -56,6 +56,23 @@
     'caution': 'bg-amber-100 text-amber-800',
     'clear': 'bg-green-100 text-green-800',
 } %}
+{# Staff-confirmed companies of the subject PI (spec §7.4, decision O6), from the
+   detail service's `confirmed_companies` (None when there are none): TODAY's
+   confirmed rows, not what was known when this verdict was written, hence the
+   as-of date. Every entry has a public source URL (the add form requires one), so
+   the block renders for every tier that can see the page. Placed under Lab
+   Background, else at the end of the key points, else as its own block. The links
+   are built in the service (`assessment_detail._company_link`), so this file gains
+   no `href` attribute (tests/unit/test_reachability.py pins how many cannot be
+   resolved). Never in the chat record, which stays a subset of the page. #}
+{% macro companies_block(companies, extra_class='') %}
+<div class="assessment-brief-companies{% if extra_class %} {{ extra_class }}{% endif %}">
+    <span class="font-semibold">Companies (staff-confirmed{% if companies.as_of %}, as of {{ companies.as_of }}{% endif %})</span>
+    <ul class="list-disc list-inside">
+        {% for entry in companies.entries %}<li class="assessment-brief-company">{{ entry.name }} &mdash; {{ entry.role }}{% if entry.funding %} &middot; {{ entry.funding }}{% endif %}{% for link in entry.links %} &middot; {{ link }}{% endfor %}</li>{% endfor %}
+    </ul>
+</div>
+{% endmacro %}
 
 {# ---------------------------------------------------------------------------
    Reviewer brief (design §5). The reviewer's job is to judge the PROPOSAL, and
@@ -118,6 +135,7 @@
        skipped when neither half exists. #}
     {% set kp_sections = key_point_sections(a.key_points) %}
     {% set has_points = kp_sections | length > 0 %}
+    {% set kp_has_lab_background = kp_sections | selectattr('is_lab_background') | list | length > 0 %}
     {% if a.elevator_pitch or has_points %}
     <div class="assessment-brief-grid mt-4 grid grid-cols-1 {% if a.elevator_pitch and has_points %}md:grid-cols-2{% else %}md:grid-cols-1{% endif %} gap-6">
         {% if a.elevator_pitch %}
@@ -166,9 +184,13 @@
         <div class="assessment-brief-keypoints">
             <div class="text-sm font-semibold text-gray-600">Key points</div>
             {# A group holding ONE point renders it as text, not as a one-item
-               list: scout_hub >= 1.9.0 writes exactly one per group. Older rows
-               (1.8.0, legacy, the flat <= 1.2.0 list) can hold several, and
-               those keep their bullets. `link_doi_references`: a key point
+               list: scout_hub >= 1.9.0 writes exactly one main point per group.
+               scout_hub >= 1.10.0 may add labelled extras (`Risk:` in any group,
+               `Companies:` in Lab Background; spec §6.1): when EVERY extra carries
+               a known label (`section.extras`, classified by `classify_key_point`),
+               the main point stays text and each extra is its own line with its
+               label in bold. Any other multi-point group (1.8.0, legacy, the flat
+               <= 1.2.0 list) keeps its bullets. `link_doi_references`: a key point
                sometimes cites a paper as `doi 10.…` rather than by URL, and both
                read "cited paper", as the pitch's URLs do. #}
             {% if kp_sections[0][0] is none %}
@@ -182,22 +204,28 @@
             {% endif %}
             {% else %}
             <div class="assessment-brief-points assessment-prose max-w-none mt-1 space-y-2">
-                {% for label, points in kp_sections %}
-                <div><span class="font-semibold">{{ label }}</span>
-                    {% if points | length == 1 %}
-                    <p>{{ plain_citations(points[0], link_doi_references=True) }}</p>
+                {% for section in kp_sections %}
+                <div><span class="font-semibold">{{ section.label }}</span>
+                    {% if section.points | length == 1 %}
+                    <p>{{ plain_citations(section.points[0], link_doi_references=True) }}</p>
+                    {% elif section.extras %}
+                    <p>{{ plain_citations(section.points[0], link_doi_references=True) }}</p>
+                    {% for extra in section.extras %}<p class="key-point-extra key-point-{{ extra.kind }}"><span class="font-semibold">{{ extra.label }}</span> {{ plain_citations(extra.body, link_doi_references=True) }}</p>{% endfor %}
                     {% else %}
                     <ul class="list-disc list-inside">
-                    {% for point in points %}<li>{{ plain_citations(point, link_doi_references=True) }}</li>{% endfor %}
+                    {% for point in section.points %}<li>{{ plain_citations(point, link_doi_references=True) }}</li>{% endfor %}
                     </ul>
                     {% endif %}</div>
+                {% if section.is_lab_background and confirmed_companies %}{{ companies_block(confirmed_companies) }}{% endif %}
                 {% endfor %}
             </div>
             {% endif %}
+            {% if confirmed_companies and not kp_has_lab_background %}{{ companies_block(confirmed_companies, 'mt-2') }}{% endif %}
         </div>
         {% endif %}
     </div>
     {% endif %}
+    {% if confirmed_companies and not has_points %}{{ companies_block(confirmed_companies, 'assessment-prose max-w-none mt-4') }}{% endif %}
     {# "Why this score" renders inside the pitch column when the brief is
        two-column (audit M8: the pitch column ended ~580px above the key
        points, leaving 40% of the card blank); full-width below otherwise. #}
@@ -268,16 +296,19 @@
    `glyph[1]` then raises, 500ing the page. Layout is a
    single full-width line: glyph, label — detail, an optional count badge,
    and (consults only) a preview clamped to two lines; the
-   quoted text sits behind the click. A dimension row may add the hub's own
-   one-sentence reason for its score (`item.rationale`, 0052) as a muted
-   second line; every other source carries None there. Only consults and long red flags are
-   collapsible — a gate's rubric description is a tooltip and a dimension's
-   weight is inline, so trivial rows never grow a disclosure control. #}
+   quoted text sits behind the click. A dimension or gate row may add a muted,
+   VISIBLE second line: the hub's own one-sentence reason (`item.rationale`:
+   `dimension_rationales`, 0052, or `gating_rationales`, 0058). A gate with no
+   stored reason shows its rubric definition there instead (`item.body`,
+   prefixed "Rubric definition:" so it is never read as a finding about this
+   proposal, spec §5.2), and a gate whose row's revision defines nothing shows
+   neither. Red flags and consults carry None in `rationale`. Only consults and
+   long red flags are collapsible — a dimension's weight is inline and a gate's
+   lines are plain text, so trivial rows never grow a disclosure control. #}
 {% macro signal_row(item, kind) %}
 {% set glyph = {'strengths': ('&#10003;', 'text-green-700', 'Strength'), 'risks': ('&#10007;', 'text-red-700', 'Risk'), 'mid_scale': ('&ndash;', 'text-slate-700', 'Mid-scale'), 'unestablished': ('?', 'text-slate-700', 'Not established')}[kind] %}
 {% set collapsible = item.body and item.source in ('consult', 'red_flag') %}
-<li class="signal-entry signal-{{ {'strengths': 'strength', 'risks': 'risk', 'mid_scale': 'midscale', 'unestablished': 'unestablished'}[kind] }} signal-source-{{ item.source }} py-1.5 border-t border-gray-100 first:border-t-0"
-    {% if item.source == 'gating' and item.body %}title="{{ item.body | join(' ') }}"{% endif %}>
+<li class="signal-entry signal-{{ {'strengths': 'strength', 'risks': 'risk', 'mid_scale': 'midscale', 'unestablished': 'unestablished'}[kind] }} signal-source-{{ item.source }} py-1.5 border-t border-gray-100 first:border-t-0">
     {% if collapsible %}
     <details class="signal-collapsible group">
         {# Wraps on narrow screens (audit M1) and clamps the preview to two
@@ -315,13 +346,15 @@
         <span class="{{ glyph[1] }} shrink-0" role="img" title="{{ glyph[2] }}" aria-label="{{ glyph[2] }}">{{ glyph[0] | safe }}</span>
         <span><span class="font-semibold">{{ item.label }}</span> &mdash; {{ item.detail }}{% if item.source == 'dimension' and item.body %} <span class="text-sm text-gray-600">&middot; {{ item.body | join(' ') }}</span>{% endif %}</span>
         {% if item.note %}<span class="signal-note shrink-0 whitespace-nowrap rounded-full border border-gray-300 px-2 text-sm text-gray-700">{{ item.note }}</span>{% endif %}
-        {% if item.source == 'gating' and item.body %}<span class="shrink-0 text-sm text-gray-600" aria-hidden="true">&#9432;</span>{% endif %}
     </div>
     {# A block line under the flex row rather than a `basis-full` item inside
        it: this row is deliberately `flex` without `flex-wrap`, so the label
        shrinks beside its badge instead of dropping below the glyph, and a
-       full-basis item there would be squeezed onto the same line. #}
-    {% if item.rationale %}<span class="signal-rationale block ml-6 text-sm text-gray-600">{{ item.rationale }}</span>{% endif %}
+       full-basis item there would be squeezed onto the same line. A gate with
+       no stored reason shows its rubric definition on the same line, prefixed
+       so it is never read as a finding about this proposal (spec §5.2). #}
+    {% if item.rationale %}<span class="signal-rationale block ml-6 text-sm text-gray-600">{{ item.rationale }}</span>
+    {% elif item.source == 'gating' and item.body %}<span class="signal-rationale signal-gate-definition block ml-6 text-sm text-gray-600">Rubric definition: {{ item.body | join(' ') }}</span>{% endif %}
     {% endif %}
 </li>
 {% endmacro %}
@@ -445,7 +478,7 @@
     </div>
     {# Legend + provenance, always visible (never behind a disclosure). #}
     <p class="signals-legend text-base leading-relaxed text-gray-600 mt-3 max-w-[68ch]">
-        &#10003; strength &middot; &#10007; risk &middot; &ndash; mid-scale &middot; ? not established &middot; "show" opens a row's quoted text &middot; &#9432; hover for the gate's definition
+        &#10003; strength &middot; &#10007; risk &middot; &ndash; mid-scale &middot; ? not established &middot; "show" opens a row's quoted text
     </p>
     <p class="signals-provenance text-base leading-relaxed text-gray-600 mt-1 max-w-[68ch]">
         Derived from this verdict's stored dimension scores, gating states, red
@@ -470,6 +503,9 @@
            fragment-only href is one test_reachability cannot resolve. #}
         {% if dimensions | selectattr('rationale') | list %}
         Each dimension's one-sentence reason, also shown under Scores, is BlackbirdBot's own text from the verdict sidecar{% if hub_strengths or hub_risks %}, like "In the hub's words"{% endif %}.
+        {% endif %}
+        {% if gating_reasons %}
+        A gate's unprefixed second line is BlackbirdBot's own reason for its state, from the verdict sidecar{% if gating_definitions %}; "Rubric definition:" marks the rubric's text where it recorded none{% endif %}.
         {% endif %}
         {% if a.score_rationale %}
         The hub's account of the score is in <a class="text-indigo-700 underline-offset-2 hover:underline" href="#score-rationale">Why this score</a> above.
@@ -770,7 +806,8 @@
 <div class="px-5 pb-5">
     {% if a.gating %}
         {% for key, gate_state in a.gating.items() %}
-        {% set gate_meta = gating_descriptions.get(key) if gating_descriptions else none %}
+        {% set gate_meta = gating_definitions.get(key) if gating_definitions else none %}
+        {% set gate_reason = gating_reasons.get(key) if gating_reasons else none %}
         <div class="gating-row gating-{{ gate_state if gate_state in ('met', 'not_met', 'unconfirmed') else 'unknown' }} text-base py-1">
             {# Each glyph carries BOTH an aria-label and its original title: the
                title is a hover affordance a touch user never gets, and the
@@ -784,12 +821,19 @@
             {% else %}
                 <span class="text-gray-600" role="img" title="Unrecognized gating value: {{ gate_state }}" aria-label="Unrecognized gating value">&bull;</span>
             {% endif %}
-            {{ key.replace("_", " ") }}
+            {{ gate_meta.title if gate_meta else key.replace("_", " ") }}
             {% if gate_meta %}
             {# The gate's definition, visible in the card rather than only in a
-               hover title (audit L1). Live-rubric rows only (same provenance
-               guard as the strengths/risks card). #}
-            <div class="gating-description ml-6 text-base leading-relaxed text-gray-600 max-w-[68ch]">{{ gate_meta.description }}</div>
+               hover title (audit L1), from the row's own revision: the live
+               document for a live row, the registry's [revision.gating.*] for an
+               archived one (`gating_definitions`); none for an unstamped or
+               unknown row. #}
+            <div class="gating-description ml-6 text-base leading-relaxed text-gray-600 max-w-[68ch]">Rubric definition: {{ gate_meta.description }}</div>
+            {% endif %}
+            {% if gate_reason %}
+            {# The hub's own reason for this state (`gating_rationales`, 0058,
+               scout_hub >= 1.10.0); NULL on every older row, never backfilled. #}
+            <div class="gating-reason ml-6 text-base leading-relaxed text-gray-700 max-w-[68ch]">Hub's reason: {{ gate_reason }}</div>
             {% endif %}
         </div>
         {% endfor %}

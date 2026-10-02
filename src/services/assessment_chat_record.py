@@ -45,7 +45,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import OpportunityAssessment
 from src.models.assessment_chat import CHAT_TIER_REVIEWER, CHAT_TIER_STAFF
-from src.services.assessment_detail import build_assessment_detail, key_point_sections
+from src.services.assessment_detail import (
+    build_assessment_detail,
+    gating_rationale_map,
+    key_point_sections,
+)
 from src.services.prose_citations import (
     _URL_RE,
     _is_linkable,
@@ -320,17 +324,31 @@ def _add_plain(doc: _Doc, a: Any, key: str, value_fn=None) -> None:
 
 
 def _brief_section(doc: _Doc, a: Any) -> None:
-    """The brief, in the page's reading order (anchors `brief`, `score-rationale`)."""
+    """The brief, in the page's reading order (anchors `brief`, `score-rationale`).
+
+    A key-point group whose extras all carry a known label (scout_hub >= 1.10.0,
+    `KeyPointSection.extras`) is ONE block: its main bullet, then each extra as a
+    plain text line reading as the page prints it, label first ("Risk: …"). Every
+    other group keeps one block per bullet, so a row with no labelled extras renders
+    exactly as before (tests/unit/test_verdict_doc_differential.py).
+    """
     _add_plain(doc, a, "company_or_project")
     _add_plain(doc, a, "headline")
     _add_plain(doc, a, "confidence", lambda v: str(v).strip("[]"))
     _add_plain(doc, a, "elevator_pitch")
-    for group_label, points in key_point_sections(a.key_points):
-        for point in points:
-            if group_label is None:
+    for section in key_point_sections(a.key_points):
+        if section.label is None:
+            for point in section.points:
                 doc.add("Key point", [point], anchor="brief")
-            else:
-                doc.add(f"Key point — {_label_safe(group_label)}", [point], anchor="brief")
+            continue
+        label = f"Key point — {_label_safe(section.label)}"
+        extras = section.extras
+        if extras:
+            lines = [section.points[0], *(f"{extra.label} {extra.body}" for extra in extras)]
+            doc.add(label, lines, anchor="brief")
+            continue
+        for point in section.points:
+            doc.add(label, [point], anchor="brief")
     _add_plain(doc, a, "score_rationale")
 
 
@@ -469,8 +487,17 @@ def _panel_section(doc: _Doc, a: Any, detail: dict[str, Any]) -> None:
 
 
 def _gating_section(doc: _Doc, a: Any, detail: dict[str, Any]) -> None:
-    """Gates (anchor `gating`)."""
+    """Gates (anchor `gating`).
+
+    A gate's stored reason (`gating_rationales`, 0058, read through
+    `gating_rationale_map`, i.e. with `getattr`) is appended as the block's last
+    quoted line, and the label says so. A row with no usable reason — every row
+    written before 0058 — renders byte-identically to before (spec §5.1). The
+    definitions stay `gating_descriptions`' (live rows only), so an archived row's
+    record gains only its reasons, never today's rubric text.
+    """
     descriptions = detail.get("gating_descriptions") or {}
+    reasons = gating_rationale_map(a)
     if isinstance(a.gating, dict) and a.gating:
         for key, value in a.gating.items():
             shown = _GATE_STATES.get(value) if isinstance(value, str) else None
@@ -478,7 +505,12 @@ def _gating_section(doc: _Doc, a: Any, detail: dict[str, Any]) -> None:
             meta = descriptions.get(key) if isinstance(key, str) else None
             if isinstance(meta, dict) and meta.get("description"):
                 lines.append(meta["description"])
-            doc.add(f"Gate — {_label_safe(str(key).replace('_', ' '))}", lines, anchor="gating")
+            label = f"Gate — {_label_safe(str(key).replace('_', ' '))}"
+            reason = reasons.get(key.strip().lower()) if isinstance(key, str) else None
+            if reason:
+                lines.append(reason)
+                label += "; the last quoted line is the hub's own reason for this state"
+            doc.add(label, lines, anchor="gating")
     else:
         doc.add("Gates — none recorded", anchor="gating")
 

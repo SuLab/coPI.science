@@ -407,8 +407,11 @@
             <div class="assessment-card-points rounded-lg border border-gray-200 bg-white p-3">
                 <div class="text-xs font-semibold uppercase tracking-wide text-gray-500">Key points</div>
                 {# One point renders as text and several as bullets, with
-                   `doi 10.…` references linked: the same rule as the detail
-                   page's key points (admin/_assessment_detail_body.html). #}
+                   `doi 10.…` references linked; a group whose extras all carry a
+                   known label (`Risk:`/`Companies:`, scout_hub >= 1.10.0) renders
+                   its main point as text and each extra on its own line with the
+                   label in bold. The same rules as the detail page's key points
+                   (admin/_assessment_detail_body.html). #}
                 {% if kp_sections[0][0] is none %}
                 {% set flat_points = kp_sections[0][1] %}
                 {% if flat_points | length == 1 %}
@@ -420,13 +423,16 @@
                 {% endif %}
                 {% else %}
                 <div class="mt-1 space-y-2">
-                    {% for label, points in kp_sections %}
-                    <div><span class="font-semibold text-gray-800">{{ label }}</span>
-                        {% if points | length == 1 %}
-                        <p class="text-sm text-gray-700">{{ plain_citations(points[0], link_doi_references=True) }}</p>
+                    {% for section in kp_sections %}
+                    <div><span class="font-semibold text-gray-800">{{ section.label }}</span>
+                        {% if section.points | length == 1 %}
+                        <p class="text-sm text-gray-700">{{ plain_citations(section.points[0], link_doi_references=True) }}</p>
+                        {% elif section.extras %}
+                        <p class="text-sm text-gray-700">{{ plain_citations(section.points[0], link_doi_references=True) }}</p>
+                        {% for extra in section.extras %}<p class="key-point-extra key-point-{{ extra.kind }} text-sm text-gray-700"><span class="font-semibold">{{ extra.label }}</span> {{ plain_citations(extra.body, link_doi_references=True) }}</p>{% endfor %}
                         {% else %}
                         <ul class="list-disc list-inside text-sm text-gray-700">
-                        {% for point in points %}<li>{{ plain_citations(point, link_doi_references=True) }}</li>{% endfor %}
+                        {% for point in section.points %}<li>{{ plain_citations(point, link_doi_references=True) }}</li>{% endfor %}
                         </ul>
                         {% endif %}</div>
                     {% endfor %}
@@ -574,15 +580,31 @@
             <p class="mt-2 text-xs text-gray-600">No per-dimension scores were stored for this verdict.</p>
             {%- endif %}
 
-            {# Moved verbatim from the card face (Task C2 of the 2026-09-14
-               assessment-UX plan), including the three
-               glyphs, their `title`s and the `gating-row gating-*` classes —
-               test_the_card_keeps_gating_panel_flags_and_rubric_on_its_face
-               and _gating_state_for both read them. #}
+            {# One line per gate (hub 1.10.0, spec §5.2): glyph, the gate's
+               rubric title, then the hub's stored reason (`gating_rationales`,
+               0058) or, when there is none, "Rubric definition: …". The glyphs,
+               their `title`s and the `gating-row gating-*` classes are kept from
+               the card face (Task C2 of the 2026-09-14 assessment-UX plan) —
+               test_the_card_keeps_gating_panel_flags_and_rubric_on_its_face and
+               _gating_state_for both read them, and the latter needs each row to
+               stay a `<span>` whose class attribute is its last.
+               Definitions come from the ROW'S OWN revision (`a.revision_view.gating`:
+               the live document's for a live row, the registry's
+               [revision.gating.*] for an archived one), and only for a STAMPED
+               row: `revision_view` is the live view for an unstamped row too (for
+               its dimension titles), and the detail page shows no definition
+               there (`assessment_detail._gating_definitions`), so neither does
+               this. A stamped row with a `revision_view` is exactly a live or
+               archived one. Reasons are looked up by the row's own key; the
+               write path stores them lower-cased. #}
             {%- if a.gating %}
-            <span class="mt-2 flex items-center gap-2 flex-wrap text-xs">
+            {%- set gate_defs = a.revision_view.gating if (a.revision_view and (a.rubric_version or a.rubric_content_hash)) else {} %}
+            {%- set gate_reasons = a.gating_rationales if a.gating_rationales is mapping else {} %}
+            <span class="mt-2 block space-y-1 text-xs">
                 {%- for key, gate_state in a.gating.items() %}
-                <span class="gating-row gating-{{ gate_state if gate_state in ('met', 'not_met', 'unconfirmed') else 'unknown' }} text-gray-600">{% if gate_state == 'met' %}<span class="text-green-700" title="Met">&#9989;</span>{% elif gate_state == 'not_met' %}<span class="text-red-600" title="Not met">&#10060;</span>{% elif gate_state == 'unconfirmed' %}<span class="text-blue-600" title="Unconfirmed — never asked">&#10067;</span>{% else %}<span class="text-gray-600" title="Unrecognized gating value: {{ gate_state }}">&bull;</span>{% endif %} {{ key.replace("_", " ") }}</span>
+                {%- set gate_meta = gate_defs.get(key) %}
+                {%- set gate_reason = gate_reasons.get(key) %}
+                <span class="gating-row gating-{{ gate_state if gate_state in ('met', 'not_met', 'unconfirmed') else 'unknown' }} block text-gray-600">{% if gate_state == 'met' %}<span class="text-green-700" title="Met">&#9989;</span>{% elif gate_state == 'not_met' %}<span class="text-red-600" title="Not met">&#10060;</span>{% elif gate_state == 'unconfirmed' %}<span class="text-blue-600" title="Unconfirmed — never asked">&#10067;</span>{% else %}<span class="text-gray-600" title="Unrecognized gating value: {{ gate_state }}">&bull;</span>{% endif %} {{ gate_meta.title if gate_meta else key.replace("_", " ") }}{% if gate_reason is string and gate_reason.strip() %}<span class="gating-reason block ml-6">{{ gate_reason.strip() }}</span>{% elif gate_meta %}<span class="gating-definition block ml-6">Rubric definition: {{ gate_meta.description }}</span>{% endif %}</span>
                 {%- endfor %}
             </span>
             {%- endif %}

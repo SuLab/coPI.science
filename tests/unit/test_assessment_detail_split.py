@@ -32,11 +32,21 @@ from tests.unit import _frozen_assessment_detail as frozen
 from tests.unit._seeded_assessments import seeded_assessments  # noqa: F401
 
 _REV = SimpleNamespace(scale_max=5, scale_min=1)
+#: An archived-style revision carrying gate tables (`RubricRevisionView.gating`).
+_REV_GATED = SimpleNamespace(scale_max=5, scale_min=1, gating={
+    "ip_clear": {"title": "IP clear", "description": "IP clear desc"},
+    "y": {"title": "Why", "description": "y desc"},
+})
 _A = [
     SimpleNamespace(gating={"ip_clear": "met", "x": "not_met", "y": "unconfirmed", "z": True}, red_flags=["f"],
                     dimension_rationales={"team": "why"}, scores={"team": 5}),
     SimpleNamespace(gating=None, red_flags="nope", dimension_rationales=None, scores=None),
     SimpleNamespace(gating={}, red_flags=[], dimension_rationales={}, scores={}),
+    # Hub 1.10.0 gate reasons (0058): one per state, a blank one, a non-string one,
+    # and a key that only matches after .strip().lower().
+    SimpleNamespace(gating={"ip_clear": "met", "x": "not_met", "y": "unconfirmed", "z": True}, red_flags=[],
+                    dimension_rationales=None, scores={},
+                    gating_rationales={" IP_Clear ": "why ip", "x": "  ", "y": 7, "z": "odd"}),
 ]
 _DIMS = [None, [], [{"key": "team", "title": "Team", "score": 4.8}, {"key": "b", "score": 1.0},
                     {"key": "c", "score": None}, {"key": "d", "score": 3}, "junk"]]
@@ -51,7 +61,8 @@ _CONSULTS = [
 
 
 @pytest.mark.parametrize("a,dims,consults,rev,prov", list(itertools.product(
-    _A, _DIMS, _CONSULTS, [_REV, None], [PROVENANCE_LIVE, PROVENANCE_UNKNOWN, None])))
+    _A, _DIMS, _CONSULTS, [_REV, _REV_GATED, None],
+    [PROVENANCE_LIVE, PROVENANCE_ARCHIVED, PROVENANCE_UNKNOWN, None])))
 def test_strengths_and_risks_equal(a, dims, consults, rev, prov):
     kw = dict(dimensions=dims, consults=consults, revision=rev, revision_provenance=prov)
     assert ad.derive_strengths_and_risks(a, **kw) == frozen.derive_strengths_and_risks(a, **kw)
@@ -60,6 +71,10 @@ def test_strengths_and_risks_equal(a, dims, consults, rev, prov):
 HUB = "blackbird"
 # An archived revision in prompts/rubric/revisions.toml (not the live 3.5.0).
 ARCHIVED_STAMP = ("3.2.0", "42aec0479ac6")
+# The gate reason every full interview below stores (0058), and those interviews'
+# subjects — the rows whose `gating_reasons` must carry it.
+SEEDED_GATE_REASON = "The lab said how each screen hit was re-tested."
+_INTERVIEW_SUBJECTS = frozenset({"detailpi", "lab-archived", "lab-unknown", "lab-null"})
 
 
 async def _seed_interview(db, *, run, subject, channel, stamp, base, users):
@@ -147,6 +162,7 @@ async def _seed_interview(db, *, run, subject, channel, stamp, base, users):
         band="conditional",
         gating={"life_sciences_domain": "met", "credible_science": "not_met",
                 "translational_potential": "unconfirmed"},
+        gating_rationales={"credible_science": SEEDED_GATE_REASON},
         scores={dims[0]: 4, dims[1]: 2, dims[2]: 3, "legacy_dim": 1},
         dimension_rationales={dims[0]: "reason one", dims[1]: "reason two"},
         red_flags=["A red flag. Second sentence."], rationale="Rationale.",
@@ -224,6 +240,32 @@ async def _detail(build, db, assessment_id, **kw):
     return out, extras
 
 
+#: Context keys the live builder gained after the frozen copy was taken (hub 1.10.0,
+#: spec §5.2-§5.3). They are page-only, so each is checked against its own
+#: expectation below rather than against the frozen build, which predates it.
+_PAGE_ONLY_KEYS = ("gating_definitions", "gating_reasons", "confirmed_companies")
+
+
+def _without_page_only_keys(detail):
+    return {key: value for key, value in detail.items() if key not in _PAGE_ONLY_KEYS}
+
+
+def _expected_gating_definitions(detail):
+    """`assessment_detail._gating_definitions`' rule, restated: live rubric for a live
+    row, the registry's gate tables for an archived one, nothing otherwise."""
+    if detail["revision_provenance"] == PROVENANCE_LIVE:
+        return dict(load_rubric().gating)
+    if detail["revision_provenance"] == PROVENANCE_ARCHIVED:
+        return dict(detail["revision"].gating)
+    return {}
+
+
+def _expected_gating_reasons(detail):
+    if detail["assessment"].subject_agent_id in _INTERVIEW_SUBJECTS:
+        return {"credible_science": SEEDED_GATE_REASON}
+    return {}
+
+
 @pytest.mark.integration
 @pytest.mark.parametrize("admin_view,viewer_is_staff", [(True, True), (False, False), (False, True)])
 async def test_build_assessment_detail_equal(db_session, seeded_detail_assessments, admin_view,
@@ -234,8 +276,16 @@ async def test_build_assessment_detail_equal(db_session, seeded_detail_assessmen
         new, new_extras = await _detail(ad.build_assessment_detail, db_session, assessment_id, **kw)
         old, old_extras = await _detail(frozen.build_assessment_detail, db_session, assessment_id,
                                         **kw)
-        assert new == old, assessment_id
+        assert _without_page_only_keys(new) == old, assessment_id
         assert new_extras == old_extras, assessment_id
+        assert new["gating_definitions"] == _expected_gating_definitions(new), assessment_id
+        assert new["gating_reasons"] == _expected_gating_reasons(new), assessment_id
+        # No seeded PI has a pi_companies row (spec §7.4).
+        assert new["confirmed_companies"] is None, assessment_id
+        if new["gating_definitions"]:
+            seen.add("gate-definitions")
+        if new["gating_reasons"]:
+            seen.add("gate-reasons")
         kinds = {entry["kind"] for entry in new["timeline"]}
         seen.add(new["revision_provenance"])
         if "consult" in kinds and "message" in kinds:
@@ -252,7 +302,7 @@ async def test_build_assessment_detail_equal(db_session, seeded_detail_assessmen
             seen.add("pi-link")
     # The seed reaches every path the split moved, so equality is not vacuous.
     expected = {PROVENANCE_LIVE, PROVENANCE_ARCHIVED, PROVENANCE_UNKNOWN, PROVENANCE_UNSTAMPED,
-                "timeline", "reviews", "pi-link"}
+                "timeline", "reviews", "pi-link", "gate-definitions", "gate-reasons"}
     if admin_view:
         expected |= {"placed-turn", "unplaced-turn"}
     if viewer_is_staff:
