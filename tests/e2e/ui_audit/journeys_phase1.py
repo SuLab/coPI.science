@@ -345,6 +345,14 @@ _PARITY_LINK = '<link rel="stylesheet" href="/static/css/app.css">'
 #: What base.html loaded before §6.1: the Play CDN as a parser-blocking head script.
 #: Injecting it later (an init script, after DOMContentLoaded) leaves the page unstyled.
 _PARITY_CDN_TAG = '<script src="https://cdn.tailwindcss.com"></script>'
+#: The plain CSS static/css/input.css adds after the utilities (tag widget, X-03, R-01,
+#: R-02). The Play CDN has no equivalent, so the CDN shot gets it too, as the last
+#: stylesheet, where the compiled file has it: the comparison is then Tailwind's
+#: compiled utilities against the CDN's, as §6.1 means.
+_PARITY_CUSTOM_CSS = "\n".join(
+    line for line in (REPO / "static" / "css" / "input.css").read_text(encoding="utf-8").splitlines()
+    if not line.startswith("@tailwind")
+)
 
 _PARITY_DIFF_JS = """async ([a, b]) => {
   const load = (data) => new Promise((resolve, reject) => {
@@ -376,7 +384,7 @@ _PARITY_DIFF_JS = """async ([a, b]) => {
 
 async def _parity_cdn_document(route) -> None:
     """Serve each HTML document with the compiled stylesheet link swapped for the CDN
-    script tag; every other request passes through."""
+    script tag and input.css's own rules appended; every other request passes through."""
     if route.request.resource_type != "document":
         await route.continue_()
         return
@@ -384,7 +392,9 @@ async def _parity_cdn_document(route) -> None:
     body = await response.text()
     if _PARITY_LINK not in body:
         raise AssertionError(f"no compiled stylesheet link in {route.request.url}")
-    await route.fulfill(response=response, body=body.replace(_PARITY_LINK, _PARITY_CDN_TAG))
+    body = body.replace(_PARITY_LINK, _PARITY_CDN_TAG)
+    body = body.replace("</body>", f"<style>{_PARITY_CUSTOM_CSS}</style></body>", 1)
+    await route.fulfill(response=response, body=body)
 
 
 async def _parity_shot(h, role: str, url: str, *, cdn: bool) -> bytes:
