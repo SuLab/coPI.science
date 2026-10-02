@@ -204,12 +204,19 @@ def test_evidence_for_display_reads_discoverys_shape():
     assert view["form_d_status"] == "ok" and view["funding_note"] is None
 
 
-def test_evidence_for_display_shows_the_unavailable_note_only_when_unavailable():
-    view = evidence_for_display({"form_d": {"status": "unavailable", "note": "funding lookup unavailable",
-                                            "reason": "HTTP 429"}})
-    assert view["funding_note"] == "funding lookup unavailable"
-    ok = evidence_for_display({"form_d": {"status": "ok", "note": "stray"}})
-    assert ok["funding_note"] is None
+@pytest.mark.parametrize("status,note", [
+    ("unavailable", "funding lookup unavailable"),
+    ("ambiguous", "two issuers file under this name; no figure recorded"),
+    ("ok", "an amended filing replaced an earlier one"),
+])
+def test_evidence_for_display_shows_the_note_of_any_status(status, note):
+    view = evidence_for_display({"form_d": {"status": status, "note": note, "reason": "x"}})
+    assert (view["form_d_status"], view["funding_note"]) == (status, note)
+
+
+def test_evidence_for_display_has_no_note_without_one():
+    assert evidence_for_display({"form_d": {"status": "ambiguous"}})["funding_note"] is None
+    assert evidence_for_display({"form_d": {"status": "ok", "note": "   "}})["funding_note"] is None
 
 
 @pytest.mark.parametrize("evidence", [None, {}, [], "x", {"coi": "x", "wikidata": {}, "form_d": []}])

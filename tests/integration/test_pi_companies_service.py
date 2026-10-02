@@ -177,6 +177,28 @@ async def test_confirm_refuses_a_bad_correction_and_changes_nothing(db_session):
     assert row.status == "suggested"
 
 
+async def test_confirm_with_clear_funding_drops_the_figure_whatever_the_fields_say(db_session):
+    """The form posts the stored figure prefilled; the checkbox still clears it."""
+    pi, _agent, manager = await _pi_agent_manager(db_session)
+    row = await seed_company(db_session, pi)
+    await confirm_company(
+        db_session, user_id=pi.id, company_id=row.id, reviewer_id=manager.id,
+        funding_usd=224_999_876, funding_as_of=date(2022, 3, 15), clear_funding=True,
+    )
+    assert (row.status, row.funding_usd, row.funding_as_of, row.funding_source_url) == (
+        "confirmed", None, None, None)
+    assert row.evidence["form_d"]["filings"]    # the filings stay as evidence
+
+
+async def test_confirm_with_clear_funding_on_a_row_without_one_is_fine(db_session):
+    pi, _agent, manager = await _pi_agent_manager(db_session)
+    row = await seed_company(db_session, pi, funding_usd=None, funding_as_of=None,
+                             funding_source_url=None)
+    await confirm_company(db_session, user_id=pi.id, company_id=row.id,
+                          reviewer_id=manager.id, clear_funding=True)
+    assert (row.status, row.funding_usd, row.funding_as_of) == ("confirmed", None, None)
+
+
 @pytest.mark.parametrize("status", ["confirmed", "rejected"])
 async def test_confirm_and_reject_act_only_on_a_suggestion(db_session, status):
     pi, _agent, manager = await _pi_agent_manager(db_session)

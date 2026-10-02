@@ -365,3 +365,58 @@ async def test_the_card_passes_the_rendered_page_gate(client, db_session, role):
     r = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(viewer.id))
     assert r.status_code == 200
     assert page_problems(r.text) == []
+
+
+async def test_confirm_with_clear_funding_drops_the_prefilled_figure(client, db_session, _companies_dir):
+    """The form posts the stored Form D figure prefilled; the checkbox clears it anyway."""
+    pi, agent, manager = await _pi_agent_manager(db_session)
+    row = await seed_company(db_session, pi)
+    page = (await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))).text
+    assert f'name="clear_funding" value="1" id="company-clear-funding-{row.id}"' in _card(page)
+    r = await client.post(
+        f"/manager/pis/{pi.id}/companies/{row.id}/confirm",
+        data={"pi_role": "founder", "funding_usd": "224999876", "funding_as_of": "2022-03-15",
+              "clear_funding": "1"},
+        headers=auth_headers(manager.id), follow_redirects=False,
+    )
+    _back_to_the_card(r, pi)
+    assert (row.status, row.funding_usd, row.funding_as_of, row.funding_source_url) == (
+        "confirmed", None, None, None)
+    text = (_companies_dir / f"{agent.agent_id}.md").read_text()
+    assert "- DELFI Diagnostics: founder" in text and "Funding" not in text.split("- DELFI")[1]
+
+
+async def test_clear_funding_ignores_an_unparseable_figure(client, db_session):
+    pi, _agent, manager = await _pi_agent_manager(db_session)
+    row = await seed_company(db_session, pi)
+    r = await client.post(
+        f"/manager/pis/{pi.id}/companies/{row.id}/confirm",
+        data={"funding_usd": "12abc", "clear_funding": "1"},
+        headers=auth_headers(manager.id), follow_redirects=False,
+    )
+    _back_to_the_card(r, pi)
+    assert (row.status, row.funding_usd) == ("confirmed", None)
+
+
+async def test_find_companies_for_a_pi_without_an_orcid_says_so_and_queues_nothing(client, db_session):
+    pi = await factories.make_user(db_session, user_role=USER_ROLE_PI, orcid="")
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    r = await client.post(f"/manager/pis/{pi.id}/companies/discover",
+                          headers=auth_headers(manager.id), follow_redirects=False)
+    _back_to_the_card(r, pi)
+    assert session_flashes(r)[-1] == {
+        "text": "Company discovery needs the PI's ORCID iD; none is recorded.", "kind": "error"}
+    assert await _discovery_jobs(db_session, pi) == []
+
+
+async def test_the_card_shows_the_note_of_an_ambiguous_funding_lookup(client, db_session):
+    pi, _agent, manager = await _pi_agent_manager(db_session)
+    note = "Two issuers file Form D under this name; no figure recorded."
+    await seed_company(
+        db_session, pi, funding_usd=None, funding_as_of=None, funding_source_url=None,
+        evidence={**DISCOVERED_EVIDENCE, "form_d": {
+            "status": "ambiguous", "funding_usd": None, "filings": [], "note": note}},
+    )
+    card = _card((await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))).text)
+    assert note in card
+    assert "clear_funding" not in card      # no figure, nothing to clear

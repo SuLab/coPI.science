@@ -270,7 +270,9 @@ def evidence_for_display(evidence: object) -> dict:
     an entry of another shape yields less, never an error, and every link passes
     ``http_url`` or is dropped. A filing's amount sold shows as dollars when it is a whole
     number, else as its ``amount_note`` or raw text (for example "Indefinite"), and
-    ``counted`` says whether it is in the floor total.
+    ``counted`` says whether it is in the floor total. ``funding_note`` is the Form D
+    block's ``note`` whatever its status (``unavailable``, ``ambiguous`` or another), so
+    the card says why a suggestion carries no figure.
     """
     ev = evidence if isinstance(evidence, dict) else {}
     statements = []
@@ -322,7 +324,7 @@ def evidence_for_display(evidence: object) -> dict:
         "wikidata": wikidata,
         "filings": filings,
         "form_d_status": status,
-        "funding_note": _text(form_d.get("note")) if status == "unavailable" else None,
+        "funding_note": _text(form_d.get("note")),
         "former": ev.get("former") is True or any(s["former"] for s in statements),
     }
 
@@ -449,21 +451,28 @@ async def confirm_company(
     pi_role: str | None = None,
     funding_usd: int | None = None,
     funding_as_of: date | None = None,
+    clear_funding: bool = False,
 ) -> PiCompany:
     """Confirm a ``suggested`` row, correcting it first where asked. ``None`` keeps the
     stored role, figure or date. A figure or date that differs from the stored one is the
     manager's own, so the row stops claiming the Form D floor: ``funding_source_url`` is
-    cleared, and the filings stay in ``evidence``. Recorded as reviewed by ``reviewer_id``
-    now. Commits, then re-exports."""
+    cleared, and the filings stay in ``evidence``. ``clear_funding`` drops the figure, its
+    date and its source link whatever ``funding_usd`` and ``funding_as_of`` say (the form
+    posts them prefilled), for a figure the manager judges wrong. Recorded as reviewed by
+    ``reviewer_id`` now. Commits, then re-exports."""
     row = await _load_row(db, user_id, company_id)
     if row.status != "suggested":
         raise CompanyValidationError(
             f"{row.company_name} is not waiting for review (it is {row.status})."
         )
     role = row.pi_role if pi_role is None else _check_role(pi_role)
-    new_usd = row.funding_usd if funding_usd is None else funding_usd
-    new_as_of = row.funding_as_of if funding_as_of is None else funding_as_of
-    if (new_usd, new_as_of) != (row.funding_usd, row.funding_as_of):
+    if clear_funding:
+        new_usd, new_as_of = None, None
+        row.funding_source_url = None
+    else:
+        new_usd = row.funding_usd if funding_usd is None else funding_usd
+        new_as_of = row.funding_as_of if funding_as_of is None else funding_as_of
+    if not clear_funding and (new_usd, new_as_of) != (row.funding_usd, row.funding_as_of):
         _check_funding(new_usd, new_as_of)
         row.funding_source_url = None
     row.pi_role = role
@@ -505,7 +514,8 @@ def _as_of(row: PiCompany) -> date:
 
 
 def render_companies_markdown(rows: Sequence[PiCompany]) -> str:
-    """The hub's file for one PI's confirmed rows (non-empty), in the order given.
+    """The hub's file for one PI's confirmed rows (non-empty; PiCompany objects or the
+    export's column rows, read by attribute), in the order given.
 
     It carries no fence of its own: ``retrieve_profile`` wraps the whole text in
     ``staff_company_record`` tags (§7.3). Every value is folded onto one line, so a name or
@@ -533,15 +543,41 @@ def render_companies_markdown(rows: Sequence[PiCompany]) -> str:
     return "\n".join(lines) + "\n"
 
 
+async def _export_rows(db: AsyncSession, user_id: uuid.UUID) -> list:
+    """The confirmed rows as plain column tuples (attribute access by column name), in the
+    file's order. Not ORM objects: the identity map would hand a second read the values
+    of the first, and the export compares the two to catch a concurrent write."""
+    rows = await db.execute(
+        select(
+            PiCompany.id, PiCompany.company_name, PiCompany.pi_role, PiCompany.funding_usd,
+            PiCompany.funding_as_of, PiCompany.funding_source_url, PiCompany.source_url,
+            PiCompany.reviewed_at, PiCompany.created_at,
+        )
+        .where(PiCompany.user_id == user_id, PiCompany.status == "confirmed")
+        .order_by(PiCompany.normalized_name, PiCompany.id)
+    )
+    return list(rows.all())
+
+
+#: How many times one export writes the file before it stops chasing concurrent writers.
+_EXPORT_PASSES = 3
+
+
 async def export_companies_file(db: AsyncSession, user_id: uuid.UUID) -> Path | None:
     """Write ``COMPANIES_DIR/<agent_id>.md`` from the PI's confirmed rows (atomic
     replace), or remove it when there are none (§7.2).
 
+    Two writers can commit in one order and write the file in the other, leaving it one
+    write behind. So after each write the rows are read again, and a changed list is
+    written again, up to ``_EXPORT_PASSES`` writes; one still changing after that is
+    logged and left to the next write.
+
     Returns the path written; None when nothing was written: the PI has no AgentRegistry
     row (a no-op; the profile publish writes the file once the agent exists), the agent
-    id fails the file-name check, there is no confirmed row, or the write failed. A
-    filesystem error is logged, never raised: the change it follows is already
-    committed. Reads only; never commits.
+    id fails the file-name check, there is no confirmed row, the write failed, or the
+    rows kept changing. A filesystem error is logged, never raised: the change it
+    follows is already committed. Reads only; never commits (the profile publish calls it inside the
+    pipeline's transaction).
     """
     agent_id = (
         await db.execute(select(AgentRegistry.agent_id).where(AgentRegistry.user_id == user_id))
@@ -551,15 +587,40 @@ async def export_companies_file(db: AsyncSession, user_id: uuid.UUID) -> Path | 
     if not _SAFE_AGENT_ID.fullmatch(agent_id):
         logger.error("Companies export skipped for user %s: unsafe agent_id %r", user_id, agent_id)
         return None
-    rows = await _confirmed_rows(db, user_id)
     path = COMPANIES_DIR / f"{agent_id}.md"
-    try:
-        if not rows:
-            path.unlink(missing_ok=True)
+    rows = await _export_rows(db, user_id)
+    for _ in range(_EXPORT_PASSES):
+        try:
+            if rows:
+                COMPANIES_DIR.mkdir(parents=True, exist_ok=True)
+                atomic_write_text(path, render_companies_markdown(rows))
+            else:
+                path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.error("Companies export for agent %s failed: %s", agent_id, exc)
             return None
-        COMPANIES_DIR.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(path, render_companies_markdown(rows))
-    except OSError as exc:
-        logger.error("Companies export for agent %s failed: %s", agent_id, exc)
+        latest = await _export_rows(db, user_id)
+        if latest == rows:
+            break
+        rows = latest
+    else:
+        logger.warning(
+            "Companies export for agent %s: the confirmed rows still changed after %d "
+            "writes; the next write repairs the file", agent_id, _EXPORT_PASSES,
+        )
         return None
-    return path
+    return path if rows else None
+
+
+async def move_companies_file(
+    db: AsyncSession, *, user_id: uuid.UUID, old_agent_id: str
+) -> Path | None:
+    """After a committed agent rename: remove ``COMPANIES_DIR/<old_agent_id>.md`` and
+    export under the PI's current agent id. Best effort, like the export: a filesystem
+    error is logged, never raised, and an unsafe old id is left alone."""
+    if _SAFE_AGENT_ID.fullmatch(old_agent_id or ""):
+        try:
+            (COMPANIES_DIR / f"{old_agent_id}.md").unlink(missing_ok=True)
+        except OSError as exc:
+            logger.error("Companies file of renamed agent %s not removed: %s", old_agent_id, exc)
+    return await export_companies_file(db, user_id)

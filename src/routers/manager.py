@@ -789,8 +789,13 @@ async def manager_discover_companies(
 ):
     """Find companies: queue company discovery for this PI at interactive priority (spec
     §7.5). While one is pending or processing a press inserts nothing (the per-user
-    unique index), and a pending bulk job is raised to interactive instead."""
-    await _require_pi(db, user_id)
+    unique index), and a pending bulk job is raised to interactive instead. Discovery
+    reads the PI's own papers and Wikidata by ORCID iD, so a PI without one is told so
+    and nothing is queued."""
+    target = await _require_pi(db, user_id)
+    if not (target.orcid or "").strip():
+        flash(request, "Company discovery needs the PI's ORCID iD; none is recorded.", "error")
+        return _companies_redirect(user_id)
     job_id = await enqueue_company_discovery(db, user_id, priority=INTERACTIVE_PRIORITY)
     await db.commit()
     if job_id is None:
@@ -829,19 +834,24 @@ async def manager_confirm_company(
     pi_role: str = Form(""),
     funding_usd: str = Form(""),
     funding_as_of: str = Form(""),
+    clear_funding: str = Form(""),
     db: AsyncSession = _DB,
     current_user: User = _STAFF,
 ):
     """Confirm a discovered suggestion, correcting its role and funding first where the
-    form says so; a blank field keeps the stored value. Recorded as reviewed by the
-    effective user."""
+    form says so; a blank field keeps the stored value. The "Clear funding" checkbox
+    (any non-blank ``clear_funding``) drops the figure, its date and its source instead,
+    and the funding fields are then not parsed. Recorded as reviewed by the effective
+    user."""
     await _require_pi(db, user_id)
+    clearing = bool(clear_funding.strip())
     try:
         row = await confirm_company(
             db, user_id=user_id, company_id=company_id, reviewer_id=current_user.id,
             pi_role=pi_role.strip() or None,
-            funding_usd=parse_funding_usd(funding_usd),
-            funding_as_of=parse_funding_as_of(funding_as_of),
+            funding_usd=None if clearing else parse_funding_usd(funding_usd),
+            funding_as_of=None if clearing else parse_funding_as_of(funding_as_of),
+            clear_funding=clearing,
         )
     except CompanyNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Company not found") from exc

@@ -172,3 +172,67 @@ async def test_deleting_a_reviewer_keeps_the_rows_and_clears_the_attribution(db_
         {"i": row.id},
     )).one()
     assert tuple(got) == (None, None, "confirmed")
+
+
+async def _two_confirmed(db_session):
+    pi, agent, _manager = await _pi_agent_manager(db_session)
+    await seed_company(db_session, pi, status="confirmed")
+    await seed_company(db_session, pi, company_name="Belay Diagnostics", status="confirmed",
+                       funding_usd=None, funding_as_of=None, funding_source_url=None)
+    return pi, agent
+
+
+async def test_a_write_committed_while_exporting_is_written_again(db_session, monkeypatch, _companies_dir):
+    """A concurrent writer commits between this export's read and its file write: the
+    re-read after the write sees the newer list and writes it, so the file is not left
+    one write behind."""
+    pi, agent = await _two_confirmed(db_session)
+    real = pi_companies._export_rows
+    calls = []
+
+    async def stale_then_current(db, user_id):
+        rows = await real(db, user_id)
+        calls.append(rows)
+        return rows[:1] if len(calls) == 1 else rows
+
+    monkeypatch.setattr(pi_companies, "_export_rows", stale_then_current)
+    path = await export_companies_file(db_session, pi.id)
+    assert path == _companies_dir / f"{agent.agent_id}.md"
+    text = path.read_text()
+    assert "- Belay Diagnostics: founder" in text and "- DELFI Diagnostics: founder" in text
+    assert len(calls) == 3      # read, write, re-read (changed), write, re-read (same)
+
+
+async def test_rows_that_keep_changing_stop_after_three_writes(db_session, monkeypatch, _companies_dir, caplog):
+    pi, agent = await _two_confirmed(db_session)
+    real = pi_companies._export_rows
+    calls = []
+    writes = []
+
+    async def always_changing(db, user_id):
+        rows = await real(db, user_id)
+        calls.append(rows)
+        return rows[: 1 + len(calls) % 2]
+
+    def counting_write(path, text):
+        writes.append(text)
+        return real_write(path, text)
+
+    real_write = pi_companies.atomic_write_text
+    monkeypatch.setattr(pi_companies, "_export_rows", always_changing)
+    monkeypatch.setattr(pi_companies, "atomic_write_text", counting_write)
+    with caplog.at_level(logging.WARNING, logger="src.services.pi_companies"):
+        assert await export_companies_file(db_session, pi.id) is None
+    assert len(writes) == pi_companies._EXPORT_PASSES == 3
+    assert "still changed after 3 writes" in caplog.text
+    assert (_companies_dir / f"{agent.agent_id}.md").exists()
+
+
+async def test_an_unchanged_list_is_written_once(db_session, monkeypatch, _companies_dir):
+    pi, _agent = await _two_confirmed(db_session)
+    writes = []
+    real_write = pi_companies.atomic_write_text
+    monkeypatch.setattr(pi_companies, "atomic_write_text",
+                        lambda path, text: (writes.append(text), real_write(path, text))[1])
+    await export_companies_file(db_session, pi.id)
+    assert len(writes) == 1

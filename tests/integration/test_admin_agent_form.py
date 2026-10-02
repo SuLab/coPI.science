@@ -3,9 +3,11 @@ import pytest
 
 from src.models import USER_ROLE_ADMIN
 from src.services.agent_form import agent_form_version
+from src.services.pi_companies import export_companies_file
 from tests import factories
 from tests.flash_support import session_flashes
 from tests.integration.test_manager_access import auth_headers
+from tests.pi_company_support import companies_dir, seed_company
 
 pytestmark = pytest.mark.integration
 
@@ -89,6 +91,28 @@ async def test_pending_slug_outside_the_safe_charset_is_refused(client, db_sessi
     assert r.status_code == 302 and "error=invalid_slug" in r.headers["location"]
     await db_session.refresh(agent)
     assert agent.agent_id == "pendingtwo"
+
+
+async def test_renaming_a_pending_agent_moves_its_companies_file(client, db_session, monkeypatch, tmp_path):
+    """The hub reads profiles/private/companies/<agent_id>.md: a rename removes the old
+    id's file and writes the confirmed rows under the new id."""
+    target = companies_dir(monkeypatch, tmp_path)
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+    pi = await factories.make_user(db_session)
+    agent = await factories.make_agent(db_session, user=pi, status="pending", agent_id="oldslug")
+    await seed_company(db_session, pi, status="confirmed")
+    await export_companies_file(db_session, pi.id)
+    assert (target / "oldslug.md").exists()
+
+    r = await client.post(f"/admin/agents/{agent.id}/approve",
+                          data={"agent_slug": "newslug", "bot_name": agent.bot_name,
+                                "form_version": agent_form_version(agent), "activation_override": "1"},
+                          headers=auth_headers(admin.id), follow_redirects=False)
+    assert r.status_code == 302 and r.headers["location"] == "/admin/agents"
+    await db_session.refresh(agent)
+    assert agent.agent_id == "newslug"
+    assert not (target / "oldslug.md").exists()
+    assert "- DELFI Diagnostics: founder" in (target / "newslug.md").read_text()
 
 
 async def test_page_parameters_are_bounded(client, db_session):
