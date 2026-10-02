@@ -125,7 +125,7 @@ FLOWS: dict[str, dict] = {
             ("open", "/admin/cohorts/topology", "agent x cohort matrix"),
             ("check", "cell SuBot x t12-browser-flow", ""),
             ("check", "cell WisemanBot x t12-browser-flow", ""),
-            ("click", "Save topology", "302s with ?notice=2+added,+0+removed"),
+            ("click", "Save topology", "302s; flashes 2 added, 0 removed"),
         ],
         "expect": [
             "2 added, 0 removed",

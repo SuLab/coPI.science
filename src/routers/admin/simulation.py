@@ -4,7 +4,6 @@ import hashlib
 import re
 import uuid
 from datetime import UTC, datetime
-from urllib.parse import quote
 
 from fastapi import Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -132,7 +131,6 @@ async def _simulation_context(
     request: Request,
     current_user: User,
     *,
-    msg: str | None = None,
     template_error: str | None = None,
     template_value_override: str | None = None,
 ) -> dict:
@@ -215,7 +213,6 @@ async def _simulation_context(
         channels_default=channels_default,
         template_value=template_value,
         audit_events=audit_events,
-        msg=msg,
         template_error=template_error,
         tick_at_display=tick_at_display,
         web_rubric_hash=RUBRIC_CONTENT_HASH,
@@ -240,12 +237,7 @@ async def admin_simulation(
     announce-channels + announce-template editors, and recent command/audit
     history, then the Live tab's stats sections — see the Live-tab comment
     block inside the template."""
-    ctx = await _simulation_context(
-        db,
-        request,
-        current_user,
-        msg=request.query_params.get("msg"),
-    )
+    ctx = await _simulation_context(db, request, current_user)
     return templates.TemplateResponse(request, "admin/simulation.html", ctx)
 
 
@@ -333,9 +325,8 @@ async def admin_simulation_start(
         db, action="simulation_start_requested", actor_user_id=current_user.id,
         payload=_audit_payload(payload, current_user),
     )
-    return RedirectResponse(
-        url=f"/admin/simulation?msg={quote('Start requested.')}", status_code=302
-    )
+    flash(request, "Start requested.", "success")
+    return RedirectResponse(url="/admin/simulation", status_code=302)
 
 
 _RUN_ID_FORM = Form(...)
@@ -412,9 +403,8 @@ async def admin_simulation_finalize_run(
         db, action="simulation_finalize_requested", actor_user_id=current_user.id,
         payload=_audit_payload(payload, current_user),
     )
-    return RedirectResponse(
-        url=f"/admin/activity/{run_id}?msg={quote('Finalize run requested.')}", status_code=302,
-    )
+    flash(request, "Finalize run requested.", "success")
+    return RedirectResponse(url=f"/admin/activity/{run_id}", status_code=302)
 
 
 @router.post("/simulation/stop")
@@ -454,7 +444,8 @@ async def admin_simulation_stop(
         payload=_audit_payload(payload, current_user),
     )
     message = "Stop (hold open interviews) requested." if payload else "Stop requested."
-    return RedirectResponse(url=f"/admin/simulation?msg={quote(message)}", status_code=302)
+    flash(request, message, "success")
+    return RedirectResponse(url="/admin/simulation", status_code=302)
 
 
 
@@ -512,7 +503,8 @@ async def admin_simulation_announce_settings(
         actor_user_id=current_user.id,
         payload=_audit_payload({"old": old_value, "new": new_value}, current_user),
     )
-    return RedirectResponse(url=f"/admin/simulation?msg={quote(msg)}", status_code=302)
+    flash(request, msg, "success")
+    return RedirectResponse(url="/admin/simulation", status_code=302)
 
 
 
@@ -551,10 +543,8 @@ async def admin_simulation_announce_template(
                     {"old_hash": _hash12(old_value), "new_hash": None}, current_user
                 ),
             )
-        return RedirectResponse(
-            url=f"/admin/simulation?msg={quote('Template reset to file default.')}",
-            status_code=302,
-        )
+        flash(request, "Template reset to file default.", "success")
+        return RedirectResponse(url="/admin/simulation", status_code=302)
 
     error = validate_template(body)
     if error:
@@ -572,4 +562,5 @@ async def admin_simulation_announce_template(
             {"old_hash": _hash12(old_value), "new_hash": _hash12(body)}, current_user
         ),
     )
-    return RedirectResponse(url=f"/admin/simulation?msg={quote('Template saved.')}", status_code=302)
+    flash(request, "Template saved.", "success")
+    return RedirectResponse(url="/admin/simulation", status_code=302)

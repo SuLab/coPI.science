@@ -970,10 +970,11 @@ def test_static_link_resolution_coverage_is_reported():
     # added two query-only links (`?page=…`): the partial serves both the admin and
     # the manager run pages, so it cannot name either path. The error page (M-01)
     # added its back link, `{{ back_href }}`: the referring page, or the role's home.
+    # The conversations pager (D-26) added two more same-page `?page=…` links.
     unresolvable = len(values) - len(resolvable)
-    assert unresolvable <= 46, (
+    assert unresolvable <= 48, (
         f"{unresolvable} of {len(values)} href/action values do not resolve to a "
-        "checkable local path (was 46) — the matcher probably regressed, or a new "
+        "checkable local path (was 48) — the matcher probably regressed, or a new "
         "link is built from a variable"
     )
 

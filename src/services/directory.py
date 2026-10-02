@@ -356,14 +356,19 @@ def _resolve_run_selection(
     runs: list[SimulationRun], run_id: str | None
 ) -> tuple[bool, uuid.UUID | str | None]:
     """``(show_all_runs, selected_run_id)``: ``run_id == "all"`` selects every run;
-    an unparseable or absent id falls back to the newest run (``runs[0]``)."""
+    an absent or unparseable id, or one naming no run in ``runs``, falls back to the newest run
+    (``runs[0]``)."""
     show_all_runs = run_id == "all"
     selected_run_id: uuid.UUID | str | None = "all" if show_all_runs else None
     if not show_all_runs and run_id:
         try:
-            selected_run_id = uuid.UUID(run_id)
+            parsed = uuid.UUID(run_id)
         except ValueError:
-            pass
+            parsed = None
+        # B-13: a well-formed id that names no run (a stale bookmark, a purged
+        # run) is treated like no id at all.
+        if parsed is not None and any(r.id == parsed for r in runs):
+            selected_run_id = parsed
     if not selected_run_id and runs:
         selected_run_id = runs[0].id
     return show_all_runs, selected_run_id
@@ -1132,7 +1137,8 @@ async def build_run_detail(
 
     The per-agent and per-channel stats are SQL aggregates over the whole run;
     ``messages`` is one page (``RUN_MESSAGES_PAGE_SIZE``) of column rows, with
-    no ``content``, ordered by time.
+    no ``content``, ordered by time. ``page`` is clamped to
+    ``1..page_count``.
     """
     run_result = await db.execute(
         select(SimulationRun).where(SimulationRun.id == run_id)
@@ -1141,10 +1147,13 @@ async def build_run_detail(
     if not run:
         return None
 
-    page = max(1, page)
     message_total = await db.scalar(
         select(func.count(AgentMessage.id)).where(AgentMessage.simulation_run_id == run_id)
     ) or 0
+    # D-27: clamp to the last page, so a stale or hand-edited ?page= past the end
+    # shows that page (and its pager) instead of an empty timeline with no way back.
+    page_count = max(1, -(-message_total // RUN_MESSAGES_PAGE_SIZE))
+    page = min(max(1, page), page_count)
     messages = (await db.execute(
         select(
             AgentMessage.agent_id,
@@ -1214,5 +1223,5 @@ async def build_run_detail(
         "channel_stats": channel_stats,
         "message_total": message_total,
         "page": page,
-        "page_count": max(1, -(-message_total // RUN_MESSAGES_PAGE_SIZE)),
+        "page_count": page_count,
     }

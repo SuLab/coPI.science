@@ -29,6 +29,7 @@ from src.models import (
     SimulationRun,
 )
 from tests import factories
+from tests.integration._webui_helpers import impersonation_headers
 from tests.integration.test_manager_access import auth_headers
 
 pytestmark = pytest.mark.integration
@@ -425,3 +426,21 @@ async def test_generate_enqueues_exactly_the_eligible_assessments_and_second_pre
         .all()
     )
     assert len(jobs_after) == 1
+
+
+async def test_status_buttons_are_hidden_while_impersonating(client, db_session):
+    """D-12: POST /reviews/suggestions/{id}/status refuses impersonation, so the
+    page must not offer buttons that 403."""
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    s = await _seed_suggestion(db_session)
+    # The manager's own view first: the suite shares one session across requests, and
+    # the impersonated request tags that session's ``manager`` object as worn.
+    own = await client.get(f"/manager/prompt-suggestions/{s.id}", headers=auth_headers(manager.id))
+    assert "Mark Implemented" in own.text
+    worn = await client.get(
+        f"/manager/prompt-suggestions/{s.id}", headers=impersonation_headers(admin.id, manager.id)
+    )
+    assert worn.status_code == 200
+    assert "Mark Implemented" not in worn.text
+    assert "Status changes are disabled while impersonating." in worn.text

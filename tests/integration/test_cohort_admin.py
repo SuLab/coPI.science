@@ -93,7 +93,7 @@ async def test_setting_an_unknown_role_is_rejected_without_a_500(
         headers=_auth(admin.id),
     )
     assert r.status_code == 302
-    assert "error" in r.headers["location"]
+    assert session_flashes(r) == [{"kind": "error", "text": "Role not changed: unknown role"}]
     row = (await db_session.execute(
         select(AgentRegistry).where(AgentRegistry.id == agent.id)
     )).scalar_one()
@@ -292,7 +292,8 @@ async def test_delete_succeeds_when_empty_and_keeps_the_trail(client, db_session
     c = await _cohort(db_session, "empty", admin)
     cid = c.id
     r = await client.post(f"/admin/cohorts/{cid}/delete", headers=_auth(admin.id))
-    assert r.status_code == 302 and "notice=Deleted" in r.headers["location"]
+    assert r.status_code == 302
+    assert {"text": "Deleted cohort empty", "kind": "success"} in session_flashes(r)
     assert (await db_session.execute(
         select(Cohort).where(Cohort.id == cid)
     )).scalar_one_or_none() is None
@@ -465,7 +466,7 @@ async def test_topology_save_applies_adds_and_removes_in_one_pass(
         headers=_auth(admin.id),
     )
     assert r.status_code == 302
-    assert "1+added" not in r.headers["location"]  # 2 added, 1 removed
+    assert {"text": "2 added, 1 removed", "kind": "success"} in session_flashes(r)
     rows = {
         (str(m.cohort_id), m.agent_id)
         for m in (await db_session.execute(select(CohortMembership))).scalars().all()
@@ -597,7 +598,7 @@ async def test_a_cell_shown_checked_and_still_checked_is_left_alone(
         },
         headers=_auth(admin.id),
     )
-    assert "0+added,+0+removed" in r.headers["location"]
+    assert {"text": "0 added, 0 removed", "kind": "success"} in session_flashes(r)
     assert (await db_session.execute(select(CohortMembership))).scalars().all() == []
 
 
@@ -945,7 +946,7 @@ async def test_deleting_an_unknown_cohort_is_a_404(client, db_session, admin):
     claim to have deleted anything.
 
     This used to be a bare redirect to the list carrying neither ``error=`` nor
-    ``notice=``. The successful path redirects with ``notice=Deleted+cohort+{name}``,
+    ``notice=``. The successful path flashes ``Deleted cohort {name}``,
     so the silent version was the only outcome in the whole surface that reported
     nothing whatsoever — a second submit of an already-processed delete just landed
     back on the list. It is now a 404, the same answer ``add-agent`` and
@@ -962,12 +963,12 @@ async def test_deleting_an_unknown_cohort_is_a_404(client, db_session, admin):
 
 async def test_a_real_delete_still_reports_success(client, db_session, admin):
     """Positive control for the 404 above: the same route, given a cohort that does
-    exist, still redirects with a notice. Without this, a handler that 404'd
+    exist, still redirects with a success flash. Without this, a handler that 404'd
     unconditionally would pass the test above."""
     c = await _cohort(db_session, "realdelete", admin)
     r = await client.post(f"/admin/cohorts/{c.id}/delete", headers=_auth(admin.id))
     assert r.status_code == 302
-    assert "notice=Deleted+cohort+realdelete" in r.headers["location"]
+    assert {"text": "Deleted cohort realdelete", "kind": "success"} in session_flashes(r)
 
 
 async def test_adding_an_agent_to_an_unknown_cohort_is_a_404(
@@ -1051,7 +1052,9 @@ async def test_topology_save_round_trips_with_marker_payload(client, db_session,
         headers=_auth(admin.id),
     )
     assert r.status_code == 302
-    assert "1+added,+1+removed" in r.headers["location"], r.headers["location"]
+    assert {"text": "1 added, 1 removed", "kind": "success"} in session_flashes(r), (
+        session_flashes(r)
+    )
 
     rows = {
         (str(cid), aid)
@@ -1139,7 +1142,7 @@ async def test_full_matrix_payload_stays_under_the_field_limit(client, db_sessio
         headers=_auth(admin.id),
     )
     assert r.status_code == 302, r.text
-    assert "1+added" in r.headers["location"]
+    assert any(f["text"].startswith("1 added") for f in session_flashes(r)), session_flashes(r)
 
 
 async def test_a_payload_of_unknown_marker_ids_does_not_blow_up_or_delete_anything(
@@ -1174,7 +1177,7 @@ async def test_a_payload_of_unknown_marker_ids_does_not_blow_up_or_delete_anythi
         f"an all-unknown payload must be a harmless no-op, not an error: "
         f"{r.headers['location']}"
     )
-    assert session_flashes(r) == [], session_flashes(r)
+    assert [f for f in session_flashes(r) if f["kind"] == "error"] == [], session_flashes(r)
 
     rows = {
         (str(m.cohort_id), m.agent_id)

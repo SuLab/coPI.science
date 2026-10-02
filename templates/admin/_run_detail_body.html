@@ -106,7 +106,7 @@
 {% endif %}
 
 <!-- Message timeline -->
-{% if messages %}
+{% if message_total > 0 %}
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
     <h2 class="font-semibold text-gray-800 mb-4">Message Timeline ({{ message_total }})</h2>
     <div class="space-y-2 max-h-96 overflow-y-auto">

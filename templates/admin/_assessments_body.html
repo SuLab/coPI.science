@@ -287,6 +287,7 @@
 {% macro qs_filters() %}<input type="hidden" name="surface" value="{{ list_surface }}"><input type="hidden" name="run_id" value="{{ 'all' if show_all_runs else selected_run_id }}"><input type="hidden" name="sort" value="{{ sort }}"><input type="hidden" name="lab" value="{{ lab_filter or '' }}"><input type="hidden" name="review" value="{{ review }}">{% endmacro %}
 <div class="space-y-4">
 {% for a in assessments %}
+    {% set next_card = loop.nextitem %}
     {# `id` BEFORE `class` (contract C13): the quick-scoring forms post a
        `surface` token that src/routers/reviews.py turns into
        `.../assessments?...#a-<id>`, so every card needs a fragment target.
@@ -618,9 +619,12 @@
                `list_surface` token and the other four carry this page's own
                filter state — run, sort, lab and review sub-tab — so
                src/routers/reviews.py can send the writer back to the list they
-               were reading, at this card's anchor. #}
+               were reading, at this card's anchor. `next_id` names the following
+               card ("" on the last): a score from the Unreviewed tab moves this
+               card off the list, so the redirect lands there instead (B-03). #}
             <form method="post" action="/reviews/assessments/{{ a.id }}/feedback" class="mt-2 space-y-2">
                 {{ qs_filters() }}
+                <input type="hidden" name="next_id" value="{{ next_card.id if next_card else '' }}">
                 <label for="{{ qs }}score" class="block text-sm font-medium text-gray-600 mb-1">Overall rating (1 = weak … 5 = strong)</label>
                 <select id="{{ qs }}score" name="score" required class="border rounded px-1 py-0.5 text-sm"><option value="" disabled selected>&mdash;</option>{% for n in range(1, 6) %}<option value="{{ n }}">{{ n }}</option>{% endfor %}</select>
                 <label for="{{ qs }}comment" class="block text-sm font-medium text-gray-600 mb-1 mt-3">Comment</label>

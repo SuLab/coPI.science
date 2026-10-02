@@ -49,9 +49,13 @@
 
 <!-- Status action -->
 <form method="post" action="/reviews/suggestions/{{ suggestion.id }}/status" class="mb-6 flex items-center gap-2">
+    {% if impersonation_banner %}
+    <span class="text-xs text-gray-600">Status changes are disabled while impersonating.</span>
+    {% else %}
     <button type="submit" name="action" value="open" class="text-xs font-medium bg-gray-600 text-white px-2 py-1 rounded hover:bg-gray-700">Reopen</button>
     <button type="submit" name="action" value="dismissed" class="text-xs font-medium bg-red-600 text-white px-2 py-1 rounded hover:bg-red-700">Dismiss</button>
     <button type="submit" name="action" value="implemented" class="text-xs font-medium bg-green-700 text-white px-2 py-1 rounded hover:bg-green-800">Mark Implemented</button>
+    {% endif %}
     {% if suggestion.status_set_by_name %}
     <span class="text-xs text-gray-500">
         last set to "{{ suggestion.status }}" by {{ suggestion.status_set_by_name }}

@@ -9,6 +9,7 @@ from src.models import USER_ROLE_ADMIN, USER_ROLE_MANAGER, SlackAppProvision
 from src.services import profile_export
 from tests import factories
 from tests.integration._webui_helpers import follow
+from tests.integration.test_finalize_run_route import _stopped_run
 from tests.integration.test_manager_access import auth_headers
 from tests.integration.test_manager_slack_provisioning import _pending_pi
 
@@ -144,3 +145,46 @@ async def test_a_callback_error_reaches_the_admin_agents_page(client, db_session
     assert r.headers["location"] == "/admin/agents"
     page = await follow(client, r)
     assert "Slack provisioning failed: the installation was cancelled in Slack" in page.text
+
+
+async def test_stop_flashes_and_a_msg_query_flag_renders_nothing(client, db_session, monkeypatch):
+    import src.routers.admin.simulation as sim_routes
+
+    async def _alive(db):
+        return True
+
+    monkeypatch.setattr(sim_routes, "engine_alive", _alive)
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+    r = await client.post(
+        "/admin/simulation/stop", headers=auth_headers(admin.id), follow_redirects=False,
+    )
+    assert r.headers["location"] == "/admin/simulation"
+    page = await follow(client, r)
+    assert "Stop requested." in page.text
+    spoof = await client.get(
+        "/admin/simulation?msg=Spoofed-banner-text", headers=auth_headers(admin.id)
+    )
+    assert "Spoofed-banner-text" not in spoof.text
+
+
+async def test_finalize_requested_flashes_on_the_run_page(client, db_session, monkeypatch):
+    import src.routers.admin.simulation as sim_routes
+
+    async def _dead(db):
+        return False
+
+    monkeypatch.setattr(sim_routes, "engine_alive", _dead)
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+    run = await _stopped_run(db_session)
+    r = await client.post(
+        "/admin/simulation/finalize-run",
+        data={"run_id": str(run.id), "confirm_run": str(run.id)[:8]},
+        headers=auth_headers(admin.id), follow_redirects=False,
+    )
+    assert r.headers["location"] == f"/admin/activity/{run.id}"
+    page = await follow(client, r)
+    assert "Finalize run requested." in page.text
+    spoof = await client.get(
+        f"/admin/activity/{run.id}?msg=Spoofed-run-text", headers=auth_headers(admin.id)
+    )
+    assert "Spoofed-run-text" not in spoof.text

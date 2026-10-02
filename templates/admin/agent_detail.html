@@ -28,12 +28,6 @@
         </p>
     </div>
     {% endif %}
-    {% if role_error %}
-    <div class="mb-4 px-4 py-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800">
-        ⚠️ {{ role_error }}
-    </div>
-    {% endif %}
-
     <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
         <div class="grid grid-cols-2 gap-4 text-sm mb-6">
             <div>
@@ -162,11 +156,6 @@
                 {% if spoke_ok %}
                 <div class="bg-green-50 border border-green-200 rounded-lg p-3 mt-3">
                     <p class="text-green-800 text-xs font-medium">✅ Star spoke wired — this lab can reach the hub.</p>
-                </div>
-                {% endif %}
-                {% if spoke_error %}
-                <div class="bg-red-50 border border-red-200 rounded-lg p-3 mt-3">
-                    <p class="text-red-800 text-xs font-medium">⚠ Star spoke: {{ spoke_error }}</p>
                 </div>
                 {% endif %}
                 {% if activation_blocked %}

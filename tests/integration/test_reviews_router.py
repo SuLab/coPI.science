@@ -1192,3 +1192,61 @@ async def test_the_same_review_after_a_minute_is_stored_again(client, db_session
     )
     await _post(client, assessment, reviewer, _SAME)
     assert len(await _reviews_of(db_session, assessment)) == 2
+
+
+async def test_quick_score_on_the_unreviewed_tab_anchors_the_next_card(client, db_session):
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    assessment = await _seed_assessment(db_session)
+    next_id = uuid.uuid4()
+    r = await client.post(
+        f"/reviews/assessments/{assessment.id}/feedback",
+        data={"score": "3", "comment": "x", "feedback_mode": "log_only",
+              "surface": "manager-list", "review": "unreviewed", "next_id": str(next_id)},
+        headers=auth_headers(manager.id), follow_redirects=False,
+    )
+    assert r.headers["location"] == f"/manager/assessments#a-{next_id}"
+    page = await follow(client, r)
+    assert "Moved to Reviewed." in page.text
+
+
+async def test_quick_score_on_the_last_unreviewed_card_has_no_anchor(client, db_session):
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    assessment = await _seed_assessment(db_session)
+    r = await client.post(
+        f"/reviews/assessments/{assessment.id}/feedback",
+        data={"score": "3", "comment": "x", "feedback_mode": "log_only",
+              "surface": "manager-list", "next_id": ""},
+        headers=auth_headers(manager.id), follow_redirects=False,
+    )
+    assert r.headers["location"] == "/manager/assessments"
+
+
+async def test_quick_score_on_the_all_tab_keeps_the_scored_card_anchor(client, db_session):
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    assessment = await _seed_assessment(db_session)
+    r = await client.post(
+        f"/reviews/assessments/{assessment.id}/feedback",
+        data={"score": "3", "comment": "x", "feedback_mode": "log_only",
+              "surface": "manager-list", "review": "all", "next_id": str(uuid.uuid4())},
+        headers=auth_headers(manager.id), follow_redirects=False,
+    )
+    assert r.headers["location"] == f"/manager/assessments?review=all#a-{assessment.id}"
+
+
+async def test_each_quick_score_form_names_the_following_card(client, db_session):
+    import re
+
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    first = await _seed_assessment(db_session)
+    db_session.add(OpportunityAssessment(
+        simulation_run_id=first.simulation_run_id, agent_id="blackbird", channel_name="c2",
+    ))
+    await db_session.flush()
+    page = await client.get(
+        f"/manager/assessments?run_id={first.simulation_run_id}&review=all",
+        headers=auth_headers(manager.id),
+    )
+    cards = re.findall(r'id="a-([0-9a-f-]{36})"', page.text)
+    nexts = re.findall(r'name="next_id" value="([^"]*)"', page.text)
+    assert len(cards) == 2
+    assert nexts == cards[1:] + [""]

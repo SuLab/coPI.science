@@ -124,6 +124,8 @@ def _assessments_redirect(
     sort: str | None = None,
     lab: str | None = None,
     review: str | None = None,
+    anchor_id: uuid.UUID | None = None,
+    no_anchor: bool = False,
 ) -> RedirectResponse:
     """Whitelist lives HERE, not at call sites; admin surface only for
     admins. NEVER build this from a bare "/admin" constant: test_reachability's
@@ -149,10 +151,14 @@ def _assessments_redirect(
     posted to one of those four lands on the UNFILTERED list — the same
     land-somewhere-real-rather-than-error posture as the surface fallback
     above. Those four are detail-page-only forms today.
+
+    ``anchor_id`` replaces the scored card as the fragment target, and
+    ``no_anchor`` drops the fragment: the feedback path uses them when the scored card has just left
+    the Unreviewed tab (B-03).
     """
     if surface in _LIST_SURFACES:
         query = _list_filter_query(run_id, sort, lab, review)
-        fragment = f"#a-{assessment_id}"
+        fragment = "" if no_anchor else f"#a-{anchor_id or assessment_id}"
         if surface == "admin-list" and current_user.is_admin:
             return RedirectResponse(
                 url=f"/admin/assessments{query}{fragment}", status_code=302
@@ -222,6 +228,13 @@ def _parse_assignee_id(assignee_user_id: str) -> uuid.UUID:
         return uuid.UUID(assignee_user_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Malformed assignee id") from exc
+
+
+def _optional_uuid(raw: str) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(raw.strip())
+    except ValueError:
+        return None
 
 
 #: Prefix for the per-rubric-dimension score fields the Human-review card
@@ -335,12 +348,29 @@ async def submit_review_feedback(
             current_user.name, current_user.id, assessment_id, score, feedback_mode,
             len(dimension_scores),
         )
+    # B-03: scoring from the Unreviewed tab moves the card to Reviewed, so its own
+    # anchor is gone from the page the reader lands on. The list form posts
+    # `next_id` (the following card, "" on the last); land there instead. A post
+    # without the field (the detail page, older pages) keeps the old anchor.
+    next_raw = form.get("next_id")
+    moved_out = (
+        surface in _LIST_SURFACES
+        and isinstance(next_raw, str)
+        and (_form_str(form, "review") or ASSESSMENT_REVIEW_DEFAULT) == ASSESSMENT_REVIEW_DEFAULT
+    )
+    anchor_id = _optional_uuid(next_raw) if moved_out else None
+    # A refused duplicate (Task 2A-12) already flashed its own note; one message only
+    # (plan audit Q2-17).
+    if moved_out and not duplicate:
+        flash(request, "Moved to Reviewed.", "success")
     return _assessments_redirect(
         surface, current_user, assessment_id,
         run_id=_form_str(form, "run_id"),
         sort=_form_str(form, "sort"),
         lab=_form_str(form, "lab"),
         review=_form_str(form, "review"),
+        anchor_id=anchor_id,
+        no_anchor=moved_out and anchor_id is None,
     )
 
 

@@ -174,11 +174,9 @@ async def admin_agent_detail(
             available_roles=available_roles(),
             form_error=request.query_params.get("error"),
             form_version=agent_form_version(agent),
-            role_error=request.query_params.get("role_error"),
             spoke_state=spoke_state,
             requires_linked_user=requires_linked_user(agent.role),
             spoke_ok=request.query_params.get("spoke_ok"),
-            spoke_error=request.query_params.get("spoke_error"),
         ),
     )
 
@@ -196,8 +194,6 @@ async def admin_ensure_agent_spoke(
     Scoped twin of POST /admin/cohorts/ensure-star-spokes; the click is
     attributed to the acting admin in cohort_audit_events.
     """
-    from urllib.parse import quote
-
     from src.services.star_topology import ensure_star_spokes
 
     result = await db.execute(
@@ -207,27 +203,19 @@ async def admin_ensure_agent_spoke(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     if star_role(agent.role) != "spoke":
-        return RedirectResponse(
-            url=f"/admin/agents/{agent_id}?spoke_error="
-            + quote("Only pi_lab agents have star spokes."),
-            status_code=302,
-        )
+        flash(request, "Star spoke: Only pi_lab agents have star spokes.", "error")
+        return RedirectResponse(url=f"/admin/agents/{agent_id}", status_code=302)
     try:
         report = await ensure_star_spokes(
             db, apply=True, actor=current_user, only={agent.agent_id}
         )
     except ValueError as exc:
-        return RedirectResponse(
-            url=f"/admin/agents/{agent_id}?spoke_error={quote(str(exc)[:200])}",
-            status_code=302,
-        )
+        flash(request, "Star spoke: " + str(exc)[:200], "error")
+        return RedirectResponse(url=f"/admin/agents/{agent_id}", status_code=302)
     await db.commit()
     if report.anomalies:
-        return RedirectResponse(
-            url=f"/admin/agents/{agent_id}?spoke_error="
-            + quote("; ".join(report.anomalies)[:300]),
-            status_code=302,
-        )
+        flash(request, "Star spoke: " + "; ".join(report.anomalies)[:300], "error")
+        return RedirectResponse(url=f"/admin/agents/{agent_id}", status_code=302)
     return RedirectResponse(
         url=f"/admin/agents/{agent_id}?spoke_ok=1", status_code=302
     )
@@ -572,9 +560,8 @@ async def admin_set_agent_role(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     if role not in available_roles():
-        return RedirectResponse(
-            url=f"/admin/agents/{agent_id}?role_error=Unknown+role", status_code=302
-        )
+        flash(request, "Role not changed: unknown role", "error")
+        return RedirectResponse(url=f"/admin/agents/{agent_id}", status_code=302)
 
     if role != agent.role and agent.status == "active":
         blockers = await ensure_activation_allowed(

@@ -6,7 +6,7 @@ import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import distinct, func, select, tuple_
 from sqlalchemy.exc import IntegrityError
@@ -31,6 +31,7 @@ from src.models import (
 )
 from src.services.agent_identity import derive_agent_identity
 from src.services.conversation_feed import own_or_gated, resolve_agent_gate
+from src.services.directory import MAX_PAGE
 from src.services.email import build_delegate_invitation, send_transactional_email
 from src.services.profile_edit import (
     apply_profile_edits,
@@ -55,6 +56,9 @@ SLACK_INVITE_URL = (
 # longer consume slots, so this surfaces more distinct conversations than the
 # previous flat 100-message window did.
 _ROOT_LIMIT = 50
+#: Conversations page number (D-26); a module singleton so the default is not a
+#: call in the signature (scripts/ci.sh SRC_LINT_MAX).
+_CONV_PAGE = Query(1, ge=1, le=MAX_PAGE)
 
 #: Delegate-invite caps (SN-02): per submission, and per agent over any rolling
 #: 24 hours. The window counts every delegate_invitations row created in it,
@@ -321,6 +325,7 @@ async def request_agent(
 async def agent_conversations(
     agent_id: str,
     request: Request,
+    page: int = _CONV_PAGE,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -331,6 +336,8 @@ async def agent_conversations(
     other human-PI-to-bot interaction surface. This is now purely a
     Slack-independent window onto what the agent's workspace is discussing.
     See specs/local-db-conversations.md.
+
+    Paged by ``page`` (D-26): ``_ROOT_LIMIT`` roots per page, newest first.
     """
     agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
     if agent.status not in ("active", "inactive"):
@@ -340,6 +347,7 @@ async def agent_conversations(
     run_id = await latest_run_id(db)
     channels: list[str] = []
     messages: list[dict] = []
+    has_older = False
     if run_id:
         channels = await _visible_channels(db, run_id, aid)
         # What this PI may read == what their bot may act on. Filtering happens in
@@ -376,9 +384,13 @@ async def agent_conversations(
             )
             .order_by(AgentMessage.posted_at.desc(), AgentMessage.created_at.desc(),
                       AgentMessage.id.desc())
-            .limit(_ROOT_LIMIT)
+            .limit(_ROOT_LIMIT + 1)
+            .offset((page - 1) * _ROOT_LIMIT)
         )
-        roots = list(reversed(root_rows.scalars().all()))
+        # One row past the page says whether an older page exists.
+        fetched = root_rows.scalars().all()
+        has_older = len(fetched) > _ROOT_LIMIT
+        roots = list(reversed(fetched[:_ROOT_LIMIT]))
 
         # Reply counts, gated with the SAME clause (including the own-post
         # carve-out) so the badge can never promise turns the expansion will not
@@ -429,6 +441,7 @@ async def agent_conversations(
         _template_context(
             request, current_user, agent=agent, is_owner=is_owner,
             messages=messages, has_run=run_id is not None,
+            page=page, has_older=has_older,
         ),
     )
 

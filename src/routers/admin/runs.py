@@ -79,7 +79,6 @@ async def admin_activity_detail(
             channel_stats=detail["channel_stats"],
             held_counts=held_counts,
             in_doubt=in_doubt,
-            msg=request.query_params.get("msg"),
         ),
     )
 
