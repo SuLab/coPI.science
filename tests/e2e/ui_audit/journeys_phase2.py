@@ -50,8 +50,10 @@ async def journey_review_double_click_stores_one(h) -> dict:
         submit = page.locator("#add-comment").locator("xpath=ancestor::form").locator(
             "button[type=submit]"
         )
-        await submit.dblclick()
-        await page.wait_for_load_state("networkidle")
+        # Wait for the form's own navigation (POST, then its redirect) to finish: a goto
+        # issued while it is in flight is aborted.
+        async with page.expect_navigation(wait_until="networkidle"):
+            await submit.dblclick()
         await page.goto(
             f"{h.base_url}/manager/assessments/{assessment_id}", wait_until="networkidle"
         )
