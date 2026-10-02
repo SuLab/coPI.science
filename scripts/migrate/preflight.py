@@ -75,7 +75,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0057"
+DEFAULT_TARGET = "0058"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -109,12 +109,13 @@ DEFAULT_TARGET = "0057"
 #: on llm_call_logs), 0033 (two composite indexes on thread_decisions plus 18
 #: unindexed ondelete-FK columns — see issue #25 P1), 0034 (two nullable columns plus
 #: one foreign-key constraint on agents), 0035 (three nullable columns across three
-#: tables, no backfill), and the 0036-0057 objects enumerated in PLANNED_OBJECTS below.
+#: tables, no backfill), and the 0036-0058 objects enumerated in PLANNED_OBJECTS (and
+#: PLANNED_RECREATES) below.
 SUPPORTED_START_REVISIONS = (
     "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028", "0029",
     "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040",
     "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
-    "0051", "0052", "0053", "0054", "0055", "0056",
+    "0051", "0052", "0053", "0054", "0055", "0056", "0057",
 )
 
 #: Tables whose row counts are snapshotted for postflight. Empty = every user table.
@@ -174,21 +175,22 @@ DEFAULT_BACKUP_DIRS = ("backups", "data/backups", "/backups", "/var/backups/copi
 BACKUP_GLOBS = ("*.sql", "*.sql.gz", "*.dump", "*.dmp", "*.pgdump", "*.custom", "*.bak")
 
 # ---------------------------------------------------------------------------
-# What the migration chain CREATES (PLANNED_OBJECTS) and DROPS (PLANNED_DROPS), per
-# revision. Derived by reading 0019-0057; tests/unit/test_migration_checks.py re-derives
-# both from the migration files' upgrade() bodies and asserts they still match, so they
-# cannot silently drift.
+# What the migration chain CREATES (PLANNED_OBJECTS), DROPS (PLANNED_DROPS) and drops and
+# creates again under the same name (PLANNED_RECREATES), per revision. Derived by reading
+# 0019-0058; tests/unit/test_migration_checks.py re-derives them from the migration
+# files' upgrade() bodies and asserts they still match, so they cannot silently drift.
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class PlannedObject:
-    """A database object one revision's ``upgrade()`` creates or drops.
+    """A database object one revision's ``upgrade()`` creates, drops, or rebuilds.
 
     Which one is decided by the tuple it sits in: an entry in ``PLANNED_OBJECTS`` is
     created (so it must not already exist, and is legitimately absent from a preflight
     row-count snapshot); an entry in ``PLANNED_DROPS`` is dropped (so it is legitimately
-    absent afterwards).
+    absent afterwards); an entry in ``PLANNED_RECREATES`` is dropped and created again
+    under the same name (so it exists before and after, and only its table is sized).
     """
 
     revision: str
@@ -446,20 +448,41 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     # 0057_email_verification_and_session_epoch
     PlannedObject("0057", "column", "email_verified_at", "users"),
     PlannedObject("0057", "column", "session_epoch", "users"),
+    # 0058_hub_1_10_gate_reasons_and_pi_companies. uq_jobs_one_active_per_user_type, which
+    # 0058 drops and creates again with company_discovery in its predicate, is in
+    # PLANNED_RECREATES: listed here, its pre-existence would BLOCK every correctly
+    # migrated database. The four CHECK names are listed as 0051's are.
+    PlannedObject("0058", "column", "gating_rationales", "opportunity_assessments"),
+    PlannedObject("0058", "table", "pi_companies"),
+    PlannedObject("0058", "constraint", "uq_pi_companies_user_normalized_name", "pi_companies"),
+    PlannedObject("0058", "constraint", "ck_pi_companies_pi_role", "pi_companies"),
+    PlannedObject("0058", "constraint", "ck_pi_companies_funding_usd", "pi_companies"),
+    PlannedObject("0058", "constraint", "ck_pi_companies_status", "pi_companies"),
+    PlannedObject("0058", "constraint", "ck_pi_companies_origin", "pi_companies"),
+    PlannedObject("0058", "index", "ix_pi_companies_user_id", "pi_companies"),
 )
 
 #: What ``upgrade()`` DROPS. Kept apart from PLANNED_OBJECTS because the collision check
 #: must never treat a drop's precondition (the object exists) as a collision. 0026 is
-#: the only upgrade-time ``drop_table`` in 0019-0057.
+#: the only upgrade-time ``drop_table`` in 0019-0058.
 PLANNED_DROPS: tuple[PlannedObject, ...] = (
     PlannedObject("0026", "table", "grantbot_posted_foas"),
+)
+
+#: What ``upgrade()`` drops and creates again under the SAME name. Kept out of
+#: PLANNED_OBJECTS for the reason the 0036/0039 notes there give (the object's existence
+#: is the revision's precondition, so a collision entry would BLOCK every correctly
+#: migrated database), and listed here so ``tables_sized_between`` still sizes the table
+#: the rebuild locks. 0058 widens the one-active-job predicate to company_discovery.
+PLANNED_RECREATES: tuple[PlannedObject, ...] = (
+    PlannedObject("0058", "index", "uq_jobs_one_active_per_user_type", "jobs"),
 )
 
 REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
     "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039",
     "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
-    "0051", "0052", "0053", "0054", "0055", "0056", "0057",
+    "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058",
 )
 
 
@@ -507,15 +530,16 @@ def tables_dropped_between(current: str, target: str) -> frozenset[str]:
 def tables_sized_between(current: str | None, target: str) -> list[str]:
     """Every existing table a pending revision locks (SC-17), sorted.
 
-    Derived from each pending ``PlannedObject.table`` (tables the chain itself creates
-    have nothing to size), so a revision that alters ``jobs`` or ``users`` is sized
-    without a hand-kept list.
+    Derived from each pending ``PlannedObject.table`` in PLANNED_OBJECTS and
+    PLANNED_RECREATES (tables the chain itself creates have nothing to size), so a
+    revision that alters ``jobs`` or ``users`` is sized without a hand-kept list.
     """
     lo = current or "0018"
     created = tables_created_between(lo, target)
-    return sorted(
-        {o.table for o in planned_objects_between(lo, target) if o.table and o.table not in created}
-    )
+    pending = _pending_revisions(lo, target)
+    tables = {o.table for o in planned_objects_between(lo, target) if o.table}
+    tables |= {o.table for o in PLANNED_RECREATES if o.revision in pending and o.table}
+    return sorted(tables - created)
 
 
 def agent_messages_ddl_pending(current: str | None, target: str) -> bool:

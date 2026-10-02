@@ -179,15 +179,20 @@ doc's §8.
 - **PI** — the original account: own profile, own lab agent, `/profile` and `/agent`.
 - **Manager** — global, read-mostly: `/manager/pis`, `/manager/assessments`,
   `/manager/discussions`, `/manager/activity`. A scoped, deliberate reversal of the
-  original all-GET guarantee (design D1) adds exactly eight write routes — `POST
+  original all-GET guarantee (design D1) adds exactly fourteen write routes — `POST
   /manager/pis` (create a PI via ORCID), `/manager/pis/{id}/profile` (edit a PI's
   profile fields), `/manager/pis/{id}/mute` / `/unmute` (toggle a PI's agent),
+  `/manager/pis/{id}/verify-email` (mark the PI's address verified),
   `/manager/pis/{id}/slack/provision` / `/activate` (install a pending PI's Slack
-  bot and bring the agent live), and `/manager/pis/{id}/grants/{grant_id}/veto` /
+  bot and bring the agent live), `/manager/pis/{id}/grants/{grant_id}/veto` /
   `/manager/pis/{id}/industry/{evidence_id}/veto` (mark a RePORTER-derived grant
-  or a piece of industry evidence as not this PI's) — and nothing else;
+  or a piece of industry evidence as not this PI's), and the five Companies routes
+  (scout_hub 1.10.0) — `/manager/pis/{id}/companies` (add a company by hand),
+  `/manager/pis/{id}/companies/{company_id}/delete`, `/confirm` and `/reject`
+  (review a discovered or confirmed company), and `/manager/pis/{id}/companies/discover`
+  (queue company discovery) — and nothing else;
   `tests/integration/test_manager_views.py`'s
-  `test_manager_router_mutations_are_an_explicit_allowlist` fails loudly on a ninth.
+  `test_manager_router_mutations_are_an_explicit_allowlist` fails loudly on a fifteenth.
   **Still cannot impersonate** or set roles (both stay admin-only), and there is
   deliberately no LLM-call drill-down and no export. A manager MAY provision a Slack
   bot and activate a pending PI's agent from `/manager/pis/{id}` (F2, 2026-09-10) —

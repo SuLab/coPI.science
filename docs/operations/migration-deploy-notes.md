@@ -976,3 +976,63 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > code, and rolling the web image back signs everyone out again (the cookie name
 > reverts). `alembic downgrade 0056` drops both columns and every verification stamp; a
 > later re-upgrade re-stamps only the addresses present then.
+
+> **Deploy order for `0058_hub_1_10_gate_reasons_and_pi_companies` — migrate BEFORE the
+> new code serves, with the WORKER IDLE and no live run; then web and worker in one
+> `up -d`; the AGENT image last, only with no live run; the next run starts FRESH
+> (scout_hub 1.10.0).** `0058` adds `opportunity_assessments.gating_rationales` (JSONB,
+> NULL: the hub's one-sentence reason per gate, never backfilled), the `pi_companies`
+> table (the staff Companies list per PI, `src/models/pi_company.py`), and the
+> `company_discovery` value of `job_type_enum`, and rebuilds
+> `uq_jobs_one_active_per_user_type` under the same name with `company_discovery` in its
+> predicate (preflight lists that index under `PLANNED_RECREATES`, so its existence is not
+> a collision, and sizes `jobs` for it). Design: the 2026-10-02 hub 1.10.0 spec, §5.1 and
+> §7.
+>
+> *Old code on the new schema* is safe until the first `company_discovery` job row
+> exists: nothing old reads the column or the table, but the old `Job` model cannot load
+> the new enum value, so an old worker's claim, or an old jobs or PI page, raises
+> `LookupError` on such a row. Only new code writes one (the Find companies button, a PI's
+> first profile generation, `scripts/enqueue_company_discovery.py`), so bring
+> `blackbird-app` and `worker` up together and run the enqueue script only after both are
+> new. *New code on the old schema* is not safe: `OpportunityAssessment` maps
+> `gating_rationales`, so every `select(OpportunityAssessment)` raises `UndefinedColumn`
+> (both assessment lists and detail pages, the review bot on the worker), and the
+> engine's best-effort verdict write loses every verdict to one ERROR line;
+> `/manager/pis/{id}` and every profile export (which now rewrites the companies file,
+> `src/services/pi_companies.py`) select `pi_companies` (`UndefinedTable`). **Agent
+> image:** rebuild in the same deploy; it bakes the model, the engine's
+> `gating_rationales` write and `retrieve_profile`'s hub-only companies appendix.
+>
+> **The worker must be idle** (no `processing` row) and `/admin/simulation` must show no
+> live run when `--apply` runs: the index rebuild takes ACCESS EXCLUSIVE on `jobs` and the
+> new column takes it on `opportunity_assessments`, and the chain's 10 s `lock_timeout`
+> rolls everything back behind a worker transaction. Check with
+> `$DC exec -T postgres psql -U copi -d copi -c "select count(*) from jobs where status='processing'"`
+> (must print 0), or `$DC stop worker` for the migration. Commit before building.
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     for s in blackbird-app worker agent; do
+>       docker image tag copi-blackbird-$s:latest copi-blackbird-$s:rollback-pre-0058
+>     done
+>     $DC build blackbird-app worker
+>     $DC --profile agent build agent
+>     ./scripts/migrate/run_migration.sh              # rehearse (writes nothing)
+>     ./scripts/migrate/run_migration.sh --apply      # dump → preflight → apply → postflight
+>     $DC run --rm blackbird-app alembic current      # must equal `alembic heads` (0058)
+>     $DC up -d blackbird-app worker
+>     $DC up -d agent                                 # ONLY when /admin/simulation shows no live run
+>
+> Then: set `SEC_USER_AGENT` in `.env` (the contact address is the owner's to choose) and
+> recreate the services that read it (`$DC up -d --force-recreate worker`, and
+> `blackbird-app` if it reads the setting); run `scripts/enqueue_company_discovery.py` as a
+> dry run, then with `--apply`; managers work the Suggested lists on `/manager/pis/{id}`.
+> The prompt-set bump to scout_hub 1.10.0 means the next run starts FRESH from
+> `/admin/simulation`, best after the Suggested lists are reviewed. Nothing here starts a
+> run.
+>
+> Rollback: redeploy the `rollback-pre-0058` images only after
+> `DELETE FROM jobs WHERE type::text = 'company_discovery'` (the old code cannot load those
+> rows); the column and the table are harmless to it. `alembic downgrade 0057` drops the
+> column, `pi_companies` and every company row, and restores 0056's predicate; the enum
+> value stays (Postgres has no DROP VALUE), as `0039`'s and `0047`'s do.

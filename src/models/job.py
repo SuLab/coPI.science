@@ -21,18 +21,23 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.database import Base
 
 #: The job types that may have at most one pending-or-processing row per user
-#: (0056 `uq_jobs_one_active_per_user_type`). `review_feedback_analysis` is
-#: excluded on purpose: one reviewer press enqueues up to 25 rows (SA3-04).
-PER_USER_JOB_TYPES = ("generate_profile", "enrich_grants", "industry_evidence")
+#: (0056 `uq_jobs_one_active_per_user_type`, rebuilt by 0058 to add
+#: `company_discovery`). `review_feedback_analysis` is excluded on purpose: one
+#: reviewer press enqueues up to 25 rows (SA3-04).
+PER_USER_JOB_TYPES = (
+    "generate_profile", "enrich_grants", "industry_evidence", "company_discovery",
+)
 
-#: The partial-index predicate, shared by the model, the migration and every
-#: `ON CONFLICT (user_id, type) WHERE ...` enqueue (Postgres infers the index only when
-#: the conflict predicate matches this text). `job_type_text` is the IMMUTABLE
-#: `enum::text` wrapper 0056 creates: a fresh alembic chain cannot use the enum values
-#: 0039 and 0047 add in the same transaction, and a plain cast is not immutable.
+#: The partial-index predicate, shared by the model, the migration that last built the
+#: index (0058) and every `ON CONFLICT (user_id, type) WHERE ...` enqueue (Postgres
+#: infers the index only when the conflict predicate matches this text). `job_type_text`
+#: is the IMMUTABLE `enum::text` wrapper 0056 creates: a fresh alembic chain cannot use
+#: the enum values 0039, 0047 and 0058 add in the same transaction, and a plain cast is
+#: not immutable.
 ONE_ACTIVE_PER_USER_TYPE_WHERE = (
     "status IN ('pending','processing') AND user_id IS NOT NULL "
-    "AND job_type_text(type) IN ('generate_profile','enrich_grants','industry_evidence')"
+    "AND job_type_text(type) IN "
+    "('generate_profile','enrich_grants','industry_evidence','company_discovery')"
 )
 
 #: `jobs.priority` (0056): higher is claimed first, NULL reads as 0. A person
@@ -50,7 +55,7 @@ class Job(Base):
     type: Mapped[str] = mapped_column(
         Enum(
             "generate_profile", "monthly_refresh", "review_feedback_analysis",
-            "enrich_grants", "industry_evidence",
+            "enrich_grants", "industry_evidence", "company_discovery",
             name="job_type_enum",
         ),
         nullable=False,

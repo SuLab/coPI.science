@@ -138,6 +138,17 @@ def _no_real_ses(monkeypatch):
     monkeypatch.setattr(email_svc, "_ses_client", _unreachable)
 
 
+@pytest.fixture(autouse=True)
+def _companies_files_off_the_live_mount(monkeypatch, tmp_path):
+    """No test may write or delete the hub's companies files in the checkout's
+    profiles/ (it is the live mount on the host): every test gets its own directory."""
+    from src.services import pi_companies, user_deletion
+
+    target = tmp_path / "companies-autouse"
+    monkeypatch.setattr(pi_companies, "COMPANIES_DIR", target)
+    monkeypatch.setattr(user_deletion, "_COMPANIES_DIR", target)
+
+
 @pytest_asyncio.fixture
 async def progress_on_test_connection(db_session):
     """Route job_progress.record through a second session on the test's own

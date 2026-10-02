@@ -277,9 +277,9 @@ def test_supported_start_revisions_are_exactly_the_documented_set():
         "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028",
         "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038",
         "0039", "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048",
-        "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056",
+        "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056", "0057",
     )
-    assert pf.DEFAULT_TARGET == "0057"
+    assert pf.DEFAULT_TARGET == "0058"
 
 
 def test_every_post_branch_revision_is_a_supported_start():
@@ -1075,8 +1075,11 @@ def test_planned_objects_matches_what_the_migration_files_actually_create():
         assert len(matches) == 1, (revision, matches)
         source = matches[0].read_text()
         upgrade = source.split("def upgrade()", 1)[1].split("def downgrade()", 1)[0]
+        # A drop-then-create under the same name sits in PLANNED_RECREATES instead
+        # (test_planned_recreates_are_rebuilds_of_earlier_objects below).
         declared = {
-            o.name for o in pf.PLANNED_OBJECTS if o.revision == revision
+            o.name for o in (*pf.PLANNED_OBJECTS, *pf.PLANNED_RECREATES)
+            if o.revision == revision
         }
         for kind, pattern in patterns.items():
             found = set(pattern.findall(upgrade))
@@ -1843,3 +1846,54 @@ async def test_sizing_reports_every_altered_table(monkeypatch):
 def test_0057_sizes_only_users_and_takes_no_agent_messages_lock():
     assert pf.tables_sized_between("0056", "0057") == ["users"]
     assert pf.agent_messages_ddl_pending("0056", "0057") is False
+
+
+# --------------------------------------------------------------------------- #
+# 0058: gate reasons, pi_companies, and the rebuilt one-active-job index
+# --------------------------------------------------------------------------- #
+
+
+def test_0058_sizes_both_altered_tables_and_takes_no_agent_messages_lock():
+    """The rebuilt index locks jobs and the new column locks opportunity_assessments;
+    pi_companies is created, so there is nothing to size there."""
+    assert pf.tables_sized_between("0057", "0058") == ["jobs", "opportunity_assessments"]
+    assert pf.agent_messages_ddl_pending("0057", "0058") is False
+
+
+def test_0058_plans_its_new_objects_and_not_the_rebuilt_index():
+    planned = {(o.kind, o.name) for o in pf.planned_objects_between("0057", "0058")}
+    assert planned == {
+        ("column", "gating_rationales"),
+        ("table", "pi_companies"),
+        ("constraint", "uq_pi_companies_user_normalized_name"),
+        ("constraint", "ck_pi_companies_pi_role"),
+        ("constraint", "ck_pi_companies_funding_usd"),
+        ("constraint", "ck_pi_companies_status"),
+        ("constraint", "ck_pi_companies_origin"),
+        ("index", "ix_pi_companies_user_id"),
+    }
+
+
+def test_planned_recreates_are_rebuilds_of_earlier_objects():
+    """A PLANNED_RECREATES entry is dropped and then created again in its revision's
+    upgrade(), was created by an earlier revision's PLANNED_OBJECTS entry, and is not a
+    PLANNED_OBJECTS entry of its own revision: there its pre-existence would read as a
+    collision and BLOCK every correctly migrated database (the 0036/0039 notes)."""
+    import re
+
+    versions_dir = Path(__file__).resolve().parents[2] / "alembic" / "versions"
+    assert pf.PLANNED_RECREATES, "control: 0058 rebuilds an index"
+    for obj in pf.PLANNED_RECREATES:
+        assert obj.kind == "index" and obj.table, obj
+        (path,) = versions_dir.glob(f"{obj.revision}_*.py")
+        upgrade = path.read_text().split("def upgrade()", 1)[1].split("def downgrade()", 1)[0]
+        name = re.escape(obj.name)
+        dropped = re.search(rf'drop_index\(\s*\n?\s*"{name}"', upgrade)
+        created = re.search(rf'create_index\(\s*\n?\s*"{name}"', upgrade)
+        assert dropped and created and dropped.start() < created.start(), obj
+        earlier = [o for o in pf.PLANNED_OBJECTS if o.name == obj.name]
+        assert earlier, obj
+        assert all(
+            pf.REVISION_ORDER.index(o.revision) < pf.REVISION_ORDER.index(obj.revision)
+            for o in earlier
+        ), obj

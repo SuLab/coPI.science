@@ -13,7 +13,6 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from src.models import Job, RubricDocument, SlackAppProvision
-from src.models.job import PER_USER_JOB_TYPES
 from tests import factories
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -105,10 +104,6 @@ async def test_email_lower_unique(db_session):
             await factories.make_user(db_session, email="case@example.edu")
 
 
-def test_per_user_types_constant():
-    assert PER_USER_JOB_TYPES == ("generate_profile", "enrich_grants", "industry_evidence")
-
-
 async def test_downgrade_restores_the_0055_shape_and_upgrade_reapplies(db_session):
     await _run_migration_step(db_session, "downgrade")
     names = await _index_names(db_session)
@@ -149,9 +144,3 @@ async def test_prechecks_name_every_offender(db_session):
     for name in ("jobs:", "slack_app_provisions:", "publications:", "users.email case duplicates:"):
         assert name in msg
     assert "remediate_0056.py --jobs" in msg
-
-
-def test_migration_predicate_matches_the_model_constant():
-    from src.models.job import ONE_ACTIVE_PER_USER_TYPE_WHERE
-
-    assert _load_migration().ONE_ACTIVE_WHERE == ONE_ACTIVE_PER_USER_TYPE_WHERE
