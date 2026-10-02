@@ -2,9 +2,12 @@
 ``python -m tests.e2e.ui_audit.run journeys --phase 2``.
 
 Part 2A: D-14 thread fetch after the session ends, B-04 double-click on a review
-submit, M-08 staff redirects away from PI-only pages."""
+submit, M-08 staff redirects away from PI-only pages. Part 2B's journeys are
+appended from journeys_phase2_2b."""
 
 import time
+
+from tests.e2e.ui_audit.journeys_phase2_2b import JOURNEYS as _JOURNEYS_2B
 
 
 async def journey_thread_fetch_after_session_expiry(h) -> dict:
@@ -92,3 +95,6 @@ JOURNEYS = [
     journey_review_double_click_stores_one,
     journey_staff_redirected_from_pi_pages,
 ]
+
+# Part 2B's journeys (tests/e2e/ui_audit/journeys_phase2_2b.py).
+JOURNEYS += _JOURNEYS_2B

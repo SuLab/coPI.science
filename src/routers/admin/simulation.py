@@ -241,13 +241,20 @@ async def admin_simulation(
     return templates.TemplateResponse(request, "admin/simulation.html", ctx)
 
 
+_RUN_ID_FORM = Form(...)
+#: C-20: a run limit is a count of seconds or proposals; 0 means "no limit". One
+#: object per parameter: FastAPI names a form field after the first parameter a shared
+#: ``Form()`` is bound to, so a shared one would read max_runtime into both.
+_MAX_RUNTIME_FORM = Form(0, ge=0)
+_MAX_PROPOSALS_FORM = Form(0, ge=0)
+
 
 @router.post("/simulation/start")
 async def admin_simulation_start(
     request: Request,
     fresh: bool = Form(False),
-    max_runtime: int = Form(0),
-    max_proposals: int = Form(0),
+    max_runtime: int = _MAX_RUNTIME_FORM,
+    max_proposals: int = _MAX_PROPOSALS_FORM,
     db: AsyncSession = _DB,
     current_user: User = _ADMIN,
 ):
@@ -327,9 +334,6 @@ async def admin_simulation_start(
     )
     flash(request, "Start requested.", "success")
     return RedirectResponse(url="/admin/simulation", status_code=302)
-
-
-_RUN_ID_FORM = Form(...)
 
 
 @router.post("/simulation/finalize-run")

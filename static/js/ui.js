@@ -17,7 +17,9 @@
 //                            [data-toggles] button, so the whole row stays clickable
 //                            while the button is the keyboard path
 //   form[data-allow-resubmit]  opts a POST form out of the double-submit guard
-//                            (B-04, at the end of this file)
+//                            (B-04, after the first IIFE)
+//   details [data-lazy-fragment]  on first open, the slot's link is fetched and its
+//                            HTML put in place (C-16, at the end of this file)
 (function () {
   "use strict";
 
@@ -134,3 +136,44 @@ window.addEventListener('pageshow', function (event) {
     b.removeAttribute('data-submit-guarded');
   });
 });
+
+// C-16: a <details> row holding [data-lazy-fragment] loads its body on first open
+// from the slot's link (also the no-JavaScript fallback). `toggle` does not bubble,
+// hence the capture listener. A redirect (expired session -> /login) or a non-HTML
+// answer leaves the link in place with a message rather than injecting that page.
+(function () {
+  "use strict";
+  document.addEventListener("toggle", function (event) {
+    const details = event.target;
+    if (!(details instanceof HTMLDetailsElement) || !details.open) {
+      return;
+    }
+    const slot = details.querySelector("[data-lazy-fragment]");
+    const link = slot ? slot.querySelector("a[href]") : null;
+    if (!link || slot.dataset.loaded) {
+      return;
+    }
+    slot.dataset.loaded = "1";
+    slot.setAttribute("aria-busy", "true");
+    fetch(link.href, { credentials: "same-origin", headers: { Accept: "text/html" } })
+      .then(function (resp) {
+        const type = resp.headers.get("content-type") || "";
+        if (!resp.ok || resp.redirected || type.indexOf("text/html") !== 0) {
+          throw new Error("fragment");
+        }
+        return resp.text();
+      })
+      .then(function (html) {
+        // Parsed, not assigned as markup: DOMParser's nodes never run a script.
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        slot.replaceChildren(...doc.body.childNodes);
+      })
+      .catch(function () {
+        delete slot.dataset.loaded;
+        link.textContent = "Could not load here — open the prompt and response on their own page";
+      })
+      .finally(function () {
+        slot.removeAttribute("aria-busy");
+      });
+  }, true);
+})();

@@ -596,17 +596,17 @@
 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
     <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
         <h2 class="text-lg font-semibold text-gray-900 mb-1">Stop-reason taxonomy</h2>
-        <p class="sc-caption">Why each API call ended (newest 20,000 calls at most). Truncated is a max_tokens stop; refused is a model refusal.</p>
+        <p class="sc-caption">Why each API call ended (API calls of the newest 20,000 logged turns at most). Truncated is a max_tokens stop; refused is a model refusal.</p>
         {% if latency_capped %}
-        <p class="sc-meta text-yellow-700 mb-2">Newest 20,000 calls only — this run has more.</p>
+        <p class="sc-meta text-yellow-700 mb-2">Only the newest 20,000 logged turns are read — this run has more.</p>
         {% endif %}
         {% if taxonomy_html %}{{ taxonomy_html | safe }}{% else %}<p class="text-base text-gray-700">No calls logged yet.</p>{% endif %}
     </div>
     <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
         <h2 class="text-lg font-semibold text-gray-900 mb-1">Latency</h2>
-        <p class="sc-caption">Wall-clock time per API call in milliseconds, per phase. n is the number of calls measured (newest 20,000 rows at most).</p>
+        <p class="sc-caption">Wall-clock time per API call in milliseconds, per phase. n is the number of calls measured (of the newest 20,000 logged turns at most).</p>
         {% if latency_capped %}
-        <p class="text-sm text-yellow-700 mb-2">Newest 20,000 calls only — this run has more.</p>
+        <p class="text-sm text-yellow-700 mb-2">Only the newest 20,000 logged turns are read — this run has more.</p>
         {% endif %}
         <table class="min-w-full text-base">
             <thead><tr>

@@ -1,0 +1,20 @@
+{# One logged turn's bodies (C-16). Loaded into an expanded row of
+   admin/llm_calls.html by static/js/ui.js (`data-lazy-fragment`), and also the
+   page that row's link opens without JavaScript. A fragment: no layout, no
+   script, and h2 headings so it nests under the page's h1. #}
+<div class="space-y-3">
+    <div>
+        <h2 class="text-xs font-semibold text-gray-600 uppercase mb-1">System Prompt</h2>
+        <pre class="text-xs bg-gray-50 p-3 rounded-lg overflow-x-auto max-h-48 overflow-y-auto whitespace-pre-wrap">{{ log.system_prompt }}</pre>
+    </div>
+    <div>
+        <h2 class="text-xs font-semibold text-gray-600 uppercase mb-1">User Message</h2>
+        {% for msg in log.messages_json %}
+        <pre class="text-xs bg-blue-50 p-3 rounded-lg overflow-x-auto max-h-48 overflow-y-auto whitespace-pre-wrap">{{ msg.content }}</pre>
+        {% endfor %}
+    </div>
+    <div>
+        <h2 class="text-xs font-semibold text-gray-600 uppercase mb-1">Response</h2>
+        <pre class="text-xs bg-green-50 p-3 rounded-lg overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap">{{ log.response_text }}</pre>
+    </div>
+</div>

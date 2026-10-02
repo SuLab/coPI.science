@@ -206,7 +206,7 @@ async def test_the_admin_page_still_renders_its_totals_and_per_row_tokens(
     """The non-breaking check, asserted rather than argued.
 
     `admin_llm_calls` reads SUM(input_tokens) / SUM(output_tokens) /
-    AVG(latency_ms) into three stat tiles, and the per-row line prints
+    the mean call_stats latency into three stat tiles, and the per-row line prints
     `input+output tok` and `latency ms`. Those three columns keep their per-turn
     cumulative meaning under this change — nothing was split into one row per API
     call — so both surfaces must be untouched. A row with `call_stats` NULL and a
@@ -234,12 +234,11 @@ async def test_the_admin_page_still_renders_its_totals_and_per_row_tokens(
         )
     ).text
 
-    assert "INSTRUMENTED-ROW" in html
-    assert "PRE-0032-ROW" in html, "a NULL call_stats row must still render"
+    assert html.count("data-lazy-fragment") == 2, "both rows render, a NULL call_stats row included"
     # Stat tiles: SUM/SUM/AVG over both rows, comma-formatted by the template.
     assert "27,923" in html, "Input Tokens tile"
     assert "18,710" in html, "Output Tokens tile"
-    assert "20000.0ms" in html, "Avg Latency tile"
+    assert "19658.3ms" in html, "Avg API-call latency tile: mean of the call_stats latencies"
     # Per-row tokens/latency line, unchanged.
     assert "26923+18210 tok" in html
     assert "1000+500 tok" in html

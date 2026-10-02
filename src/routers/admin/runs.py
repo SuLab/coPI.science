@@ -4,18 +4,45 @@ import uuid
 
 from fastapi import Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
-from sqlalchemy import select
+from sqlalchemy import Float, column, func, select, true
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from src.agent.specialists import parse_opinion
 from src.database import get_db
 from src.dependencies import get_admin_user
 from src.models import LlmCallLog, SimulationRun, User
-from src.routers.admin._common import _template_context, router, templates
+from src.routers.admin._common import _ADMIN, _DB, _template_context, router, templates
 from src.services.directory import MAX_PAGE, build_run_detail, list_runs_overview
 from src.services.headline_claims import held_headline_counts, list_in_doubt
 
 _PAGE = Query(1, ge=1, le=MAX_PAGE)
+
+#: C-16: the three body columns the list never renders. `raiseload` makes a template
+#: or handler that reaches for one fail loudly instead of issuing one query per row.
+_DEFERRED_BODIES = (
+    defer(LlmCallLog.system_prompt, raiseload=True),
+    defer(LlmCallLog.messages_json, raiseload=True),
+    defer(LlmCallLog.response_text, raiseload=True),
+)
+
+
+async def _avg_api_call_latency_ms(db: AsyncSession, run_id: uuid.UUID) -> float | None:
+    """Mean per-API-call latency from `call_stats` (C-21), the same source as the
+    simulation page's latency percentiles. `latency_ms` on the row is NOT a turn
+    figure (see LlmCallLog), so it is not averaged here. None when no row of the run
+    has a `call_stats` array."""
+    is_array = func.jsonb_typeof(LlmCallLog.call_stats) == "array"
+    elem = func.jsonb_array_elements(LlmCallLog.call_stats).table_valued(column("value", JSONB))
+    return (
+        await db.execute(
+            select(func.avg(elem.c.value["latency_ms"].astext.cast(Float)))
+            .select_from(LlmCallLog)
+            .join(elem, true())
+            .where(LlmCallLog.simulation_run_id == run_id, is_array)
+        )
+    ).scalar_one_or_none()
 
 
 @router.get("/activity", response_class=HTMLResponse)
@@ -92,7 +119,7 @@ async def admin_llm_calls(
     phase: str | None = None,
     model: str | None = None,
     channel: str | None = None,
-    page: int = Query(1, ge=1),
+    page: int = _PAGE,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
@@ -116,7 +143,7 @@ async def admin_llm_calls(
         raise HTTPException(status_code=404, detail="Run not found")
 
     # Build filtered query
-    query = select(LlmCallLog).where(LlmCallLog.simulation_run_id == run_id)
+    query = select(LlmCallLog).options(*_DEFERRED_BODIES).where(LlmCallLog.simulation_run_id == run_id)
     if agent:
         query = query.where(LlmCallLog.agent_id == agent)
     if phase:
@@ -126,10 +153,9 @@ async def admin_llm_calls(
     if channel:
         query = query.where(LlmCallLog.channel == channel)
 
-    # Total count for pagination
-    from sqlalchemy import func as sa_func
-
-    count_query = select(sa_func.count()).select_from(query.subquery())
+    # Total count for pagination. Loader options such as defer() apply only to the
+    # top-level statement, so the subquery selects the id alone, not the bodies.
+    count_query = select(func.count()).select_from(query.with_only_columns(LlmCallLog.id).subquery())
     total_count = (await db.execute(count_query)).scalar() or 0
 
     # Paginate
@@ -144,17 +170,16 @@ async def admin_llm_calls(
     # Summary stats for this run (unfiltered)
     stats_result = await db.execute(
         select(
-            sa_func.count(LlmCallLog.id).label("total_calls"),
-            sa_func.sum(LlmCallLog.input_tokens).label("total_input_tokens"),
-            sa_func.sum(LlmCallLog.output_tokens).label("total_output_tokens"),
-            sa_func.avg(LlmCallLog.latency_ms).label("avg_latency_ms"),
+            func.count(LlmCallLog.id).label("total_calls"),
+            func.sum(LlmCallLog.input_tokens).label("total_input_tokens"),
+            func.sum(LlmCallLog.output_tokens).label("total_output_tokens"),
         ).where(LlmCallLog.simulation_run_id == run_id)
     )
     stats = stats_result.first()
 
     # Model breakdown
     model_breakdown_result = await db.execute(
-        select(LlmCallLog.model, sa_func.count(LlmCallLog.id).label("count"))
+        select(LlmCallLog.model, func.count(LlmCallLog.id).label("count"))
         .where(LlmCallLog.simulation_run_id == run_id)
         .group_by(LlmCallLog.model)
     )
@@ -190,6 +215,8 @@ async def admin_llm_calls(
 
     # A consult's verdict signal — the one thing worth scanning a page of
     # consults for — was only readable by opening the row and reading the JSON.
+    # The bodies are deferred (C-16), so the consult rows' `response_text` is
+    # fetched for those rows only.
     # Parsed server-side here, and ONLY for `consult_` rows: running
     # parse_opinion over 50 arbitrary responses would be 50 wasted json.loads.
     # `parse_opinion` never raises and degrades an unreadable reply to `gap`,
@@ -200,15 +227,25 @@ async def admin_llm_calls(
     # re-parses STORED text, so every consult logged before the rename would
     # otherwise be relabelled `gap` on every page view. It must stay OFF on the
     # live consult path, which shares this same function — see that constant.
+    consult_ids = [log.id for log in logs if log.phase.startswith("consult_")]
+    consult_texts = (
+        dict(
+            (await db.execute(
+                select(LlmCallLog.id, LlmCallLog.response_text).where(LlmCallLog.id.in_(consult_ids))
+            )).all()
+        )
+        if consult_ids else {}
+    )
     consult_signals = {
         str(log.id): parse_opinion(
-            log.response_text,
+            consult_texts[log.id],
             domain=log.phase.removeprefix("consult_"),
             allow_historical=True,
         ).verdict_signal
         for log in logs
-        if log.phase.startswith("consult_")
+        if log.id in consult_texts
     }
+    avg_call_latency = await _avg_api_call_latency_ms(db, run_id)
 
     return templates.TemplateResponse(
         request,
@@ -226,7 +263,7 @@ async def admin_llm_calls(
             total_calls=stats.total_calls or 0,
             total_input_tokens=stats.total_input_tokens or 0,
             total_output_tokens=stats.total_output_tokens or 0,
-            avg_latency_ms=round(stats.avg_latency_ms or 0, 1),
+            avg_call_latency_display=f"{round(avg_call_latency, 1)}ms" if avg_call_latency is not None else "—",
             model_breakdown=model_breakdown,
             available_agents=available_agents,
             available_phases=available_phases,
@@ -238,3 +275,25 @@ async def admin_llm_calls(
             filter_channel=channel,
         ),
     )
+
+
+@router.get("/activity/{run_id}/llm-calls/{call_id}/bodies", response_class=HTMLResponse)
+async def admin_llm_call_bodies(
+    run_id: uuid.UUID,
+    call_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = _DB,
+    current_user: User = _ADMIN,
+):
+    """One logged turn's system prompt, messages and response (C-16): the fragment an
+    expanded row of the LLM-calls page loads (static/js/ui.js `data-lazy-fragment`),
+    and the page that row's link opens without JavaScript. 404 unless the call
+    belongs to the run, so a call id cannot be read through another run's URL."""
+    log = (
+        await db.execute(
+            select(LlmCallLog).where(LlmCallLog.id == call_id, LlmCallLog.simulation_run_id == run_id)
+        )
+    ).scalar_one_or_none()
+    if log is None:
+        raise HTTPException(status_code=404, detail="LLM call not found")
+    return templates.TemplateResponse(request, "admin/_llm_call_bodies.html", {"request": request, "log": log})

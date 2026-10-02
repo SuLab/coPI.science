@@ -413,9 +413,31 @@
     window.setTimeout(function () {
       target.classList.remove("ring-2", "ring-amber-400");
     }, 2500);
-    if (window.matchMedia("(max-width: 767px)").matches) {
+    if (!WIDE.matches) {
       closeDrawer();
+    } else {
+      keepClearOfDrawer(target);
     }
+  }
+
+  // B-20: from md up the drawer overlays the page's right side, so a target scrolled
+  // into view can still sit under it. When the room right of the target fits the
+  // drawer's minimum width the drawer narrows to it for this view (savedWidth is not
+  // touched, so the next open or resize restores the chosen width); otherwise it
+  // closes, as it already does below md.
+  function keepClearOfDrawer(target) {
+    if (!state.open) {
+      return;
+    }
+    const room = Math.floor(window.innerWidth - target.getBoundingClientRect().right - 8);
+    if (room >= drawer.getBoundingClientRect().width) {
+      return;
+    }
+    if (room >= WIDTH_MIN_PX) {
+      drawer.style.width = room + "px";
+      return;
+    }
+    closeDrawer();
   }
 
   // Turns whose Sources list is open. The log is rebuilt on every streamed frame
@@ -462,6 +484,7 @@
       if (c.anchor) {
         const button = el("button", "shrink-0 text-indigo-700 hover:underline", "Show in page");
         button.type = "button";
+        button.id = "chat-src-show-" + turnKey + "-" + c.n;
         button.addEventListener("click", function () { showInPage(c.anchor); });
         item.appendChild(button);
       }
@@ -530,8 +553,17 @@
     return wrap;
   }
 
+  // B-17: the log is rebuilt on every streamed frame and every history load. A
+  // reader scrolled up stays where they were (only a log already at the bottom
+  // follows new content), and focus on a control with an id inside the log is put
+  // back on the rebuilt control.
   function render() {
-    els.log.replaceChildren();
+    const log = els.log;
+    const pinned = log.scrollHeight - log.scrollTop - log.clientHeight <= 24;
+    const keptTop = log.scrollTop;
+    const active = document.activeElement;
+    const focusId = active && log.contains(active) && active.id ? active.id : null;
+    log.replaceChildren();
     const firstIn = state.turns.findIndex(function (t) { return t.in_window; });
     const olderLeftOut = firstIn > 0 && state.turns.slice(0, firstIn).some(function (t) {
       return (t.status === "complete" || t.status === "truncated") && !t.in_window;
@@ -539,14 +571,20 @@
     state.turns.forEach(function (turn, i) {
       const prev = i > 0 ? state.turns[i - 1] : null;
       const revisionStart = prev !== null && (prev.verdict_revision || 1) !== (turn.verdict_revision || 1);
-      els.log.appendChild(turnNode(turn, olderLeftOut && i === firstIn, revisionStart));
+      log.appendChild(turnNode(turn, olderLeftOut && i === firstIn, revisionStart));
     });
     els.starters.hidden = state.turns.length > 0;
     els.notice.hidden = !(state.limits && state.limits.verdict_may_change);
     updateUsage();
     updateCounter();
     setBusy(state.busy);
-    els.log.scrollTop = els.log.scrollHeight;
+    log.scrollTop = pinned ? log.scrollHeight : keptTop;
+    if (focusId) {
+      const again = document.getElementById(focusId);
+      if (again) {
+        again.focus({ preventScroll: true });
+      }
+    }
   }
 
   // ---- network -----------------------------------------------------------
@@ -563,14 +601,14 @@
       state.poll = 0;
     }
     if (state.open && !state.busy && hasStreaming()) {
-      state.poll = window.setTimeout(loadHistory, POLL_MS);
+      state.poll = window.setTimeout(function () { loadHistory(true); }, POLL_MS);
     }
   }
 
   // SW-1/SW-4/SW-9/SW-10: returns true only when it actually replaced
   // state.turns and re-rendered; false on every error path and on a stale
   // response (its historySeq token no longer current, or an ask() is busy).
-  async function loadHistory() {
+  async function loadHistory(isPoll) {
     const token = ++state.historySeq;
     function stale() {
       return token !== state.historySeq || state.busy;
@@ -590,7 +628,9 @@
     }
     let resp;
     try {
-      resp = await fetch(cfg.historyUrl, { credentials: "same-origin", headers: { Accept: "application/json" } });
+      // B-08: a poll asks for the sweepless history (?poll=1); an open or a reload does not.
+      const url = isPoll ? cfg.historyUrl + "?poll=1" : cfg.historyUrl;
+      resp = await fetch(url, { credentials: "same-origin", headers: { Accept: "application/json" } });
     } catch (e) {
       return fail("network");
     }
@@ -1009,6 +1049,24 @@
     inertedSiblings = [];
   }
 
+  // B-16: below md the open drawer is a modal (role=dialog, aria-modal, the page
+  // inert); from md up it is not. Re-evaluated on every crossing of the breakpoint
+  // while open, not only at open.
+  function applyModality() {
+    const narrow = !WIDE.matches;
+    if (narrow && !mobileModalActive) {
+      drawer.setAttribute("role", "dialog");
+      drawer.setAttribute("aria-modal", "true");
+      setInertForModal();
+      mobileModalActive = true;
+    } else if (!narrow && mobileModalActive) {
+      drawer.removeAttribute("role");
+      drawer.removeAttribute("aria-modal");
+      clearInertForModal();
+      mobileModalActive = false;
+    }
+  }
+
   function openDrawer(opener) {
     if (state.open) {  // SW-1: reopening (or a second opener click) is a no-op
       return;
@@ -1027,12 +1085,7 @@
     // independent of the order the CDN emits the two utilities in.
     if (bubble) { bubble.classList.remove("flex"); bubble.classList.add("hidden"); }
     applyWidth();  // now visible, so the handle's aria-valuenow can be measured
-    mobileModalActive = window.matchMedia("(max-width: 767px)").matches;
-    if (mobileModalActive) {
-      drawer.setAttribute("role", "dialog");
-      drawer.setAttribute("aria-modal", "true");
-      setInertForModal();
-    }
+    applyModality();
     clearError();
     els.input.focus();
     loadHistory();
@@ -1066,6 +1119,11 @@
     button.addEventListener("click", function () { openDrawer(button); });
   });
   els.close.addEventListener("click", closeDrawer);
+  WIDE.addEventListener("change", function () {
+    if (state.open) {
+      applyModality();
+    }
+  });
   document.addEventListener("keydown", function (event) {
     if (event.key === "Escape" && state.open && !event.isComposing) {
       closeDrawer();

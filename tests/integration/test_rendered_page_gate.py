@@ -117,6 +117,7 @@ SKIPPED: dict[str, str] = {
     "/login/start": "redirects to ORCID",
     "/assessment-chat/{assessment_id}": "JSON for static/js/assessment_chat.js",
     "/api/health": "JSON health probe",
+    "/admin/activity/{run_id}/llm-calls/{call_id}/bodies": "HTML fragment for the llm_calls page; no layout",
 }
 
 #: Walked (any HTML they return is still checked) but expected to answer every role with a
