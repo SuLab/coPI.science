@@ -14,19 +14,20 @@ from itsdangerous import TimestampSigner
 from src.config import get_settings
 from src.models import USER_ROLE_ADMIN, USER_ROLE_PI
 from tests import factories
+from tests.session_support import session_cookie_name
 
 pytestmark = pytest.mark.characterization
 
 
 def _session_cookie(user_id) -> str:
-    """Forge a 'copi-session' cookie the same way SessionMiddleware signs it."""
+    """Forge the session cookie the same way SessionMiddleware signs it."""
     signer = TimestampSigner(get_settings().secret_key)
     data = base64.b64encode(json.dumps({"user_id": str(user_id)}).encode())
     return signer.sign(data).decode("utf-8")
 
 
 def _auth_headers(user_id) -> dict:
-    return {"Cookie": f"copi-session={_session_cookie(user_id)}"}
+    return {"Cookie": f"{session_cookie_name()}={_session_cookie(user_id)}"}
 
 
 # --- auth router -------------------------------------------------------------
@@ -39,7 +40,7 @@ async def test_login_page_anonymous_200(client):
 
 async def test_login_page_with_session_redirects_home(client):
     # login() short-circuits to "/" when the session already has a user_id.
-    r = await client.get("/login", headers={"Cookie": f"copi-session={_session_cookie('irrelevant')}"})
+    r = await client.get("/login", headers={"Cookie": f"{session_cookie_name()}={_session_cookie('irrelevant')}"})
     assert r.status_code == 302
     assert r.headers["location"] == "/"
 
@@ -280,68 +281,19 @@ async def test_admin_llm_calls_page_zero_rejected_not_500(client, db_session):
     assert r2.status_code == 200
 
 
-# --- impersonate cookie flags (E1.5) ----------------------------------------
+# --- impersonation is not a cookie of its own (spec 2026-10-01 §6.7, A-05) ---
 
-def _impersonate_set_cookie(response) -> str:
-    """The Set-Cookie line for ``copi-impersonate``, or "" if there is none.
-
-    ``response.cookies`` drops the attributes, and a single-valued
-    ``headers["set-cookie"]`` would silently pick whichever of the (possibly
-    several) Set-Cookie headers came first — the session cookie is also being
-    re-set on this response. ``multi_items`` keeps them apart.
-    """
-    for k, v in response.headers.multi_items():
-        if k.lower() == "set-cookie" and v.startswith("copi-impersonate="):
-            return v
-    return ""
-
-
-async def test_the_impersonate_cookie_is_secure_when_https_is_required(
-    client, db_session, monkeypatch
-):
-    """``secure`` must track ``allow_http_sessions``, exactly as the session cookie does.
-
-    The old expression was
-    ``secure=not request.app.state.allow_http if hasattr(request.app.state, "allow_http") else False``
-    and NOTHING anywhere sets ``app.state.allow_http`` — the setting is named
-    ``allow_http_sessions`` and lives on ``Settings`` — so the ``hasattr`` was
-    always False and the ternary was a constant ``secure=False``. Production
-    runs ``ALLOW_HTTP_SESSIONS=false``, i.e. a session cookie that refuses to
-    travel over HTTP alongside an impersonation cookie that happily would.
-
-    Both directions are asserted: an implementation that hardcoded ``True``
-    would satisfy the first half and fail the second, so the pair is what pins
-    "reads the setting" rather than "flipped the constant".
-    """
-    real = get_settings()
+async def test_impersonation_sets_no_cookie_of_its_own(client, db_session):
+    """Replaces the E1.5 pin on the `copi-impersonate` Secure flag: the impersonation
+    now rides in the signed session cookie, whose Secure flag follows
+    `allow_http_sessions` (tests/integration/test_session_cookie.py)."""
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     target = await factories.make_user(db_session, user_role=USER_ROLE_PI)
     await db_session.flush()
 
-    monkeypatch.setattr(
-        "src.routers.admin.impersonation.get_settings",
-        lambda: real.model_copy(update={"allow_http_sessions": False}),
+    r = await client.post(
+        "/admin/impersonate", data={"orcid": target.orcid}, headers=_auth_headers(admin.id)
     )
-    https_only = await client.post(
-        "/admin/impersonate",
-        data={"orcid": target.orcid},
-        headers=_auth_headers(admin.id),
-    )
-    assert https_only.status_code == 302
-    cookie = _impersonate_set_cookie(https_only)
-    assert cookie, f"no copi-impersonate cookie was set: {https_only.headers}"
-    assert "secure" in cookie.lower(), cookie
-
-    monkeypatch.setattr(
-        "src.routers.admin.impersonation.get_settings",
-        lambda: real.model_copy(update={"allow_http_sessions": True}),
-    )
-    http_ok = await client.post(
-        "/admin/impersonate",
-        data={"orcid": target.orcid},
-        headers=_auth_headers(admin.id),
-    )
-    assert http_ok.status_code == 302
-    plain = _impersonate_set_cookie(http_ok)
-    assert plain, f"no copi-impersonate cookie was set: {http_ok.headers}"
-    assert "secure" not in plain.lower(), plain
+    assert r.status_code == 302
+    names = [v.split("=", 1)[0] for k, v in r.headers.multi_items() if k.lower() == "set-cookie"]
+    assert names == [session_cookie_name()]

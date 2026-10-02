@@ -105,8 +105,7 @@ async def test_every_route_refuses_an_impersonating_admin(client, db_session, in
     seeded = await seed_interview(db_session)
     admin = await _user(db_session, USER_ROLE_ADMIN)
     subject = await _user(db_session, subject_role)
-    headers = auth_headers(admin.id)
-    headers["Cookie"] += f"; copi-impersonate={subject.id}"
+    headers = auth_headers(admin.id, impersonate=subject.id)
     responses = [
         await client.get(history_url(seeded.assessment_id), headers=headers),
         await client.post(ask_url(seeded.assessment_id), json={"question": "q"}, headers=headers),
@@ -124,8 +123,7 @@ async def test_impersonation_wins_over_a_malformed_assessment_id(client, db_sess
     fake = install_llm()
     admin = await _user(db_session, USER_ROLE_ADMIN)
     pi = await _user(db_session, USER_ROLE_PI)
-    headers = auth_headers(admin.id)
-    headers["Cookie"] += f"; copi-impersonate={pi.id}"
+    headers = auth_headers(admin.id, impersonate=pi.id)
     resp = await client.get("/assessment-chat/not-a-uuid", headers=headers)
     assert (resp.status_code, resp.json()) == (403, {"error": "impersonating"})
     assert fake.calls == []

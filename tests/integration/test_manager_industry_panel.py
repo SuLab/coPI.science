@@ -11,7 +11,7 @@ from src.models import (
     PiIndustryScore,
 )
 from tests import factories
-from tests.integration.test_manager_access import _session_cookie, auth_headers
+from tests.integration.test_manager_access import auth_headers
 
 pytestmark = pytest.mark.integration
 
@@ -124,7 +124,7 @@ async def test_veto_attribution_under_impersonation(client, db_session, caplog):
     db_session.add(e)
     await db_session.commit()
 
-    headers = {"Cookie": f"copi-session={_session_cookie(admin.id)}; copi-impersonate={mgr.id}"}
+    headers = auth_headers(admin.id, impersonate=mgr.id)
     with caplog.at_level("WARNING"):
         r = await client.post(
             f"/manager/pis/{pi.id}/industry/{e.id}/veto", data={}, headers=headers,

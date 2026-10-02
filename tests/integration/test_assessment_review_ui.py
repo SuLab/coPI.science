@@ -281,8 +281,7 @@ async def test_impersonating_admin_sees_write_forms_and_the_reviewing_as_notice(
     `recorded_by_user_id`. The notice stays, reworded to say so rather than
     to explain an absence. Assign/unassign remain refused regardless."""
     assessment = await _seed_assessment(db_session)
-    headers = auth_headers(admin.id)
-    headers["Cookie"] += f"; copi-impersonate={manager.id}"
+    headers = auth_headers(admin.id, impersonate=manager.id)
 
     resp = await client.get(f"/manager/assessments/{assessment.id}", headers=headers)
     assert resp.status_code == 200

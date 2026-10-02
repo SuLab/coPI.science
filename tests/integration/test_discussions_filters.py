@@ -28,6 +28,7 @@ from src.config import get_settings
 from src.models import USER_ROLE_ADMIN
 from src.services.directory import build_discussions_view
 from tests import factories
+from tests.session_support import session_cookie_name
 
 pytestmark = pytest.mark.integration
 
@@ -40,7 +41,7 @@ def _auth(user_id) -> dict:
     """Forge the signed session cookie SessionMiddleware would issue."""
     signer = TimestampSigner(get_settings().secret_key)
     data = base64.b64encode(json.dumps({"user_id": str(user_id)}).encode())
-    return {"Cookie": f"copi-session={signer.sign(data).decode()}"}
+    return {"Cookie": f"{session_cookie_name()}={signer.sign(data).decode()}"}
 
 
 @pytest.fixture

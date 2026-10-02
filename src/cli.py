@@ -124,6 +124,7 @@ def admin_grant(
         from sqlalchemy import select
 
         from src.models import USER_ROLE_ADMIN, User
+        from src.services.session_epoch import bump_session_epoch
         engine, factory = await _get_db()
         try:
             async with factory() as db:
@@ -132,7 +133,10 @@ def admin_grant(
                 if not user:
                     console.print(f"[red]User with ORCID {orcid} not found[/red]")
                     return False
+                changed = user.user_role != USER_ROLE_ADMIN
                 user.user_role = USER_ROLE_ADMIN
+                if changed:
+                    await bump_session_epoch(db, user.id)
                 await db.commit()
                 console.print(f"[green]Granted admin to {user.name} ({orcid})[/green]")
                 return True
@@ -155,6 +159,7 @@ def admin_revoke(
         from sqlalchemy import select
 
         from src.models import USER_ROLE_ADMIN, USER_ROLE_PI, User
+        from src.services.session_epoch import bump_session_epoch
         engine, factory = await _get_db()
         try:
             async with factory() as db:
@@ -176,6 +181,7 @@ def admin_revoke(
                     )
                     return True
                 user.user_role = USER_ROLE_PI
+                await bump_session_epoch(db, user.id)
                 await db.commit()
                 console.print(f"[green]Revoked admin from {user.name} ({orcid})[/green]")
                 return True
@@ -196,6 +202,7 @@ def role_set(
         from sqlalchemy import select
 
         from src.models import VALID_USER_ROLES, User
+        from src.services.session_epoch import bump_session_epoch
         if role not in VALID_USER_ROLES:
             console.print(f"[red]Invalid role {role!r}; expected one of {VALID_USER_ROLES}[/red]")
             return False
@@ -207,7 +214,10 @@ def role_set(
                 if not user:
                     console.print(f"[red]User with ORCID {orcid} not found[/red]")
                     return False
+                changed = user.user_role != role
                 user.user_role = role
+                if changed:
+                    await bump_session_epoch(db, user.id)
                 await db.commit()
                 console.print(f"[green]Set {user.name} ({orcid}) to {role}[/green]")
                 return True

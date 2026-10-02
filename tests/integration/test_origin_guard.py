@@ -6,7 +6,7 @@ There was no request-side CSRF check anywhere in src/ — ``grep -rn
 deployment: one nginx serves ``blackbird.copi.science``, ``copi.science`` (an
 unrelated production tenant) and ``devel.copi.science``. SameSite is computed on
 the *registrable* domain, so all three are **same-site** and a page on either
-sibling could auto-submit a top-level POST with the victim's ``copi-session``
+sibling could auto-submit a top-level POST with the victim's session
 cookie attached. Reachable that way: ``POST /profile/delete-account`` (cascades
 nine tables) and, against a signed-in admin, ``POST /admin/users/{id}/role``.
 
@@ -28,10 +28,11 @@ import pytest
 from src.config import get_settings
 from tests import factories
 from tests.integration.test_manager_access import auth_headers
+from tests.session_support import session_cookie_name
 
 pytestmark = pytest.mark.integration
 
-SESSION_COOKIE = "copi-session"
+SESSION_COOKIE = session_cookie_name()
 
 # Sibling tenants on the same registrable domain (so SameSite=lax lets them
 # through), plus the two shapes a hostile page can produce instead of a real

@@ -50,6 +50,7 @@ from tests.integration.test_pi_only_writes import (
     _save_profile_form,
     _snapshot,
 )
+from tests.session_support import session_cookie_name
 
 pytestmark = pytest.mark.integration
 
@@ -93,7 +94,7 @@ async def test_get_review_user_gates_by_role(db_session, monkeypatch, role, expe
     app.add_middleware(
         SessionMiddleware,
         secret_key=get_settings().secret_key,
-        session_cookie="copi-session",
+        session_cookie=session_cookie_name(),
     )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
@@ -128,7 +129,7 @@ async def test_get_staff_user_still_refuses_a_reviewer(db_session, monkeypatch):
     app.add_middleware(
         SessionMiddleware,
         secret_key=get_settings().secret_key,
-        session_cookie="copi-session",
+        session_cookie=session_cookie_name(),
     )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
@@ -377,8 +378,7 @@ async def test_admin_impersonating_a_reviewer_sees_no_staff_forms(client, db_ses
     rev = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER, name="Rev Imp")
     pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)
     await factories.make_agent(db_session, user=pi, status="active")
-    headers = auth_headers(admin.id)
-    headers["Cookie"] += f"; copi-impersonate={rev.id}"
+    headers = auth_headers(admin.id, impersonate=rev.id)
 
     pis_body = (await client.get("/manager/pis", headers=headers)).text
     assert pis_body  # sanity: the page actually rendered (200, not a redirect body)
@@ -422,7 +422,7 @@ async def test_reviewer_full_login_chain_terminates(client, db_session):
     follow_redirects=True actually follows the 302."""
     rev = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
     cookie_value = auth_headers(rev.id)["Cookie"].split("=", 1)[1]
-    client.cookies.set("copi-session", cookie_value)
+    client.cookies.set(session_cookie_name(), cookie_value)
     r = await client.get("/profile", follow_redirects=True)
     assert r.status_code == 200
     assert str(r.url).endswith("/manager/assessments")

@@ -1503,8 +1503,7 @@ async def test_a_card_with_no_pitch_also_offers_the_chat_button(client, db_sessi
 
 async def test_the_chat_button_is_absent_while_impersonating(client, db_session, admin, manager):
     run, _ = await _seed_narrative_row(db_session, project="No Chat Co")
-    headers = auth_headers(admin.id)
-    headers["Cookie"] += f"; copi-impersonate={manager.id}"
+    headers = auth_headers(admin.id, impersonate=manager.id)
     html = (await client.get(
         f"/manager/assessments?run_id={run.id}", headers=headers
     )).text

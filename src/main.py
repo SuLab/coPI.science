@@ -11,7 +11,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import PlainTextResponse
 
 from src.agent.ids import WRITER_WEB, set_default_writer_id
-from src.config import get_settings
+from src.config import Settings, get_settings
 from src.routers import (
     admin,
     agent_page,
@@ -40,8 +40,19 @@ logger = logging.getLogger(__name__)
 #: it came from one of our own pages.
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
-#: The session cookie, spelled the same way create_app() configures it below.
-SESSION_COOKIE = "copi-session"
+#: The session cookie's name over plain HTTP (``ALLOW_HTTP_SESSIONS=true``: local
+#: development and the browser harness).
+SESSION_COOKIE_HTTP = "copi-session"
+#: Its name when the cookie is Secure. The ``__Host-`` prefix makes a browser refuse
+#: the cookie unless it is Secure, has ``Path=/`` and carries no ``Domain``, so a
+#: sibling host on the shared registrable domain cannot set or shadow it (A-05).
+#: SessionMiddleware's defaults (path "/", no domain) satisfy all three.
+SESSION_COOKIE_HTTPS = "__Host-copi-session"
+
+
+def session_cookie_name(settings: Settings) -> str:
+    """The session cookie name create_app() configures for ``settings``."""
+    return SESSION_COOKIE_HTTP if settings.allow_http_sessions else SESSION_COOKIE_HTTPS
 
 #: Ports a URL of that scheme omits by default. An origin does not include its
 #: default port (RFC 6454 §4), so both sides are normalised against this.
@@ -109,7 +120,7 @@ class OriginGuardMiddleware(BaseHTTPMiddleware):
     (an unrelated production tenant) and ``devel.copi.science``. SameSite is
     computed on the REGISTRABLE domain, so all three count as the same site — a
     page on either sibling could auto-submit a top-level POST and the victim's
-    ``copi-session`` cookie would ride along. ``POST /profile/delete-account``
+    session cookie would ride along. ``POST /profile/delete-account``
     (cascades nine tables) and, against a signed-in admin, ``POST
     /admin/users/{id}/role`` were both reachable that way (E1.1).
 
@@ -266,7 +277,7 @@ def create_app() -> FastAPI:
     application.add_middleware(
         SessionMiddleware,
         secret_key=settings.secret_key,
-        session_cookie=SESSION_COOKIE,
+        session_cookie=session_cookie_name(settings),
         max_age=30 * 24 * 3600,  # 30 days
         https_only=not settings.allow_http_sessions,
         same_site="lax",

@@ -54,8 +54,7 @@ async def test_impersonation_renders_text_instead_of_a_control(client, db_sessio
     seeded = await seed_interview(db_session)
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
-    headers = auth_headers(admin.id)
-    headers["Cookie"] += f"; copi-impersonate={manager.id}"
+    headers = auth_headers(admin.id, impersonate=manager.id)
     resp = await client.get(f"/manager/assessments/{seeded.assessment_id}", headers=headers)
     body = _main(resp.text)
     assert "Chat unavailable while impersonating" in body

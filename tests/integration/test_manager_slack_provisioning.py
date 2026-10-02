@@ -116,8 +116,7 @@ async def test_reviewer_is_refused_and_impersonating_admin_is_admitted(
         return "https://slack.test/authorize?imp=1"
 
     monkeypatch.setattr("src.routers.manager.start_provisioning", fake_start)
-    headers = auth_headers(admin.id)
-    headers["Cookie"] += f"; copi-impersonate={manager.id}"
+    headers = auth_headers(admin.id, impersonate=manager.id)
     r = await client.post(
         f"/manager/pis/{pi.id}/slack/provision", headers=headers, follow_redirects=False,
     )
@@ -326,8 +325,7 @@ async def test_the_callback_admits_an_impersonated_session(
         "src.services.admin_provisioning.exchange_code",
         lambda *a, **k: "xoxb-imp-token",
     )
-    headers = auth_headers(admin.id)
-    headers["Cookie"] += f"; copi-impersonate={manager.id}"
+    headers = auth_headers(admin.id, impersonate=manager.id)
     r = await client.get(
         "/admin/agents/slack/callback?code=c&state=s4",
         headers=headers, follow_redirects=False,

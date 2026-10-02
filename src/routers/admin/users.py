@@ -14,6 +14,7 @@ from src.models import USER_ROLE_ADMIN, VALID_USER_ROLES, User
 from src.routers.admin._common import _template_context, router, templates
 from src.services.admin_invariant import LastAdminError, ensure_admin_remains
 from src.services.directory import list_pi_directory, load_user_detail
+from src.services.session_epoch import bump_session_epoch
 from src.services.user_deletion import delete_user_account
 
 logger = logging.getLogger("src.routers.admin")
@@ -174,6 +175,9 @@ async def admin_set_user_role(
 
     previous = user.user_role
     user.user_role = user_role
+    if previous != user_role:
+        # A role change signs the account out everywhere (spec 2026-10-01 §6.7).
+        await bump_session_epoch(db, user.id)
     await db.commit()
     logger.info(
         "Admin %s changed role of %s (%s) from %s to %s",

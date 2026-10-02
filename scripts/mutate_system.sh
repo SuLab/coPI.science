@@ -289,7 +289,7 @@ MUTANTS=(
 "pipeline~~src/services/profile_pipeline.py~~def _validate_profile(profile: dict[str, Any]) -> bool:~~def _validate_profile(profile: dict[str, Any]) -> bool:\n    return False~~M6b the same function always returns False — the paired control for M6, which shows whether the tier can see validation's effect in EITHER direction"
 # --- onboarding / impersonation / profile export (T7) ----------------------------------
 "onboarding~~src/dependencies.py~~    # Impersonation: admin can view as another user~~    # Impersonation [INERT EDIT]: an admin can view the site as another user~~M12f INERT comment — MUST SURVIVE"
-"onboarding~~src/dependencies.py~~    if impersonate_id and session_user.is_admin:~~    if impersonate_id:~~M8 copi-impersonate is honoured for non-admins — any logged-in user can become any other user"
+"onboarding~~src/dependencies.py~~    if impersonate_id and session_user.is_admin:~~    if impersonate_id:~~M8 the session's impersonate_user_id is honoured for non-admins — any logged-in user can become any other user"
 'onboarding~~src/services/profile_export.py~~    path = PROFILES_DIR / f"{agent_id}.md"~~    if profile.private_profile_md:\n        lines.append(profile.private_profile_md)\n    path = PROFILES_DIR / f"{agent_id}.md"~~M9 the PUBLIC profile export appends private_profile_md'
 # --- vacuity (RCA §8 cause 3): the killing mutation of every test fixed for vacuity ----
 # Each real mutant is judged against ONLY its fixed test's node (see the header). M13 is

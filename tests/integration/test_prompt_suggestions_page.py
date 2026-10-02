@@ -345,8 +345,7 @@ async def test_generate_button_absent_while_impersonating(client, db_session):
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER, name="Mgr Two")
 
-    headers = auth_headers(admin.id)
-    headers["Cookie"] += f"; copi-impersonate={mgr.id}"
+    headers = auth_headers(admin.id, impersonate=mgr.id)
 
     body = (await client.get("/manager/prompt-suggestions", headers=headers)).text
 

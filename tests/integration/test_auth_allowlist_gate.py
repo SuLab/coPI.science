@@ -9,6 +9,7 @@ from src.config import get_settings
 from src.models import AccessAllowlist, User
 from src.routers import auth as auth_module
 from tests import factories
+from tests.session_support import session_cookie_name
 
 pytestmark = pytest.mark.asyncio
 
@@ -16,7 +17,7 @@ pytestmark = pytest.mark.asyncio
 def _session_cookie(payload: dict) -> dict:
     signer = TimestampSigner(get_settings().secret_key)
     data = base64.b64encode(json.dumps(payload).encode())
-    return {"Cookie": f"copi-session={signer.sign(data).decode()}"}
+    return {"Cookie": f"{session_cookie_name()}={signer.sign(data).decode()}"}
 
 
 def _fake_oauth(orcid: str):

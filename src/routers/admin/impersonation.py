@@ -1,4 +1,10 @@
-"""Admin impersonation start/stop routes."""
+"""Admin impersonation start/stop routes.
+
+The impersonation is held in the signed session (``IMPERSONATE_KEY`` in
+src/dependencies.py, spec 2026-10-01 §6.7). It used to be an unsigned
+``copi-impersonate`` cookie, which anything able to set a cookie for this host
+could point at any user for an admin's browser (A-05).
+"""
 
 import logging
 
@@ -7,9 +13,13 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.config import get_settings
 from src.database import get_db
-from src.dependencies import get_admin_user, get_current_user
+from src.dependencies import (
+    end_impersonation,
+    get_admin_user,
+    get_current_user,
+    start_impersonation,
+)
 from src.models import User
 from src.routers.admin._common import router
 from src.services.pi_onboarding import find_or_create_pi_by_orcid
@@ -42,24 +52,8 @@ async def impersonate_user(
                 detail=f"User with ORCID {orcid} not found",
             )
 
-    response = RedirectResponse(url="/", status_code=302)
-    # httpOnly cookie, 24h expiry
-    response.set_cookie(
-        "copi-impersonate",
-        str(target.id),
-        max_age=86400,
-        httponly=True,
-        samesite="lax",
-        # Same switch the session cookie uses in src/main.py. This used to read
-        # `request.app.state.allow_http`, guarded by a hasattr — but nothing in
-        # src/ has ever SET app.state.allow_http (the setting is called
-        # allow_http_sessions and lives on Settings), so the hasattr was always
-        # False and the whole ternary was a constant secure=False. Production
-        # runs ALLOW_HTTP_SESSIONS=false, so this cookie was shipping without
-        # Secure beside a session cookie that requires HTTPS (E1.5).
-        secure=not get_settings().allow_http_sessions,
-    )
-    return response
+    start_impersonation(request, target.id)
+    return RedirectResponse(url="/", status_code=302)
 
 
 
@@ -68,7 +62,6 @@ async def stop_impersonating(
     request: Request,
     current_user: User = Depends(get_current_user),
 ):
-    """Stop impersonating — clear the impersonate cookie."""
-    response = RedirectResponse(url="/admin/users", status_code=302)
-    response.delete_cookie("copi-impersonate")
-    return response
+    """Stop impersonating — drop the impersonation from the session."""
+    end_impersonation(request)
+    return RedirectResponse(url="/admin/users", status_code=302)

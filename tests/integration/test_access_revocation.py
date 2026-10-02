@@ -23,10 +23,11 @@ from src.config import get_settings
 from src.models import USER_ROLE_PI
 from tests import factories
 from tests.integration.test_manager_access import auth_headers
+from tests.session_support import session_cookie_name
 
 pytestmark = pytest.mark.integration
 
-SESSION_COOKIE = "copi-session"
+SESSION_COOKIE = session_cookie_name()
 
 
 def _session_from(response) -> dict | None:

@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from src.models import USER_ROLE_ADMIN, USER_ROLE_MANAGER, USER_ROLE_PI, Job
 from tests import factories
 from tests.integration.test_manager_access import auth_headers
+from tests.session_support import session_cookie_name
 
 pytestmark = pytest.mark.integration
 
@@ -88,7 +89,7 @@ async def test_an_admin_with_incomplete_onboarding_is_not_locked_out(client, db_
     assert "Building Your Profile" in direct.text
 
     cookie_value = auth_headers(admin.id)["Cookie"].split("=", 1)[1]
-    client.cookies.set("copi-session", cookie_value)
+    client.cookies.set(session_cookie_name(), cookie_value)
     followed = await client.get("/profile", follow_redirects=True)
     assert followed.status_code == 200
     assert str(followed.url).endswith("/onboarding"), (
@@ -108,7 +109,7 @@ async def test_manager_profile_url_bounce_terminates(client, db_session):
     # of this two-hop chain. Seed the jar directly so follow_redirects=True
     # actually exercises both hops instead of bouncing to /login on hop two.
     cookie_value = auth_headers(mgr.id)["Cookie"].split("=", 1)[1]
-    client.cookies.set("copi-session", cookie_value)
+    client.cookies.set(session_cookie_name(), cookie_value)
     r = await client.get("/profile", follow_redirects=True)
     assert r.status_code == 200
     assert str(r.url).endswith("/manager/pis")

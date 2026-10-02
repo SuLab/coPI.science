@@ -234,6 +234,4 @@ async def delete_account(
     await delete_user_account(db, current_user)
 
     request.session.clear()
-    response = RedirectResponse(url="/login?deleted=1", status_code=302)
-    response.delete_cookie("copi-impersonate")
-    return response
+    return RedirectResponse(url="/login?deleted=1", status_code=302)

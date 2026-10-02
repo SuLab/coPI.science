@@ -3,31 +3,26 @@ that a manager cannot reach /admin or impersonate anyone is pinned in
 test_manager_views.py.
 """
 
-import base64
-import json
-
 import pytest
 from fastapi import Depends, FastAPI
-from itsdangerous import TimestampSigner
 from sqlalchemy import select
 
 from src.config import get_settings
 from src.dependencies import get_staff_user
 from src.models import USER_ROLE_ADMIN, USER_ROLE_MANAGER, USER_ROLE_PI, User
 from tests import factories
+from tests.session_support import session_cookie_name, session_headers
 
 pytestmark = pytest.mark.integration
 
 
-def _session_cookie(user_id) -> str:
-    signer = TimestampSigner(get_settings().secret_key)
-    data = base64.b64encode(json.dumps({"user_id": str(user_id)}).encode())
-    return signer.sign(data).decode("utf-8")
+def auth_headers(user_id, *, impersonate=None) -> dict:
+    """Imported by test_manager_views.py and the other integration suites.
 
-
-def auth_headers(user_id) -> dict:
-    """Imported by test_manager_views.py and the other integration suites."""
-    return {"Cookie": f"copi-session={_session_cookie(user_id)}"}
+    ``impersonate`` signs an admin's impersonation of that user into the session, as
+    POST /admin/impersonate does.
+    """
+    return session_headers(user_id, impersonate=impersonate)
 
 
 async def test_default_role_is_pi_in_the_database(db_session):
@@ -80,7 +75,7 @@ async def test_get_staff_user_gates_by_role(db_session, monkeypatch, role, expec
     app.add_middleware(
         SessionMiddleware,
         secret_key=get_settings().secret_key,
-        session_cookie="copi-session",
+        session_cookie=session_cookie_name(),
     )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
