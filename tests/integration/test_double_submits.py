@@ -40,22 +40,11 @@ async def _cleanup(f, users, agent_ids):
         await s.commit()
 
 
-async def test_double_accept_creates_one_delegate(engine, monkeypatch):
+async def test_double_accept_creates_one_delegate(engine):
     """Review Focus 3."""
     from src.routers import invite as invite_routes
 
     f, pi, d, agent, inv = await _committed(engine, bot_token="xoxb-test-accept")
-    seen_delegates = []
-
-    async def lookup(token, email):
-        # Runs only after the accept commits: a separate session already sees the row.
-        async with f() as probe:
-            seen_delegates.append((await probe.execute(
-                select(func.count()).select_from(AgentDelegate)
-                .where(AgentDelegate.agent_registry_id == agent.id))).scalar_one())
-        return None
-
-    monkeypatch.setattr("src.services.slack_web.lookup_user_by_email_async", lookup)
     try:
         async def accept():
             async with f() as s:
@@ -69,8 +58,6 @@ async def test_double_accept_creates_one_delegate(engine, monkeypatch):
             n = (await s.execute(select(func.count()).select_from(AgentDelegate)
                                  .where(AgentDelegate.agent_registry_id == agent.id))).scalar_one()
         assert n == 1
-        # One accept won and looked the delegate up in Slack, after its commit.
-        assert seen_delegates == [1]
     finally:
         await _cleanup(f, [pi.id, d.id], [agent.id])
 

@@ -109,7 +109,7 @@ async def test_the_drawer_has_no_details_and_no_form(client, db_session):
     _, _, body = await _page(client, db_session, USER_ROLE_ADMIN, "admin")
     opening = re.search(r'<aside[^>]*id="assessment-chat"[^>]*>', body)
     assert opening is not None
-    assert "ph-no-capture" in opening.group() and "print:hidden" in opening.group()
+    assert "print:hidden" in opening.group()
     drawer = body[opening.end():].split("</aside>", 1)[0]
     assert "<details" not in drawer
     assert "<form" not in drawer

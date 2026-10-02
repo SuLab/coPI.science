@@ -31,20 +31,6 @@ async def test_access_pending_email_without_session_redirects_home(client):
     assert r.headers["location"] == "/"
 
 
-# --- public collaboration graphs (DB-only, no network) ----------------------
-
-@pytest.mark.parametrize(
-    "path",
-    ["/cabo-graph", "/scripps-graph", "/schultz-alumni-pilot", "/schultz-group-alumni"],
-)
-async def test_graph_routes_render_200_with_csp(client, path):
-    r = await client.get(path)
-    assert r.status_code == 200
-    assert "text/html" in r.headers["content-type"]
-    # _render_graph attaches a per-response CSP header.
-    assert "content-security-policy" in {k.lower() for k in r.headers.keys()}
-
-
 # --- interactive docs (E1.4) -------------------------------------------------
 
 @pytest.mark.parametrize(

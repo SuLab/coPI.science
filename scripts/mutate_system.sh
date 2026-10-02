@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Mutation check for the subsystems T1–T10 claim to protect: ORCID, PubMed/NCBI, the
-# job-queue worker, the profile pipeline, the public graph, onboarding/impersonation/
+# job-queue worker, the profile pipeline, onboarding/impersonation/
 # profile export, and the agent page.
 #
 # Each mutant must be KILLED — at least one test in the named selection must fail with it
@@ -73,6 +73,7 @@
 #   killed 5/5 real mutants        M4, M5 (worker); M7 (graph); M8, M9 (onboarding)
 #   inert controls 3/3 survived    M12c, M12e, M12f
 #   (M10/M12g/agentpage and M20/vac_i29 retired with the proposal routes, R-01, 2026-09-29)
+#   (M7/M12e/graph retired with the public graph pages, D9, 2026-10-01)
 #   9 skipped for credentials      orcid: M12a, M1, M1b
 #                                  pubmed: M12b, M2, M3
 #                                  pipeline: M12d, M6, M6b
@@ -233,7 +234,6 @@ declare -A TIER_SELECT=(
   [pubmed_both]="tests/live_api/test_pubmed_live.py -k 'test_ncbi_get_sends_the_required_tool_and_email_parameters or test_reconcile_pub_doi_separates_a_real_match_from_a_near_miss'"
   [worker]="tests/integration/test_worker.py"
   [pipeline]="tests/integration/test_profile_pipeline_live.py -k test_t41_one_real_orcid_becomes_a_stored_profile_grounded_in_its_works"
-  [graph]="tests/integration/test_public_graph.py"
   [onboarding]="tests/integration/test_onboarding_flow.py"
   [vac_i20]="tests/unit/test_reply_lane.py::test_thread_lock_then_agent_lock_does_not_deadlock_against_an_agent_lock_only_caller"
   [vac_i23_route]="'tests/unit/test_specialist_floor.py::test_floor_arithmetic[route-to-incubation-armed-owes-pair]'"
@@ -246,7 +246,7 @@ declare -A TIER_SELECT=(
 )
 declare -A TIER_CREDS=(
   [orcid]="live"       [pubmed_tool]="live"  [pubmed_doi]="live"  [pubmed_both]="live"
-  [worker]=""          [pipeline]="live+llm" [graph]=""           [onboarding]=""
+  [worker]=""          [pipeline]="live+llm" [onboarding]=""
   [vac_i20]=""         [vac_i23_route]=""    [vac_i23_pass]=""    [vac_c2]=""
   [vac_i21]=""         [vac_i28]=""          [vac_i24b]=""
   [vacuity]=""
@@ -287,9 +287,6 @@ MUTANTS=(
 "pipeline~~src/services/profile_pipeline.py~~    Validate synthesized profile fields.~~    Validate the synthesized profile fields. [INERT EDIT]~~M12d INERT docstring — MUST SURVIVE"
 "pipeline~~src/services/profile_pipeline.py~~def _validate_profile(profile: dict[str, Any]) -> bool:~~def _validate_profile(profile: dict[str, Any]) -> bool:\n    return True~~M6 _validate_profile always returns True, so no profile is ever rejected"
 "pipeline~~src/services/profile_pipeline.py~~def _validate_profile(profile: dict[str, Any]) -> bool:~~def _validate_profile(profile: dict[str, Any]) -> bool:\n    return False~~M6b the same function always returns False — the paired control for M6, which shows whether the tier can see validation's effect in EITHER direction"
-# --- public graph (T9) -----------------------------------------------------------------
-"graph~~src/routers/public.py~~            -- The agent-only proposal for a thread is the FIRST one the bots~~            -- [INERT EDIT] the agent-only proposal for a thread is the FIRST one the bots~~M12e INERT SQL comment inside the mutated query — MUST SURVIVE"
-"graph~~src/routers/public.py~~                  AND origin_visibility = 'public'\n                  AND decided_at >= :decided_floor{window_end_clause}~~                  AND decided_at >= :decided_floor{window_end_clause}~~M7 the pairs CTE stops filtering on origin_visibility, so collab_private proposals reach the public graph"
 # --- onboarding / impersonation / profile export (T7) ----------------------------------
 "onboarding~~src/dependencies.py~~    # Impersonation: admin can view as another user~~    # Impersonation [INERT EDIT]: an admin can view the site as another user~~M12f INERT comment — MUST SURVIVE"
 "onboarding~~src/dependencies.py~~    if impersonate_id and session_user.is_admin:~~    if impersonate_id:~~M8 copi-impersonate is honoured for non-admins — any logged-in user can become any other user"

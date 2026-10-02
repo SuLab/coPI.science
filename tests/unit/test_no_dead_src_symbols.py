@@ -75,10 +75,6 @@ ALLOWLIST: dict[str, str] = {
         "Starlette BaseHTTPMiddleware hook: the framework calls self.dispatch for every "
         "request; create_app registers the class with add_middleware, never the method."
     ),
-    "src.main:PostHogContextMiddleware.dispatch": (
-        "Starlette BaseHTTPMiddleware hook: the framework calls self.dispatch for every "
-        "request; create_app registers the class with add_middleware, never the method."
-    ),
     "src.services.blackbird_rubric:parse_rubric": (
         "Public validator for scratch rubric documents (its docstring). The import-time "
         "load reads the bytes once and calls parse_rubric_bytes, so rubric_documents "
@@ -428,7 +424,6 @@ def _describe(result: ScanResult, key: str) -> str:
 ENTRY_POINTS: frozenset[str] = frozenset(
     {
         "src.main:OriginGuardMiddleware.dispatch",
-        "src.main:PostHogContextMiddleware.dispatch",
     }
 )
 

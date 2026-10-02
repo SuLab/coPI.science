@@ -157,25 +157,6 @@ FLOWS: dict[str, dict] = {
             "tests/integration/test_agent_page.py, not here."
         ),
     },
-    "public_graph": {
-        "as": None,  # unauthenticated on purpose: these routes take no auth
-        "human_needed": False,
-        "steps": [
-            ("open", "/scripps-graph", "D3 force layout over real rows"),
-            ("click", "an edge", "opens the proposal modal"),
-        ],
-        "expect": [
-            "Scripps Research collaboration network",
-            "5 Scripps PIs",
-            "4 collaborating pairs",
-            "4 joint proposals",
-        ],
-        "control": (
-            "The counts come from tests.e2e.seed's 5 agents / 4 edges. A route "
-            "that rendered an empty graph would still return 200, so the "
-            "assertion is on the counts, not on the status code."
-        ),
-    },
     "onboarding": {
         "as": "onboarding",
         "human_needed": False,
@@ -356,29 +337,6 @@ def as_user():
     yield _make
     for c in created:
         c.close()
-
-
-@requires_server
-def test_public_graph_renders_with_real_data(client):
-    """FLOWS['public_graph'].
-
-    Rule L3-style attribution: each assertion says which failure it saw.
-    """
-    r = client.get("/scripps-graph")
-    assert r.status_code == 200, f"/scripps-graph did not render: {r.status_code}"
-    for want in FLOWS["public_graph"]["expect"]:
-        assert want in r.text, (
-            f"{want!r} missing from /scripps-graph — either the seed is absent "
-            "(run python -m tests.e2e.seed) or the graph query stopped matching "
-            "the seeded rows"
-        )
-    # Control: an empty graph would also be a 200, so assert the payload has
-    # nodes AND that a proposal summary reached the page (the modal's content).
-    assert '"nodes": [{' in r.text, "graph payload has no nodes"
-    assert "propose a joint study" in r.text, (
-        "no proposal summary in the payload: thread_decisions did not join to "
-        "the in-window new_post messages"
-    )
 
 
 @requires_server

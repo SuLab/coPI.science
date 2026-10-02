@@ -216,48 +216,6 @@ async def _accept_invitation(
     )
     await db.commit()
 
-    # Slack sync runs after the commit: the delegation must not wait on (or roll
-    # back with) a network call. Best-effort, as before.
-    if user.email:
-        try:
-            from src.services.slack_tokens import token_for_agent_row
-            from src.services.slack_web import lookup_user_by_email_async
-
-            bot_token = token_for_agent_row(agent)
-            if bot_token:
-                sid = await lookup_user_by_email_async(bot_token, user.email)
-                if sid:
-                    # Atomic, self-deduplicating append: the read-append-reassign
-                    # this replaces wrote the WHOLE array back, so two delegates
-                    # accepting at once each dropped the other's id (issue #22
-                    # C1). The dedup guard has to live in the SQL — a
-                    # check-then-append in Python just re-races.
-                    from sqlalchemy import text as sa_text
-                    await db.execute(
-                        update(AgentRegistry)
-                        .where(
-                            AgentRegistry.id == agent.id,
-                            sa_text(
-                                "NOT (coalesce(delegate_slack_ids, '{}'::varchar[]) @> ARRAY[:sid]::varchar[])"
-                            ).bindparams(sid=sid),
-                        )
-                        .values(
-                            delegate_slack_ids=sa_text(
-                                "array_append(coalesce(delegate_slack_ids, '{}'::varchar[]), :sid2)"
-                            ).bindparams(sid2=sid)
-                        )
-                    )
-        except Exception as exc:
-            # Best-effort by design (specs/web-delegates.md §Slack Linkage): a
-            # delegate is useful without a Slack id. But LOG it — a bare `pass`
-            # here hid an ImportError for an unknown length of time, and the
-            # whole sync was dead code with nothing to show for it.
-            logger.warning(
-                "Delegate Slack-ID sync failed for agent %s: %s", agent.agent_id, exc
-            )
-
-    await db.commit()
-
     logger.info(
         "Delegate %s accepted invitation for agent %s",
         user.id, agent.agent_id,

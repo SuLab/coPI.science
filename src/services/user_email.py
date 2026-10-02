@@ -1,14 +1,14 @@
 """The one writer of ``users.email``.
 
 ``users.email`` is a plain, case-sensitive UNIQUE column that delegate-invitation
-acceptance binds to and ``users.lookupByEmail`` reads. A login whose ORCID
+acceptance binds to. A login whose ORCID
 address another account already held used to 500 on the unique violation, and a
 case variant was silently stored as a second account's address.
 
 ``assign_user_email`` stores the address EXACTLY as its caller hands it — each
 caller keeps its own normalisation (profile edits and onboarding strip and
 lowercase; the ORCID login and the CLI store ORCID's value as-is), so no stored
-address and no ``lookupByEmail`` input changes. It refuses an address another
+address changes. It refuses an address another
 user holds in ANY case, and confines a racing unique violation to a savepoint.
 tests/unit/test_email_writer_tripwire.py fails on any other ``users.email``
 write in src/.

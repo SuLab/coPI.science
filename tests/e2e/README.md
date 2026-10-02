@@ -129,7 +129,6 @@ Two gotchas that cost red tests and are pinned in comments:
 |---|---|---|
 | admin: create cohort + edit topology | yes | ordinary form posts |
 | agent self-service signup | yes | ordinary form post |
-| public graph | yes | unauthenticated GET |
 | onboarding | partly — see below | |
 | **Slack provisioning** | **no** | needs a Slack-authenticated browser |
 | **ORCID login** | **no** | no valid client_id; no consent screen exists |

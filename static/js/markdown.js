@@ -34,8 +34,8 @@
     return undefined;
   }
 
-  // One factory for every sanitizing renderer (LC-02): the detail pages ("page"),
-  // the assessment chat ("chat") and the collaboration graph ("graph"). Each call
+  // One factory for every sanitizing renderer (LC-02): the detail pages ("page")
+  // and the assessment chat ("chat"). Each call
   // returns a PRIVATE marked instance. Every profile treats "~" as literal text.
   function createSanitizingMarked(profile) {
     if (!window.marked || !window.marked.Marked) return null;
@@ -68,9 +68,6 @@
           return '<a href="' + escapeHtml(href) + '">' + (text || escapeHtml(href)) + "</a>";
         }
       };
-    } else if (profile === "graph") {
-      ext.gfm = true;
-      ext.breaks = true;
     } else {
       throw new Error("unknown markdown profile: " + profile);
     }

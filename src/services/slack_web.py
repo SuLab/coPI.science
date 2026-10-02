@@ -15,12 +15,11 @@ here is a single, unpaginated call that posts nothing, so what this half supplie
 is ``_call``'s retry; pagination and message splitting live only in the agent
 client.
 
-The core is synchronous, because ``slack_sdk.WebClient`` is and because one route
-helper has no event loop. **Async callers must use the ``_async``
-wrappers at the bottom of this module, not the sync functions.** Four of the five
-call sites run on the event loop (route handlers, and the account-deletion teardown
-they call), and a synchronous ``time.sleep`` inside one of those stalls the whole
-event loop, not just that request — see ``_call``.
+The core is synchronous, because ``slack_sdk.WebClient`` is. **Async callers must
+use the ``_async`` wrappers at the bottom of this module, not the sync functions.**
+The one call site (the account-deletion teardown) runs on the event loop, and a
+synchronous ``time.sleep`` inside it stalls the whole event loop, not just that
+request — see ``_call``.
 """
 from __future__ import annotations
 
@@ -44,23 +43,14 @@ _BACKOFF_BASE = 0.5
 # every other request in the process, not just this one.
 _MAX_RETRY_AFTER = 30.0
 
-# Errors that mean "this call will never work", so retrying is pointless.
-# ``user_not_found`` is users.info's spelling and ``users_not_found`` is
-# users.lookupByEmail's; both are here because a user who does not exist does not
-# start existing on attempt four, and the callers that translate them to None sit
-# in synchronous request paths where four attempts costs 3.5s of backoff.
+# Errors that mean "this call will never work", so retrying is pointless: a revoked
+# token does not become valid on attempt four.
 _TERMINAL = frozenset({
     "invalid_auth", "account_inactive", "token_revoked", "no_permission",
-    "user_not_found", "users_not_found", "channel_not_found", "not_in_channel",
+    "channel_not_found", "not_in_channel",
 })
 
-__all__ = [
-    "get_user_info",
-    "lookup_user_by_email",
-    "lookup_user_by_email_async",
-    "revoke_token",
-    "revoke_token_async",
-]
+__all__ = ["revoke_token", "revoke_token_async"]
 
 
 def _client(token: str) -> WebClient:
@@ -112,28 +102,6 @@ def _call(client: WebClient, method: str, **kwargs: Any) -> Any:
     raise last
 
 
-def lookup_user_by_email(token: str, email: str) -> str | None:
-    """Slack user id for an email, or None when Slack has no such user."""
-    try:
-        result = _call(_client(token), "users_lookupByEmail", email=email)
-    except SlackApiError as exc:
-        if _error_code(exc) == "users_not_found":
-            return None
-        raise
-    return ((result.get("user") or {}).get("id")) or None
-
-
-def get_user_info(token: str, user_id: str) -> dict[str, Any] | None:
-    """The ``user`` object for a Slack id, or None when it does not resolve."""
-    try:
-        result = _call(_client(token), "users_info", user=user_id)
-    except SlackApiError as exc:
-        if _error_code(exc) in {"user_not_found", "users_not_found"}:
-            return None
-        raise
-    return result.get("user") or None
-
-
 def revoke_token(token: str) -> bool:
     """Revoke a bot token (auth.revoke). True when the token is dead
     afterwards — including when it already was: a token that is
@@ -162,16 +130,8 @@ def revoke_token(token: str) -> bool:
 # single blocking HTTP call rather than four plus backoff.
 #
 # asyncio.to_thread moves the whole thing to a worker thread, so the wait costs
-# that request its latency and nothing else. Four of the five call sites are async;
-# _resolve_delegate_names (routers/agent_page.py) is the remaining sync caller. It
-# calls get_user_info, which therefore has no wrapper here: the route already runs
-# that whole helper through asyncio.to_thread.
+# that request its latency and nothing else.
 # ---------------------------------------------------------------------------
-
-
-async def lookup_user_by_email_async(token: str, email: str) -> str | None:
-    """``lookup_user_by_email`` off the event loop."""
-    return await asyncio.to_thread(lookup_user_by_email, token, email)
 
 
 async def revoke_token_async(token: str) -> bool:

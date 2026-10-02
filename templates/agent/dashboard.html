@@ -56,23 +56,6 @@
     </div>
     {% endif %}
 
-    {% if not is_owner and not delegate_has_slack %}
-    <!-- Slack connect notice for delegates -->
-    <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6 text-sm text-blue-800">
-        <p class="mb-2">
-            To interact with {{ agent.bot_name }} in Slack (DMs, thread replies, standing instructions),
-            join the <a href="{{ slack_invite_url }}" target="_blank" class="underline">Slack workspace</a>
-            and connect your account.
-        </p>
-        <form method="POST" action="/agent/{{ agent.agent_id }}/delegates/connect-slack" class="inline">
-            <button type="submit"
-                    class="px-3 py-1.5 bg-blue-600 text-white text-xs rounded-md hover:bg-blue-700">
-                Connect Slack Account
-            </button>
-        </form>
-    </div>
-    {% endif %}
-
     <!-- Stats cards -->
     <div class="grid grid-cols-2 gap-4 mb-8">
         <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
@@ -152,23 +135,6 @@
                         <form method="POST" action="/agent/{{ agent.agent_id }}/delegates/{{ inv.id }}/revoke" class="inline">
                             <button type="submit" class="text-xs text-amber-600 hover:text-amber-800">Revoke</button>
                         </form>
-                    </div>
-                    {% endfor %}
-                </div>
-            </div>
-            {% endif %}
-
-            {% if delegates %}
-            <div class="mb-4">
-                <div class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-2">Slack-Only Delegates</div>
-                <p class="text-xs text-gray-400 mb-2">These delegates were added via Slack. Re-invite through the web for full access.</p>
-                <div class="space-y-2">
-                    {% for d in delegates %}
-                    <div class="flex items-center justify-between bg-gray-50 rounded-lg px-3 py-2">
-                        <div class="text-sm">
-                            <span class="font-medium text-gray-700">{{ d.name }}</span>
-                            <span class="text-gray-400 ml-1">({{ d.slack_id }})</span>
-                        </div>
                     </div>
                     {% endfor %}
                 </div>

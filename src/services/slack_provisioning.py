@@ -40,7 +40,6 @@ BOT_SCOPES = [
     # https://docs.slack.dev/reference/scopes/groups.read
     "groups:history",
     "users:read",         # users.info
-    "users:read.email",   # users.lookupByEmail
 ]
 
 

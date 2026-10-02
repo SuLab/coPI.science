@@ -36,7 +36,7 @@ def token_for_agent_row(agent: AgentRegistry) -> str | None:
 
 
 async def get_any_bot_token(db: AsyncSession) -> str | None:
-    """Any valid bot token, for workspace-wide lookups (e.g. users.lookupByEmail).
+    """Any valid bot token, for workspace-wide calls (e.g. the team lookup at provisioning).
 
     Prefers any non-null DB token, then falls back to the first valid ``.env`` token.
     """

@@ -204,24 +204,6 @@ class OriginGuardMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-class PostHogContextMiddleware(BaseHTTPMiddleware):
-    """Put the PostHog project key on ``request.state`` for ``templates/base.html``.
-
-    ``base.html`` renders the PostHog snippet only when
-    ``request.state.posthog_api_key`` is truthy, and nothing else sets it.
-
-    Asset and health probes render no page, so they skip the settings read —
-    nginx has no ``location /static`` block, so every asset reaches uvicorn.
-    """
-
-    async def dispatch(self, request: Request, call_next):
-        path = request.url.path
-        if path.startswith("/static/") or path == "/api/health":
-            return await call_next(request)
-        request.state.posthog_api_key = get_settings().posthog_api_key
-        return await call_next(request)
-
-
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     """No startup work of its own. On shutdown, give assessment-chat answers still
@@ -266,10 +248,6 @@ def create_app() -> FastAPI:
     # A state attribute rather than a Jinja global, because a global would have
     # to be registered in both routers' template setup.
     application.state.assessment_chat_enabled = settings.assessment_chat_enabled
-
-    # PostHog context (added first, so it runs innermost, inside the session
-    # middleware).
-    application.add_middleware(PostHogContextMiddleware)
 
     # Session middleware (signed cookies via itsdangerous)
     application.add_middleware(
