@@ -166,7 +166,11 @@ def test_the_chat_script_accepts_only_its_own_citation_markers():
     # The instance comes from the shared factory's "chat" profile (LC-02).
     factory = (JS.parent / "markdown.js").read_text(encoding="utf-8")
     chat_profile = factory.split('if (profile === "chat") {', 1)[1].split("} else if", 1)[0]
-    assert "inRawBlock: false" in chat_profile
+    # The raw-block-free tokenizer is shared with the page profile (web UI remediation
+    # 2026-10-01, spec §5.2): the chat profile assigns it, the function carries the pin.
+    assert "tokenizer.tag = rawTagTokenizer" in chat_profile
+    tokenizer = factory.split("function rawTagTokenizer", 1)[1].split("function createSanitizingMarked", 1)[0]
+    assert "inRawBlock: false" in tokenizer
     # R2SEC-2: no attribute but href survives sanitizing, so a marker cannot hide
     # in a title tooltip.
     assert 'ALLOWED_ATTR: ["href"],' in js
