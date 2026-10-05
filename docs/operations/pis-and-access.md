@@ -66,13 +66,19 @@ iD's last four digits. Slack restricts bot display names to ASCII, and the
 The `generate_profile` job now enqueues two follow-on jobs of its own,
 `enrich_grants` and `industry_evidence`, which run on the worker independently
 of the corpus pipeline and never block or fail the profile it followed. The
-first pulls NIH RePORTER grants for the PI, tenure-filters them, and
-supplements (never replaces) the ORCID-fundings seed in `grant_titles`; the
-second scores industry interest from OpenAlex/PubMed/USPTO/ClinicalTrials.gov
-evidence. Neither writes anything a prompt or a profile export reads — the
-grants panel and the industry-interest score are manager-only surfaces on
-`/manager/pis/{id}`, each row individually vetoable ("not this PI's") via the
-two veto routes below. `scripts/enqueue_enrichment.py` backfills both jobs for
+first pulls NIH RePORTER grants for the PI, tenure-filters them, and REPLACES the
+ORCID-fundings seed in `grant_titles` with the LLM-eligible RePORTER titles when it
+finds any (it keeps the seed when it finds none). `grant_titles` is the persona's
+"Active Grants" section, so the job re-exports `profiles/public/{agent_id}.md` and
+records a `pipeline` revision when the list changed (2026-10-05; before that the
+persona kept the ORCID seed until an unrelated edit re-exported, and 47 files were
+behind). The second scores industry interest from
+OpenAlex/PubMed/USPTO/ClinicalTrials.gov evidence and writes nothing a prompt or a
+profile export reads. The grants panel and the industry-interest score are
+manager-only surfaces on `/manager/pis/{id}`, each row individually vetoable ("not
+this PI's") via the two veto routes below. OpenAlex is keyless here: 1000
+credits/day per IP (`x-ratelimit-limit`), reset at 00:00 UTC; a spent budget
+answers 429 and fails the job. Backfill in batches that fit the day's budget. `scripts/enqueue_enrichment.py` backfills both jobs for
 PIs who predate this feature — it previews by default, needs `--apply` to
 enqueue for real, and takes `--only grants` / `--only industry` and
 `--orcid` to scope a run.

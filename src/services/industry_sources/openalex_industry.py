@@ -5,6 +5,7 @@ import re
 import httpx
 
 from src.config import get_settings
+from src.services.http_pacing import TRANSIENT_STATUSES, Pacer, with_retries
 from src.services.industry_sources import JHU_OPENALEX_IDS, EvidenceItem
 from src.services.industry_sources.companies import classify_company
 from src.services.jhu_rules import is_hopkins_affiliation
@@ -12,6 +13,25 @@ from src.services.jhu_rules import is_hopkins_affiliation
 logger = logging.getLogger(__name__)
 OA = "https://api.openalex.org"
 _SELECT = "id,ids,title,publication_year,authorships,funders,primary_topic"
+
+# Every request here once went out unpaced and unretried, so one 429 failed the job
+# outright; 52 jobs died that way on 2026-09-22/25. OpenAlex answers 429 above 100
+# requests/second or once the day's budget is spent (keyless: 1000 credits/day per
+# IP, x-ratelimit-limit); help.openalex.org asks for exponential backoff. The pacer
+# keeps one worker far below the per-second limit; the backoff rides out a burst. A
+# spent daily budget still fails the job, which the worker retries later.
+_PACER = Pacer(0.2)
+
+
+async def _get(client: httpx.AsyncClient, url: str, params: dict) -> httpx.Response:
+    resp = await with_retries(
+        lambda: client.get(url, params=params),
+        attempts=4, backoff=lambda a: 2.0 * (2 ** a),
+        retry_statuses=TRANSIENT_STATUSES, retry_exceptions=(httpx.TransportError,),
+        pacer=_PACER,
+    )
+    resp.raise_for_status()
+    return resp
 
 
 def _oaid(url: str | None) -> str:
@@ -86,8 +106,7 @@ async def fetch_works_for_pmids(pmids: list[str]) -> list[dict]:
             params = {"filter": f"pmid:{chunk}", "select": _SELECT, "per-page": 50}
             if contact:
                 params["mailto"] = contact
-            resp = await client.get(f"{OA}/works", params=params)
-            resp.raise_for_status()
+            resp = await _get(client, f"{OA}/works", params)
             out.extend(resp.json().get("results") or [])
     return out
 
@@ -106,10 +125,9 @@ async def company_funder_ids(funder_ids: set[str]) -> set[str]:
     async with httpx.AsyncClient(timeout=30) as client:
         for i in range(0, len(ordered), 50):
             chunk = "|".join(ordered[i:i + 50])
-            resp = await client.get(f"{OA}/funders", params={
+            resp = await _get(client, f"{OA}/funders", {
                 "filter": f"ids.openalex:{chunk}", "select": "id,display_name,roles", "per-page": 50, **mailto,
             })
-            resp.raise_for_status()
             inst_by_funder: dict[str, list[str]] = {}
             for f in resp.json().get("results") or []:
                 inst_ids = [_oaid(r.get("id")) for r in f.get("roles") or [] if r.get("role") == "institution"]
@@ -120,11 +138,10 @@ async def company_funder_ids(funder_ids: set[str]) -> set[str]:
                 continue
             companies: set[str] = set()
             for j in range(0, len(all_insts), 50):
-                r2 = await client.get(f"{OA}/institutions", params={
+                r2 = await _get(client, f"{OA}/institutions", {
                     "filter": f"ids.openalex:{'|'.join(all_insts[j:j + 50])}",
                     "select": "id,type", "per-page": 50, **mailto,
                 })
-                r2.raise_for_status()
                 companies |= {_oaid(i.get("id")) for i in r2.json().get("results") or []
                               if i.get("type") == "company"}
             hits |= {fid for fid, ids in inst_by_funder.items() if companies & set(ids)}

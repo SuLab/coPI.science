@@ -25,3 +25,24 @@ async def test_one_institutions_request_per_chunk_and_same_answer(monkeypatch):
 
 async def test_empty_input_makes_no_request():
     assert await oa.company_funder_ids(set()) == set()
+
+
+@respx.mock
+async def test_a_429_is_retried_with_backoff_instead_of_failing_the_job(monkeypatch):
+    """52 industry jobs died on 2026-09-22/25 of one unretried OpenAlex 429 each."""
+    from src.services import http_pacing
+
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(http_pacing, "_sleep", fake_sleep)
+    monkeypatch.setattr(oa, "get_settings", lambda: type("S", (), {"ncbi_contact_email": None})())
+    oa._PACER.reset()
+    works = respx.get(f"{oa.OA}/works").mock(side_effect=[
+        httpx.Response(429), httpx.Response(200, json={"results": [{"id": "https://openalex.org/W1"}]}),
+    ])
+    assert await oa.fetch_works_for_pmids(["31980915"]) == [{"id": "https://openalex.org/W1"}]
+    assert works.call_count == 2
+    assert slept == [2.0]

@@ -25,6 +25,8 @@ from src.services.nih_reporter import (
     publications_for_cores,
     search_projects,
 )
+from src.services.profile_publish import export_and_record
+from src.services.tenure_scope import scoped_publications_for_export
 
 if TYPE_CHECKING:
     from src.worker.main import JobContext
@@ -129,7 +131,19 @@ async def execute_enrich_grants(ctx: JobContext, db: AsyncSession) -> None:
         await db.execute(select(ResearcherProfile).where(ResearcherProfile.user_id == user_id))
     ).scalar_one_or_none()
     if profile is not None:
+        before = list(profile.grant_titles or [])
         profile.grant_titles = derive_grant_titles(kept) or profile.grant_titles
+        await db.flush()
+        if agent is not None and list(profile.grant_titles or []) != before:
+            # grant_titles is the persona's "Active Grants" section, and this job runs
+            # AFTER the pipeline's own export, so without this the bot kept the ORCID
+            # seed until some unrelated edit re-exported (2026-10-05 profile audit: 47
+            # persona files behind the database). Same export the grant veto does.
+            publications = await scoped_publications_for_export(db, user_id, agent.agent_id)
+            await export_and_record(
+                db, user=user, profile=profile, agent=agent, publications=publications,
+                mechanism="pipeline", change_summary="Grant titles from NIH RePORTER",
+            )
     await db.flush()
     await job_progress.record(
         ctx.id,

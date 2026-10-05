@@ -142,3 +142,56 @@ async def test_enqueue_skips_a_type_that_already_has_an_active_row(db_session):
     jobs = (await db_session.execute(select(Job).where(Job.user_id == u.id))).scalars().all()
     assert len([j for j in jobs if j.type == "enrich_grants"]) == 1
     assert len([j for j in jobs if j.type == "industry_evidence"]) == 1
+
+
+async def test_new_grant_titles_reach_the_persona_file_and_a_revision(db_session, monkeypatch, tmp_path):
+    """grant_titles is the persona's "Active Grants" section and this job runs after the
+    pipeline's export: it re-exports, or the bot keeps the ORCID seed (2026-10-05 audit:
+    47 persona files behind the database). An unchanged list writes nothing."""
+    from src.models import AgentRegistry, ProfileRevision
+    from src.services import pi_companies, profile_export
+
+    monkeypatch.setattr(profile_export, "PROFILES_DIR", tmp_path / "public")
+    monkeypatch.setattr(pi_companies, "COMPANIES_DIR", tmp_path / "companies")
+    u = User(orcid="0000-0002-2214-0199", name="Gyanu Lamichhane", user_role="pi")
+    db_session.add(u)
+    await db_session.flush()
+    agent = AgentRegistry(agent_id="grantlab", user_id=u.id, bot_name="GrantlabBot",
+                          pi_name=u.name, status="inactive")
+    db_session.add(agent)
+    db_session.add(ResearcherProfile(user_id=u.id, research_summary="Studies TB.",
+                                     grant_titles=["old orcid title"]))
+    db_session.add(Publication(user_id=u.id, pmid="34187885", title="p", year=2021))
+    await set_tenure_start(u.id, 2018, "manual", db=db_session)
+    await db_session.flush()
+
+    async def fake_search(criteria, fields, max_total=500):
+        return [_row("R01AI137329", 2019, 9751245)]
+
+    async def fake_links(cores):
+        return {"R01AI137329": {"34187885"}}
+
+    monkeypatch.setattr(ge, "search_projects", fake_search)
+    monkeypatch.setattr(ge, "publications_for_cores", fake_links)
+
+    async def run_job():
+        job = Job(type="enrich_grants", user_id=u.id, payload={"user_id": str(u.id), "orcid": u.orcid})
+        db_session.add(job)
+        await db_session.flush()
+        await ge.execute_enrich_grants(_ctx(job), db_session)
+        job.status = "completed"  # one active row per (user, type)
+        await db_session.flush()
+
+    await run_job()
+    text = (tmp_path / "public" / "grantlab.md").read_text()
+    assert "- T R01AI137329" in text and "old orcid title" not in text
+    revisions = (await db_session.execute(
+        select(ProfileRevision).where(ProfileRevision.agent_registry_id == agent.id)
+    )).scalars().all()
+    assert [(r.mechanism, r.change_summary) for r in revisions] == [
+        ("pipeline", "Grant titles from NIH RePORTER"),
+    ]
+
+    (tmp_path / "public" / "grantlab.md").write_text("sentinel")
+    await run_job()
+    assert (tmp_path / "public" / "grantlab.md").read_text() == "sentinel"
