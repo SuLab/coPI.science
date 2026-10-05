@@ -137,9 +137,11 @@ async def adopt_agentless_pi(db: AsyncSession, orcid: str) -> User | None:
 
     if await get_tenure_start(db, user.id) is None:
         try:
-            await record_employment_tenure(db, user, await fetch_orcid_profile(orcid))
+            profile_data = await fetch_orcid_profile(orcid)
         except Exception as exc:  # the pipeline derives a paper-based start instead
-            logger.warning("Adopting %s: no ORCID employment tenure (%s)", orcid, exc)
+            logger.warning("Adopting %s: ORCID record unavailable (%s)", orcid, exc)
+        else:
+            await record_employment_tenure(db, user, profile_data)
     has_profile = await db.scalar(
         select(ResearcherProfile.id).where(ResearcherProfile.user_id == user.id)
     )

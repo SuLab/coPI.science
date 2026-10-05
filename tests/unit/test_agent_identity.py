@@ -62,6 +62,8 @@ async def test_a_name_with_no_alphabetic_characters_never_yields_an_empty_id(
         ("John Smith Jr.", ("smith", "SmithBot")),
         ("Mary Jones III", ("jones", "JonesBot")),
         ("Jean-Luc Picard PhD", ("picard", "PicardBot")),
+        ("Naoki Ii", ("ii", "IiBot")),
+        ("Henry Ford II", ("ford", "FordBot")),
     ],
 )
 async def test_slugs_and_bot_names_are_ascii_letters_only(db_session, name, expected):

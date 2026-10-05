@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.role_capabilities import hub_role_names, spoke_role_names, star_role
@@ -59,6 +60,15 @@ _NAME_MAX = 48  # Cohort.name is String(48)
 # it would be noise. pending/inactive labs DO get one — the spoke being ready
 # before activation is the whole point.
 _SKIPPED_STATUSES = frozenset({"suspended"})
+
+
+def star_centre_candidates(agents: Collection[AgentRegistry]) -> list[AgentRegistry]:
+    """The hub-role rows that can be the star's centre: the active ones when any is
+    active (D14 allows at most one), else every non-suspended one. A parked second
+    hub row, which D14 permits, must not make the centre ambiguous, and a suspended
+    hub is retired and never the centre."""
+    hubs = [a for a in agents if star_role(a.role) == "hub" and a.status not in _SKIPPED_STATUSES]
+    return [a for a in hubs if a.status == "active"] or hubs
 
 
 @dataclass
@@ -91,7 +101,7 @@ async def ensure_star_spokes(
     agents = (await db.execute(select(AgentRegistry))).scalars().all()
 
     spokes = spoke_role_names()
-    hubs = [a for a in agents if star_role(a.role) == "hub"]
+    hubs = star_centre_candidates(agents)
     if len(hubs) != 1:
         raise ValueError(
             f"expected exactly one scout_hub agent, found {len(hubs)} "
@@ -221,27 +231,39 @@ async def ensure_lab_spoke(
     A role that is not a spoke is a no-op. ``agent_id`` and ``role`` are passed as
     values because the unmute path has expired its row by then.
 
-    A problem (more than one scout_hub, a lab-to-lab membership, an over-long
-    cohort name) refuses the activation only while cohort isolation is enabled, the
-    only configuration in which an unwired lab is unreachable or fails run start;
-    otherwise it is logged. A roster with NO scout_hub is logged and allowed: no
-    lab can reach a hub then and no run can start under isolation whatever this
-    returns, so refusing one lab protects nothing; the admin's ensure-star-spokes
-    wires every lab once the hub exists. Writes audited rows; does not commit.
+    A problem (an ambiguous centre — two active hubs, or no active hub and two
+    parked ones — a lab-to-lab membership, an over-long cohort name, or a
+    concurrent write of the same spoke) refuses the activation only while cohort
+    isolation is enabled, the only configuration in which an unwired lab is
+    unreachable or fails run start; otherwise it is logged. A roster with no
+    non-suspended scout_hub is logged and allowed: no lab can reach a hub then and
+    no run can start under isolation whatever this returns, so refusing one lab
+    protects nothing; the admin's ensure-star-spokes wires every lab once the hub
+    exists. Writes audited rows inside a savepoint; does not commit.
     """
     if star_role(role) != "spoke":
         return []
+    # Also the autoflush of the caller's pending edits (an admin's slug rename), so
+    # their IntegrityError surfaces here, outside the savepoint, to the caller.
     hubs = await db.scalar(
-        select(func.count(AgentRegistry.id)).where(AgentRegistry.role.in_(hub_role_names()))
+        select(func.count(AgentRegistry.id)).where(
+            AgentRegistry.role.in_(hub_role_names()),
+            AgentRegistry.status.notin_(tuple(_SKIPPED_STATUSES)),
+        )
     )
     if not hubs:
         logger.warning("No scout_hub on the roster: %s goes live without a star spoke", agent_id)
         return []
     try:
-        report = await ensure_star_spokes(db, apply=True, actor=actor, only={agent_id})
+        async with db.begin_nested():
+            report = await ensure_star_spokes(db, apply=True, actor=actor, only={agent_id})
         problems = list(report.anomalies)
     except ValueError as exc:
         problems = [str(exc)]
+    except IntegrityError:
+        # Cohort.name and the membership pair are unique: someone wired this spoke
+        # at the same moment. The savepoint is gone; the caller refuses or retries.
+        problems = [f"hub-{agent_id} was written concurrently; try again"]
     if problems and not get_settings().cohort_isolation_enabled:
         logger.warning(
             "Star spoke for %s not ensured (cohort isolation is off): %s",

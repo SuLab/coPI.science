@@ -45,8 +45,10 @@ does the same. Before this, nothing but the admin ensure-spoke buttons and
 `COHORT_ISOLATION_ENABLED=true` / `COHORT_DEFAULT_POLICY=isolated` a
 manager-activated lab was isolated mid-run and the next run start failed
 `_validate_star_topology`. With isolation on, an activation whose spoke cannot be
-ensured (more than one scout_hub row, a lab-to-lab membership) is refused; a roster
-with no scout_hub at all is logged and allowed (no run can start then anyway). A dead
+ensured (two active scout_hubs, a lab-to-lab membership, a concurrent write of the
+same spoke) is refused; the spoke goes to the active hub, so a parked second hub
+row (D14 allows one) does not count, and a roster with no non-suspended scout_hub
+is logged and allowed (no run can start then anyway). A dead
 generation job or an ungrounded profile shows **Retry profile generation** on the
 same page (manager route above; no admin impersonation needed). An ORCID already
 held by a PI account with no agent — someone who signed in before being added — is

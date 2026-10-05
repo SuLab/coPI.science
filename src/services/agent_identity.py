@@ -32,11 +32,13 @@ _ASCII_LETTERS = str.maketrans({
 })
 
 # Generational and degree suffixes an ORCID family-name field can carry
-# ("Smith Jr.", "Jones III", "Picard PhD"); never a surname on their own.
+# ("Smith Jr.", "Jones III", "Picard PhD"). Roman numerals count only in capitals:
+# "Ii" is a surname (Naoki Ii), "II" is a generation.
 _NAME_SUFFIXES = frozenset({
-    "jr", "sr", "ii", "iii", "iv", "phd", "md", "mph", "dphil", "dds", "dvm",
-    "msc", "mba", "facs", "frs", "esq",
+    "jr", "sr", "phd", "md", "mph", "dphil", "dds", "dvm", "msc", "mba", "facs",
+    "frs", "esq",
 })
+_ROMAN_SUFFIXES = frozenset({"II", "III", "IV"})
 
 
 def _ascii_letters(text: str) -> str:
@@ -46,13 +48,18 @@ def _ascii_letters(text: str) -> str:
     return "".join(c for c in folded if c.isascii() and c.isalnum())
 
 
+def _is_suffix(word: str) -> bool:
+    return word.lower() in _NAME_SUFFIXES or word in _ROMAN_SUFFIXES
+
+
 def _surname(full_name: str) -> str:
     """The last word of ``full_name`` that can be a surname, as ASCII letters: a word
     holding a digit (an ORCID iD standing in for a private name) and a trailing
-    generational or degree suffix are skipped. Empty when no word qualifies."""
+    generational or degree suffix are skipped, the last remaining word never. Empty
+    when no word qualifies."""
     words = [_ascii_letters(w) for w in full_name.split()]
     words = [w for w in words if w and not any(c.isdigit() for c in w)]
-    while words and words[-1].lower() in _NAME_SUFFIXES:
+    while len(words) > 1 and _is_suffix(words[-1]):
         words.pop()
     return words[-1][:_DISPLAY_MAX] if words else ""
 

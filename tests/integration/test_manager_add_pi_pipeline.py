@@ -92,13 +92,13 @@ async def test_manager_activation_creates_the_labs_spoke(client, db_session):
 async def test_an_unwireable_lab_is_refused_while_isolation_is_on(
     client, db_session, monkeypatch,
 ):
-    """Two hub-role rows make the star's centre ambiguous: ensure_star_spokes
+    """Two active hubs make the star's centre ambiguous: ensure_star_spokes
     refuses, and with isolation on the activation is refused WHOLE — the status
     flip rolls back with it."""
     monkeypatch.setattr(get_settings(), "cohort_isolation_enabled", True)
     manager = await _manager(db_session)
     await _hub(db_session)
-    await _hub(db_session, agent_id="blackbird2", status="inactive")
+    await _hub(db_session, agent_id="blackbird2")
     pi, agent = await _lab(db_session, agent_id="stuck")
     await db_session.commit()
     pi_id = pi.id
@@ -121,7 +121,7 @@ async def test_without_isolation_an_unwireable_lab_still_activates(
     monkeypatch.setattr(get_settings(), "cohort_isolation_enabled", False)
     manager = await _manager(db_session)
     await _hub(db_session)
-    await _hub(db_session, agent_id="blackbird2", status="inactive")
+    await _hub(db_session, agent_id="blackbird2")
     pi, agent = await _lab(db_session, agent_id="openlab")
     r = await client.post(
         f"/manager/pis/{pi.id}/activate", headers=auth_headers(manager.id),
@@ -130,6 +130,25 @@ async def test_without_isolation_an_unwireable_lab_still_activates(
     assert r.headers["location"] == f"/manager/pis/{pi.id}?activated=1"
     await db_session.refresh(agent)
     assert agent.status == "active"
+
+
+async def test_a_parked_second_hub_does_not_make_the_centre_ambiguous(
+    client, db_session, monkeypatch,
+):
+    """D14 allows an inactive second hub row; the spoke goes to the active hub."""
+    monkeypatch.setattr(get_settings(), "cohort_isolation_enabled", True)
+    manager = await _manager(db_session)
+    hub = await _hub(db_session)
+    await _hub(db_session, agent_id="parkedhub", status="inactive")
+    pi, agent = await _lab(db_session, agent_id="parkedcase")
+    r = await client.post(
+        f"/manager/pis/{pi.id}/activate", headers=auth_headers(manager.id),
+        follow_redirects=False,
+    )
+    assert r.headers["location"] == f"/manager/pis/{pi.id}?activated=1"
+    assert await _spoke_members(db_session, "parkedcase") == {
+        "parkedcase", hub.agent_id, *EXTRA_SPOKE_MEMBERS,
+    }
 
 
 async def test_unmute_wires_a_lab_that_has_no_spoke(client, db_session):
@@ -169,6 +188,51 @@ async def test_admin_approval_wires_the_renamed_slug(client, db_session):
         "newslug", hub.agent_id, *EXTRA_SPOKE_MEMBERS,
     }
     assert await _spoke_members(db_session, "oldslug") is None
+
+
+async def test_an_admin_approval_refused_for_its_spoke_applies_no_edits(
+    client, db_session, monkeypatch,
+):
+    """admin_approve_agent's contract: a refusal applies NO edits — the rename, the
+    bot name and the token roll back with the activation."""
+    monkeypatch.setattr(get_settings(), "cohort_isolation_enabled", True)
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+    await _hub(db_session)
+    await _hub(db_session, agent_id="blackbird2")
+    _pi, agent = await _lab(db_session, agent_id="keepme")
+    await db_session.commit()
+    agent_pk = agent.id
+    form = {
+        "agent_slug": "renamed", "bot_name": "RenamedBot",
+        "replace_slack_bot_token": "xoxb-new", "form_version": agent_form_version(agent),
+    }
+    r = await client.post(
+        f"/admin/agents/{agent_pk}/approve", data=form,
+        headers=auth_headers(admin.id), follow_redirects=False,
+    )
+    assert r.headers["location"] == f"/admin/agents/{agent_pk}?activation_blocked=1"
+    row = (await db_session.execute(
+        select(AgentRegistry).where(AgentRegistry.id == agent_pk)
+    )).scalar_one()
+    await db_session.refresh(row)
+    assert (row.agent_id, row.bot_name, row.slack_bot_token, row.status) == (
+        "keepme", "KeepmeBot", "xoxb-lab", "pending",
+    )
+    assert await _spoke_members(db_session, "renamed") is None
+
+
+async def test_an_admin_role_save_on_an_active_lab_wires_its_spoke(client, db_session):
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+    hub = await _hub(db_session)
+    _pi, agent = await _lab(db_session, agent_id="rolelab", status="active")
+    r = await client.post(
+        f"/admin/agents/{agent.id}/role", data={"role": "pi_lab"},
+        headers=auth_headers(admin.id), follow_redirects=False,
+    )
+    assert r.status_code == 302
+    assert await _spoke_members(db_session, "rolelab") == {
+        "rolelab", hub.agent_id, *EXTRA_SPOKE_MEMBERS,
+    }
 
 
 # --- F2: the manager's profile retry ---------------------------------------------
@@ -293,6 +357,7 @@ async def test_add_pi_still_refuses_any_other_holder_of_the_orcid(client, db_ses
 
 async def test_an_identity_derivation_failure_rolls_back_instead_of_500ing(client, db_session):
     manager = await _manager(db_session)
+    await db_session.commit()  # so the route's rollback undoes only its own work
     with (
         patch(
             "src.services.pi_onboarding.fetch_orcid_profile",
