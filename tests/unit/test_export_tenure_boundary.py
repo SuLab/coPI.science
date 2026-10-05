@@ -51,9 +51,11 @@ _PASS_THROUGH_SITES = {("src", "services", "profile_publish.py")}
 # The exact call sites. A new caller — or the loss of one — must fail this test
 # loudly rather than silently widening or narrowing the audited set. The router
 # and onboarding edit paths now reach the boundary through
-# `profile_edit.apply_profile_edits`.
+# `profile_edit.apply_profile_edits`. `grant_enrichment.py` joined 2026-10-05: the
+# enrich_grants job re-exports the persona after replacing grant_titles.
 _EXPECTED_CALL_SITES = {
     ("src", "routers", "manager.py"),
+    ("src", "services", "grant_enrichment.py"),
     ("src", "services", "profile_pipeline.py"),
     ("src", "services", "profile_edit.py"),
     ("src", "services", "profile_publish.py"),
