@@ -35,6 +35,32 @@ generation job is dead, unless the logged "activate anyway" override is
 checked (`src/services/agent_activation.py`). The CLI `seed-profiles` path
 below still works but creates NO agent row and derives NO tenure entry.
 
+**The manager's whole path, 2026-10-05.** On `/manager/pis/{id}` a manager then
+presses **Install Slack bot** (Slack app + OAuth, token saved on the row) and
+**Activate agent**. Activation also wires the lab into its `hub-{slug}` star spoke
+(`src/services/star_topology.py::ensure_lab_spoke`), in the same commit as the status
+flip; every other activation path (admin approve, the admin role change, unmute)
+does the same. Before this, nothing but the admin ensure-spoke buttons and
+`scripts/ensure_star_spokes.py` created spokes, so under production's
+`COHORT_ISOLATION_ENABLED=true` / `COHORT_DEFAULT_POLICY=isolated` a
+manager-activated lab was isolated mid-run and the next run start failed
+`_validate_star_topology`. With isolation on, an activation whose spoke cannot be
+ensured (more than one scout_hub row, a lab-to-lab membership) is refused; a roster
+with no scout_hub at all is logged and allowed (no run can start then anyway). A dead
+generation job or an ungrounded profile shows **Retry profile generation** on the
+same page (manager route above; no admin impersonation needed). An ORCID already
+held by a PI account with no agent — someone who signed in before being added — is
+adopted by Add-PI (agent minted, profile job enqueued if there is no profile)
+instead of "already exists"; any other holder still gets "already exists".
+Agent slugs and bot names are ASCII letters and digits only
+(`src/services/agent_identity.py`): accents are folded (`Müller` → `muller` /
+`MullerBot`), punctuation dropped (`O'Brien` → `OBrienBot`), a trailing
+`Jr.`/`III`/`PhD` skipped, and a name with no usable surname (non-Latin script, or
+the ORCID iD an ORCID record with a private name yields) falls back to `pi` + the
+iD's last four digits. Slack restricts bot display names to ASCII, and the
+`[a-z0-9_-]` slug checks in `src/agent/tools.py`, `user_deletion` and
+`pi_companies` refused the accented slugs the old derivation produced.
+
 The `generate_profile` job now enqueues two follow-on jobs of its own,
 `enrich_grants` and `industry_evidence`, which run on the worker independently
 of the corpus pipeline and never block or fail the profile it followed. The
@@ -179,9 +205,10 @@ doc's §8.
 - **PI** — the original account: own profile, own lab agent, `/profile` and `/agent`.
 - **Manager** — global, read-mostly: `/manager/pis`, `/manager/assessments`,
   `/manager/discussions`, `/manager/activity`. A scoped, deliberate reversal of the
-  original all-GET guarantee (design D1) adds exactly fourteen write routes — `POST
+  original all-GET guarantee (design D1) adds exactly fifteen write routes — `POST
   /manager/pis` (create a PI via ORCID), `/manager/pis/{id}/profile` (edit a PI's
-  profile fields), `/manager/pis/{id}/mute` / `/unmute` (toggle a PI's agent),
+  profile fields), `/manager/pis/{id}/profile/retry` (queue profile generation again
+  after a dead job or for an ungrounded profile), `/manager/pis/{id}/mute` / `/unmute` (toggle a PI's agent),
   `/manager/pis/{id}/verify-email` (mark the PI's address verified),
   `/manager/pis/{id}/slack/provision` / `/activate` (install a pending PI's Slack
   bot and bring the agent live), `/manager/pis/{id}/grants/{grant_id}/veto` /
@@ -192,7 +219,7 @@ doc's §8.
   (review a discovered or confirmed company), and `/manager/pis/{id}/companies/discover`
   (queue company discovery) — and nothing else;
   `tests/integration/test_manager_views.py`'s
-  `test_manager_router_mutations_are_an_explicit_allowlist` fails loudly on a fifteenth.
+  `test_manager_router_mutations_are_an_explicit_allowlist` fails loudly on a sixteenth.
   **Still cannot impersonate** or set roles (both stay admin-only), and there is
   deliberately no LLM-call drill-down and no export. A manager MAY provision a Slack
   bot and activate a pending PI's agent from `/manager/pis/{id}` (F2, 2026-09-10) —

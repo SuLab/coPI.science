@@ -12,7 +12,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models import USER_ROLE_MANAGER, USER_ROLE_REVIEWER, Job, User
+from src.models import USER_ROLE_MANAGER, USER_ROLE_REVIEWER, Job, ResearcherProfile, User
 from src.services.job_queue import insert_job_if_absent
 
 _NO_PROFILE_ROLES = frozenset({USER_ROLE_MANAGER, USER_ROLE_REVIEWER})
@@ -50,3 +50,19 @@ async def enqueue_profile_job_if_absent(
         .order_by(Job.enqueued_at)
         .limit(1)
     )).scalar_one_or_none()
+
+
+def profile_retry_warranted(
+    profile: ResearcherProfile | None, latest_job: Job | None
+) -> bool:
+    """Whether staff may queue this PI's profile generation again (the manager's
+    "Retry profile generation"): never while a job is pending or processing; yes
+    when the newest generate_profile job is dead, or when there is no profile or
+    it is not grounded in a publication abstract — the states the activation gate
+    refuses. A grounded profile is not regenerated from here: that would spend a
+    pipeline run for nothing the gate needs."""
+    if latest_job is not None and latest_job.status in _LIVE_STATUSES:
+        return False
+    if latest_job is not None and latest_job.status == "dead":
+        return True
+    return profile is None or profile.evidence_state != "grounded"

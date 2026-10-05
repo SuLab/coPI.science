@@ -31,36 +31,37 @@ async def fetch_orcid_profile(orcid_id: str) -> dict[str, Any]:
     record = await fetch_orcid_record(orcid_id)
     result: dict[str, Any] = {"orcid": orcid_id}
 
+    # ORCID emits a present-but-null value for an absent part (a single-name
+    # researcher has "family-name": null), and ``.get(k, {})`` defaults only an
+    # ABSENT key, so every chain here is ``(x.get(k) or {})`` — the same fix
+    # fetch_orcid_works carries (D11/item 6).
+    person = record.get("person") or {}
+
     # Name
-    name_block = record.get("person", {}).get("name", {})
-    given = name_block.get("given-names", {}).get("value", "") if name_block else ""
-    family = name_block.get("family-name", {}).get("value", "") if name_block else ""
+    name_block = person.get("name") or {}
+    given = (name_block.get("given-names") or {}).get("value") or ""
+    family = (name_block.get("family-name") or {}).get("value") or ""
     result["name"] = f"{given} {family}".strip() or orcid_id
 
     # Email (first public email)
-    emails = (
-        record.get("person", {})
-        .get("emails", {})
-        .get("email", [])
-    )
+    emails = (person.get("emails") or {}).get("email") or []
     for e in emails:
         if e.get("primary") or not result.get("email"):
             result["email"] = e.get("email")
 
     # Current employment (affiliation) — prefer primary (lowest display-index)
     employments = (
-        record.get("activities-summary", {})
-        .get("employments", {})
-        .get("affiliation-group", [])
+        ((record.get("activities-summary") or {}).get("employments") or {})
+        .get("affiliation-group") or []
     )
     # Full employment list (org, start year, current) — the tenure derivation
     # in src/services/jhu_rules.py needs every stint, ended ones included.
     all_employments: list[dict[str, Any]] = []
     current_employments: list[dict[str, Any]] = []
     for grp in employments:
-        summaries_list = grp.get("summaries", [])
+        summaries_list = grp.get("summaries") or []
         if summaries_list:
-            emp = summaries_list[0].get("employment-summary", {})
+            emp = summaries_list[0].get("employment-summary") or {}
             start_year = None
             year_val = ((emp.get("start-date") or {}).get("year") or {}).get("value")
             if year_val:
@@ -76,15 +77,17 @@ async def fetch_orcid_profile(orcid_id: str) -> dict[str, Any]:
                 }
             )
         for summaries in summaries_list:
-            emp = summaries.get("employment-summary", {})
+            emp = summaries.get("employment-summary") or {}
             if emp.get("end-date") is None:  # Current employment
                 current_employments.append(emp)
                 break  # one per group
     # Sort by display-index ascending: 0 = primary/preferred position
-    current_employments.sort(key=lambda e: int(e.get("display-index", 999)))
+    current_employments.sort(
+        key=lambda e: 999 if e.get("display-index") is None else int(e["display-index"])
+    )
     if current_employments:
         emp = current_employments[0]
-        org = emp.get("organization", {})
+        org = emp.get("organization") or {}
         result["institution"] = org.get("name")
         dept = emp.get("department-name")
         if dept:
@@ -92,9 +95,9 @@ async def fetch_orcid_profile(orcid_id: str) -> dict[str, Any]:
     result["employments"] = all_employments
 
     # Researcher URLs (lab website)
-    urls = record.get("person", {}).get("researcher-urls", {}).get("researcher-url", [])
+    urls = (person.get("researcher-urls") or {}).get("researcher-url") or []
     for u in urls:
-        result["lab_website"] = u.get("url", {}).get("value")
+        result["lab_website"] = (u.get("url") or {}).get("value")
         break
 
     return result

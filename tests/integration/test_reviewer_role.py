@@ -241,6 +241,7 @@ REVIEWER_MANAGER_EXPECTATIONS = {
     ("GET", "/manager/prompt-suggestions/{suggestion_id}"): 403,
     ("POST", "/manager/pis"): 403,
     ("POST", "/manager/pis/{user_id}/profile"): 403,
+    ("POST", "/manager/pis/{user_id}/profile/retry"): 403,
     ("POST", "/manager/pis/{user_id}/mute"): 403,
     ("POST", "/manager/pis/{user_id}/unmute"): 403,
     ("POST", "/manager/pis/{user_id}/verify-email"): 403,
@@ -262,6 +263,7 @@ REVIEWER_MANAGER_EXPECTATIONS = {
 _REVIEWER_POST_BODIES = {
     "/manager/pis": {"orcid": "0000-0006-0000-0000"},
     "/manager/pis/{user_id}/profile": {},
+    "/manager/pis/{user_id}/profile/retry": None,
     "/manager/pis/{user_id}/mute": None,
     "/manager/pis/{user_id}/unmute": None,
     "/manager/pis/{user_id}/verify-email": None,

@@ -29,10 +29,11 @@ from collections.abc import Collection
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.agent.role_capabilities import spoke_role_names, star_role
+from src.agent.role_capabilities import hub_role_names, spoke_role_names, star_role
+from src.config import get_settings
 from src.models import (
     COHORT_ACTION_AGENT_ADDED,
     COHORT_ACTION_CREATED,
@@ -204,3 +205,47 @@ async def ensure_star_spokes(
         len(report.anomalies),
     )
     return report
+
+
+async def ensure_lab_spoke(
+    db: AsyncSession, *, agent_id: str, role: str, actor: Any | None,
+) -> list[str]:
+    """Wire one lab that is going live into its ``hub-{agent_id}`` spoke; the reasons
+    the activation must be refused, [] when it may proceed.
+
+    Every path that makes an agent ``active`` calls this after applying its own
+    writes and before committing — the manager's Activate and Unmute, the admin
+    approve form and the admin role change — so a lab never goes live without the
+    cohort ``_validate_star_topology`` requires at run start (a manager-activated
+    lab used to go live uncohorted: isolated mid-run, and the next start failed).
+    A role that is not a spoke is a no-op. ``agent_id`` and ``role`` are passed as
+    values because the unmute path has expired its row by then.
+
+    A problem (more than one scout_hub, a lab-to-lab membership, an over-long
+    cohort name) refuses the activation only while cohort isolation is enabled, the
+    only configuration in which an unwired lab is unreachable or fails run start;
+    otherwise it is logged. A roster with NO scout_hub is logged and allowed: no
+    lab can reach a hub then and no run can start under isolation whatever this
+    returns, so refusing one lab protects nothing; the admin's ensure-star-spokes
+    wires every lab once the hub exists. Writes audited rows; does not commit.
+    """
+    if star_role(role) != "spoke":
+        return []
+    hubs = await db.scalar(
+        select(func.count(AgentRegistry.id)).where(AgentRegistry.role.in_(hub_role_names()))
+    )
+    if not hubs:
+        logger.warning("No scout_hub on the roster: %s goes live without a star spoke", agent_id)
+        return []
+    try:
+        report = await ensure_star_spokes(db, apply=True, actor=actor, only={agent_id})
+        problems = list(report.anomalies)
+    except ValueError as exc:
+        problems = [str(exc)]
+    if problems and not get_settings().cohort_isolation_enabled:
+        logger.warning(
+            "Star spoke for %s not ensured (cohort isolation is off): %s",
+            agent_id, "; ".join(problems),
+        )
+        return []
+    return problems

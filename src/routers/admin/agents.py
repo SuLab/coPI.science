@@ -31,6 +31,7 @@ from src.services.agent_activation import (
 from src.services.agent_form import agent_form_version
 from src.services.jhu_rules import get_tenure_start
 from src.services.pi_companies import move_companies_file
+from src.services.star_topology import ensure_lab_spoke
 from src.web.flash import flash
 
 logger = logging.getLogger("src.routers.admin")
@@ -329,10 +330,31 @@ async def admin_approve_agent(
         agent.status = agent_status
 
     try:
-        await db.commit()
+        # The lab's hub spoke goes in the same commit as the activation, AFTER the
+        # rename above so it is the final slug's (ensure_lab_spoke). Its flush is
+        # where a concurrent rename's IntegrityError then surfaces.
+        spoke_problems = (
+            await ensure_lab_spoke(
+                db, agent_id=agent.agent_id, role=agent.role, actor=current_user
+            )
+            if activating else []
+        )
+        if not spoke_problems:
+            await db.commit()
     except IntegrityError:
         await db.rollback()  # a concurrent rename took the slug
         return RedirectResponse(url=f"/admin/agents/{agent_id}?error=slug_taken", status_code=302)
+    if spoke_problems:
+        await db.rollback()
+        flash(
+            request,
+            "Activation refused: this lab could not be connected to the hub: "
+            + "; ".join(spoke_problems)[:300],
+            "error",
+        )
+        return RedirectResponse(
+            url=f"/admin/agents/{agent_id}?activation_blocked=1", status_code=302
+        )
 
     if renamed_from is not None and owner_id is not None:
         # The hub reads profiles/private/companies/<agent_id>.md: move the file to the
@@ -584,6 +606,19 @@ async def admin_set_agent_role(
             return RedirectResponse(url=f"/admin/agents/{agent_id}", status_code=302)
 
     agent.role = role
+    if agent.status == "active":
+        spoke_problems = await ensure_lab_spoke(
+            db, agent_id=agent.agent_id, role=role, actor=current_user
+        )
+        if spoke_problems:
+            await db.rollback()
+            flash(
+                request,
+                "Role not changed: this lab could not be connected to the hub: "
+                + "; ".join(spoke_problems)[:300],
+                "error",
+            )
+            return RedirectResponse(url=f"/admin/agents/{agent_id}", status_code=302)
     await db.commit()
 
     return RedirectResponse(url=f"/admin/agents/{agent_id}", status_code=302)

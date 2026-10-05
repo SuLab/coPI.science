@@ -272,11 +272,18 @@ async def _start_provisioning_locked(
     from urllib.parse import urlencode
     from src.services.slack_tokens import get_any_bot_token
     extra = {"state": state, "redirect_uri": redirect_uri}
-    team_token = await get_any_bot_token(db)
-    if team_token:
-        team_id = await asyncio.to_thread(lookup_team_id, team_token)
-        if team_id:
-            extra["team"] = team_id
+    # The provision row is already committed, so a lookup failure must not turn
+    # into a 500 that hides the install URL: Slack's own workspace picker covers it.
+    try:
+        team_token = await get_any_bot_token(db)
+        team_id = (
+            await asyncio.to_thread(lookup_team_id, team_token) if team_token else None
+        )
+    except Exception as exc:
+        logger.warning("Slack workspace lookup failed; install URL left unpinned: %s", exc)
+        team_id = None
+    if team_id:
+        extra["team"] = team_id
     return app["oauth_url"] + "&" + urlencode(extra)
 
 

@@ -63,8 +63,12 @@ async def test_manager_creates_a_pi_via_orcid(client, db_session):
 
 
 async def test_manager_create_pi_rejects_a_duplicate_orcid(client, db_session):
+    """A PI who already has a lab agent; an agentless one is adopted instead
+    (test_manager_add_pi_pipeline.py)."""
     manager = await _manager(db_session)
     existing = await factories.make_user(db_session, orcid="0000-0005-0000-0000")
+    await factories.make_agent(db_session, user=existing)
+    await db_session.commit()  # the refusal rolls the request back
 
     r = await client.post(
         "/manager/pis", data={"orcid": existing.orcid},
@@ -282,10 +286,14 @@ async def test_manager_create_pi_maps_known_failures_to_canned_codes(
 ):
     manager = await _manager(db_session)
     existing = await factories.make_user(db_session, orcid="0000-0008-0000-0000")
+    await factories.make_agent(db_session, user=existing)
+    await db_session.commit()  # each refusal rolls its request back
+    # Read now: a refusal's rollback expires the shared session's objects.
+    headers = auth_headers(manager.id)
 
     r = await client.post(
         "/manager/pis", data={"orcid": existing.orcid},
-        headers=auth_headers(manager.id), follow_redirects=False,
+        headers=headers, follow_redirects=False,
     )
     assert r.headers["location"] == "/manager/pis?error=exists"
 
@@ -295,7 +303,7 @@ async def test_manager_create_pi_maps_known_failures_to_canned_codes(
     ):
         r = await client.post(
             "/manager/pis", data={"orcid": "0000-0009-0000-0000"},
-            headers=auth_headers(manager.id), follow_redirects=False,
+            headers=headers, follow_redirects=False,
         )
     assert r.headers["location"] == "/manager/pis?error=fetch_failed"
 
@@ -370,7 +378,12 @@ async def test_pi_detail_shows_agent_state_and_the_manager_provision_button(
     assert "awaiting Slack install" not in r.text
 
     job.status = "completed"
+    await factories.make_profile(
+        db_session, user=pi, evidence_pmid_count=10, evidence_pub_count=8,
+    )
     await db_session.flush()
+    # The shared session cached pi.profile as None on the earlier loads.
+    await db_session.refresh(pi, attribute_names=["profile"])
     r = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(admin.id))
     assert "Awaiting Slack install" in r.text
     assert f'action="/manager/pis/{pi.id}/slack/provision"' in r.text, (

@@ -1,7 +1,8 @@
 """The /manager surface: deny-by-default, PI-scoped, and read-only except for
-an explicit, mechanically-enumerated allowlist of fourteen write routes (design
+an explicit, mechanically-enumerated allowlist of fifteen write routes (design
 D1, amended 2026-09-10 by F2, 2026-09-11 by the two enrichment vetoes,
-2026-10-01 by email verification and 2026-10-02 by the five Companies routes)."""
+2026-10-01 by email verification, 2026-10-02 by the five Companies routes and
+2026-10-05 by the profile retry)."""
 
 import re
 import uuid
@@ -55,8 +56,8 @@ def _manager_get_paths(param_values: dict[str, str] | None = None) -> list[str]:
 
 def test_manager_router_mutations_are_an_explicit_allowlist():
     """D12 amended, not abolished (design decision D1): the manager router may
-    have non-GET routes now, but only these fourteen, named exactly. A future
-    accidental fifteenth write route still fails this test loudly. The two
+    have non-GET routes now, but only these fifteen, named exactly. A future
+    accidental sixteenth write route still fails this test loudly. The two
     provisioning routes joined the list with F2 (2026-09-10): a manager may
     install a PI's Slack bot and activate the agent from /manager/pis/{id}.
     The grant veto joined 2026-09-11 (Task 5 of
@@ -68,11 +69,13 @@ def test_manager_router_mutations_are_an_explicit_allowlist():
     may vouch for a PI's address, which delegate-invitation acceptance requires.
     The five Companies routes joined 2026-10-02 (hub 1.10.0 spec §7.2): a
     manager may add, delete, confirm and reject a PI's company ties and queue
-    company discovery.
+    company discovery. The profile retry joined 2026-10-05: a manager may queue
+    generation again for a PI whose job died or whose profile is ungrounded.
     """
     allowed_post_paths = {
         "/pis",
         "/pis/{user_id}/profile",
+        "/pis/{user_id}/profile/retry",
         "/pis/{user_id}/mute",
         "/pis/{user_id}/unmute",
         "/pis/{user_id}/slack/provision",

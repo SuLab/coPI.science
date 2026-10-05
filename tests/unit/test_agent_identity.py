@@ -46,3 +46,46 @@ async def test_a_name_with_no_alphabetic_characters_never_yields_an_empty_id(
     assert agent_id == agent_id.lower()
     assert "6789" in agent_id
     assert bot_name.endswith("Bot")
+
+
+# The slug names files and cohorts that [a-z0-9_-] checks guard, and Slack restricts
+# a bot's display name to ASCII (2026-10-05 Add-PI audit, F4/F5).
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("Anna Müller", ("muller", "MullerBot")),
+        ("José García López", ("lopez", "LopezBot")),
+        ("Søren Kierkegaard", ("kierkegaard", "KierkegaardBot")),
+        ("Lars Ørsted", ("orsted", "OrstedBot")),
+        ("Liam O'Brien", ("obrien", "OBrienBot")),
+        ("Ana Hamacher-Brady", ("hamacherbrady", "HamacherBradyBot")),
+        ("John Smith Jr.", ("smith", "SmithBot")),
+        ("Mary Jones III", ("jones", "JonesBot")),
+        ("Jean-Luc Picard PhD", ("picard", "PicardBot")),
+    ],
+)
+async def test_slugs_and_bot_names_are_ascii_letters_only(db_session, name, expected):
+    assert await derive_agent_identity(db_session, name) == expected
+
+
+@pytest.mark.parametrize("name", ["0000-0002-1825-009X", "王小明", "Иван Петров"])
+async def test_a_name_without_a_latin_surname_falls_back_to_the_orcid_stem(db_session, name):
+    """An ORCID record with a private name yields the iD itself as the name; the old
+    derivation took its check digit and minted the slug ``x``."""
+    agent_id, bot_name = await derive_agent_identity(
+        db_session, name, orcid="0000-0002-1825-0097"
+    )
+    assert (agent_id, bot_name) == ("pi0097", "Pi0097Bot")
+
+
+async def test_an_accented_initial_is_folded_in_the_prefix_tier(db_session):
+    await factories.make_agent(db_session, agent_id="ruiz", bot_name="RuizBot")
+    assert await derive_agent_identity(db_session, "Ángel Ruiz") == ("aruiz", "ARuizBot")
+
+
+async def test_a_long_surname_keeps_the_bot_name_within_slacks_35_characters(db_session):
+    agent_id, bot_name = await derive_agent_identity(
+        db_session, "Ann Wolfeschlegelsteinhausenbergerdorff"
+    )
+    assert len(bot_name) <= 35
+    assert agent_id == bot_name[:-3].lower()

@@ -591,7 +591,7 @@ async def _step9_store(run: PipelineRun) -> None:
     #   * Storing + marking keeps onboarding moving — the PI edits the draft and
     #     POSTs /onboarding/save-profile — while being distinguishable (one column,
     #     one ERROR log, one job-progress entry) and recoverable (POST
-    #     /onboarding/retry, or the next monthly_refresh).
+    #     /onboarding/retry, or the manager's POST /manager/pis/{id}/profile/retry).
     #
     # What it will NOT do is let a worse synthesis overwrite a better stored one.
     # A monthly refresh that fails validation, or one that runs while PubMed is

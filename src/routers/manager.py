@@ -15,7 +15,7 @@ regardless of what the router-level dependency alone would allow through.
 Exactly four GETs use ``_REVIEW``: ``manager_pis``, ``manager_pi_detail``,
 ``manager_assessments`` and ``manager_assessment_detail``; ``manager_root``
 takes no per-handler dependency at all (its only job is a redirect to a
-route that is itself reviewer-reachable). Every other handler — the fourteen
+route that is itself reviewer-reachable). Every other handler — the fifteen
 POSTs, ``manager_slack_bots``, ``manager_discussions``, ``manager_activity``/
 ``manager_activity_detail`` and the two prompt-suggestion pages — stays on
 ``_STAFF``, so a reviewer reaches none of them. This docstring is not what
@@ -110,6 +110,7 @@ from src.services.pi_companies import (
     reject_company,
 )
 from src.services.pi_onboarding import (
+    adopt_agentless_pi,
     create_pending_agent_for,
     find_or_create_pi_by_orcid,
 )
@@ -118,9 +119,11 @@ from src.services.profile_edit import (
     list_fields_from_form,
     parse_expected_version,
 )
+from src.services.profile_jobs import enqueue_profile_job_if_absent, profile_retry_warranted
 from src.services.profile_publish import export_and_record
-from src.services.tenure_scope import scoped_publications_for_export
 from src.services.slack_tokens import token_for_agent_row
+from src.services.star_topology import ensure_lab_spoke
+from src.services.tenure_scope import scoped_publications_for_export
 from src.services.thread_panel import panel_cards_by_thread
 from src.web.flash import flash
 from src.web.templating import make_templates
@@ -305,6 +308,10 @@ async def manager_pi_detail(
             industry_evidence=detail["industry_evidence"],
             tenure_start=tenure_start,
             has_bot_token=bool(agent is not None and token_for_agent_row(agent)),
+            can_retry_profile=current_user.is_staff and profile_retry_warranted(
+                detail["profile"],
+                next((j for j in detail["jobs"] if j.type == "generate_profile"), None),
+            ),
             activation_blocked=blocked,
             activated=request.query_params.get("activated"),
             blockers=blockers,
@@ -333,6 +340,7 @@ def _create_pi_error_code(exc: ValueError) -> str:
 
 @router.post("/pis")
 async def manager_create_pi(
+    request: Request,
     orcid: str = Form(...),
     db: AsyncSession = _DB,
     current_user: User = _STAFF,
@@ -348,16 +356,32 @@ async def manager_create_pi(
     exports/revisions for seeded PIs). The pending row is provisioned and activated in a
     separate step (/admin/agents, or this router's /slack/provision and
     /activate routes), never here (D7: the row belongs to the new PI, never
-    the manager)."""
+    the manager).
+
+    An ORCID already held by a PI account with no lab agent (a PI who signed in
+    before being added) is adopted rather than refused: the agent row is minted
+    for that account (``adopt_agentless_pi``). Every refusal rolls the whole
+    attempt back: ``get_db`` commits on a clean return, so a redirect after a
+    partial write would otherwise persist it."""
+    adopted = False
     try:
-        pi = await find_or_create_pi_by_orcid(db, orcid)
+        pi = await adopt_agentless_pi(db, orcid)
+        adopted = pi is not None
+        if pi is None:
+            pi = await find_or_create_pi_by_orcid(db, orcid)
         await create_pending_agent_for(db, pi)
         await db.commit()
     except ValueError as exc:
+        await db.rollback()
         return RedirectResponse(
             url=f"/manager/pis?error={_create_pi_error_code(exc)}",
             status_code=302,
         )
+    except RuntimeError:
+        # derive_agent_identity ran out of numeric suffixes for this surname.
+        await db.rollback()
+        logger.exception("Add-PI could not derive an agent identity for ORCID %r", orcid.strip()[:40])
+        return RedirectResponse(url="/manager/pis?error=create_failed", status_code=302)
     except IntegrityError as exc:
         # Two managers adding same-surname PIs can race the identity
         # derivation's SELECT-then-INSERT; the loser rolls the WHOLE creation
@@ -373,6 +397,13 @@ async def manager_create_pi(
         )
         return RedirectResponse(
             url="/manager/pis?error=agent_conflict", status_code=302
+        )
+    if adopted:
+        flash(
+            request,
+            "This PI already had an account (they signed in with ORCID); "
+            "their lab agent has been created.",
+            "success",
         )
     return RedirectResponse(url=f"/manager/pis/{pi.id}", status_code=302)
 
@@ -703,10 +734,69 @@ async def manager_activate_agent(
             "error",
         )
         return RedirectResponse(url=f"/manager/pis/{user_id}", status_code=302)
+    # The lab's hub-{slug} spoke, in the same commit as the status flip: without it
+    # the lab is isolated mid-run and the next run start fails (ensure_lab_spoke).
+    spoke_problems = await ensure_lab_spoke(
+        db, agent_id=agent.agent_id, role=agent.role, actor=current_user
+    )
+    if spoke_problems:
+        await db.rollback()
+        flash(
+            request,
+            "Activation refused: this lab could not be connected to the hub: "
+            + "; ".join(spoke_problems)[:300],
+            "error",
+        )
+        return RedirectResponse(url=f"/manager/pis/{user_id}", status_code=302)
     await db.commit()
     return RedirectResponse(
         url=f"/manager/pis/{user_id}?activated=1", status_code=302
     )
+
+
+@router.post("/pis/{user_id}/profile/retry")
+async def manager_retry_profile(
+    user_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = _DB,
+    current_user: User = _STAFF,
+):
+    """Queue this PI's profile generation again (F2 of the 2026-10-05 Add-PI audit).
+
+    Before this route, a dead generation job or an ungrounded profile left a manager
+    nothing to do but ask an admin to impersonate the PI and press Try Again — the
+    activation gate refuses both states. Allowed only in those states
+    (``profile_retry_warranted``), and the enqueue is the shared idempotent one, so
+    a double click runs one pipeline."""
+    target = await _require_pi(db, user_id)
+    profile = (
+        await db.execute(
+            select(ResearcherProfile).where(ResearcherProfile.user_id == user_id)
+        )
+    ).scalar_one_or_none()
+    latest_job = (
+        await db.execute(
+            select(Job)
+            .where(Job.user_id == user_id, Job.type == "generate_profile")
+            .order_by(Job.enqueued_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if not profile_retry_warranted(profile, latest_job):
+        flash(
+            request,
+            "Nothing to retry: profile generation is running, or the profile is "
+            "already grounded.",
+            "error",
+        )
+        return RedirectResponse(url=f"/manager/pis/{user_id}", status_code=302)
+    job = await enqueue_profile_job_if_absent(db, target, priority=INTERACTIVE_PRIORITY)
+    await db.commit()
+    if job is None:
+        flash(request, "This account's access is denied; no profile is generated.", "error")
+    else:
+        flash(request, "Profile generation queued.", "success")
+    return RedirectResponse(url=f"/manager/pis/{user_id}", status_code=302)
 
 
 def _company_view(row: PiCompany) -> dict:

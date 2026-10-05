@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.models import AgentRegistry, User
 from src.services.agent_activation import activate_agent
 from src.services.slack_tokens import token_for_agent_row
+from src.services.star_topology import ensure_lab_spoke
 
 _MUTABLE_STATUSES = ("active", "inactive")
 
@@ -20,11 +21,13 @@ async def set_agent_mute_state(
     (activate_agent, no override; the manager surface never overrides) plus the
     Slack-token check, applied as an UPDATE conditional on status still being
     active/inactive, so a concurrent suspend or delete is never overwritten (RA-01).
+    An unmute also ensures the lab's hub spoke (``ensure_lab_spoke``) in the same commit.
     Returns None on success (committed), else a refusal code: "agent_not_mutable",
-    "no_token" or "activation_blocked"."""
+    "no_token", "activation_blocked" or "no_spoke"."""
     if agent.status not in _MUTABLE_STATUSES:
         return "agent_not_mutable"
-    agent_pk = agent.id  # read now: the unmute path expires `agent` before its UPDATE
+    # Read now: the unmute path expires `agent` before its UPDATE.
+    agent_pk, agent_slug, agent_role = agent.id, agent.agent_id, agent.role
     if muted:
         result = await db.execute(
             update(AgentRegistry)
@@ -47,5 +50,10 @@ async def set_agent_mute_state(
     if result.rowcount != 1:
         await db.rollback()
         return "agent_not_mutable"
+    if not muted and await ensure_lab_spoke(
+        db, agent_id=agent_slug, role=agent_role, actor=actor
+    ):
+        await db.rollback()
+        return "no_spoke"
     await db.commit()
     return None

@@ -36,12 +36,26 @@
                 {% if latest_job and latest_job.status == 'dead' %}
                     <span class="text-xs text-red-600 font-medium">
                         Agent pending — profile generation failed after {{ latest_job.attempts }} attempts.
-                        An admin can retry (impersonate → Try Again, or CLI seed-profile) before Slack install.
+                        Retry it before activating the agent.
                     </span>
                 {% elif latest_job and latest_job.status in ('pending', 'processing') %}
-                    <span class="text-xs text-gray-500">Agent pending — Profile generating…</span>
+                    <span class="text-xs text-gray-500">Agent pending — Profile generating… (reload to update)</span>
+                {% elif can_retry_profile and profile %}
+                    <span class="text-xs text-red-600 font-medium">
+                        Agent pending — the profile is not grounded in any publication abstract.
+                        Check the name and ORCID iD, then retry profile generation.
+                    </span>
+                {% elif can_retry_profile %}
+                    <span class="text-xs text-red-600 font-medium">
+                        Agent pending — no profile has been generated yet.
+                    </span>
                 {% else %}
                     <span class="text-xs text-gray-500">Agent pending — Awaiting Slack install.</span>
+                {% endif %}
+                {% if can_retry_profile %}
+                <form method="post" action="/manager/pis/{{ target_user.id }}/profile/retry" class="mt-1">
+                    <button type="submit" class="text-sm px-3 py-1 rounded bg-gray-700 text-white hover:opacity-90">Retry profile generation</button>
+                </form>
                 {% endif %}
                 {# F2 (2026-09-10): provisioning stopped being admin-only.
                    Gated by the enclosing `effective_user.is_staff`, never on
@@ -84,7 +98,7 @@
         <ul class="list-disc list-inside mt-1">
             {% for blocker in blockers %}<li>{{ blocker }}</li>{% endfor %}
         </ul>
-        <p class="mt-1">Fix the profile, or ask an admin to override on /admin/agents.</p>
+        <p class="mt-1">{% if can_retry_profile %}Retry profile generation above (after correcting the name if it is wrong){% else %}Fix the profile{% endif %}, or ask an admin to override on /admin/agents.</p>
     </div>
     {% endif %}
     {% endif %}
@@ -101,6 +115,7 @@
             {% elif request.query_params.get('error') == 'agent_not_mutable' %}This agent can't be muted or unmuted in its current state.
             {% elif request.query_params.get('error') == 'no_token' %}This agent can't be unmuted until its Slack bot is installed.
             {% elif request.query_params.get('error') == 'activation_blocked' %}This agent can't be unmuted yet: its profile doesn't pass the activation checks.
+            {% elif request.query_params.get('error') == 'no_spoke' %}This agent can't be unmuted: it could not be connected to the hub. Ask an admin to check its star spoke on /admin/agents.
             {% elif request.query_params.get('error') == 'profile_generating' %}Profile is being generated — try again shortly.
             {% elif request.query_params.get('error') == 'field_too_long' %}Name, institution and department are limited to 255 characters each.
             {% elif request.query_params.get('error') == 'no_agent' %}This PI has no lab agent yet, so there is nothing to mute or unmute.

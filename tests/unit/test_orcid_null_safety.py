@@ -120,3 +120,48 @@ async def test_a_null_title_and_publication_date_do_not_raise_either(monkeypatch
     assert work["title"] == ""
     assert work["year"] is None
     assert work["doi"] == "10.1/xyz"
+
+
+async def test_fetch_orcid_profile_survives_present_but_null_parts(monkeypatch):
+    """The same null idiom in the RECORD: a single-name researcher has
+    ``"family-name": null``, which made Add-PI answer "Could not fetch" for a
+    record that fetched fine (2026-10-05 Add-PI audit, N2)."""
+    record = {
+        "person": {
+            "name": {"given-names": {"value": "Madonna"}, "family-name": None},
+            "emails": None,
+            "researcher-urls": {"researcher-url": [{"url": None}]},
+        },
+        "activities-summary": {
+            "employments": {
+                "affiliation-group": [
+                    {"summaries": [{"employment-summary": {
+                        "organization": None, "start-date": None,
+                        "end-date": None, "display-index": None,
+                    }}]},
+                    {"summaries": None},
+                ]
+            }
+        },
+    }
+
+    async def _record(_orcid_id):
+        return record
+
+    monkeypatch.setattr(orcid, "fetch_orcid_record", _record)
+    profile = await orcid.fetch_orcid_profile("0000-0002-1825-0097")
+    assert profile["name"] == "Madonna"
+    assert profile["institution"] is None
+    assert profile["employments"] == [
+        {"organization": None, "start_year": None, "current": True}
+    ]
+
+
+async def test_fetch_orcid_profile_survives_a_null_person(monkeypatch):
+    async def _record(_orcid_id):
+        return {"person": None, "activities-summary": None}
+
+    monkeypatch.setattr(orcid, "fetch_orcid_record", _record)
+    profile = await orcid.fetch_orcid_profile("0000-0002-1825-0097")
+    assert profile["name"] == "0000-0002-1825-0097"
+    assert profile["employments"] == []

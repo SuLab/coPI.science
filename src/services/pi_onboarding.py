@@ -12,10 +12,10 @@ import re
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models import USER_ROLE_PI, AgentRegistry, User
+from src.models import USER_ROLE_PI, AgentRegistry, ResearcherProfile, User
 from src.models.job import INTERACTIVE_PRIORITY
 from src.services.agent_identity import derive_agent_identity
-from src.services.jhu_rules import derive_employment_start, set_tenure_start
+from src.services.jhu_rules import derive_employment_start, get_tenure_start, set_tenure_start
 from src.services.orcid import fetch_orcid_profile
 from src.services.profile_jobs import enqueue_profile_job_if_absent
 from src.services.user_email import assign_user_email
@@ -104,6 +104,47 @@ async def find_or_create_pi_by_orcid(db: AsyncSession, orcid: str) -> User:
     await record_employment_tenure(db, user, profile_data)
 
     await enqueue_profile_job_if_absent(db, user, priority=INTERACTIVE_PRIORITY)
+    return user
+
+
+async def adopt_agentless_pi(db: AsyncSession, orcid: str) -> User | None:
+    """The PI account that already holds ``orcid`` but has no lab agent, readied for
+    the Add-PI flow; None when no account holds the iD.
+
+    A PI who signed in with ORCID before anyone added them has a ``pi`` User (pending
+    access until an admin approves it) and no AgentRegistry row — only Add-PI mints
+    one for a manager — so "already exists" used to leave the manager with no way to
+    give that PI a lab. Such an account is adopted: its profile job is enqueued when
+    it has no profile yet (the login enqueues none for a pending account), and the
+    employment-derived tenure start is recorded when none is set, best effort. The
+    caller then mints the agent exactly as for a new PI.
+
+    Raises ValueError ("already exists") for any other holder of the iD: a staff
+    account, a denied account, or a PI who already has an agent (D6). Validates the
+    iD like ``find_or_create_pi_by_orcid``. Does not commit.
+    """
+    orcid = validate_orcid(orcid)
+    user = (
+        await db.execute(select(User).where(User.orcid == orcid))
+    ).scalar_one_or_none()
+    if user is None:
+        return None
+    has_agent = await db.scalar(
+        select(AgentRegistry.id).where(AgentRegistry.user_id == user.id)
+    )
+    if user.user_role != USER_ROLE_PI or user.access_status == "denied" or has_agent:
+        raise ValueError(f"A user with ORCID {orcid} already exists")
+
+    if await get_tenure_start(db, user.id) is None:
+        try:
+            await record_employment_tenure(db, user, await fetch_orcid_profile(orcid))
+        except Exception as exc:  # the pipeline derives a paper-based start instead
+            logger.warning("Adopting %s: no ORCID employment tenure (%s)", orcid, exc)
+    has_profile = await db.scalar(
+        select(ResearcherProfile.id).where(ResearcherProfile.user_id == user.id)
+    )
+    if has_profile is None:
+        await enqueue_profile_job_if_absent(db, user, priority=INTERACTIVE_PRIORITY)
     return user
 
 
