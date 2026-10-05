@@ -75,7 +75,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0058"
+DEFAULT_TARGET = "0059"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -109,13 +109,13 @@ DEFAULT_TARGET = "0058"
 #: on llm_call_logs), 0033 (two composite indexes on thread_decisions plus 18
 #: unindexed ondelete-FK columns — see issue #25 P1), 0034 (two nullable columns plus
 #: one foreign-key constraint on agents), 0035 (three nullable columns across three
-#: tables, no backfill), and the 0036-0058 objects enumerated in PLANNED_OBJECTS (and
+#: tables, no backfill), and the 0036-0059 objects enumerated in PLANNED_OBJECTS (and
 #: PLANNED_RECREATES) below.
 SUPPORTED_START_REVISIONS = (
     "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028", "0029",
     "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040",
     "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
-    "0051", "0052", "0053", "0054", "0055", "0056", "0057",
+    "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058",
 )
 
 #: Tables whose row counts are snapshotted for postflight. Empty = every user table.
@@ -177,7 +177,7 @@ BACKUP_GLOBS = ("*.sql", "*.sql.gz", "*.dump", "*.dmp", "*.pgdump", "*.custom", 
 # ---------------------------------------------------------------------------
 # What the migration chain CREATES (PLANNED_OBJECTS), DROPS (PLANNED_DROPS) and drops and
 # creates again under the same name (PLANNED_RECREATES), per revision. Derived by reading
-# 0019-0058; tests/unit/test_migration_checks.py re-derives them from the migration
+# 0019-0059; tests/unit/test_migration_checks.py re-derives them from the migration
 # files' upgrade() bodies and asserts they still match, so they cannot silently drift.
 # ---------------------------------------------------------------------------
 
@@ -460,11 +460,35 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0058", "constraint", "ck_pi_companies_status", "pi_companies"),
     PlannedObject("0058", "constraint", "ck_pi_companies_origin", "pi_companies"),
     PlannedObject("0058", "index", "ix_pi_companies_user_id", "pi_companies"),
+    # 0059_assessment_chat_suggestions
+    PlannedObject("0059", "column", "question_origin", "assessment_chat_usage"),
+    PlannedObject(
+        "0059", "constraint", "ck_assessment_chat_usage_question_origin", "assessment_chat_usage",
+    ),
+    PlannedObject("0059", "table", "assessment_chat_suggestions"),
+    PlannedObject(
+        "0059", "constraint", "uq_assessment_chat_suggestions_key", "assessment_chat_suggestions",
+    ),
+    PlannedObject(
+        "0059", "constraint", "ck_assessment_chat_suggestions_tier", "assessment_chat_suggestions",
+    ),
+    PlannedObject(
+        "0059", "constraint", "ck_assessment_chat_suggestions_status", "assessment_chat_suggestions",
+    ),
+    PlannedObject(
+        "0059", "index", "ix_assessment_chat_suggestions_updated", "assessment_chat_suggestions",
+    ),
+    PlannedObject("0059", "table", "assessment_chat_opens"),
+    PlannedObject("0059", "constraint", "ck_assessment_chat_opens_tier", "assessment_chat_opens"),
+    PlannedObject("0059", "constraint", "ck_assessment_chat_opens_via", "assessment_chat_opens"),
+    PlannedObject("0059", "index", "ix_assessment_chat_opens_user_id", "assessment_chat_opens"),
+    PlannedObject("0059", "index", "ix_assessment_chat_opens_assessment_id", "assessment_chat_opens"),
+    PlannedObject("0059", "index", "ix_assessment_chat_opens_created", "assessment_chat_opens"),
 )
 
 #: What ``upgrade()`` DROPS. Kept apart from PLANNED_OBJECTS because the collision check
 #: must never treat a drop's precondition (the object exists) as a collision. 0026 is
-#: the only upgrade-time ``drop_table`` in 0019-0058.
+#: the only upgrade-time ``drop_table`` in 0019-0059.
 PLANNED_DROPS: tuple[PlannedObject, ...] = (
     PlannedObject("0026", "table", "grantbot_posted_foas"),
 )
@@ -482,7 +506,7 @@ REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
     "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039",
     "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
-    "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058",
+    "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059",
 )
 
 

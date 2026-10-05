@@ -118,3 +118,67 @@ up its left edge is a resize handle — drag it, press ←/→ while it has focu
 double-click to reset to 28rem — bounded to 320 px … 75% of the window. The chosen
 width is kept per browser in `localStorage["assessment-chat-width"]`, a number and
 nothing else.
+
+## Opening questions (2026-10-05, migration `0059`)
+
+The drawer opens on up to four questions about THIS assessment, and each question that
+is about one page section also appears as an "Ask:" button at the end of that section
+(brief, evidence, the ask, verdict, panel, gating, red flags, rationale, scores). A click
+SENDS the question: it counts toward the daily caps like a typed one, and while an
+answer is still being written it is refused with the usual message. The aim is more and
+better human reviews, so the questions point at what a reviewer has to judge.
+
+- **Generated sets.** `src/services/assessment_chat_suggestions.py`. While the worker
+  has no job it generates one set per (assessment, tier, verdict revision), newest
+  assessment first, one model call at a time (`generate_due`, at most every 30 s), so a
+  job waits behind at most one call. The request is that tier's chat record (the same
+  five documents, citations off), `prompts/assessment-chat-suggestions.md` (read per
+  generation; an edit applies to the next set and keeps the existing ones) and a numbered
+  list of the Verdict document's blocks, answered as structured JSON. A question is kept
+  only if it names a listed block (that block's page anchor places it inline), is one
+  plain line of 10–200 characters with no link or markup, and repeats no block or
+  question; fewer than two kept and the set fails. The staff tier is always generated;
+  the reviewer tier only once a `reviewer` account exists. Model:
+  `llm_assessment_chat_suggestions_model` (`claude-opus-5`, with `fallbacks: "default"`;
+  not the chat's 5.5, whose biology classifier declined every production chat question),
+  about $0.50 a set at the record's ~90 k input tokens.
+- **The template set.** Until a set is `ready`, and whenever none can be, the page builds
+  questions from fields every tier's page shows: a not-met (else unconfirmed) gate, the
+  lowest-scored dimension, the first red flag, the recommendation, the ask — padded with
+  the drawer's original three generic questions when the verdict has fewer than two.
+- **Failures.** A row is written BEFORE each call (`failed`/`in_progress`, attempts + 1,
+  priced at the reserve), so a paid attempt is counted even if the worker dies before
+  storing its result. A failed set is retried after 30 minutes, at most three attempts
+  per revision; a 429 or 5xx answer (never billed) is retried without using one up; a
+  refusal is never retried. One call is limited to 180 s with no SDK retry, so a job
+  waits behind at most that. A record that raises while being built is skipped (one
+  ERROR in the worker log) until the worker restarts. To regenerate a set, delete its
+  row; the next idle sweep redoes it.
+- **Limits and switches.** `ASSESSMENT_CHAT_SUGGESTIONS_DAILY_USD_LIMIT` (default 30):
+  rolling 24 h over the suggestion rows' own usage (an attempt whose cost is unknown —
+  in flight, timed out, cut off — counts the chat's $2.50 reserve), separate from the
+  chat's ceilings. An unpriced model or a missing prompt file stops generation with one WARNING.
+  `ASSESSMENT_CHAT_SUGGESTIONS_ENABLED=false`, or the chat's own kill switch, stops
+  generation; both are `.env` settings, so recreate the worker (and `blackbird-app` for
+  the chat switch). The page then shows the template set (or, with the chat off, nothing).
+- **Measurement, content-free.** `assessment_chat_opens` has one row per drawer opening,
+  with `opened_via` = `bubble`, `link` (the list page's `#chat`) or `inline`; its foreign
+  keys SET NULL, like the ledger's. `assessment_chat_usage.question_origin` says where each
+  question came from: `typed`, `drawer_generated`, `drawer_template`, `inline_generated`,
+  `inline_template` (NULL before `0059`). Neither counts an impersonated session.
+
+      -- openings and questions per day, by entry point and origin
+      SELECT date_trunc('day', created_at) AS day, opened_via, count(*)
+      FROM assessment_chat_opens GROUP BY 1, 2 ORDER BY 1 DESC;
+      SELECT date_trunc('day', created_at) AS day, question_origin, count(*)
+      FROM assessment_chat_usage GROUP BY 1, 2 ORDER BY 1 DESC;
+      -- human reviews written after their author asked the chat about that assessment
+      SELECT count(*) FILTER (WHERE asked) AS after_chat, count(*) AS reviews FROM (
+        SELECT EXISTS (SELECT 1 FROM assessment_chat_usage u
+                       WHERE u.user_id = r.reviewer_user_id
+                         AND u.assessment_id = r.assessment_id
+                         AND u.created_at < r.created_at) AS asked
+        FROM assessment_reviews r) t;
+      -- generation outcomes
+      SELECT context_tier, status, error_code, count(*), sum(attempts)
+      FROM assessment_chat_suggestions GROUP BY 1, 2, 3;

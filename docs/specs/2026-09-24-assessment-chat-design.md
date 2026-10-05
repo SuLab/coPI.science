@@ -682,7 +682,8 @@ trusted (§11.6).
 
 New router `src/routers/assessment_chat.py`, mounted at `/assessment-chat`, with
 router-level `dependencies=[Depends(get_review_user)]` and module-level `_DB`/`_REVIEW`
-singletons (B008). Exactly three routes, pinned by an allowlist test:
+singletons (B008). Exactly three routes, pinned by an allowlist test (a fourth,
+`POST /{id}/opened`, the content-free drawer-opening counter, joined on 2026-10-05):
 
 | Method, path | Purpose | Success |
 |---|---|---|
@@ -940,7 +941,8 @@ same value; a test renders both detail pages.
   questions when empty ("What is being proposed, in plain terms?", "What were the hub's
   main concerns, and how did the lab's agent answer them?", "What would Blackbird fund
   next, and what result would change the recommendation?") fill the textarea without
-  sending.
+  sending. (Superseded 2026-10-05: per-assessment questions that send on click; see
+  `docs/operations/assessment-chat.md`, "Opening questions".)
 - Header: title, the signed-in user's name (a swapped session is then visible, §13), close.
 - Footer: textarea (Enter sends, Shift+Enter is a newline, character counter), Ask,
   "N of 100 questions used today", Clear (with a confirm dialog), and the line "Saved for

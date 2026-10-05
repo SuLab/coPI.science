@@ -1,6 +1,6 @@
 // Assessment chat drawer — docs/specs/2026-09-24-assessment-chat-design.md §8.3.
 //
-// Talks only to the three URLs the drawer partial writes into
+// Talks only to the four URLs the drawer partial writes into
 // window.ASSESSMENT_CHAT, so this file names no route of its own. The rules it
 // keeps, each from the spec:
 //   * questions, labels, cited text and every status line go in as textContent;
@@ -107,7 +107,14 @@
   };
   const openers = Array.from(document.querySelectorAll("[data-chat-open]"));
   const bubble = document.querySelector("[data-chat-bubble]");
-  const state = { turns: [], limits: null, busy: false, loaded: false, open: false, opener: null, poll: 0, historySeq: 0 };
+  // The opening questions (2026-10-05): `data-chat-starter` in the drawer and
+  // `data-chat-ask` beside page sections. Each carries its question in
+  // `data-chat-question` and the ledger origin in `data-chat-origin`; a click SENDS it.
+  const starterButtons = Array.from(drawer.querySelectorAll("[data-chat-starter]"));
+  const inlineAsks = Array.from(document.querySelectorAll("[data-chat-ask]"));
+  // `historyLoad` is the open's history request, which an inline ask waits for so
+  // its question lands after the conversation it joins.
+  const state = { turns: [], limits: null, busy: false, loaded: false, open: false, opener: null, poll: 0, historySeq: 0, historyLoad: null };
 
   // SW-11: elements this file itself made `inert` while the drawer is a
   // full-screen overlay on a narrow viewport, so close can undo exactly them
@@ -704,8 +711,12 @@
     }
   }
 
-  async function ask() {
-    const question = els.input.value.trim();
+  // `origin` is one of the ledger's question origins ("typed" for the box). A
+  // suggestion passes its own `text`: the box keeps whatever draft it holds, on
+  // success and on refusal alike.
+  async function ask(origin, text) {
+    const suggested = typeof text === "string";
+    const question = suggested ? text.trim() : els.input.value.trim();
     if (!question || state.busy || hasStreaming()) {
       return;
     }
@@ -750,7 +761,8 @@
 
     function abandon(code) {
       wrap.remove();
-      els.input.value = question;
+      // A refused suggestion leaves the draft in the box alone.
+      els.input.value = suggested ? els.input.value : question;
       setBusy(false);
       render();
       showError(code);
@@ -763,7 +775,7 @@
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-        body: JSON.stringify({ question: question })
+        body: JSON.stringify({ question: question, origin: origin || "typed" })
       });
     } catch (e) {
       abandon("network");
@@ -785,8 +797,10 @@
       abandon(code);
       return;
     }
-    els.input.value = "";
-    updateCounter();
+    if (!suggested) {
+      els.input.value = "";
+      updateCounter();
+    }
 
     function segment(i) {
       if (!live.segments[i]) {
@@ -1069,7 +1083,25 @@
     }
   }
 
-  function openDrawer(opener) {
+  // A content-free count of this opening (`via`: bubble, link or inline). Fire and
+  // forget: a failed count must never get in the way of the chat.
+  function recordOpen(via) {
+    if (!cfg.openedUrl) {
+      return;
+    }
+    try {
+      fetch(cfg.openedUrl, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ via: via })
+      }).catch(function () {});
+    } catch (e) {
+      // Not counted.
+    }
+  }
+
+  function openDrawer(opener, via) {
     if (state.open) {  // SW-1: reopening (or a second opener click) is a no-op
       return;
     }
@@ -1090,7 +1122,8 @@
     applyModality();
     clearError();
     els.input.focus();
-    loadHistory();
+    recordOpen(via || "bubble");
+    state.historyLoad = loadHistory();
   }
 
   function closeDrawer() {
@@ -1118,7 +1151,7 @@
   }
 
   openers.forEach(function (button) {
-    button.addEventListener("click", function () { openDrawer(button); });
+    button.addEventListener("click", function () { openDrawer(button, "bubble"); });
   });
   els.close.addEventListener("click", closeDrawer);
   WIDE.addEventListener("change", function () {
@@ -1140,15 +1173,46 @@
       return;
     }
     event.preventDefault();
-    ask();
+    ask("typed");
   });
-  els.send.addEventListener("click", ask);
+  els.send.addEventListener("click", function () { ask("typed"); });
   els.clear.addEventListener("click", clearConversation);
-  Array.from(drawer.querySelectorAll("[data-chat-starter]")).forEach(function (button) {
-    button.addEventListener("click", function () {
-      els.input.value = button.textContent.trim();
-      updateCounter();
-      els.input.focus();
+
+  // A suggestion is sent at once. While an answer is still being written it is
+  // refused with the usual message rather than silently dropped.
+  function askSuggestion(button) {
+    if (state.busy || hasStreaming()) {
+      showError("answer_in_progress");
+      return;
+    }
+    ask(button.getAttribute("data-chat-origin"), button.getAttribute("data-chat-question") || "");
+  }
+
+  starterButtons.forEach(function (button) {
+    button.addEventListener("click", function () { askSuggestion(button); });
+  });
+  // An inline ask opens the drawer first (counted as an `inline` opening) and waits
+  // for the conversation to load, so the question joins it in order. Further inline
+  // clicks are ignored while one waits, and nothing is sent if the drawer was closed
+  // meanwhile: a question spends from the daily caps.
+  let inlinePending = false;
+  inlineAsks.forEach(function (button) {
+    button.addEventListener("click", async function () {
+      if (inlinePending) {
+        return;
+      }
+      inlinePending = true;
+      try {
+        openDrawer(button, "inline");
+        if (state.historyLoad) {
+          await state.historyLoad;
+        }
+        if (state.open) {
+          askSuggestion(button);
+        }
+      } finally {
+        inlinePending = false;
+      }
     });
   });
   updateCounter();
@@ -1163,7 +1227,7 @@
   // ambiguous.
   function openFromHash() {
     if (window.location.hash === "#chat") {
-      openDrawer(bubble);
+      openDrawer(bubble, "link");
     }
   }
   window.addEventListener("hashchange", openFromHash);

@@ -6,7 +6,7 @@
      <details> inside <main>, and this drawer lives inside <main>.
    * NO <form>: without JavaScript a submit would GET the page with the question in
      the URL. Every control is a type="button" that static/js/assessment_chat.js drives.
-   * The three URLs are JS string literals with the id in the path-parameter slot.
+   * The four URLs are JS string literals with the id in the path-parameter slot.
      That is what credits the routes in tests/unit/test_reachability.py, and why the
      script names no URL of its own. `a.id` is a server-generated UUID; any STRING
      value added here later goes through `| tojson`.
@@ -57,11 +57,17 @@
         This interview may still be running. If the hub updates this verdict, earlier questions stay visible here but are no longer used as context.
     </p>
     <div data-chat-log class="flex-1 space-y-4 overflow-y-auto px-4 py-3"></div>
-    <div data-chat-starters hidden class="space-y-1 px-4 pb-2">
-        <p class="text-sm text-gray-600">Try one of these:</p>
-        <button type="button" data-chat-starter class="block text-left text-sm text-indigo-700 hover:underline">What is being proposed, in plain terms?</button>
-        <button type="button" data-chat-starter class="block text-left text-sm text-indigo-700 hover:underline">What were the hub's main concerns, and how did the lab's agent answer them?</button>
-        <button type="button" data-chat-starter class="block text-left text-sm text-indigo-700 hover:underline">What would Blackbird fund next, and what result would change the recommendation?</button>
+    {# The opening questions (2026-10-05): generated for THIS assessment and the
+       viewer's tier by the worker, else the template set built from the verdict
+       (src/services/assessment_chat_suggestions.py). A click SENDS the question —
+       the line above them says so, because a question spends from the daily
+       caps. `data-chat-origin` is what the ledger's `question_origin` records. #}
+    <div data-chat-starters hidden class="space-y-2 px-4 pb-2">
+        <p class="text-sm text-gray-600">Questions about this assessment. A click sends one:</p>
+        {% for s in chat_suggestions | default([]) %}
+        <button type="button" data-chat-starter data-chat-question="{{ s.text }}" data-chat-origin="drawer_{{ s.kind }}"
+                class="block w-full rounded border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-left text-sm text-indigo-800 hover:bg-indigo-100">{{ s.text }}</button>
+        {% endfor %}
     </div>
     <div class="space-y-2 border-t border-gray-200 px-4 py-3">
         <label for="assessment-chat-question" class="sr-only">Your question</label>
@@ -83,7 +89,8 @@
   window.ASSESSMENT_CHAT = {
     historyUrl: "/assessment-chat/{{ a.id }}",
     askUrl: "/assessment-chat/{{ a.id }}/messages",
-    clearUrl: "/assessment-chat/{{ a.id }}/clear"
+    clearUrl: "/assessment-chat/{{ a.id }}/clear",
+    openedUrl: "/assessment-chat/{{ a.id }}/opened"
   };
 </script>
 <script src="/static/js/assessment_chat.js" defer></script>

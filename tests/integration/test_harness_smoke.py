@@ -83,7 +83,9 @@ async def test_container_is_migrated(engine):
         # 0057 users.email_verified_at / users.session_epoch (web UI remediation §6.6-§6.7)
         # 0058 opportunity_assessments.gating_rationales, pi_companies, job type
         #      company_discovery in a rebuilt one-active-job index (hub 1.10.0)
-        assert v == "0058"
+        # 0059 assessment_chat_suggestions / assessment_chat_opens and
+        #      assessment_chat_usage.question_origin (the chat's opening questions)
+        assert v == "0059"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

@@ -11,6 +11,15 @@ Two tables, split on purpose (docs/specs/2026-09-24-assessment-chat-design.md §
   timestamps. The daily question cap and the dollar ceilings count it, so every
   foreign key is SET NULL: Clear, an assessment's deletion and a user's deletion
   all leave the cost record behind.
+
+Two more (0059), for the drawer's per-assessment opening questions:
+
+* ``assessment_chat_suggestions`` holds the questions the worker generated for one
+  (assessment, tier, verdict revision), or why it could not. They are written from that
+  tier's record, so they are assessment content, not a user's: they CASCADE from the
+  assessment and belong to no user.
+* ``assessment_chat_opens`` is content-free like the ledger: one row per drawer opening,
+  every foreign key SET NULL.
 """
 
 from __future__ import annotations
@@ -27,6 +36,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -71,6 +81,28 @@ TOKEN_FIELDS = (
 #: The partial unique index behind "one answer in flight per user". The ask route
 #: recognises its IntegrityError by this name (§6.2 step 10).
 ONE_STREAMING_INDEX = "uq_assessment_chat_turns_one_streaming_per_user"
+
+#: Where a question came from (0059), recorded on the ledger row: typed into the box, or
+#: a suggestion clicked in the drawer or beside a page section — generated for this
+#: assessment, or the deterministic template set. NULL: asked before 0059, or by a page
+#: that did not say.
+QUESTION_ORIGIN_TYPED = "typed"
+QUESTION_ORIGINS = (
+    QUESTION_ORIGIN_TYPED,
+    "drawer_generated",
+    "drawer_template",
+    "inline_generated",
+    "inline_template",
+)
+
+#: How the drawer was opened (0059): the floating bubble, the list page's `#chat` link,
+#: or an inline question beside a page section.
+OPEN_VIAS = ("bubble", "link", "inline")
+
+SUGGESTION_STATUS_READY = "ready"
+SUGGESTION_STATUS_FAILED = "failed"  # retried, up to the service's attempt cap
+SUGGESTION_STATUS_REFUSED = "refused"  # a refusal; never retried for this revision
+SUGGESTION_STATUSES = (SUGGESTION_STATUS_READY, SUGGESTION_STATUS_FAILED, SUGGESTION_STATUS_REFUSED)
 
 
 def _sql_in(values: tuple[str, ...]) -> str:
@@ -196,6 +228,8 @@ class AssessmentChatUsage(Base):
     #: no usage was recorded at all, which the ceilings count at the reserve; `[]`
     #: means the request is known not to have been billed.
     usage_by_model: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    #: One of QUESTION_ORIGINS (0059). NULL: asked before 0059, or the page did not say.
+    question_origin: Mapped[str | None] = mapped_column(String(20), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -204,6 +238,10 @@ class AssessmentChatUsage(Base):
     __table_args__ = (
         CheckConstraint(
             f"context_tier IN ({_sql_in(CHAT_TIERS)})", name="ck_assessment_chat_usage_tier"
+        ),
+        CheckConstraint(
+            f"question_origin IN ({_sql_in(QUESTION_ORIGINS)})",
+            name="ck_assessment_chat_usage_question_origin",
         ),
         Index("ix_assessment_chat_usage_user_created", "user_id", "created_at"),
         Index("ix_assessment_chat_usage_created", "created_at"),
@@ -217,3 +255,109 @@ class AssessmentChatUsage(Base):
 
     def __repr__(self) -> str:
         return f"<AssessmentChatUsage {self.id} turn={self.turn_id} status={self.status}>"
+
+
+class AssessmentChatSuggestionSet(Base):
+    """The drawer's opening questions for one (assessment, tier, verdict revision), as
+    the worker generated them from that tier's record — or why it could not.
+
+    ``suggestions`` is ``[{"text", "anchor", "label"}]``: the question, the page element
+    id of the verdict block it is about, and that block's record label. A row that is not
+    ``ready`` carries none and the page shows the template set instead. A ``failed`` row
+    is retried in place (``attempts`` counts them, ``usage_by_model`` accumulates every
+    attempt's usage), so the daily ceiling sees what each one cost.
+    """
+
+    __tablename__ = "assessment_chat_suggestions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    assessment_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("opportunity_assessments.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    context_tier: Mapped[str] = mapped_column(String(10), nullable=False)
+    #: COALESCE(assessment.verdict_revision, 1) when generated: a revised verdict gets
+    #: its own row, and the page reads only the current revision's.
+    verdict_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(12), nullable=False)
+    suggestions: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    model: Mapped[str] = mapped_column(String(100), nullable=False)
+    served_by_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    record_sha256_12: Mapped[str] = mapped_column(String(12), nullable=False)
+    prompt_sha256_12: Mapped[str] = mapped_column(String(12), nullable=False)
+    #: The ledger's shape (`[{"model", "billed", <TOKEN_FIELDS>}]`), every attempt's
+    #: entries appended. NULL: no attempt reported usage.
+    usage_by_model: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        # Leads with assessment_id, so it is also the ondelete FK's index.
+        UniqueConstraint(
+            "assessment_id", "context_tier", "verdict_revision",
+            name="uq_assessment_chat_suggestions_key",
+        ),
+        CheckConstraint(
+            f"context_tier IN ({_sql_in(CHAT_TIERS)})", name="ck_assessment_chat_suggestions_tier"
+        ),
+        CheckConstraint(
+            f"status IN ({_sql_in(SUGGESTION_STATUSES)})",
+            name="ck_assessment_chat_suggestions_status",
+        ),
+        Index("ix_assessment_chat_suggestions_updated", "updated_at"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<AssessmentChatSuggestionSet {self.id} assessment={self.assessment_id} "
+            f"tier={self.context_tier} status={self.status}>"
+        )
+
+
+class AssessmentChatOpen(Base):
+    """One opening of the drawer. Content-free; outlives its user and assessment."""
+
+    __tablename__ = "assessment_chat_opens"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    assessment_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("opportunity_assessments.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    context_tier: Mapped[str] = mapped_column(String(10), nullable=False)
+    #: One of OPEN_VIAS; NULL when the page did not say.
+    opened_via: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            f"context_tier IN ({_sql_in(CHAT_TIERS)})", name="ck_assessment_chat_opens_tier"
+        ),
+        CheckConstraint(
+            f"opened_via IN ({_sql_in(OPEN_VIAS)})", name="ck_assessment_chat_opens_via"
+        ),
+        Index("ix_assessment_chat_opens_user_id", "user_id"),
+        Index("ix_assessment_chat_opens_assessment_id", "assessment_id"),
+        Index("ix_assessment_chat_opens_created", "created_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<AssessmentChatOpen {self.id} assessment={self.assessment_id} via={self.opened_via}>"

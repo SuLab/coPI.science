@@ -71,6 +71,7 @@ from src.services import directory
 from src.services.admin_provisioning import ProvisioningError, start_provisioning
 from src.services.agent_activation import activation_blockers, ensure_activation_allowed
 from src.services.agent_mute import set_agent_mute_state
+from src.services.assessment_chat_suggestions import page_suggestions
 from src.services.assessment_detail import build_assessment_detail
 from src.services.assessment_reviews import (
     MAX_ANALYSES_PER_PRESS,
@@ -1061,10 +1062,17 @@ async def manager_assessment_detail(
     )
     if detail is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
+    chat_suggestions = await page_suggestions(
+        db, detail, current_user,
+        chat_enabled=getattr(request.app.state, "assessment_chat_enabled", False) is True,
+    )
     return templates.TemplateResponse(
         request,
         "manager/assessment_detail.html",
-        _template_context(request, current_user, active_manager="assessments", **detail),
+        _template_context(
+            request, current_user, active_manager="assessments",
+            chat_suggestions=chat_suggestions, **detail,
+        ),
     )
 
 

@@ -148,7 +148,7 @@ def test_the_chat_script_carries_the_b1_and_sec_fixes():
     # SW-7: Safari's IME-confirming Enter.
     assert "event.keyCode === 229" in js
     # SW-1: reopening (or a second opener click) while already open is a no-op.
-    open_drawer = js.split("function openDrawer(opener)", 1)[1].split("\n  }\n", 1)[0]
+    open_drawer = js.split("function openDrawer(opener, via)", 1)[1].split("\n  }\n", 1)[0]
     assert "if (state.open) {" in open_drawer
 
 

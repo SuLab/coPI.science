@@ -1,4 +1,4 @@
-"""The chat's three routes (spec §6, §9): who may call them, what they refuse, the
+"""The chat's routes (spec §6, §9): who may call them, what they refuse, the
 headers they send, and one question streamed end to end."""
 
 import logging
@@ -53,12 +53,13 @@ async def _user(db_session, role):
     return await factories.make_user(db_session, user_role=role)
 
 
-def test_the_router_has_exactly_the_three_routes():
+def test_the_router_has_exactly_the_four_routes():
     routes = {(tuple(sorted(route.methods)), route.path) for route in chat_router.router.routes}
     assert routes == {
         (("GET",), "/{assessment_id}"),
         (("POST",), "/{assessment_id}/messages"),
         (("POST",), "/{assessment_id}/clear"),
+        (("POST",), "/{assessment_id}/opened"),
     }
 
 

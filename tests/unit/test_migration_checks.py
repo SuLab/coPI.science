@@ -277,9 +277,9 @@ def test_supported_start_revisions_are_exactly_the_documented_set():
         "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028",
         "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038",
         "0039", "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048",
-        "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056", "0057",
+        "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058",
     )
-    assert pf.DEFAULT_TARGET == "0058"
+    assert pf.DEFAULT_TARGET == "0059"
 
 
 def test_every_post_branch_revision_is_a_supported_start():
@@ -1871,6 +1871,36 @@ def test_0058_plans_its_new_objects_and_not_the_rebuilt_index():
         ("constraint", "ck_pi_companies_status"),
         ("constraint", "ck_pi_companies_origin"),
         ("index", "ix_pi_companies_user_id"),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# 0059: the chat's opening questions, drawer openings and question origins
+# --------------------------------------------------------------------------- #
+
+
+def test_0059_sizes_only_the_usage_ledger_and_takes_no_agent_messages_lock():
+    """The new column locks assessment_chat_usage; both new tables are created."""
+    assert pf.tables_sized_between("0058", "0059") == ["assessment_chat_usage"]
+    assert pf.agent_messages_ddl_pending("0058", "0059") is False
+
+
+def test_0059_plans_its_new_objects():
+    planned = {(o.kind, o.name) for o in pf.planned_objects_between("0058", "0059")}
+    assert planned == {
+        ("column", "question_origin"),
+        ("constraint", "ck_assessment_chat_usage_question_origin"),
+        ("table", "assessment_chat_suggestions"),
+        ("constraint", "uq_assessment_chat_suggestions_key"),
+        ("constraint", "ck_assessment_chat_suggestions_tier"),
+        ("constraint", "ck_assessment_chat_suggestions_status"),
+        ("index", "ix_assessment_chat_suggestions_updated"),
+        ("table", "assessment_chat_opens"),
+        ("constraint", "ck_assessment_chat_opens_tier"),
+        ("constraint", "ck_assessment_chat_opens_via"),
+        ("index", "ix_assessment_chat_opens_user_id"),
+        ("index", "ix_assessment_chat_opens_assessment_id"),
+        ("index", "ix_assessment_chat_opens_created"),
     }
 
 

@@ -38,13 +38,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import get_settings
 from src.database import get_session_factory
-from src.models import AssessmentChatTurn, AssessmentChatUsage, OpportunityAssessment, SimulationRun
+from src.models import (
+    AssessmentChatOpen,
+    AssessmentChatTurn,
+    AssessmentChatUsage,
+    OpportunityAssessment,
+    SimulationRun,
+)
 from src.models.assessment_chat import (
     CHAT_REPLAYABLE_STATUSES,
     CHAT_STATUS_FAILED,
     CHAT_STATUS_INTERRUPTED,
     CHAT_STATUS_STREAMING,
     ONE_STREAMING_INDEX,
+    OPEN_VIAS,
+    QUESTION_ORIGINS,
 )
 from src.services.assessment_chat_record import ChatRecord, load_chat_record, tier_for
 from src.services.assessment_chat_stream import (
@@ -151,6 +159,12 @@ def validate_question(raw: object, *, max_chars: int) -> str:
     except UnicodeEncodeError:
         raise ChatError(400, "invalid_question") from None
     return question
+
+
+def question_origin(raw: object) -> str | None:
+    """The ledger's `question_origin` for what the page sent: one of QUESTION_ORIGINS,
+    else None. A counter, not a control, so an unknown value is dropped, not refused."""
+    return raw if isinstance(raw, str) and raw in QUESTION_ORIGINS else None
 
 
 def load_system_prompt() -> tuple[str, str]:
@@ -484,6 +498,7 @@ def _new_rows(
     prompt_sha: str,
     created_at: datetime,
     verdict_revision: int,
+    origin: str | None = None,
 ) -> tuple[AssessmentChatTurn, AssessmentChatUsage]:
     turn = AssessmentChatTurn(
         id=uuid.uuid4(),
@@ -508,6 +523,7 @@ def _new_rows(
         context_tier=tier,
         model=model,
         status=CHAT_STATUS_STREAMING,
+        question_origin=origin,
         created_at=created_at,
     )
     return turn, usage
@@ -561,7 +577,12 @@ async def _take_spend_lock(db: AsyncSession) -> None:
 
 
 async def prepare_turn(
-    db: AsyncSession, *, assessment_id: uuid.UUID, user: Any, question_raw: object
+    db: AsyncSession,
+    *,
+    assessment_id: uuid.UUID,
+    user: Any,
+    question_raw: object,
+    origin_raw: object = None,
 ) -> PreparedTurn:
     """§6.2 steps 2-10, cheapest first; the router has already refused impersonation,
     a disabled chat, an unknown assessment and a non-JSON body. Raises ChatError for
@@ -637,6 +658,7 @@ async def prepare_turn(
         prompt_sha=prompt_sha,
         created_at=created_at,
         verdict_revision=revision,
+        origin=question_origin(origin_raw),
     )
     try:
         # A SAVEPOINT, so the one-in-flight IntegrityError rolls back only these two
@@ -1048,3 +1070,19 @@ async def clear_history(db: AsyncSession, *, assessment_id: uuid.UUID, user_id: 
     ).scalars().all()
     await db.commit()
     return len(deleted)
+
+
+async def record_open(
+    db: AsyncSession, *, assessment_id: uuid.UUID, user: Any, via_raw: object
+) -> None:
+    """One content-free row per drawer opening: who (a SET NULL reference), which
+    assessment, the tier, and how it was opened (one of OPEN_VIAS, else NULL)."""
+    db.add(
+        AssessmentChatOpen(
+            user_id=user.id,
+            assessment_id=assessment_id,
+            context_tier=tier_for(user),
+            opened_via=via_raw if isinstance(via_raw, str) and via_raw in OPEN_VIAS else None,
+        )
+    )
+    await db.commit()

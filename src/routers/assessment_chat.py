@@ -1,10 +1,11 @@
-"""The assessment chat's three routes (docs/specs/2026-09-24-assessment-chat-design.md §6).
+"""The assessment chat's routes (docs/specs/2026-09-24-assessment-chat-design.md §6),
+plus the drawer-opening counter (docs/operations/assessment-chat.md, "Opening questions").
 
 Mounted at /assessment-chat for admin, manager and reviewer alike. Every route, in
 order: 403 while impersonating (a history is private, and asking spends money — the
 reviews router's `generate_prompt_suggestions` precedent), 403 for a signed-in user
 who is neither staff nor reviewer, 503 when the chat is switched off, 404 for an
-unknown or malformed assessment id, and for both POSTs 415 unless the body is JSON:
+unknown or malformed assessment id, and for every POST 415 unless the body is JSON:
 FastAPI parses a body with no content type as JSON, and a sibling tenant's `no-cors`
 fetch sends none, so this closes that path in addition to OriginGuardMiddleware. No
 conversation or turn id is ever taken from the client — every read and write is keyed
@@ -86,12 +87,12 @@ async def _exists(db: AsyncSession, assessment_id: uuid.UUID) -> bool:
     return found is not None
 
 
-async def _question(request: Request) -> object:
+async def _body(request: Request) -> dict:
     try:
         body = await request.json()
     except ValueError:  # malformed JSON, or bytes that are not UTF-8
-        return None
-    return body.get("question") if isinstance(body, dict) else None
+        return {}
+    return body if isinstance(body, dict) else {}
 
 
 async def _storage_error(
@@ -158,8 +159,13 @@ async def assessment_chat_ask(
             return _error(404, "not_found")
         if not _is_json(request):
             return _error(415, "unsupported_media_type")
+        body = await _body(request)
         prepared = await chat.prepare_turn(
-            db, assessment_id=parsed_id, user=current_user, question_raw=await _question(request)
+            db,
+            assessment_id=parsed_id,
+            user=current_user,
+            question_raw=body.get("question"),
+            origin_raw=body.get("origin"),
         )
     except chat.ChatError as err:
         return _error(err.status, err.code, **err.extra)
@@ -199,3 +205,31 @@ async def assessment_chat_clear(
     except SQLAlchemyError as exc:
         return await _storage_error(db, exc, "clear", parsed_id, user_id)
     return JSONResponse({"deleted": deleted}, headers=_NO_STORE)
+
+
+@router.post("/{assessment_id}/opened")
+async def assessment_chat_opened(
+    assessment_id: str,
+    request: Request,
+    db: AsyncSession = _DB,
+    current_user: User = _USER,
+) -> JSONResponse:
+    """Count one opening of the drawer (content-free; see ``chat.record_open``). Refused
+    exactly as the other routes are, so an impersonated session is never counted."""
+    user_id = current_user.id
+    refused = _refused(request, current_user)
+    if refused is not None:
+        return refused
+    parsed_id = _parse_assessment_id(assessment_id)
+    if parsed_id is None:
+        return _error(404, "not_found")
+    try:
+        if not await _exists(db, parsed_id):
+            return _error(404, "not_found")
+        if not _is_json(request):
+            return _error(415, "unsupported_media_type")
+        body = await _body(request)
+        await chat.record_open(db, assessment_id=parsed_id, user=current_user, via_raw=body.get("via"))
+    except SQLAlchemyError as exc:
+        return await _storage_error(db, exc, "opened", parsed_id, user_id)
+    return JSONResponse({"ok": True}, headers=_NO_STORE)

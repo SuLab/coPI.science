@@ -19,7 +19,7 @@ def test_polls_ask_for_the_sweepless_history():
 def test_modality_is_re_evaluated_on_resize():
     assert "function applyModality()" in JS
     assert 'WIDE.addEventListener("change"' in JS
-    assert "applyModality();" in _body("function openDrawer(opener)")
+    assert "applyModality();" in _body("function openDrawer(opener, via)")
 
 
 def test_render_keeps_scroll_position_and_focus():

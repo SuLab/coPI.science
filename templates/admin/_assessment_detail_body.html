@@ -45,6 +45,27 @@
    offers text, never a control that would. #}
 {% set chat_enabled = request is defined and request.app is defined and request.app.state.assessment_chat_enabled is sameas true %}
 {% set chat_available = chat_enabled and not impersonation_banner %}
+{# Inline asks (2026-10-05): the opening questions that are about one page section,
+   shown at the end of that section. `chat_suggestions` comes from the route
+   (src/services/assessment_chat_suggestions.py::page_suggestions) and `section` is
+   each question's home section, or None for drawer-only. Rendered only where the
+   drawer is (`chat_available`), since a click opens it and SENDS the question;
+   static/js/assessment_chat.js drives `data-chat-ask`. Passed in explicitly: a macro
+   does not see this template's top-level `set`s. #}
+{% macro chat_asks(section, available, suggestions) %}
+{% if available %}
+{% set asks = (suggestions or []) | selectattr('section', 'equalto', section) | list %}
+{% if asks %}
+<div class="chat-asks print:hidden mt-4 flex flex-wrap gap-2">
+    {% for s in asks %}
+    <button type="button" data-chat-ask data-chat-question="{{ s.text }}" data-chat-origin="inline_{{ s.kind }}"
+            title="Ask the assessment chat (sends this question)"
+            class="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-left text-sm text-indigo-800 hover:bg-indigo-100"><span class="font-semibold">Ask:</span> {{ s.text }}</button>
+    {% endfor %}
+</div>
+{% endif %}
+{% endif %}
+{% endmacro %}
 {# FIVE values. The live vocabulary is `blocking`/`gap`/`adequate` (2026-08-28);
    `caution`/`clear` are what every consult stored before that date holds, and
    no row was rewritten — so both vocabularies render here, historical ones in
@@ -253,6 +274,7 @@
     </div>
     {% endif %}
     {% endif %}
+    {{ chat_asks('brief', chat_available, chat_suggestions) }}
 </div>
 
 {# --------------------------------------------------------------------------
@@ -511,6 +533,7 @@
         The hub's account of the score is in <a class="text-indigo-700 underline-offset-2 hover:underline" href="#score-rationale">Why this score</a> above.
         {% endif %}
     </p>
+    {{ chat_asks('signals', chat_available, chat_suggestions) }}
 </div>
 
 {# Sidecar item 5 (rubric v2.1.0) — moved directly under the brief
@@ -543,6 +566,7 @@
     <p class="assessment-next-experiment whitespace-pre-line">{{ plain_citations(ask_text) }}</p>
     {% endif %}
     </div>
+    {{ chat_asks('ask', chat_available, chat_suggestions) }}
 </div>
 {% endif %}
 
@@ -704,6 +728,7 @@
             <span class="font-mono">{{ rubric_version }}</span>.
         {% endif %}
     </div>
+    {{ chat_asks('verdict', chat_available, chat_suggestions) }}
 </div>
 
 {# Panel status. FIVE states — see OpportunityAssessment.missing_domains /
@@ -794,6 +819,7 @@
             {% endfor %}
         </div>
     {% endif %}
+    {{ chat_asks('panel', chat_available, chat_suggestions) }}
 </div>
 
 {# Gating and Red flags used to share one grid — split
@@ -847,6 +873,7 @@
     {% else %}
         <p class="text-sm text-gray-600">No gating recorded.</p>
     {% endif %}
+    {{ chat_asks('gating', chat_available, chat_suggestions) }}
 </div>
 </details>
 
@@ -862,6 +889,7 @@
     {% else %}
         <p class="text-sm text-gray-600">None recorded.</p>
     {% endif %}
+    {{ chat_asks('red-flags', chat_available, chat_suggestions) }}
 </div>
 
 {% if a.rationale %}
@@ -887,6 +915,7 @@
     </div>
     {% endif %}
     </div>
+    {{ chat_asks('rationale', chat_available, chat_suggestions) }}
 </div>
 </details>
 {% endif %}
@@ -941,6 +970,7 @@
         values and the weights of the revision that scored them
         (src/services/blackbird_rubric.py) — an unscored dimension counted as zero.
     </p>
+    {{ chat_asks('scores', chat_available, chat_suggestions) }}
 </div>
 </details>
 

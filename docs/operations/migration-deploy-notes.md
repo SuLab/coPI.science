@@ -1036,3 +1036,47 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > rows); the column and the table are harmless to it. `alembic downgrade 0057` drops the
 > column, `pi_companies` and every company row, and restores 0056's predicate; the enum
 > value stays (Postgres has no DROP VALUE), as `0039`'s and `0047`'s do.
+
+> **Deploy order for `0059_assessment_chat_suggestions` — migrate BEFORE the new web app
+> and worker serve, with the WORKER IDLE; then web and worker in one `up -d`; no agent
+> rebuild.** `0059` adds `assessment_chat_suggestions` (the chat drawer's generated
+> opening questions per assessment, tier and verdict revision; CASCADE with the
+> assessment), `assessment_chat_opens` (one content-free row per drawer opening; both
+> foreign keys SET NULL) and `assessment_chat_usage.question_origin` (varchar, NULL before
+> `0059`, never backfilled). Design: `docs/operations/assessment-chat.md`, "Opening
+> questions".
+>
+> *Old code on the new schema* is safe: nothing old reads either table or the column.
+> *New code on the old schema* is not: `AssessmentChatUsage` maps `question_origin`, so
+> every chat question and every ledger read raises `UndefinedColumn`, and both assessment
+> detail pages select `assessment_chat_suggestions` (`UndefinedTable`, a 500 on every
+> detail page). **Agent image:** no rebuild — the engine reads none of the three, and
+> nothing under `src/agent/` changed.
+>
+> **The worker must be idle** (no `processing` row) when `--apply` runs: the new foreign
+> keys lock `users` and `opportunity_assessments` briefly, the worker holds its
+> transaction across a whole pipeline run, and the chain's 10 s `lock_timeout` then rolls
+> the chain back. Check with
+> `$DC exec -T postgres psql -U copi -d copi -c "select count(*) from jobs where status='processing'"`
+> (must print 0), or `$DC stop worker` for the migration. Commit before building.
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     for s in blackbird-app worker; do
+>       docker image tag copi-blackbird-$s:latest copi-blackbird-$s:rollback-pre-0059
+>     done
+>     $DC build blackbird-app worker
+>     ./scripts/migrate/run_migration.sh              # rehearse (writes nothing)
+>     ./scripts/migrate/run_migration.sh --apply      # dump → preflight → apply → postflight
+>     $DC run --rm blackbird-app alembic current      # must equal `alembic heads` (0059)
+>     $DC up -d blackbird-app worker
+>
+> **The new worker starts spending on its own:** while idle it generates a set for every
+> assessment, newest first, about $0.50 each (`claude-opus-5`), within
+> `ASSESSMENT_CHAT_SUGGESTIONS_DAILY_USD_LIMIT` (default $30 a rolling day). To hold it,
+> set `ASSESSMENT_CHAT_SUGGESTIONS_ENABLED=false` in `.env` before the worker comes up.
+> Nothing here touches the prompt set or the rubric, so no fresh-run requirement, and
+> nothing starts a run.
+>
+> Rollback: redeploy the `rollback-pre-0059` images; the tables and the column are
+> harmless to them. `alembic downgrade 0058` drops both tables, every row in them and the
+> column.

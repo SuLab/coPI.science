@@ -10,6 +10,7 @@ from src.database import get_db
 from src.dependencies import get_admin_user
 from src.models import User
 from src.routers.admin._common import _ADMIN, _DB, _template_context, router, templates
+from src.services.assessment_chat_suggestions import page_suggestions
 from src.services.assessment_detail import build_assessment_detail
 from src.services.directory import list_assessments
 
@@ -101,8 +102,15 @@ async def admin_assessment_detail(
     )
     if detail is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
+    chat_suggestions = await page_suggestions(
+        db, detail, current_user,
+        chat_enabled=getattr(request.app.state, "assessment_chat_enabled", False) is True,
+    )
     return templates.TemplateResponse(
         request,
         "admin/assessment_detail.html",
-        _template_context(request, current_user, active_admin="assessments", **detail),
+        _template_context(
+            request, current_user, active_admin="assessments",
+            chat_suggestions=chat_suggestions, **detail,
+        ),
     )
