@@ -461,7 +461,9 @@ async def test_human_review_card_sits_between_dimension_scores_and_the_timeline(
 ):
     """The Human review card moved between the Dimension scores card and the
     Interview timeline section (a pure reorder), on BOTH surfaces — the shared
-    body template. String-index comparison of three stable headings."""
+    body template. String-index comparison of three stable anchors; the scores
+    card is found by its id, because the Evidence summary above it also labels
+    a group "Dimension scores"."""
     _, assessment = await _seed(db_session)
 
     for path, user in (
@@ -471,7 +473,7 @@ async def test_human_review_card_sits_between_dimension_scores_and_the_timeline(
         resp = await client.get(path, headers=auth_headers(user.id))
         assert resp.status_code == 200
         html = resp.text
-        dimension_scores_at = html.index("Dimension scores")
+        dimension_scores_at = html.index('<details id="scores"')
         human_review_at = html.index("Human review")
         timeline_at = html.index("Interview timeline")
         assert dimension_scores_at < human_review_at < timeline_at, (
@@ -2628,6 +2630,136 @@ async def test_consults_in_one_domain_render_as_a_single_entry_from_the_latest(
     assert "signal-source-consult" not in strengths
 
 
+_GROUP_LABELS = {
+    "dimension": "Dimension scores",
+    "gating": "Gating criteria",
+    "red_flag": "Red flags",
+    "consult": "Specialist consults",
+}
+
+
+def _signal_groups(section: str) -> list[tuple[str, list[str]]]:
+    """(group source, [row sources]) for each labelled group in one section
+    slice, in render order. Each group's slice ends where the next group
+    begins, so a row is attributed to the group it renders under."""
+    marker = 'class="signal-group signal-group-'
+    chunks = section.split(marker)[1:]
+    groups = []
+    for chunk in chunks:
+        source = chunk.split('"', 1)[0]
+        label = _GROUP_LABELS.get(source, "Other")
+        assert f">{label}</div>" in chunk, f"group {source!r} is missing its {label!r} label"
+        groups.append((source, re.findall(r"signal-source-([a-z_]+)", chunk)))
+    return groups
+
+
+async def test_each_sections_derived_rows_are_grouped_and_labelled_by_source(
+    client, db_session, admin
+):
+    """A section mixes evidence of different kinds — dimension scores, gates,
+    red flags, specialist consults — and each kind renders as its own labelled
+    group, in the service's append order, with every row under the group of
+    its own source and none lost or duplicated by the split."""
+    from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH, RUBRIC_VERSION
+
+    run = await factories.make_simulation_run(db_session)
+    root_ts = f"{time.time():.6f}"
+    await factories.make_agent_message(
+        db_session, run=run, agent_id=SUBJECT, channel_name=CHANNEL,
+        message_ts=root_ts, phase="new_post",
+        content="Root post for the grouping test.", posted_at=time.time(),
+    )
+    for domain, signal, truncated in (
+        ("clinical", "adequate", False), ("legal", "gap", False),
+        ("commercial", "gap", True),
+    ):
+        db_session.add(
+            SpecialistConsult(
+                simulation_run_id=run.id, agent_id=HUB, subject_agent_id=SUBJECT,
+                thread_id=root_ts, channel_name=CHANNEL, domain=domain,
+                question=f"q-{domain}", verdict_signal=signal, confidence="moderate",
+                established=["ESTABLISHED-GROUP-MARKER"] if signal == "adequate" else None,
+                concerns=["CONCERN-GROUP-MARKER"] if signal == "gap" else None,
+                raw_opinion="not shown on this page", truncated=truncated,
+            )
+        )
+    assessment = OpportunityAssessment(
+        simulation_run_id=run.id, agent_id=HUB, subject_agent_id=SUBJECT,
+        channel_name=CHANNEL, slack_ts=root_ts,
+        company_or_project="Grouped Evidence Fixture Co",
+        recommendation="conditional", weighted_score=3.20, band="conditional",
+        rubric_version=RUBRIC_VERSION, rubric_content_hash=RUBRIC_CONTENT_HASH,
+        # One strength, one risk, one mid-scale; the other three are unscored.
+        scores={"scientific_credibility": 5, "venture_potential": 1, "translational_path": 3},
+        gating={
+            "life_sciences_domain": "met", "credible_science": "not_met",
+            "translational_potential": "unconfirmed",
+        },
+        red_flags=["RED-FLAG-GROUP-MARKER"],
+    )
+    db_session.add(assessment)
+    await db_session.flush()
+
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    strengths, risks, unestablished = _signal_columns(body)
+    card = _signals_card(body)
+    neutral = card[card.index("assessment-signals-neutral"):card.index("assessment-signals-unestablished")]
+
+    assert _signal_groups(strengths) == [
+        ("dimension", ["dimension"]), ("gating", ["gating"]), ("consult", ["consult"]),
+    ]
+    assert _signal_groups(risks) == [
+        ("dimension", ["dimension"]), ("gating", ["gating"]),
+        ("red_flag", ["red_flag"]), ("consult", ["consult"]),
+    ]
+    assert _signal_groups(neutral) == [("dimension", ["dimension"])]
+    assert _signal_groups(unestablished) == [
+        ("dimension", ["dimension"] * 3), ("gating", ["gating"]), ("consult", ["consult"]),
+    ]
+    # The rows' own text still lands in the right section.
+    assert "ESTABLISHED-GROUP-MARKER" in strengths
+    assert "CONCERN-GROUP-MARKER" in risks and "RED-FLAG-GROUP-MARKER" in risks
+    # A red flag is not re-labelled "Red flag" under its "Red flags" group.
+    red_flag_group = risks.split("signal-group-red_flag", 1)[1].split("signal-group-consult", 1)[0]
+    assert "RED-FLAG-GROUP-MARKER" in red_flag_group
+    assert '<span class="font-semibold">Red flag</span>' not in red_flag_group
+    # The footnote no longer credits red flags to the specialists.
+    provenance = " ".join(body.split("signals-provenance", 1)[1].split("</p>", 1)[0].split())
+    assert "derived rows quote the specialists" not in provenance
+    assert "red-flag rows BlackbirdBot's own red flags" in provenance
+
+
+async def test_a_row_of_an_unknown_source_renders_under_other_rather_than_vanishing(
+    client, db_session, admin, monkeypatch
+):
+    """The groups select rows by a fixed list of sources. A source outside it
+    must still render, under "Other": silently dropping it would make the
+    section look emptier than the stored verdict is."""
+    from src.services import assessment_detail as assessment_detail_module
+
+    real = assessment_detail_module.derive_strengths_and_risks
+
+    def with_unknown_source(*args, **kwargs):
+        signals = real(*args, **kwargs)
+        signals["risks"].append({
+            "source": "mystery", "label": "MYSTERY-SOURCE-ROW", "detail": "x",
+            "body": [], "preview": None, "note": None, "rationale": None,
+        })
+        return signals
+
+    monkeypatch.setattr(assessment_detail_module, "derive_strengths_and_risks", with_unknown_source)
+    _, assessment = await _seed(db_session)
+    body = _main((await client.get(
+        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+    )).text)
+    _strengths, risks, _unestablished = _signal_columns(body)
+    groups = _signal_groups(risks)
+    assert groups[-1] == ("other", ["mystery"])
+    assert "MYSTERY-SOURCE-ROW" in risks.split('signal-group-other', 1)[1]
+
+
 async def test_the_score_rationale_pointer_is_conditional(client, db_session, admin):
     """The footnote's jump-link to `#score-rationale` only appears when the
     row has a score rationale; the anchor is added to the amber box either
@@ -2958,6 +3090,8 @@ async def test_a_midscale_dimension_is_listed_with_its_reason(client, db_session
     assert "signal-midscale" in neutral
     assert "MIDSCALE-REASON" in neutral
     assert 'class="signal-rationale' in neutral
+    # Labelled as the hub's, as the Gating card labels a gate's reason.
+    assert "Hub's reason: MIDSCALE-REASON" in neutral
     strengths, risks, _unestablished = _signal_columns(body)
     # The mid-scale row and its reason stay out of the coloured columns...
     assert "MIDSCALE-REASON" not in strengths and "MIDSCALE-REASON" not in risks

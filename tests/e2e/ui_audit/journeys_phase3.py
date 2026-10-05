@@ -217,7 +217,9 @@ def _detail_gates_ok(rows: list[dict], titles: dict[str, str], *, with_reasons: 
         if not r["second_visible"] or r["titles"] or r["info_glyph"]:
             return False
         if with_reasons:
-            if r["is_definition"] or r["second"] != P3_GATING_RATIONALES[by_title[r["label"]]]:
+            if r["is_definition"] or r["second"] != (
+                "Hub's reason: " + P3_GATING_RATIONALES[by_title[r["label"]]]
+            ):
                 return False
         elif not (r["is_definition"] and r["second"].startswith("Rubric definition:")):
             return False
@@ -244,7 +246,7 @@ def _card_gates_ok(rows: list[dict] | None, titles: dict[str, str], *,
 
 async def journey_gate_lines(h) -> dict:
     """Spec §5.2: on both seeded detail pages every gate row of the Evidence summary
-    (#signals) has a visible second line, the hub's reason on the row with
+    (#signals) has a visible second line, "Hub's reason: …" on the row with
     `gating_rationales` and "Rubric definition: …" on the row without, labelled with
     the rubric title and with no title tooltip; on the list card each gate is its own
     line carrying one reason or definition."""

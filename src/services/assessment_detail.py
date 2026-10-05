@@ -1422,10 +1422,13 @@ def derive_strengths_and_risks(
     there is nothing stored to quote, so the template can test truthiness
     without `.get`. The template collapses only a consult or red-flag entry
     with a non-empty `body` into a `<details>` whose summary is `label —
-    detail`, the `note` badge and the one-line `preview`. A dimension's body
+    detail` (a red flag's `detail` alone: the template groups rows under a
+    label per `source`, and "Red flags" already names it), the `note` badge
+    and the one-line `preview`. A dimension's body
     (its weight) renders inline after its detail; a gate's body (its rubric
     definition) renders as a visible "Rubric definition: …" second line, and
-    only when the gate has no `rationale`, which takes that line instead; an
+    only when the gate has no `rationale`, which takes that line instead,
+    prefixed "Hub's reason:" (as on a dimension row); an
     entry with an empty body is a plain bullet. Consults are ONE ENTRY PER
     DOMAIN, from the domain's latest
     consult (`_latest_consult_per_domain`), with `note` = "latest of N

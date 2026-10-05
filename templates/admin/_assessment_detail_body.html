@@ -318,9 +318,12 @@
    `glyph[1]` then raises, 500ing the page. Layout is a
    single full-width line: glyph, label — detail, an optional count badge,
    and (consults only) a preview clamped to two lines; the
-   quoted text sits behind the click. A dimension or gate row may add a muted,
+   quoted text sits behind the click. A red flag shows its detail alone: every
+   red-flag row's label is the literal "Red flag", which its "Red flags" group
+   label already says. A dimension or gate row may add a muted,
    VISIBLE second line: the hub's own one-sentence reason (`item.rationale`:
-   `dimension_rationales`, 0052, or `gating_rationales`, 0058). A gate with no
+   `dimension_rationales`, 0052, or `gating_rationales`, 0058), prefixed
+   "Hub's reason:" as the Gating card prefixes the same text. A gate with no
    stored reason shows its rubric definition there instead (`item.body`,
    prefixed "Rubric definition:" so it is never read as a finding about this
    proposal, spec §5.2), and a gate whose row's revision defines nothing shows
@@ -338,11 +341,11 @@
            clause of a risk's first sentence survives. #}
         <summary class="cursor-pointer list-none [&::-webkit-details-marker]:hidden flex flex-wrap items-baseline gap-x-2 gap-y-0.5 min-w-0">
             <span class="{{ glyph[1] }} shrink-0" role="img" title="{{ glyph[2] }}" aria-label="{{ glyph[2] }}">{{ glyph[0] | safe }}</span>
-            <span><span class="font-semibold">{{ item.label }}</span> &mdash; {{ item.detail }}</span>
+            <span>{% if item.source != 'red_flag' %}<span class="font-semibold">{{ item.label }}</span> &mdash; {% endif %}{{ item.detail }}</span>
             {% if item.note %}<span class="signal-note whitespace-nowrap rounded-full border border-gray-300 px-2 text-sm text-gray-700">{{ item.note }}</span>{% endif %}
             <span class="ml-auto text-sm text-gray-600 select-none"><span class="group-open:hidden">show</span><span class="hidden group-open:inline">hide</span></span>
             {% if item.preview %}<span class="signal-preview basis-full ml-6 line-clamp-2 text-sm text-gray-600 group-open:hidden">{{ item.preview }}</span>{% endif %}
-            {% if item.rationale %}<span class="signal-rationale basis-full ml-6 text-sm text-gray-600">{{ item.rationale }}</span>{% endif %}
+            {% if item.rationale %}<span class="signal-rationale basis-full ml-6 text-sm text-gray-600">Hub's reason: {{ item.rationale }}</span>{% endif %}
         </summary>
         <div class="mt-1 ml-6">
             {% if item.source == 'consult' %}
@@ -366,7 +369,7 @@
     {% else %}
     <div class="flex items-baseline gap-x-2 min-w-0">
         <span class="{{ glyph[1] }} shrink-0" role="img" title="{{ glyph[2] }}" aria-label="{{ glyph[2] }}">{{ glyph[0] | safe }}</span>
-        <span><span class="font-semibold">{{ item.label }}</span> &mdash; {{ item.detail }}{% if item.source == 'dimension' and item.body %} <span class="text-sm text-gray-600">&middot; {{ item.body | join(' ') }}</span>{% endif %}</span>
+        <span>{% if item.source != 'red_flag' %}<span class="font-semibold">{{ item.label }}</span> &mdash; {% endif %}{{ item.detail }}{% if item.source == 'dimension' and item.body %} <span class="text-sm text-gray-600">&middot; {{ item.body | join(' ') }}</span>{% endif %}</span>
         {% if item.note %}<span class="signal-note shrink-0 whitespace-nowrap rounded-full border border-gray-300 px-2 text-sm text-gray-700">{{ item.note }}</span>{% endif %}
     </div>
     {# A block line under the flex row rather than a `basis-full` item inside
@@ -375,10 +378,37 @@
        full-basis item there would be squeezed onto the same line. A gate with
        no stored reason shows its rubric definition on the same line, prefixed
        so it is never read as a finding about this proposal (spec §5.2). #}
-    {% if item.rationale %}<span class="signal-rationale block ml-6 text-sm text-gray-600">{{ item.rationale }}</span>
+    {% if item.rationale %}<span class="signal-rationale block ml-6 text-sm text-gray-600">Hub's reason: {{ item.rationale }}</span>
     {% elif item.source == 'gating' and item.body %}<span class="signal-rationale signal-gate-definition block ml-6 text-sm text-gray-600">Rubric definition: {{ item.body | join(' ') }}</span>{% endif %}
     {% endif %}
 </li>
+{% endmacro %}
+{# A section's derived rows, split into one labelled group per evidence source
+   (2026-10-05): a section mixes dimension scores, gates, red flags and
+   specialist consults, and one flat list left a reader to infer each row's
+   kind from its label. The groups follow `derive_strengths_and_risks`' own
+   append order. The first three labels match the page's Dimension scores,
+   Gating criteria and Red flags cards; consults are in the Specialist panel
+   banner and on the interview timeline.
+   A row whose `source` is not in this list renders under "Other" rather than
+   vanishing: a dropped row would make a section look emptier than the stored
+   verdict is. #}
+{% macro signal_groups(items, kind) %}
+{% set sources = [('dimension', 'Dimension scores'), ('gating', 'Gating criteria'), ('red_flag', 'Red flags'), ('consult', 'Specialist consults')] %}
+{% set other = items | rejectattr('source', 'in', sources | map('first') | list) | list %}
+<div class="signal-groups mt-1 space-y-2">
+    {% for source, title in sources + [('other', 'Other')] %}
+    {% set group = other if source == 'other' else items | selectattr('source', 'equalto', source) | list %}
+    {% if group %}
+    <div class="signal-group signal-group-{{ source }}">
+        <div class="signal-group-label text-sm font-medium text-gray-700">{{ title }}</div>
+        <ul class="signal-derived mt-0.5 text-base leading-relaxed text-gray-700">
+            {% for item in group %}{{ signal_row(item, kind) }}{% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+    {% endfor %}
+</div>
 {% endmacro %}
 <div id="signals" class="assessment-signals scroll-mt-16 max-md:scroll-mt-28 bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
     <h2 class="text-base font-semibold text-gray-900 mb-1">Evidence summary</h2>
@@ -413,9 +443,7 @@
             <div class="text-sm font-semibold uppercase tracking-wide text-green-800 mt-3">Derived from the stored verdict</div>
             {% endif %}
             {% if vs.get('strengths') %}
-            <ul class="signal-derived mt-1 text-base leading-relaxed text-gray-700">
-                {% for item in vs['strengths'] %}{{ signal_row(item, 'strengths') }}{% endfor %}
-            </ul>
+            {{ signal_groups(vs['strengths'], 'strengths') }}
             {% else %}
             <p class="signals-empty mt-1 text-sm text-gray-600">
                 {% if vs.get('scale_known') and vs_thresholds.strength is not none and vs_thresholds.scale_max is not none %}
@@ -438,9 +466,7 @@
             <div class="text-sm font-semibold uppercase tracking-wide text-red-800 mt-3">Derived from the stored verdict</div>
             {% endif %}
             {% if vs.get('risks') %}
-            <ul class="signal-derived mt-1 text-base leading-relaxed text-gray-700">
-                {% for item in vs['risks'] %}{{ signal_row(item, 'risks') }}{% endfor %}
-            </ul>
+            {{ signal_groups(vs['risks'], 'risks') }}
             {% else %}
             <p class="signals-empty mt-1 text-sm text-gray-600">
                 {% if vs.get('scale_known') and vs_thresholds.risk is not none and vs_thresholds.scale_max is not none %}
@@ -464,9 +490,7 @@
         <section class="assessment-signals-neutral rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
             <div class="text-sm font-semibold text-slate-900">Mid-scale</div>
             <p class="text-sm text-gray-600">Neither a strength nor a risk at this revision's thresholds.</p>
-            <ul class="signal-derived mt-1 text-base leading-relaxed text-gray-700">
-                {% for item in vs['mid_scale'] %}{{ signal_row(item, 'mid_scale') }}{% endfor %}
-            </ul>
+            {{ signal_groups(vs['mid_scale'], 'mid_scale') }}
         </section>
         {% endif %}
         {% if hub_landscape %}
@@ -490,9 +514,7 @@
         <section class="assessment-signals-unestablished rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
             {% if vs.get('unestablished') %}
             <div class="text-sm font-semibold text-slate-900">Not established</div>
-            <ul class="mt-1 text-base leading-relaxed text-gray-700">
-                {% for item in vs['unestablished'] %}{{ signal_row(item, 'unestablished') }}{% endfor %}
-            </ul>
+            {{ signal_groups(vs['unestablished'], 'unestablished') }}
             {% else %}
             <p class="signals-empty text-sm text-gray-700"><span class="font-semibold text-slate-900">Not established</span> &mdash; nothing left unanswered.</p>
             {% endif %}
@@ -510,9 +532,9 @@
         scores could not be classified as strengths or risks.
         {% endif %}
         {% if hub_strengths or hub_risks or hub_landscape or hub_maturity %}
-        "In the hub's words", the competitive landscape and the evidence maturity are BlackbirdBot's own text from the verdict sidecar; derived rows quote the specialists' stored text.
+        "In the hub's words", the competitive landscape and the evidence maturity are BlackbirdBot's own text from the verdict sidecar; specialist consult rows quote the specialists' stored text, and red-flag rows BlackbirdBot's own red flags from its verdict.
         {% else %}
-        Consult rows quote the specialists' stored text.
+        Specialist consult rows quote the specialists' stored text, and red-flag rows BlackbirdBot's own red flags from its verdict.
         {% endif %}
         {# D5: not gated on `viewer_is_staff` — like `score_rationale`, the
            per-dimension reasons render for every tier, so this clause does too.
@@ -524,10 +546,10 @@
            Plain text, not a fragment link: the nav already links there, and a
            fragment-only href is one test_reachability cannot resolve. #}
         {% if dimensions | selectattr('rationale') | list %}
-        Each dimension's one-sentence reason, also shown under Scores, is BlackbirdBot's own text from the verdict sidecar{% if hub_strengths or hub_risks %}, like "In the hub's words"{% endif %}.
+        Each dimension's one-sentence "Hub's reason:", also shown under Scores, is BlackbirdBot's own text from the verdict sidecar{% if hub_strengths or hub_risks %}, like "In the hub's words"{% endif %}.
         {% endif %}
         {% if gating_reasons %}
-        A gate's unprefixed second line is BlackbirdBot's own reason for its state, from the verdict sidecar{% if gating_definitions %}; "Rubric definition:" marks the rubric's text where it recorded none{% endif %}.
+        A gate's "Hub's reason:" is BlackbirdBot's own reason for its state, from the verdict sidecar{% if gating_definitions %}; "Rubric definition:" marks the rubric's text where it recorded none{% endif %}.
         {% endif %}
         {% if a.score_rationale %}
         The hub's account of the score is in <a class="text-indigo-700 underline-offset-2 hover:underline" href="#score-rationale">Why this score</a> above.

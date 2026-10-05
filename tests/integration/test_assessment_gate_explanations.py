@@ -74,7 +74,10 @@ def _definition_line(description):
 
 
 def _reason_line(reason):
-    return f'<span class="signal-rationale block ml-6 text-sm text-gray-600">{escape(reason)}</span>'
+    return (
+        '<span class="signal-rationale block ml-6 text-sm text-gray-600">'
+        f"Hub's reason: {escape(reason)}</span>"
+    )
 
 
 @pytest.mark.parametrize("surface", ["admin", "manager"])
