@@ -25,6 +25,8 @@ class ResearcherProfile(Base):
     disease_areas: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
     key_targets: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
     keywords: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
+    # Retired 2026-10-05 (spec D34/D40): no readers or writers; the persona's grant sections
+    # come from pi_grants and pi_orcid_fundings (src/services/grant_sections.py).
     grant_titles: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
     # [{label: str, content: str, submitted_at: str}]  — deprecated, no writers
     # `none_as_null=True` so "nothing submitted" is SQL NULL, not the JSON scalar
@@ -64,8 +66,8 @@ class ResearcherProfile(Base):
     #                         (len(pubs_for_synthesis) at profile_pipeline.py step 9).
     #                         Read it as what was offered to the synthesis step — an
     #                         upper bound on what the model saw, not a count of it:
-    #                         _build_synthesis_context sorts by year
-    #                         and keeps sorted_pubs[:30], so for a PI with more than 30
+    #                         _build_synthesis_context orders them by
+    #                         publication_sort_key and keeps the first 30, so for a PI with more than 30
     #                         abstract-bearing papers this exceeds what reached the
     #                         prompt. It is exact where it matters — the 0 / non-zero
     #                         boundary this column exists to draw is the same either way,

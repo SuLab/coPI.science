@@ -9,8 +9,9 @@ be a ``TenureScopedPublications`` (``src/services/tenure_scope.py``), and the
 function raises ``TypeError`` on anything else, including a bare list. This
 file has two jobs:
 
-1. A static AST walk over every ``export_profile_to_markdown(`` and
-   ``export_and_record(`` call site in ``src/`` and ``scripts/`` asserting each one obtains its ``publications``
+1. A static AST walk over every ``export_profile_to_markdown(``,
+   ``export_and_record(`` and ``render_profile_markdown(`` call site in ``src/``
+   and ``scripts/`` asserting each one obtains its ``publications``
    argument from a ``tenure_scope`` producer (``scoped_publications_for_export``
    or ``scope_for_export``), not from a raw ``select(Publication)``/list
    expression. A written comment is what failed before (two call sites'
@@ -28,7 +29,8 @@ from pathlib import Path
 
 import pytest
 
-from src.services.profile_export import export_profile_to_markdown
+from src.services.grant_sections import EMPTY_GRANT_SECTIONS
+from src.services.profile_export import export_profile_to_markdown, render_profile_markdown
 from src.services.tenure_scope import TenureScopedPublications, scope_for_export
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -41,25 +43,28 @@ _ALLOWED_PRODUCERS = {"scoped_publications_for_export", "scope_for_export"}
 
 # The boundary functions. Phase 3 (RB-09) routed every live export through
 # `profile_publish.export_and_record`, which passes its `publications` parameter
-# (typed `TenureScopedPublications`) straight to `export_profile_to_markdown`; the
-# producer check therefore applies to callers of either function.
-_BOUNDARY_FUNCTIONS = {"export_profile_to_markdown", "export_and_record"}
+# (typed `TenureScopedPublications`) on to the renderer; the producer check
+# therefore applies to callers of any of the three.
+_BOUNDARY_FUNCTIONS = {"export_profile_to_markdown", "export_and_record", "render_profile_markdown"}
 
-# The one pass-through wrapper: its export call forwards its own typed parameter.
-_PASS_THROUGH_SITES = {("src", "services", "profile_publish.py")}
+# The pass-through wrappers: their boundary calls forward their own typed parameter.
+_PASS_THROUGH_SITES = {
+    ("src", "services", "profile_publish.py"),
+    ("src", "services", "profile_export.py"),
+}
 
 # The exact call sites. A new caller — or the loss of one — must fail this test
 # loudly rather than silently widening or narrowing the audited set. The router
-# and onboarding edit paths now reach the boundary through
-# `profile_edit.apply_profile_edits`. `grant_enrichment.py` joined 2026-10-05: the
-# enrich_grants job re-exports the persona after replacing grant_titles.
+# and onboarding edit paths reach the boundary through
+# `profile_edit.apply_profile_edits`. The veto/pin routes, the enrich_grants job,
+# the persona sweep and the repair scripts reach it through
+# `profile_publish.reexport_persona`, which loads `publications` with
+# `scoped_publications_for_export` itself (spec 2026-10-05 §4.3).
 _EXPECTED_CALL_SITES = {
-    ("src", "routers", "manager.py"),
-    ("src", "services", "grant_enrichment.py"),
+    ("src", "services", "profile_export.py"),
     ("src", "services", "profile_pipeline.py"),
     ("src", "services", "profile_edit.py"),
     ("src", "services", "profile_publish.py"),
-    ("scripts", "audit_pub_dois.py"),
 }
 
 
@@ -191,7 +196,6 @@ class _FakeProfile:
     disease_areas = None
     key_targets = None
     keywords = None
-    grant_titles = None
 
 
 class _FakePub:
@@ -206,7 +210,16 @@ class _FakePub:
 def test_bare_list_is_refused_with_type_error():
     with pytest.raises(TypeError, match="scoped_publications_for_export"):
         export_profile_to_markdown(
-            _FakeUser(), _FakeProfile(), "test-agent", publications=[_FakePub(2020)]
+            _FakeUser(), _FakeProfile(), "test-agent", publications=[_FakePub(2020)],
+            grants=EMPTY_GRANT_SECTIONS,
+        )
+
+
+def test_render_is_refused_a_bare_list_too():
+    with pytest.raises(TypeError, match="scoped_publications_for_export"):
+        render_profile_markdown(
+            _FakeUser(), _FakeProfile(), publications=[_FakePub(2020)],
+            grants=EMPTY_GRANT_SECTIONS,
         )
 
 
@@ -214,7 +227,9 @@ def test_none_publications_is_still_accepted(tmp_path, monkeypatch):
     import src.services.profile_export as profile_export
 
     monkeypatch.setattr(profile_export, "PROFILES_DIR", tmp_path)
-    path = export_profile_to_markdown(_FakeUser(), _FakeProfile(), "test-agent", publications=None)
+    path = export_profile_to_markdown(
+        _FakeUser(), _FakeProfile(), "test-agent", publications=None, grants=EMPTY_GRANT_SECTIONS
+    )
     assert path is not None
 
 
@@ -226,7 +241,8 @@ def test_tenure_scoped_export_drops_pre_tenure_publications(tmp_path, monkeypatc
     scoped = scope_for_export(pubs, tenure_start=2020)
     assert isinstance(scoped, TenureScopedPublications)
     path = export_profile_to_markdown(
-        _FakeUser(), _FakeProfile(), "test-agent", publications=scoped
+        _FakeUser(), _FakeProfile(), "test-agent", publications=scoped,
+        grants=EMPTY_GRANT_SECTIONS,
     )
     content = path.read_text(encoding="utf-8")
     assert "New Paper" in content
@@ -240,7 +256,8 @@ def test_tenure_start_none_is_a_full_career_pass_through(tmp_path, monkeypatch):
     pubs = [_FakePub(2001, "Ancient Paper"), _FakePub(2022, "New Paper")]
     scoped = scope_for_export(pubs, tenure_start=None)
     path = export_profile_to_markdown(
-        _FakeUser(), _FakeProfile(), "test-agent", publications=scoped
+        _FakeUser(), _FakeProfile(), "test-agent", publications=scoped,
+        grants=EMPTY_GRANT_SECTIONS,
     )
     content = path.read_text(encoding="utf-8")
     assert "Ancient Paper" in content

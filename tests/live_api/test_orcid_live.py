@@ -13,7 +13,7 @@ reality until this file.
 import httpx
 import pytest
 
-from src.services import orcid
+from src.services import orcid, orcid_fundings
 
 pytestmark = [pytest.mark.live_api]
 
@@ -144,19 +144,19 @@ async def test_fetch_orcid_works_returns_a_list_of_dicts(api_budget):
         pytest.skip("the example record currently has no works to shape-check")
 
 
-async def test_fetch_orcid_grants_returns_titles_or_empty(api_budget):
+async def test_fetch_orcid_fundings_returns_a_list(api_budget):
     api_budget.wait("orcid")
-    grants = await orcid.fetch_orcid_grants(CARBERRY)
-    assert isinstance(grants, list)
-    assert all(isinstance(g, str) for g in grants)
+    fundings = await orcid_fundings.fetch_orcid_fundings(CARBERRY, strict=True)
+    assert isinstance(fundings, list)
+    assert all(isinstance(f, orcid_fundings.OrcidFunding) for f in fundings)
 
 
 async def test_an_unknown_orcid_degrades_without_taking_down_the_caller(api_budget):
     """Rule L3: distinguish "ORCID said no such record" from "we could not reach ORCID".
 
-    fetch_orcid_record raises for status; the grants/works helpers swallow and return
-    []. Both behaviours are deliberate and both are asserted, because the callers rely
-    on the difference.
+    fetch_orcid_record raises for status; the soft fundings fetch answers None (a 400)
+    or [] (a 404), and the works helper swallows and returns []. Both behaviours are
+    deliberate and both are asserted, because the callers rely on the difference.
     """
     bogus = "0000-0000-0000-0000"
     api_budget.wait("orcid")
@@ -168,6 +168,6 @@ async def test_an_unknown_orcid_degrades_without_taking_down_the_caller(api_budg
     )
 
     api_budget.wait("orcid")
-    assert await orcid.fetch_orcid_grants(bogus) == []
+    assert await orcid_fundings.fetch_orcid_fundings(bogus, strict=False) in (None, [])
     api_budget.wait("orcid")
     assert await orcid.fetch_orcid_works(bogus) == []

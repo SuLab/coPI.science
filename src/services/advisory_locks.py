@@ -9,7 +9,9 @@ Two key shapes (spec §8.3, SA2-15/SA3-09):
   ``tests/unit/test_advisory_locks.py`` asserts they are distinct from each
   other and from the spend lock.
 * **Per-entity keys** — computed in SQL by ``hashtextextended('<ns>:' ||
-  CAST(:id AS text), 0)`` (deterministic and signed on Postgres 15, C24).
+  CAST(:id AS text), 0)`` (deterministic and signed on Postgres 15, C24), for
+  example ``corpus:<user_id>``, ``provision:<agent_id>`` and ``agent:<user_id>``
+  (``lock_agent_persona``).
   ``CAST`` rather than ``::`` because SQLAlchemy ``text()`` does not bind
   ``:id`` directly before ``::`` (SA4-16).
 
@@ -21,6 +23,7 @@ so a lock taken in a scratch database on the same server is ignored (SA3-07).
 from __future__ import annotations
 
 import hashlib
+import uuid
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
@@ -51,6 +54,15 @@ def entity_key_sql(namespace: str) -> str:
     Bind ``id`` as a ``str`` (``str(user.id)`` for a UUID): the parameter is typed
     ``text`` by the cast, and asyncpg refuses a ``uuid.UUID`` for it."""
     return f"hashtextextended('{namespace}:' || CAST(:id AS text), 0)"
+
+
+async def lock_agent_persona(db: AsyncSession, user_id: uuid.UUID) -> None:
+    """pg_advisory_xact_lock on agent:<user_id>, held until the caller's transaction ends:
+    serialises persona file writes, the persona revision transaction and account deletion
+    for one PI (spec 2026-10-05 §4.3)."""
+    await db.execute(
+        text(f"SELECT pg_advisory_xact_lock({entity_key_sql('agent')})"), {"id": str(user_id)}
+    )
 
 
 _HELD_SQL = text(

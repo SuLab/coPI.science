@@ -325,7 +325,7 @@ def _profile_writer(expected_users: dict[uuid.UUID, str]):
     real ORCID/PubMed/Anthropic calls).
     """
 
-    async def fake(user_id, db, job_id=None):
+    async def fake(user_id, db, job_id=None, after_commit=None, followon_not_before=None):
         if user_id not in expected_users:
             raise RuntimeError(f"T5: refusing to run the pipeline for unknown user {user_id}")
         profile = ResearcherProfile(
@@ -472,7 +472,7 @@ async def test_a_failing_job_retries_to_max_attempts_and_then_dies(wk, monkeypat
 
     seen_attempts = []
 
-    async def always_fails(user_id, db, job_id=None):
+    async def always_fails(user_id, db, job_id=None, after_commit=None, followon_not_before=None):
         seen_attempts.append((await db.execute(select(Job.attempts).where(Job.id == job_id))).scalar_one())
         raise RuntimeError("pipeline exploded (T5.2)")
 
@@ -502,7 +502,7 @@ async def test_a_failing_job_retries_to_max_attempts_and_then_dies(wk, monkeypat
     write = _profile_writer({uid2: "recovered on the second attempt"})
     calls = {"n": 0}
 
-    async def fails_once(user_id, db, job_id=None):
+    async def fails_once(user_id, db, job_id=None, after_commit=None, followon_not_before=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("transient (T5.2 control)")
@@ -581,7 +581,7 @@ async def test_process_job_swallows_the_failure_so_the_next_job_still_runs(wk, m
 
     write = _profile_writer({uid_good: "survivor profile"})
 
-    async def crash_for_bad(user_id, db, job_id=None):
+    async def crash_for_bad(user_id, db, job_id=None, after_commit=None, followon_not_before=None):
         if user_id == uid_bad:
             raise RuntimeError("kaboom (T5.3)")
         return await write(user_id, db, job_id)
@@ -630,7 +630,7 @@ async def test_run_worker_loop_survives_a_crashing_job(wk, pg_url, monkeypatch):
 
     write = _profile_writer({uid_good: "loop survivor profile"})
 
-    async def crash_for_bad(user_id, db, job_id=None):
+    async def crash_for_bad(user_id, db, job_id=None, after_commit=None, followon_not_before=None):
         if user_id == uid_bad:
             raise RuntimeError("kaboom in the loop (T5.3)")
         return await write(user_id, db, job_id)
@@ -724,7 +724,7 @@ async def test_execute_generate_profile_calls_the_pipeline_with_the_claimed_job(
     jid = await wk.enqueue(uid)
     seen = {}
 
-    async def record(user_id, db, job_id=None):
+    async def record(user_id, db, job_id=None, after_commit=None, followon_not_before=None):
         seen["user_id"] = user_id
         seen["job_id"] = job_id
         await job_progress.record(job_id, "t5", "probe")
@@ -778,7 +778,7 @@ async def test_the_job_is_marked_completed_only_after_the_profile_row_exists(wk,
     jid = await wk.enqueue(uid)
     seen = {}
 
-    async def observe_then_work(user_id, db, job_id=None):
+    async def observe_then_work(user_id, db, job_id=None, after_commit=None, followon_not_before=None):
         seen["committed_before"] = await wk.job_state(jid)
         seen["in_session_status"] = seen["committed_before"].status
         seen["profiles_before"] = await wk.profile_count(uid)
@@ -829,7 +829,7 @@ async def test_a_crash_after_partial_work_leaves_a_retryable_job(wk, monkeypatch
     uid = await wk.new_user("T5 partial")
     jid = await wk.enqueue(uid)
 
-    async def half_then_crash(user_id, db, job_id=None):
+    async def half_then_crash(user_id, db, job_id=None, after_commit=None, followon_not_before=None):
         db.add(ResearcherProfile(user_id=user_id, research_summary="half written"))
         await db.flush()
         raise RuntimeError("crashed after the profile row (T5.4)")
@@ -885,7 +885,7 @@ async def test_a_database_error_in_the_pipeline_is_recorded_and_retried(wk, monk
         await db.commit()
     jid = await wk.enqueue(uid)
 
-    async def duplicate_profile(user_id, db, job_id=None):
+    async def duplicate_profile(user_id, db, job_id=None, after_commit=None, followon_not_before=None):
         db.add(ResearcherProfile(user_id=user_id, research_summary="a second row"))
         await db.flush()  # unique violation on researcher_profiles.user_id
 
@@ -916,7 +916,7 @@ async def test_a_database_error_in_the_pipeline_is_recorded_and_retried(wk, monk
     uid2 = await wk.new_user("T5 db error control")
     jid2 = await wk.enqueue(uid2)
 
-    async def plain_error(user_id, db, job_id=None):
+    async def plain_error(user_id, db, job_id=None, after_commit=None, followon_not_before=None):
         raise RuntimeError("a plain error (T5 control)")
 
     monkeypatch.setattr(worker_main, "run_profile_pipeline", plain_error)
@@ -944,7 +944,7 @@ async def test_a_legacy_monthly_refresh_row_fails_loudly_and_runs_nothing(wk, mo
     """
     called = []
 
-    async def should_not_run(user_id, db, job_id=None):
+    async def should_not_run(user_id, db, job_id=None, after_commit=None, followon_not_before=None):
         called.append(user_id)
         raise AssertionError("the pipeline ran for a retired job type")
 
@@ -980,7 +980,7 @@ async def test_a_job_with_no_user_at_all_fails_loudly(wk, monkeypatch):
     """
     called = []
 
-    async def should_not_run(user_id, db, job_id=None):
+    async def should_not_run(user_id, db, job_id=None, after_commit=None, followon_not_before=None):
         called.append(user_id)
         return None
 
@@ -1076,7 +1076,7 @@ async def test_an_unknown_job_type_is_rejected_loudly_by_the_dispatcher(wk, monk
     jid = await wk.enqueue(uid)
     ran = []
 
-    async def pipeline(user_id, db, job_id=None):
+    async def pipeline(user_id, db, job_id=None, after_commit=None, followon_not_before=None):
         ran.append(user_id)
         return await _profile_writer({uid: "should not happen"})(user_id, db, job_id)
 
@@ -1165,7 +1165,7 @@ async def test_a_failed_job_backs_off_4_then_16_minutes_then_dies(wk, monkeypatc
     uid = await wk.new_user()
     jid = await wk.enqueue(uid, max_attempts=3)
 
-    async def always_fails(user_id, db, job_id=None):
+    async def always_fails(user_id, db, job_id=None, after_commit=None, followon_not_before=None):
         raise RuntimeError("upstream 503")
 
     monkeypatch.setattr(worker_main, "run_profile_pipeline", always_fails)

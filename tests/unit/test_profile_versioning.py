@@ -11,7 +11,10 @@ SRC = Path(__file__).resolve().parents[2] / "src"
 
 # The values a live writer may pass. "private" and "slack_dm" survive only on rows
 # written before 2026-08-13; "monthly_refresh" was never written by anything.
-LIVE_MECHANISMS = {"web", "web_impersonated", "agent", "pipeline"}
+LIVE_MECHANISMS = {
+    "web", "web_impersonated", "agent", "pipeline", "grant_veto", "orcid_veto", "grant_pin",
+    "reexport", "persona_sweep",
+}
 LIVE_PROFILE_TYPES = {"public", "memory"}
 
 
@@ -277,3 +280,12 @@ def test_create_revision_docstring_names_every_live_value():
     assert doc is not None
     for value in LIVE_MECHANISMS | LIVE_PROFILE_TYPES:
         assert f'"{value}"' in doc, value
+
+
+def test_every_mechanism_fits_the_column():
+    """profile_revisions.mechanism is String(20); spec 2026-10-05 §6.1 lists eleven."""
+    spec = {
+        "pipeline", "web", "web_impersonated", "agent", "grant_veto", "orcid_veto", "grant_pin",
+        "draft_accept", "reexport", "persona_sweep", "lifecycle_export",
+    }
+    assert LIVE_MECHANISMS <= spec and all(len(m) <= 20 for m in spec)

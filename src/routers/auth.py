@@ -2,7 +2,7 @@
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from urllib.parse import urlsplit
 
 from authlib.integrations.httpx_client import AsyncOAuth2Client
@@ -19,6 +19,7 @@ from src.database import get_db
 from src.models import AccessAllowlist, User
 from src.models.job import INTERACTIVE_PRIORITY
 from src.services.orcid import fetch_orcid_profile
+from src.services.person_names import name_from_machine_source
 from src.services.profile_jobs import enqueue_profile_job_if_absent
 from src.services.session_epoch import (
     SESSION_EPOCH_KEY,
@@ -173,10 +174,13 @@ async def _create_new_user(
     ORCID won the `users.orcid` unique race (RB-11), after rolling back only the
     savepoint so the caller re-selects the winner's row."""
     is_allowlisted = allowlist_entry is not None
-    # Create new user — pending unless allowlisted
+    # Create new user — pending unless allowlisted. A name cut to the D60 allowlist is
+    # stamped for the manager PI page.
+    name, cut = name_from_machine_source(profile_data.get("name") or orcid_name)
     user = User(
         orcid=orcid_id,
-        name=profile_data.get("name") or orcid_name,
+        name=name,
+        name_sanitized_at=datetime.now(UTC) if cut else None,
         institution=profile_data.get("institution"),
         department=profile_data.get("department"),
         access_status="allowed" if is_allowlisted else "pending",
@@ -231,7 +235,9 @@ async def _find_or_create_user(
 
     # Existing user — update name/institution/department/email if empty
     if not user.name and profile_data.get("name"):
-        user.name = profile_data["name"]
+        user.name, cut = name_from_machine_source(profile_data["name"])
+        if cut:
+            user.name_sanitized_at = datetime.now(UTC)
     if not user.institution and profile_data.get("institution"):
         user.institution = profile_data["institution"]
     if not user.department and profile_data.get("department"):

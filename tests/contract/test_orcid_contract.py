@@ -1,4 +1,5 @@
-"""Contract tests for src/services/orcid.py against ORCID pub API v3.0 shapes.
+"""Contract tests for src/services/orcid.py and orcid_fundings.py against ORCID pub API
+v3.0 shapes.
 
 Pins how the parsers read a real-shaped record and how each function behaves on
 non-200 / timeout / malformed JSON. respx intercepts the httpx.AsyncClient the
@@ -11,7 +12,7 @@ import httpx
 import pytest
 import respx
 
-from src.services import orcid
+from src.services import http_pacing, orcid, orcid_fundings
 
 pytestmark = pytest.mark.contract
 
@@ -131,7 +132,7 @@ async def test_fetch_orcid_profile_falls_back_to_orcid_when_no_name():
 
 
 @respx.mock
-async def test_fetch_orcid_grants_parses_titles():
+async def test_fetch_orcid_fundings_parses_titles():
     data = {
         "group": [
             {"funding-summary": [{"title": {"title": {"value": "R01 Big Grant"}}}]},
@@ -139,7 +140,8 @@ async def test_fetch_orcid_grants_parses_titles():
         ]
     }
     respx.get(f"{BASE}/{OID}/fundings").mock(return_value=httpx.Response(200, json=data))
-    assert await orcid.fetch_orcid_grants(OID) == ["R01 Big Grant", "NSF Small Grant"]
+    got = await orcid_fundings.fetch_orcid_fundings(OID, strict=True)
+    assert [f.title for f in got] == ["R01 Big Grant", "NSF Small Grant"]
 
 
 @respx.mock
@@ -195,17 +197,14 @@ async def test_fetch_orcid_record_raises_on_malformed_json():
 
 
 @respx.mock
-async def test_fetch_orcid_grants_swallows_non_200_returns_empty():
+async def test_soft_fetch_orcid_fundings_reads_a_503_as_unknown(monkeypatch):
+    async def _instant(_seconds):
+        return None
+
+    monkeypatch.setattr(http_pacing, "_sleep", _instant)
     route = respx.get(f"{BASE}/{OID}/fundings").mock(return_value=httpx.Response(503))
-    assert await orcid.fetch_orcid_grants(OID) == []
+    assert await orcid_fundings.fetch_orcid_fundings(OID, strict=False) is None
     assert route.called  # fail if the mocked URL drifts — the swallowed error would otherwise hide it
-
-
-@respx.mock
-async def test_fetch_orcid_grants_swallows_timeout_returns_empty():
-    route = respx.get(f"{BASE}/{OID}/fundings").mock(side_effect=httpx.TimeoutException("t"))
-    assert await orcid.fetch_orcid_grants(OID) == []
-    assert route.called
 
 
 @respx.mock

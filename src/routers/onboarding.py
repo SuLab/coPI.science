@@ -13,6 +13,7 @@ from src.models import Job, ResearcherProfile, User
 from src.models.job import INTERACTIVE_PRIORITY
 from src.routers.auth import pop_post_login_redirect
 from src.services.email import build_welcome, send_transactional_email
+from src.services.grant_sections import load_grant_sections
 from src.services.profile_edit import (
     apply_profile_edits,
     list_fields_from_form,
@@ -113,6 +114,9 @@ async def onboarding_start(
             job=job,
             job_status=job_status,
             progress=progress,
+            grant_sections=(
+                await load_grant_sections(db, current_user.id) if profile is not None else None
+            ),
             error=error,
         ),
     )

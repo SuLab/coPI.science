@@ -9,6 +9,7 @@ only if the context actually marks last-author papers.
 
 from pathlib import Path
 
+from src.services.grant_sections import EMPTY_GRANT_SECTIONS
 from src.services.profile_pipeline import _build_synthesis_context
 
 _PROMPT = Path(__file__).resolve().parents[2] / "prompts" / "profile-synthesis.md"
@@ -17,7 +18,7 @@ _PROMPT = Path(__file__).resolve().parents[2] / "prompts" / "profile-synthesis.m
 def _context() -> str:
     return _build_synthesis_context(
         {"name": "Rachel Green", "institution": "Johns Hopkins University"},
-        ["A grant"],
+        EMPTY_GRANT_SECTIONS,
         [
             {"pmid": "1", "title": "A paper", "journal": "J", "year": 2020,
              "abstract": "Findings."},

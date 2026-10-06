@@ -7,7 +7,8 @@ different paper than the one cited — the failure mode behind the bad-link
 incident (see GitHub issue #5).
 
 Classifies each row and, with --fix, corrects the DB and re-exports the
-affected public profiles.
+affected public profiles through `reexport_persona` (a `reexport` revision in the
+fix's transaction, committed, then the post-commit `write_persona_files`).
 
 Categories:
   ok           stored DOI matches the PMID's authoritative DOI
@@ -43,10 +44,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.config import get_settings
-from src.models import AgentRegistry, Publication, ResearcherProfile, User
-from src.services.profile_export import export_profile_to_markdown
+from src.models import AgentRegistry, Publication, User
+from src.services.profile_publish import reexport_persona, write_persona_files
 from src.services.pubmed import fetch_authoritative_dois, reconcile_pub_doi
-from src.services.tenure_scope import scoped_publications_for_export
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("audit_pub_dois")
@@ -150,23 +150,16 @@ async def _run(orcids: list[str], agents: list[str], fix: bool) -> int:
             # Re-export affected public profiles.
             print(f"Re-exporting {len(affected_users)} profile(s)...")
             for uid in affected_users:
-                user = (await db.execute(select(User).where(User.id == uid))).scalar_one_or_none()
-                profile = (await db.execute(
-                    select(ResearcherProfile).where(ResearcherProfile.user_id == uid)
-                )).scalar_one_or_none()
-                agent = (await db.execute(
-                    select(AgentRegistry).where(AgentRegistry.user_id == uid)
-                )).scalar_one_or_none()
-                if user and profile and agent:
-                    user_pubs = await scoped_publications_for_export(
-                        db, uid, agent.agent_id
-                    )
-                    exported = export_profile_to_markdown(
-                        user, profile, agent.agent_id, publications=user_pubs
-                    )
-                    print(f"  {agent.agent_id}: {exported.name if exported else 'FAILED'}")
-                else:
-                    print(f"  SKIP {user.name if user else uid}: missing profile/agent")
+                rendered = await reexport_persona(
+                    db, uid, mechanism="reexport",
+                    change_summary="DOI links corrected (audit_pub_dois)",
+                )
+                if rendered is None:
+                    print(f"  SKIP {uid}: missing profile/agent")
+                    continue
+                await db.commit()
+                path = await write_persona_files(db, uid)
+                print(f"  {path.name if path else 'FAILED (see the ERROR log)'}")
         elif changes:
             print("\n[report only] Re-run with --fix to apply and re-export.")
 

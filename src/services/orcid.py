@@ -1,4 +1,4 @@
-"""ORCID API client — fetch profile, grants, and works."""
+"""ORCID API client — fetch profile and works (fundings: `orcid_fundings`)."""
 
 import logging
 from typing import Any
@@ -101,32 +101,6 @@ async def fetch_orcid_profile(orcid_id: str) -> dict[str, Any]:
         break
 
     return result
-
-
-async def fetch_orcid_grants(orcid_id: str) -> list[str]:
-    """Return list of grant titles from ORCID fundings."""
-    url = f"{ORCID_API_BASE}/{orcid_id}/fundings"
-    headers = {"Accept": "application/json"}
-    async with httpx.AsyncClient(timeout=30) as client:
-        try:
-            resp = await with_retries(
-                lambda: client.get(url, headers=headers),
-                attempts=3, backoff=lambda a: 1.0 * (2 ** a),
-                retry_statuses=TRANSIENT_STATUSES, retry_exceptions=(httpx.TransportError,),
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as exc:
-            logger.warning("Failed to fetch ORCID grants for %s: %s", orcid_id, exc)
-            return []
-
-    titles = []
-    for grp in data.get("group", []):
-        for summary in grp.get("funding-summary", []):
-            title = summary.get("title", {}).get("title", {}).get("value")
-            if title:
-                titles.append(title)
-    return titles
 
 
 # Statuses the public API returns about the state of a RECORD, which a retry

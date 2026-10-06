@@ -39,7 +39,13 @@ from src.models.email_notification import (
     EmailNotification,
     EmailNotificationPreference,
 )
-from src.models.enrichment import PiGrant, PiIndustryEvidence, PiIndustryScore
+from src.models.enrichment import (
+    PiGrant,
+    PiGrantIdentity,
+    PiIndustryEvidence,
+    PiIndustryScore,
+    PiOrcidFunding,
+)
 from src.models.job import Job
 from src.models.opportunity import AssessmentDrop, OpportunityAssessment
 from src.models.pi_company import PiCompany
@@ -124,6 +130,8 @@ __all__ = [
     "SimulationProcessStatus",
     "AdminAuditEvent",
     "PiGrant",
+    "PiGrantIdentity",
+    "PiOrcidFunding",
     "PiIndustryEvidence",
     "PiIndustryScore",
     "PiCompany",

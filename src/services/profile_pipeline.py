@@ -2,7 +2,7 @@
 
 Implements the pipeline from profile-ingestion.md:
 1. Fetch ORCID profile
-2. Fetch ORCID grants
+2. Fetch ORCID fundings into pi_orcid_fundings (soft)
 3. Resolve the publication corpus (ORCID works + OpenAlex + PubMed; corpus.py)
 4. Fetch PubMed abstracts
 5. Deep mining: PMC methods sections
@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import AgentRegistry, Publication, ResearcherProfile, User
@@ -32,6 +33,7 @@ from src.services.corpus import (
     resolve_corpus,
 )
 from src.services.corpus_additions import lock_corpus, select_corpus_additions
+from src.services.grant_sections import GrantSections, grant_blocks, load_grant_sections
 from src.services.jhu_rules import (
     clear_provisional_tenure_start,
     derive_employment_start,
@@ -41,13 +43,17 @@ from src.services.jhu_rules import (
     set_tenure_start,
     tenure_filter,
 )
+from src.services.job_queue import AfterCommit
 from src.services.llm import synthesize_profile
-from src.services.orcid import fetch_orcid_grants, fetch_orcid_profile
+from src.services.orcid import fetch_orcid_profile
+from src.services.orcid_fundings import fetch_orcid_fundings, store_orcid_fundings
+from src.services.person_names import name_from_machine_source
 from src.services.pubmed import (
     convert_pmids_to_pmcids,
     fetch_pmc_methods,
     reconcile_pub_doi,
 )
+from src.services.tenure_scope import publication_order_by, publication_sort_key
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +92,6 @@ class PipelineRun:
     orcid_id: str
     orcid_profile: dict = field(default_factory=dict)
     step1_failed: bool = False
-    grant_titles: list = field(default_factory=list)
     agent_reg: AgentRegistry | None = None
     corpus_result: Any = None
     tenure_start: int | None = None
@@ -99,6 +104,8 @@ class PipelineRun:
     abstracts_hash: str = ""
     synthesized: dict = field(default_factory=dict)
     validated: bool = False
+    after_commit: list[AfterCommit] | None = None
+    followon_not_before: datetime | None = None
 
     async def progress(self, step: str, detail: str = "") -> None:
         """Record a progress entry on the job, if there is one, and log it. The
@@ -112,12 +119,21 @@ async def run_profile_pipeline(
     user_id: uuid.UUID,
     db: AsyncSession,
     job_id: uuid.UUID | None = None,
+    after_commit: list[AfterCommit] | None = None,
+    followon_not_before: datetime | None = None,
 ) -> ResearcherProfile:
     """
     Full profile generation pipeline. Records job progress if job_id is provided.
     Returns the updated/created ResearcherProfile.
+
+    ``after_commit`` is the worker's JobContext.after_commit: the persona file is written
+    there, after the job's commit (spec 2026-10-05 §4.3). None (a direct caller with no
+    commit hook) writes it at the end of the run, inside the caller's transaction.
+    ``followon_not_before`` is a bulk repair's slot for the step-10 follow-on jobs (§4.2).
     """
     run = await _start(user_id, db, job_id)
+    run.after_commit = after_commit
+    run.followon_not_before = followon_not_before
     await _step1_orcid_profile(run)
     await _step2_grants(run)
     await _steps3_4_resolve_corpus(run)
@@ -159,7 +175,11 @@ async def _step1_orcid_profile(run: PipelineRun) -> None:
         orcid_profile = await fetch_orcid_profile(orcid_id)
         # Update user record with fresh data
         if orcid_profile.get("name") and not user.name:
-            user.name = orcid_profile["name"]
+            # Cut to the D60 allowlist (spec 2026-10-05 §4.1); an iD-like name is
+            # stored unchanged.
+            user.name, cut = name_from_machine_source(orcid_profile["name"])
+            if cut:
+                user.name_sanitized_at = datetime.now(UTC)
         if orcid_profile.get("institution") and not user.institution:
             user.institution = orcid_profile["institution"]
         if orcid_profile.get("department") and not user.department:
@@ -177,13 +197,27 @@ async def _step1_orcid_profile(run: PipelineRun) -> None:
 async def _step2_grants(run: PipelineRun) -> None:
     db = run.db
     user = run.user
-    # Step 2: Fetch ORCID grants
-    await run.progress("step2", "Fetching grant information...")
-    try:
-        run.grant_titles = await fetch_orcid_grants(run.orcid_id)
-    except Exception as exc:
-        logger.warning("Step 2 failed: %s", exc)
-        run.grant_titles = []
+    # Step 2: ORCID fundings, soft (spec 2026-10-05 §6.1). Step 1's writes commit first, the
+    # fetch runs with no transaction open, and the store commits in its own short
+    # transaction before the main work: an ORCID outage keeps the stored rows and never
+    # fails generation (the activation gate refuses a dead generate_profile), and the ORCID
+    # veto never waits behind a whole pipeline run for these rows.
+    await run.progress("step2", "Fetching ORCID fundings...")
+    await db.commit()
+    fundings = await fetch_orcid_fundings(run.orcid_id, strict=False)
+    if fundings is None:
+        await run.progress(
+            "step2_orcid_unavailable", "ORCID fundings unavailable; kept the stored ones."
+        )
+    else:
+        try:
+            async with db.begin_nested():
+                await store_orcid_fundings(db, run.user_id, fundings)
+        except SQLAlchemyError as exc:
+            logger.warning(
+                "Step 2: storing ORCID fundings for %s failed: %s", run.orcid_id, exc
+            )
+    await db.commit()
 
     # The agent row (may be None) is needed EARLY now: the legacy tenure map
     # is keyed by agent_id, and step 9's export/revision use it too.
@@ -420,13 +454,12 @@ async def _load_synthesis_inputs(run: PipelineRun) -> None:
     user_id = run.user_id
     # Synthesis basis: the STORED corpus (both cohorts — additions included,
     # audited rows the resolver missed included too), tenure-filtered (R2).
-    # Ordered newest-first so the abstracts hash is deterministic across runs.
+    # Ordered newest-first (the shared publication order) so the abstracts hash is
+    # deterministic across runs.
     stored_result = await db.execute(
         select(Publication)
         .where(Publication.user_id == user_id)
-        .order_by(
-            Publication.year.desc().nullslast(), Publication.pmid.desc()
-        )
+        .order_by(*publication_order_by())
     )
     corpus_records: list[dict[str, Any]] = [
         {
@@ -436,6 +469,8 @@ async def _load_synthesis_inputs(run: PipelineRun) -> None:
             "abstract": p.abstract,
             "journal": p.journal,
             "year": p.year,
+            "doi": p.doi,
+            "id": str(p.id),
         }
         for p in stored_result.scalars().all()
     ]
@@ -518,9 +553,10 @@ async def _steps7_8_synthesize(run: PipelineRun) -> None:
     user = run.user
     # Step 7: LLM Synthesis
     await run.progress("step7", "Synthesizing profile with AI...")
+    grants = await load_grant_sections(run.db, run.user_id)
     run.context_text = _build_synthesis_context(
         orcid_profile=run.orcid_profile,
-        grant_titles=run.grant_titles,
+        grants=grants,
         publications=run.pubs_for_synthesis,
         methods_by_pmid=run.methods_by_pmid,
     )
@@ -597,7 +633,6 @@ async def _step9_store(run: PipelineRun) -> None:
     # A monthly refresh that fails validation, or one that runs while PubMed is
     # down, keeps the profile that is already there.
     await run.progress("step9", "Saving profile to database...")
-    profile.grant_titles = run.grant_titles or profile.grant_titles
     # Records this run's INPUT (change detection), so it is written even when the
     # synthesized fields below are not. The evidence counts are the ones that
     # describe the stored profile.
@@ -638,8 +673,8 @@ async def _step9_store(run: PipelineRun) -> None:
                 f"the new synthesis {reason}.",
             )
         else:
-            # This run's other writes (grant titles, abstracts hash, publications,
-            # methods text) are stored whatever happens to the text below.
+            # This run's other writes (abstracts hash, publications, methods text)
+            # are stored whatever happens to the text below.
             await db.flush()
             # SQL-side increment (the Python read-modify-write lost updates when
             # two writers raced), and conditional on the version step 6 read: an
@@ -673,13 +708,13 @@ async def _step9_store(run: PipelineRun) -> None:
             if not result.rowcount:
                 logger.warning(
                     "Kept the edit made to %s's profile while this run synthesized "
-                    "(version %d at step 6, %d now); stored publications and grants only",
+                    "(version %d at step 6, %d now); stored publications only",
                     user.name, loaded_version, profile.profile_version,
                 )
                 await run.progress(
                     "concurrent_edit_kept",
                     f"Kept the profile edit saved while this ran (version "
-                    f"{profile.profile_version}); publications and grants were updated.",
+                    f"{profile.profile_version}); publications were updated.",
                 )
 
             if result.rowcount:
@@ -730,8 +765,13 @@ async def _enqueue_enrichment(run: PipelineRun) -> None:
     later queues neither."""
     from src.services.company_discovery import enqueue_first_company_discovery
     from src.services.grant_enrichment import enqueue_enrichment_jobs
-    await enqueue_enrichment_jobs(run.db, run.user.id, run.orcid_id, priority=BULK_PRIORITY)
-    discovery = await enqueue_first_company_discovery(run.db, run.user.id, priority=BULK_PRIORITY)
+    await enqueue_enrichment_jobs(
+        run.db, run.user.id, run.orcid_id, priority=BULK_PRIORITY,
+        not_before=run.followon_not_before,
+    )
+    discovery = await enqueue_first_company_discovery(
+        run.db, run.user.id, priority=BULK_PRIORITY, not_before=run.followon_not_before
+    )
     await run.progress(
         "step10",
         "Enqueued grant + industry enrichment jobs"
@@ -745,13 +785,13 @@ async def _export_profile(run: PipelineRun) -> None:
     profile = run.profile
     agent_reg = run.agent_reg
     # agent_reg was loaded before step 3 (the tenure map needed it);
-    # it gates file export and revision here.
+    # it gates the revision and the persona write here.
 
     # A concurrent account deletion can commit while this pipeline is between
     # flushes (the worker holds no lock on the users row). Re-check before the
-    # export below: it is a plain filesystem write outside any transaction, so
-    # without this it would recreate profiles/public/{agent_id}.md for an
-    # account that no longer exists (deletion audit 2026-08-25, F10).
+    # render below so a deleted account gets no revision and no scheduled write
+    # (deletion audit 2026-08-25, F10); the writer itself re-selects under the
+    # per-PI lock and writes nothing for a deleted account (spec 2026-10-05 §4.3).
     if await db.scalar(select(User.id).where(User.id == user.id)) is None:
         raise ValueError(
             f"User {user.id} was deleted mid-pipeline; aborting before export"
@@ -763,36 +803,45 @@ async def _export_profile(run: PipelineRun) -> None:
     await db.refresh(profile)
     await db.refresh(user)
 
-    # Export to markdown for agent consumption (include publications).
+    # Render the persona (publications and grant sections included).
     # The export list is tenure-filtered EXPLICITLY (JHU R2's export rule):
     # storage is full-career, and exporting the raw top-20 is exactly how
     # pre-tenure papers reached 9 agents' prompts on 2026-08-14 (audit H3).
     # tenure_start is already resolved above, so scope the rows already
     # loaded here rather than re-querying it via scoped_publications_for_export.
-    from src.services.profile_publish import export_and_record
+    from src.services.profile_publish import export_and_record, schedule_persona_write
     from src.services.tenure_scope import scope_for_export
     pub_result = await db.execute(
-        select(Publication).where(Publication.user_id == user.id)
+        select(Publication)
+        .where(Publication.user_id == user.id)
+        .order_by(*publication_order_by())
     )
     user_pubs = scope_for_export(pub_result.scalars().all(), run.tenure_start)
+    grants = await load_grant_sections(db, user.id)
 
-    # Record the revision alongside the export.
-    await export_and_record(
+    # The revision records this render; the file is written after the job's commit
+    # (re-rendered from the database under the per-PI lock, spec 2026-10-05 §4.3).
+    text = await export_and_record(
         db, user=user, profile=profile, agent=agent_reg, publications=user_pubs,
-        mechanism="pipeline", change_summary="Profile generated from ORCID + PubMed",
+        grants=grants, mechanism="pipeline",
+        change_summary="Profile generated from ORCID + PubMed",
     )
     await db.flush()
+    if text is not None:
+        await schedule_persona_write(db, user.id, run.after_commit)
 
     await run.progress("complete", "Profile generation complete.")
 
 
 def _build_synthesis_context(
     orcid_profile: dict[str, Any],
-    grant_titles: list[str],
+    grants: GrantSections,
     publications: list[dict[str, Any]],
     methods_by_pmid: dict[str, str],
 ) -> str:
-    """Build the text context to pass to the LLM."""
+    """Build the text context to pass to the LLM. Grants are the persona's own sections
+    (Active, Past since tenure; spec 2026-10-05 D41), stored ones only: a PI's first run
+    sees only ORCID items because enrich_grants runs after it (D63)."""
     parts = []
 
     # Researcher info
@@ -806,15 +855,12 @@ def _build_synthesis_context(
         parts.append(f"- Lab Website: {orcid_profile['lab_website']}")
 
     # Grants
-    if grant_titles:
-        parts.append("\n## Grant Titles")
-        for title in grant_titles:
-            parts.append(f"- {title}")
+    for heading, lines in grant_blocks(grants):
+        parts.append(f"\n## {heading}")
+        parts.extend(f"- {line.render()}" for line in lines)
 
-    # Publications (most recent 30)
-    sorted_pubs = sorted(publications, key=lambda p: p.get("year") or 0, reverse=True)
-    # Take up to 30
-    selected_pubs = sorted_pubs[:30]
+    # Publications (most recent 30, in the shared publication order)
+    selected_pubs = sorted(publications, key=publication_sort_key)[:30]
 
     if selected_pubs:
         parts.append("\n## Publications")

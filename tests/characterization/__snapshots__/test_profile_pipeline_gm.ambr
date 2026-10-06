@@ -20,10 +20,6 @@
       'analytical engine',
       'difference engine',
     ]),
-    'grant_titles': list([
-      'Difference Engine Program',
-      'Analytical Engine Grant',
-    ]),
     'key_targets': list([
       'Bernoulli numbers',
     ]),
@@ -31,6 +27,10 @@
       'computing',
       'mathematics',
       'engines',
+    ]),
+    'orcid_funding_titles': list([
+      'Analytical Engine Grant',
+      'Difference Engine Program',
     ]),
     'private_profile_md': None,
     'private_profile_seed': None,
@@ -72,9 +72,9 @@
     'evidence_pmid_count': None,
     'evidence_pub_count': None,
     'evidence_state': 'unknown',
-    'grant_titles': list([
-      'Difference Engine Program',
+    'orcid_funding_titles': list([
       'Analytical Engine Grant',
+      'Difference Engine Program',
     ]),
     'private_profile_seed': None,
     'profile_version': 0,

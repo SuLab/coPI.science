@@ -30,8 +30,10 @@ from src.models import (
     Job,
     OpportunityAssessment,
     PiGrant,
+    PiGrantIdentity,
     PiIndustryEvidence,
     PiIndustryScore,
+    PiOrcidFunding,
     Publication,
     ResearcherProfile,
     SimulationRun,
@@ -51,9 +53,14 @@ from src.services.blackbird_rubric import (
     RUBRIC_WEIGHTS,
     load_rubric,
 )
+from src.services.grant_sections import load_grant_sections
 from src.services.rubric_revisions import RubricRevisionView, resolve_revision
 from src.services.runs import runs_ordered
-from src.services.tenure_scope import scoped_counts, scoped_publications_for
+from src.services.tenure_scope import (
+    publication_order_by,
+    scoped_counts,
+    scoped_publications_for,
+)
 
 # Hard cap on rows fetched for one render of the triage queue (B1). Scoped to
 # the current run this is rarely close to binding — a single run's worth of
@@ -314,7 +321,7 @@ async def load_user_detail(db: AsyncSession, user_id: uuid.UUID) -> dict[str, An
     pub_result = await db.execute(
         select(Publication)
         .where(Publication.user_id == user_id)
-        .order_by(Publication.year.desc())
+        .order_by(*publication_order_by())
     )
     publications = pub_result.scalars().all()
 
@@ -336,6 +343,20 @@ async def load_user_detail(db: AsyncSession, user_id: uuid.UUID) -> dict[str, An
         select(PiGrant).where(PiGrant.user_id == user_id)
         .order_by(PiGrant.vetoed_at.is_(None).desc(), PiGrant.last_fy.desc().nullslast())
     )).scalars().all()
+    grant_identity = (await db.execute(
+        select(PiGrantIdentity).where(PiGrantIdentity.user_id == user_id)
+    )).scalar_one_or_none()
+    orcid_fundings = (await db.execute(
+        select(PiOrcidFunding).where(PiOrcidFunding.user_id == user_id)
+        .order_by(
+            PiOrcidFunding.vetoed_at.is_(None).desc(),
+            PiOrcidFunding.end_year.desc().nullsfirst(),
+            PiOrcidFunding.title,
+        )
+    )).scalars().all()
+    # What the persona renders (the export's own tenure year, provisional included),
+    # so the manager card's counts and D57 note match the file.
+    grant_sections = await load_grant_sections(db, user_id)
 
     industry_score = (await db.execute(
         select(PiIndustryScore).where(PiIndustryScore.user_id == user_id)
@@ -357,6 +378,9 @@ async def load_user_detail(db: AsyncSession, user_id: uuid.UUID) -> dict[str, An
         "pub_scope": pub_scope,
         "jobs": sorted(user.jobs, key=lambda j: j.enqueued_at, reverse=True),
         "grants": grants,
+        "grant_identity": grant_identity,
+        "orcid_fundings": orcid_fundings,
+        "grant_sections": grant_sections,
         "industry_score": industry_score,
         "industry_evidence": industry_evidence,
     }

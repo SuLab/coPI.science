@@ -1080,3 +1080,47 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > Rollback: redeploy the `rollback-pre-0059` images; the tables and the column are
 > harmless to them. `alembic downgrade 0058` drops both tables, every row in them and the
 > column.
+
+> **Deploy order for `0060_grant_identity_orcid_fundings_job_reruns` — migrate BEFORE the
+> new code serves, with the WORKER STOPPED; then web and worker; then the agent (no live
+> run); then the grants repair.** `0060` adds `pi_grant_identity` (one row per PI: RePORTER
+> identity status, accepted and pinned profile ids, candidates, the staff `none_confirmed`
+> flag, `evaluated_at`, `orcid_fetched_at`), `pi_orcid_fundings` (one row per ORCID
+> funding group, unique `(user_id, group_key)`), `pi_grants.vetoed_by_user_id`,
+> `jobs.rerun_requested_at` / `jobs.rerun_not_before` and `users.name_sanitized_at` (when an
+> ORCID- or OAuth-sourced name was cut to the allowed characters; the manager PI page
+> flags it). Design:
+> `docs/specs/2026-10-05-pi-profile-remediation-design.md` §6.1, §4.2.
+>
+> *Old code on the new schema* is safe: it reads none of it. *New code on the old schema*
+> is not: `Job` maps the rerun columns (the worker's claim and every jobs page raise
+> `UndefinedColumn`), `User` maps `name_sanitized_at` (every page), and every persona export
+> selects the two new tables. **Agent image:**
+> rebuild — the engine imports `src.models`.
+>
+> **Stop the worker** for `--apply` (`$DC stop worker`, after no row is `processing`): the
+> chain's 10 s `lock_timeout` otherwise collides with the worker's job-long transaction
+> and its idle-loop sweeps. Commit before building.
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     for s in blackbird-app worker agent; do
+>       docker image tag copi-blackbird-$s:latest copi-blackbird-$s:rollback-pre-0060
+>     done
+>     $DC build blackbird-app worker
+>     $DC --profile agent build agent
+>     $DC stop worker
+>     ./scripts/migrate/run_migration.sh              # rehearse (writes nothing)
+>     ./scripts/migrate/run_migration.sh --apply      # dump → preflight → apply → postflight
+>     $DC run --rm blackbird-app alembic current      # must equal `alembic heads` (0060)
+>     $DC up -d blackbird-app worker
+>     $DC up -d agent                                 # ONLY when /admin/simulation shows no live run
+>
+> Then run the grants repair at once (`scripts/grants_remediation.py`: `--dry-run`, then
+> `--apply`, then `--verify`): until it runs, an export renders no RePORTER grants (no
+> identity rows yet) and no ORCID items (no fundings yet). The repair sets the app setting
+> `persona_sweep_enabled` last. Nothing here starts a run.
+>
+> Rollback: redeploy the `rollback-pre-0060` images; the schema is harmless to them, but
+> old code re-exports from `grant_titles` and brings the misattribution back, so this is a
+> last resort. `alembic downgrade 0059`, if wanted, runs from a one-off container off the
+> NEW image before the images are restored, and drops both tables and the four columns.

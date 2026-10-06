@@ -13,7 +13,10 @@ This module is the one place deletion policy lives. Both delete routes call
 Two phases, deliberately:
 
 * **in-transaction** — suspend the linked agent, purge revisions/DMs/tenure
-  key (and optionally the allowlist row), delete the user, COMMIT.
+  key (and optionally the allowlist row), delete the user, COMMIT. Just before
+  the commit it takes the per-PI persona lock (``lock_agent_persona``, spec
+  2026-10-05 §4.3) and purges revisions again, so no persona file or revision
+  written by a concurrent publish outlives the deletion.
 * **post-commit** — filesystem cleanup and Slack token revocation. External
   effects that cannot roll back run only once the DB state is durable; a
   failure lands on the report and in the log, never raises. A half-failed
@@ -45,6 +48,7 @@ from src.models import (
     ProfileRevision,
     User,
 )
+from src.services.advisory_locks import lock_agent_persona
 from src.services.jhu_rules import PROVISIONAL_KEY_PREFIX, TENURE_KEY_PREFIX
 from src.services.slack_tokens import is_valid_token
 from src.services.slack_web import revoke_token_async
@@ -183,6 +187,20 @@ async def delete_user_account(
         report.allowlist_removed = bool(res.rowcount)
 
     await db.delete(user)
+    # Flush the cascading DELETE first, then take the persona lock (spec 2026-10-05 §4.3):
+    # a post-commit persona write in flight finishes before this commits, and one that
+    # starts after it finds no agent for this user and writes nothing. Taking the lock
+    # BEFORE the DELETE would deadlock against a pipeline transaction holding row locks.
+    await db.flush()
+    await lock_agent_persona(db, report.user_id)
+    if agent is not None:
+        # A revision transaction that held the lock may have committed a revision after
+        # the purge above; it is visible now and goes too. agent.id is the agents primary
+        # key, untouched by the cascade's SET NULL of agents.user_id.
+        res = await db.execute(
+            sa_delete(ProfileRevision).where(ProfileRevision.agent_registry_id == agent.id)
+        )
+        report.revisions_deleted += res.rowcount or 0
     await db.commit()
 
     # ---- post-commit, best-effort: external effects that cannot roll back ----

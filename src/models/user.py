@@ -68,6 +68,10 @@ class User(Base):
     #: epoch differs. Bumped by logout, access denial and a role change
     #: (src/services/session_epoch.py). NULL counts as 0.
     session_epoch: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: When an ORCID- or OAuth-sourced name was last cut to the D60 allowlist
+    #: (migration 0060; `person_names.name_from_machine_source`). The manager PI page
+    #: shows a "check the spelling" note while it is set. NULL = never cut.
+    name_sanitized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(

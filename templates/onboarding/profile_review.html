@@ -100,16 +100,15 @@
 
             {{ profile_tag_fields(profile, "mb-6") }}
 
-            {% if profile.grant_titles %}
-            <!-- Grant Titles (read-only) -->
+            {% if grant_sections and (grant_sections.active or grant_sections.past) %}
+            <!-- Grants (read-only; the persona's sections) -->
             <div class="mb-6">
-                <label class="block text-sm font-medium text-gray-700 mb-2">Grant Titles</label>
+                <label class="block text-sm font-medium text-gray-700 mb-2">Grants (NIH RePORTER and ORCID)</label>
                 <div class="bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-600">
-                    {% for title in profile.grant_titles %}
-                    <div class="py-1 border-b border-gray-100 last:border-0">{{ title }}</div>
-                    {% endfor %}
+                    {% for line in grant_sections.active %}<div class="py-1 border-b border-gray-100 last:border-0">{{ line.render() }}</div>{% endfor %}
+                    {% for line in grant_sections.past %}<div class="py-1 border-b border-gray-100 last:border-0">{{ line.render() }} (past)</div>{% endfor %}
                 </div>
-                <p class="text-xs text-gray-600 mt-1">From your ORCID profile. Update at <a href="https://orcid.org" target="_blank" class="text-indigo-600">orcid.org</a>.</p>
+                <p class="text-xs text-gray-600 mt-1">Update ORCID fundings at <a href="https://orcid.org" target="_blank" class="text-indigo-600">orcid.org</a>.</p>
             </div>
             {% endif %}
 

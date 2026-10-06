@@ -15,8 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import FormData
 
 from src.models import AgentRegistry, Job, ResearcherProfile, User
+from src.models.job import INTERACTIVE_PRIORITY
+from src.services.grant_sections import load_grant_sections
 from src.services.jhu_rules import get_tenure_start, set_tenure_start
-from src.services.profile_publish import export_and_record
+from src.services.job_queue import request_job
+from src.services.profile_publish import export_and_record, write_persona_files
 from src.services.tenure_scope import scoped_publications_for_export
 from src.services.user_email import assign_user_email
 from src.services.validators import is_valid_email
@@ -113,13 +116,21 @@ async def _write_tenure_if_changed(
     db: AsyncSession, user: User, year: int, export_agent: AgentRegistry | None,
 ) -> None:
     """Upsert a ``manual`` tenure entry only when ``year`` differs from the recorded one
-    (D-01). The manager form re-posts the displayed year on every save; relabelling a
-    machine-derived entry ``manual`` made the re-derivation script skip it."""
+    (D-01), and then request an ``enrich_grants`` job in the same transaction. The manager
+    form re-posts the displayed year on every save; relabelling a machine-derived entry
+    ``manual`` made the re-derivation script skip it."""
     agent_slug = export_agent.agent_id if export_agent is not None else await db.scalar(
         select(AgentRegistry.agent_id).where(AgentRegistry.user_id == user.id)
     )
     if await get_tenure_start(db, user.id, agent_id=agent_slug) != year:
         await set_tenure_start(user.id, year, "manual", db=db)
+        # The stored RePORTER rows were fetched under the old fiscal-year filter (spec
+        # 2026-10-05 §6.1; §6.3 later moves this to a generate_profile enqueue).
+        await request_job(
+            db, type="enrich_grants", user_id=user.id,
+            payload={"user_id": str(user.id), "orcid": user.orcid},
+            priority=INTERACTIVE_PRIORITY,
+        )
 
 
 async def _load_or_create_profile(
@@ -204,13 +215,15 @@ async def apply_profile_edits(
     already holds the agent. ``mechanism`` is the revision mechanism recorded
     for the export (``web_impersonated`` for an impersonated session). A name,
     institution or department longer than ``USER_FIELD_MAX_CHARS`` returns
-    ``field_too_long`` before anything is written. Returns an
-    error code, or None after committing and exporting.
+    ``field_too_long`` before anything is written. Returns an error code, or None after
+    committing; the persona revision is recorded in a second transaction and the file is
+    written after that commit (spec 2026-10-05 §4.3).
 
     Every refusal comes before any write, because ``get_db`` commits on a clean return: an
     overlong user field (A-15), a ``generate_profile`` job pending or processing for ``target_user`` (``PROFILE_GENERATING``,
     D-08), a malformed tenure year, then the email checks (D-02). The tenure year is written
-    only when it differs from the recorded one (D-01). The profile-row insert runs under
+    only when it differs from the recorded one (D-01), and such a write also requests an
+    ``enrich_grants`` job (a refused save writes neither). The profile-row insert runs under
     ``PROFILE_INSERT_LOCK_TIMEOUT``; a lock timeout rolls back and also returns
     ``PROFILE_GENERATING``.
     """
@@ -263,11 +276,13 @@ async def apply_profile_edits(
     user_pubs = await scoped_publications_for_export(
         db, target_user.id, agent.agent_id if agent else None
     )
-    path = await export_and_record(
+    grants = await load_grant_sections(db, target_user.id)
+    rendered = await export_and_record(
         db, user=target_user, profile=profile, agent=agent, publications=user_pubs,
-        mechanism=mechanism, changed_by_user_id=changed_by_user_id,
+        grants=grants, mechanism=mechanism, changed_by_user_id=changed_by_user_id,
         change_summary=change_summary,
     )
-    if path is not None and agent is not None:
+    if rendered is not None:
         await db.commit()
+        await write_persona_files(db, target_user.id)
     return None

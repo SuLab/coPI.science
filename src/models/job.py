@@ -87,6 +87,12 @@ class Job(Base):
     #: 10 = interactive (a person is waiting), -10 = bulk; NULL = 0 (every row
     #: written before 0056, and every enqueue that states no priority).
     priority: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    #: A change requested while this job was processing (migration 0060, spec §4.2):
+    #: `job_queue.request_job` sets it; `claim_job` clears it; when the job ends
+    #: (`completed` or `dead`) the worker inserts a fresh pending job carrying
+    #: `rerun_not_before`; a retry back to `pending` clears both.
+    rerun_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rerun_not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         Index(

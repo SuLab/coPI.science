@@ -66,8 +66,12 @@ async def create_revision(
         content: Full markdown content after the change.
         changed_by_user_id: The user who initiated the change (None for agent/system).
         mechanism: "web", "web_impersonated" (a web edit made by an admin
-            impersonating the PI; the change_summary names the admin), "agent"
-            or "pipeline". ("slack_dm" is historical: only
+            impersonating the PI; the change_summary names the admin), "agent",
+            "pipeline", "grant_veto" (a staff veto of a RePORTER award),
+            "orcid_veto" (a staff veto of an ORCID funding), "grant_pin" (a staff
+            pin, unpin or "no RePORTER profile"), "reexport" (a repair script's
+            re-export) or "persona_sweep" (the daily persona sweep). At most 20
+            characters (the column is String(20)). ("slack_dm" is historical: only
             rows written before 2026-08-13 carry it. "monthly_refresh" has never
             been written: the monthly_refresh job runs the profile pipeline, which
             records "pipeline".)

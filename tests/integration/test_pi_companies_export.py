@@ -17,7 +17,7 @@ from src.services.pi_companies import (
     export_companies_file,
     reject_company,
 )
-from src.services.profile_publish import export_and_record
+from src.services.profile_publish import write_persona_files
 from src.services.user_deletion import delete_user_account
 from tests import factories
 from tests.pi_company_support import companies_dir, seed_company
@@ -121,26 +121,25 @@ async def test_a_filesystem_failure_is_logged_and_the_write_stands(db_session, m
 
 
 async def test_the_profile_publish_writes_the_file_for_a_later_agent(db_session, monkeypatch, tmp_path, _companies_dir):
-    """§7.2: rows confirmed before the agent existed reach the hub at the next publish."""
+    """§7.2: rows confirmed before the agent existed reach the hub at the next publish;
+    the post-commit persona write rewrites the companies file."""
     monkeypatch.setattr(profile_export, "PROFILES_DIR", tmp_path / "public")
     pi = await factories.make_user(db_session, name="Victor Velculescu")
-    profile = await factories.make_profile(db_session, user=pi)
+    await factories.make_profile(db_session, user=pi)
     await seed_company(db_session, pi, status="confirmed")
     assert await export_companies_file(db_session, pi.id) is None      # no agent yet
     agent = await factories.make_agent(db_session, user=pi)
 
-    await export_and_record(db_session, user=pi, profile=profile, agent=agent,
-                            publications=None, mechanism=None)
+    await write_persona_files(db_session, pi.id)
     assert "- DELFI Diagnostics: founder" in (_companies_dir / f"{agent.agent_id}.md").read_text()
 
 
 async def test_the_profile_publish_without_an_agent_writes_no_file(db_session, monkeypatch, tmp_path, _companies_dir):
     monkeypatch.setattr(profile_export, "PROFILES_DIR", tmp_path / "public")
     pi = await factories.make_user(db_session)
-    profile = await factories.make_profile(db_session, user=pi)
+    await factories.make_profile(db_session, user=pi)
     await seed_company(db_session, pi, status="confirmed")
-    assert await export_and_record(db_session, user=pi, profile=profile, agent=None,
-                                   publications=None, mechanism="web") is None
+    assert await write_persona_files(db_session, pi.id) is None
     assert not _companies_dir.exists()
 
 

@@ -278,8 +278,9 @@ def test_supported_start_revisions_are_exactly_the_documented_set():
         "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038",
         "0039", "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048",
         "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058",
+        "0059",
     )
-    assert pf.DEFAULT_TARGET == "0059"
+    assert pf.DEFAULT_TARGET == "0060"
 
 
 def test_every_post_branch_revision_is_a_supported_start():
@@ -1901,6 +1902,34 @@ def test_0059_plans_its_new_objects():
         ("index", "ix_assessment_chat_opens_user_id"),
         ("index", "ix_assessment_chat_opens_assessment_id"),
         ("index", "ix_assessment_chat_opens_created"),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# 0060: grant identity, ORCID fundings, job rerun requests
+# --------------------------------------------------------------------------- #
+
+
+def test_0060_sizes_jobs_pi_grants_and_users_and_takes_no_agent_messages_lock():
+    assert pf.tables_sized_between("0059", "0060") == ["jobs", "pi_grants", "users"]
+    assert pf.agent_messages_ddl_pending("0059", "0060") is False
+
+
+def test_0060_plans_its_new_objects():
+    planned = {(o.kind, o.name) for o in pf.planned_objects_between("0059", "0060")}
+    assert planned == {
+        ("column", "name_sanitized_at"),
+        ("column", "rerun_requested_at"),
+        ("column", "rerun_not_before"),
+        ("column", "vetoed_by_user_id"),
+        ("constraint", "fk_pi_grants_vetoed_by_user_id_users"),
+        ("index", "ix_pi_grants_vetoed_by_user_id"),
+        ("table", "pi_grant_identity"),
+        ("constraint", "ck_pi_grant_identity_status"),
+        ("index", "ix_pi_grant_identity_pinned_by_user_id"),
+        ("table", "pi_orcid_fundings"),
+        ("constraint", "uq_pi_orcid_fundings_user_group"),
+        ("index", "ix_pi_orcid_fundings_vetoed_by_user_id"),
     }
 
 

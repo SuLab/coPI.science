@@ -3,6 +3,7 @@ from sqlalchemy import select
 
 from src.models import ProfileRevision, ResearcherProfile
 from src.services import profile_export
+from src.services.grant_sections import load_grant_sections
 from src.services.profile_edit import PROFILE_FIELDS, apply_profile_edits
 from src.services.profile_export import export_profile_to_markdown
 from src.services.tenure_scope import scoped_publications_for_export
@@ -96,7 +97,10 @@ async def test_each_route_exports_the_same_bytes_as_the_export_function(
         select(ResearcherProfile).where(ResearcherProfile.user_id == user.id))).scalar_one()
     await db_session.refresh(profile)
     pubs = await scoped_publications_for_export(db_session, user.id, "route1")
-    assert written == export_profile_to_markdown(user, profile, "route1", publications=pubs).read_text()
+    grants = await load_grant_sections(db_session, user.id)
+    assert written == export_profile_to_markdown(
+        user, profile, "route1", publications=pubs, grants=grants
+    ).read_text()
     revs = (await db_session.execute(select(ProfileRevision).where(
         ProfileRevision.agent_registry_id == agent.id))).scalars().all()
     assert [(v.mechanism, v.change_summary, v.content) for v in revs] == [("web", summary, written)]

@@ -7,7 +7,14 @@ company_discovery).
 
 While no job is waiting it also generates the assessment chat's opening questions,
 one set at a time (`src.services.assessment_chat_suggestions.generate_due`), so a job
-waits behind at most one of those calls (CALL_TIMEOUT_SECONDS, 3 minutes, at worst).
+waits behind at most one of those calls (CALL_TIMEOUT_SECONDS, 3 minutes, at worst),
+and runs the daily persona re-export sweep when it is due
+(`src.services.persona_sweep.run_persona_sweep`, spec 2026-10-05 D54).
+
+A handler may raise `job_queue.NonRetryableJobError` (dead at once) or
+`job_queue.JobDeferred` (back to pending, attempt not counted), and may append
+post-commit steps to `JobContext.after_commit`. A `request_job` call that flagged a
+processing job gets its fresh job when that job completes or dies (spec 2026-10-05 §4.2).
 """
 
 import asyncio
@@ -15,8 +22,8 @@ import logging
 import signal
 import sys
 import uuid
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.ext.asyncio import (
@@ -29,11 +36,23 @@ from sqlalchemy.ext.asyncio import (
 from src.config import get_settings
 from src.database import make_engine
 from src.models import Job, User
+from src.models.job import PER_USER_JOB_TYPES
 from src.services import job_progress
 from src.services.assessment_chat_suggestions import (
     SWEEP_INTERVAL_SECONDS as SUGGESTION_SWEEP_SECONDS,
 )
 from src.services.assessment_chat_suggestions import generate_due as generate_chat_suggestions
+from src.services.job_queue import (
+    AfterCommit,
+    JobDeferred,
+    NonRetryableJobError,
+    insert_job_if_absent,
+)
+from src.services.persona_sweep import (
+    PERSONA_SWEEP_RECHECK_SECONDS,
+    PERSONA_SWEEP_SECONDS,
+    run_persona_sweep,
+)
 from src.services.profile_pipeline import run_profile_pipeline
 from src.services.review_bot import execute_review_analysis
 
@@ -53,7 +72,8 @@ def _handle_sigterm(*args):
 
 
 async def claim_job(db: AsyncSession) -> Job | None:
-    """Atomically claim the next pending job."""
+    """Atomically claim the next pending job. A row an uncommitted `request_job` holds
+    locked is skipped until that transaction ends."""
     result = await db.execute(
         select(Job)
         .where(
@@ -72,8 +92,10 @@ async def claim_job(db: AsyncSession) -> Job | None:
         return None
 
     job.status = "processing"
-    job.started_at = datetime.now(timezone.utc)
+    job.started_at = datetime.now(UTC)
     job.attempts += 1
+    job.rerun_requested_at = None  # this run will see every change committed before now
+    job.rerun_not_before = None
     await db.commit()
     return job
 
@@ -118,9 +140,11 @@ async def requeue_stale_processing_jobs(
     in the queue forever, and `enqueue_analysis_if_absent` counts pending rows
     when deciding whether to enqueue. A NULL `started_at` on a processing row
     is treated as stale too — `claim_job` always sets it, so NULL means the
-    row was never claimed by this code path.
+    row was never claimed by this code path. A dead row whose rerun was requested
+    gets its fresh pending job in the same transaction; a row back to pending has
+    its request cleared (the retry will see the change).
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cutoff = now - timedelta(seconds=older_than_seconds)
     stale = (
         Job.status == "processing",
@@ -134,14 +158,24 @@ async def requeue_stale_processing_jobs(
         update(Job)
         .where(*stale, Job.attempts >= Job.max_attempts)
         .values(status="dead", last_error=note, completed_at=now)
+        .returning(Job.type, Job.user_id, Job.payload, Job.priority,
+                   Job.rerun_requested_at, Job.rerun_not_before)
     )
+    dead_rows = dead.all()
     pending = await db.execute(
         update(Job)
         .where(*stale, Job.attempts < Job.max_attempts)
-        .values(status="pending", last_error=note)
+        .values(status="pending", last_error=note,
+                rerun_requested_at=None, rerun_not_before=None)
     )
+    for row in dead_rows:
+        await _spawn_requested_rerun(
+            db, job_type=row.type, user_id=row.user_id, payload=row.payload,
+            priority=row.priority, rerun_requested_at=row.rerun_requested_at,
+            rerun_not_before=row.rerun_not_before,
+        )
     await db.commit()
-    n_dead = dead.rowcount or 0
+    n_dead = len(dead_rows)
     n_pending = pending.rowcount or 0
     if n_dead or n_pending:
         logger.warning(
@@ -162,6 +196,54 @@ class JobContext:
     payload: dict
     attempts: int
     max_attempts: int
+    #: Async callables process_job runs, in order, on the handler's session after the
+    #: handler's commit (spec §4.3): the post-commit persona write.
+    after_commit: list[AfterCommit] = field(default_factory=list, compare=False)
+
+
+async def _spawn_requested_rerun(
+    db: AsyncSession, *, job_type: str, user_id: uuid.UUID | None, payload: dict | None,
+    priority: int | None, rerun_requested_at: datetime | None,
+    rerun_not_before: datetime | None,
+) -> uuid.UUID | None:
+    """The fresh job a `request_job` call asked for while this one ran (spec §4.2):
+    the payload minus `progress`, the same priority, `not_before = rerun_not_before`.
+    Call after the ending status flip is flushed, so the one-active-job index allows it."""
+    if rerun_requested_at is None or user_id is None or job_type not in PER_USER_JOB_TYPES:
+        return None
+    fresh = {k: v for k, v in (payload or {}).items() if k != "progress"}
+    new_id = await insert_job_if_absent(
+        db, type=job_type, user_id=user_id, payload=fresh, priority=priority,
+        not_before=rerun_not_before,
+    )
+    logger.info(
+        "Rerun of %s for user %s requested during the last run: job %s",
+        job_type, user_id, new_id,
+    )
+    return new_id
+
+
+async def _spawn_for(db: AsyncSession, job: Job) -> None:
+    """Flush ``job``'s ending status, then spawn its requested rerun, if any."""
+    await db.flush()
+    await _spawn_requested_rerun(
+        db, job_type=job.type, user_id=job.user_id, payload=job.payload,
+        priority=job.priority, rerun_requested_at=job.rerun_requested_at,
+        rerun_not_before=job.rerun_not_before,
+    )
+
+
+def _followon_not_before(payload: dict) -> datetime | None:
+    """`_bulk_enqueue`'s slot for this parent's step-10 follow-ons (spec §4.2), if any:
+    an ISO 8601 string, read as UTC when it has no offset. None when absent or invalid."""
+    raw = payload.get("followon_not_before")
+    if not isinstance(raw, str):
+        return None
+    try:
+        value = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
 
 
 async def execute_generate_profile(ctx: JobContext, db: AsyncSession) -> None:
@@ -179,7 +261,10 @@ async def execute_generate_profile(ctx: JobContext, db: AsyncSession) -> None:
         raise ValueError(f"User {user_id} not found")
 
     logger.info("Running profile pipeline for user %s (%s)", user_id, user.name)
-    await run_profile_pipeline(user_id=user_id, db=db, job_id=ctx.id)
+    await run_profile_pipeline(
+        user_id=user_id, db=db, job_id=ctx.id, after_commit=ctx.after_commit,
+        followon_not_before=_followon_not_before(ctx.payload),
+    )
     logger.info("Profile pipeline complete for user %s", user_id)
 
 
@@ -226,22 +311,33 @@ JOB_HANDLERS = {
 
 
 async def _mark_completed(session_factory: async_sessionmaker, job_id: uuid.UUID) -> None:
+    """Mark the job completed and spawn its requested rerun, if any. A row already
+    gone (account deletion cascades it) is tolerated."""
     async with session_factory() as db:
-        await db.execute(
-            update(Job).where(Job.id == job_id)
-            .values(status="completed", completed_at=datetime.now(timezone.utc))
-        )
+        # FOR UPDATE: waits for a request_job UPDATE in flight on this row, then sees its flag.
+        job = (await db.execute(
+            select(Job).where(Job.id == job_id).with_for_update()
+        )).scalar_one_or_none()
+        if job is None:
+            return
+        job.status = "completed"
+        job.completed_at = datetime.now(UTC)
+        await _spawn_for(db, job)
         await db.commit()
 
 
 async def _mark_failed(
     session_factory: async_sessionmaker, job_id: uuid.UUID, exc: BaseException
 ) -> None:
-    """Failure bookkeeping in its own transaction: dead at max attempts, else
-    pending behind the retry backoff. The row can already be gone (account
-    deletion cascades it), which is tolerated."""
+    """Failure bookkeeping in its own transaction: dead at max attempts or on a
+    `NonRetryableJobError` (spawning a requested rerun), else pending behind the
+    retry backoff with any rerun request cleared (the retry will see the change).
+    The row can already be gone (account deletion cascades it), which is tolerated."""
     async with session_factory() as db:
-        job = (await db.execute(select(Job).where(Job.id == job_id))).scalar_one_or_none()
+        # FOR UPDATE: waits for a request_job UPDATE in flight on this row, then sees its flag.
+        job = (await db.execute(
+            select(Job).where(Job.id == job_id).with_for_update()
+        )).scalar_one_or_none()
         if job is None:
             logger.info(
                 "Job %s row is gone (user deleted mid-run); "
@@ -250,24 +346,61 @@ async def _mark_failed(
             return
         job.last_error = str(exc)[:2000]
 
-        if job.attempts >= job.max_attempts:
+        job.completed_at = datetime.now(UTC)
+        if isinstance(exc, NonRetryableJobError) or job.attempts >= job.max_attempts:
             job.status = "dead"
-            logger.warning("Job %s marked as dead after %d attempts", job_id, job.attempts)
+            if isinstance(exc, NonRetryableJobError):
+                logger.warning("Job %s marked as dead (non-retryable)", job_id)
+            else:
+                logger.warning("Job %s marked as dead after %d attempts", job_id, job.attempts)
+            await _spawn_for(db, job)
         else:
             job.status = "pending"  # Will be retried after the backoff
             job.not_before = func.now() + retry_delay(job.attempts)
+            job.rerun_requested_at = None
+            job.rerun_not_before = None
             logger.info(
                 "Job %s will be retried after %s (attempt %d of %d failed)",
                 job_id, retry_delay(job.attempts), job.attempts, job.max_attempts,
             )
 
-        job.completed_at = datetime.now(timezone.utc)
         try:
             await db.commit()
         except Exception:
             # Lost a second race on the same delete; nothing left to save.
             await db.rollback()
             logger.info("Job %s vanished during failure bookkeeping", job_id)
+
+
+async def _mark_deferred(
+    session_factory: async_sessionmaker, job_id: uuid.UUID, exc: JobDeferred
+) -> None:
+    """A handler deferred its own job (spec §4.2): back to pending until exc.not_before,
+    without counting the attempt claim_job added. A retry-like return: flags cleared."""
+    async with session_factory() as db:
+        job = (await db.execute(
+            select(Job).where(Job.id == job_id).with_for_update()
+        )).scalar_one_or_none()
+        if job is None:
+            return
+        job.status = "pending"
+        job.attempts = max(job.attempts - 1, 0)
+        job.not_before = exc.not_before
+        job.rerun_requested_at = None
+        job.rerun_not_before = None
+        job.last_error = f"deferred until {exc.not_before.isoformat()}: {exc.reason}"[:2000]
+        await db.commit()
+    logger.info("Job %s deferred until %s", job_id, exc.not_before)
+
+
+async def _run_after_commit(ctx: JobContext, db: AsyncSession) -> None:
+    """The handler's post-commit steps (spec §4.3), in order; one failing never fails the job."""
+    for callback in ctx.after_commit:
+        try:
+            await callback(db)
+        except Exception:
+            logger.exception("Job %s: a post-commit step failed", ctx.id)
+            await db.rollback()
 
 
 async def process_job(job_id: uuid.UUID, job_type: str, job_attempts: int, job_max_attempts: int, session_factory: async_sessionmaker) -> None:
@@ -280,6 +413,10 @@ async def process_job(job_id: uuid.UUID, job_type: str, job_attempts: int, job_m
     so an account deletion mid-run takes the row with it (deletion audit F10).
     Both the initial re-fetch and the failure bookkeeping tolerate that — the
     account is gone, so there is no state anyone still needs updated.
+
+    After the handler's commit, `ctx.after_commit` runs in order on the same
+    session, before the job is marked completed; a failed or deferred handler runs
+    none of it. `JobDeferred` returns the job to pending without counting the attempt.
     """
     async with session_factory() as db:
         row = (await db.execute(select(Job).where(Job.id == job_id))).scalar_one_or_none()
@@ -303,6 +440,10 @@ async def process_job(job_id: uuid.UUID, job_type: str, job_attempts: int, job_m
                 raise ValueError(f"Unknown job type: {ctx.type}")
             await handler(ctx, db)
             await db.commit()
+        except JobDeferred as exc:
+            await db.rollback()
+            await _mark_deferred(session_factory, job_id, exc)
+            return
         except Exception as exc:
             logger.error("Job %s failed: %s", job_id, exc, exc_info=True)
             # The pipeline may have left the transaction aborted (e.g. an FK
@@ -311,6 +452,7 @@ async def process_job(job_id: uuid.UUID, job_type: str, job_attempts: int, job_m
             await db.rollback()
             await _mark_failed(session_factory, job_id, exc)
             return
+        await _run_after_commit(ctx, db)
     await _mark_completed(session_factory, job_id)
     logger.info("Job %s completed", job_id)
 
@@ -337,6 +479,22 @@ async def acquire_worker_lock(engine: AsyncEngine) -> AsyncConnection | None:
     return conn
 
 
+async def _maybe_sweep_personas(
+    session_factory: async_sessionmaker, now: float, due_at: float
+) -> float:
+    """Run the daily persona sweep when it is due (spec 2026-10-05 §6.1, D54); returns the
+    next due time. While `persona_sweep_enabled` is off, or after the sweep raised, it
+    re-checks every PERSONA_SWEEP_RECHECK_SECONDS, so the idle work after it still runs."""
+    if now < due_at:
+        return due_at
+    try:
+        swept = await run_persona_sweep(session_factory)
+    except Exception:
+        logger.exception("Persona sweep failed; retrying in %ds", PERSONA_SWEEP_RECHECK_SECONDS)
+        return now + PERSONA_SWEEP_RECHECK_SECONDS
+    return now + (PERSONA_SWEEP_RECHECK_SECONDS if swept is None else PERSONA_SWEEP_SECONDS)
+
+
 async def run_worker():
     """Main worker loop."""
     global _shutdown
@@ -361,6 +519,7 @@ async def run_worker():
         await requeue_stale_processing_jobs(db, older_than_seconds=0)
     last_stale_check = asyncio.get_event_loop().time()
     last_suggestion_check: float | None = None
+    persona_sweep_due = 0.0
 
     while not _shutdown:
         try:
@@ -376,6 +535,9 @@ async def run_worker():
                 # waiting.
                 generated = False
                 now = asyncio.get_event_loop().time()
+                persona_sweep_due = await _maybe_sweep_personas(
+                    session_factory, now, persona_sweep_due
+                )
                 if last_suggestion_check is None or now - last_suggestion_check >= SUGGESTION_SWEEP_SECONDS:
                     last_suggestion_check = now
                     generated = await generate_chat_suggestions(session_factory)

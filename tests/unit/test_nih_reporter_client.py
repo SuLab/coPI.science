@@ -48,3 +48,32 @@ async def test_publications_for_cores_groups_pmids_as_strings():
                         {"coreproject": "R01AI137329", "pmid": 30000000, "applid": 2}]}))
         out = await nr.publications_for_cores(["R01AI137329"])
     assert out == {"R01AI137329": {"34187885", "30000000"}}
+
+
+async def test_core_project_nums_is_refused_on_projects_search():
+    """projects/search silently ignores core_project_nums (NEW-2); before the per-endpoint
+    split it was allowed there and returned the whole database."""
+    with respx.mock(assert_all_called=False) as router:
+        route = router.post(URL)
+        with pytest.raises(nr.ReporterCriteriaError):
+            await nr.search_projects({"core_project_nums": ["R01AI137329"]}, nr.PROJECT_FIELDS)
+        assert not route.called
+
+
+def test_publications_allowlist_is_its_own():
+    with pytest.raises(nr.ReporterCriteriaError):
+        nr._check_criteria({"pi_names": []}, nr.PUBLICATIONS_CRITERIA, "publications/search")
+    nr._check_criteria({"core_project_nums": ["X"]}, nr.PUBLICATIONS_CRITERIA, "publications/search")
+
+
+async def test_profile_id_exists_reads_one_page():
+    with respx.mock() as router:
+        route = router.post(URL).mock(return_value=httpx.Response(200, json=_page(3, [
+            {"principal_investigators": [{"profile_id": 9751245}]}])))
+        assert await nr.profile_id_exists(9751245) is True
+        body = route.calls[0].request.content
+        assert body and b'"limit":1' in body.replace(b" ", b"")
+    with respx.mock() as router:
+        router.post(URL).mock(return_value=httpx.Response(200, json=_page(2983191, [
+            {"principal_investigators": [{"profile_id": 1}]}])))
+        assert await nr.profile_id_exists(9751245) is False

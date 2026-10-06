@@ -15,7 +15,7 @@ regardless of what the router-level dependency alone would allow through.
 Exactly four GETs use ``_REVIEW``: ``manager_pis``, ``manager_pi_detail``,
 ``manager_assessments`` and ``manager_assessment_detail``; ``manager_root``
 takes no per-handler dependency at all (its only job is a redirect to a
-route that is itself reviewer-reachable). Every other handler — the fifteen
+route that is itself reviewer-reachable). Every other handler — the nineteen
 POSTs, ``manager_slack_bots``, ``manager_discussions``, ``manager_activity``/
 ``manager_activity_detail`` and the two prompt-suggestion pages — stays on
 ``_STAFF``, so a reviewer reaches none of them. This docstring is not what
@@ -40,10 +40,11 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import func, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import func, select, text, update
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.role_capabilities import requires_linked_user, roles_requiring_user
@@ -60,7 +61,9 @@ from src.models import (
     Job,
     PiCompany,
     PiGrant,
+    PiGrantIdentity,
     PiIndustryEvidence,
+    PiOrcidFunding,
     PromptChangeSuggestion,
     ResearcherProfile,
     User,
@@ -95,6 +98,8 @@ from src.services.directory import (
 from src.services.email_verification import mark_email_verified
 from src.services.industry_evidence import rescore_user
 from src.services.jhu_rules import get_tenure_start
+from src.services.job_queue import request_job
+from src.services.nih_reporter import profile_id_exists
 from src.services.pi_companies import (
     PI_COMPANY_ROLE_LABELS,
     CompanyNotFoundError,
@@ -121,10 +126,9 @@ from src.services.profile_edit import (
     parse_expected_version,
 )
 from src.services.profile_jobs import enqueue_profile_job_if_absent, profile_retry_warranted
-from src.services.profile_publish import export_and_record
+from src.services.profile_publish import reexport_persona, write_persona_files
 from src.services.slack_tokens import token_for_agent_row
 from src.services.star_topology import ensure_lab_spoke
-from src.services.tenure_scope import scoped_publications_for_export
 from src.services.thread_panel import panel_cards_by_thread
 from src.web.flash import flash
 from src.web.templating import make_templates
@@ -305,6 +309,9 @@ async def manager_pi_detail(
             pub_scope=detail["pub_scope"],
             jobs=detail["jobs"],
             grants=detail["grants"],
+            grant_identity=detail["grant_identity"],
+            orcid_fundings=detail["orcid_fundings"],
+            grant_sections=detail["grant_sections"],
             industry_score=detail["industry_score"],
             industry_evidence=detail["industry_evidence"],
             tenure_start=tenure_start,
@@ -512,35 +519,61 @@ async def manager_verify_pi_email(
     return RedirectResponse(url=f"/manager/pis/{user_id}?email_verified=1", status_code=302)
 
 
-async def _reexport_profile_markdown_best_effort(db: AsyncSession, user_id: uuid.UUID) -> None:
-    """Best-effort re-export of profiles/public/{agent_id}.md after a veto.
+#: ``SET LOCAL lock_timeout`` for the ORCID veto (spec 2026-10-05 §6.1): a refresh holds the
+#: PI's funding rows only for its short store transaction; past this the veto says "try again".
+ORCID_VETO_LOCK_TIMEOUT = "5s"
+#: Postgres SQLSTATE lock_not_available.
+_LOCK_NOT_AVAILABLE = "55P03"
 
-    A grant veto changes ``ResearcherProfile.grant_titles``, and without this
-    the running agent's persona keeps serving the vetoed grant's title until
-    some unrelated profile edit happens to re-export it. Mirrors
-    ``apply_profile_edits``'s own export call (``src/services/profile_edit.py``)
-    but never raises: an export failure must not turn a successful veto
-    commit into a 500, so the caller sees this as fire-and-forget.
-    """
-    try:
-        agent = (await db.execute(
-            select(AgentRegistry).where(AgentRegistry.user_id == user_id)
-        )).scalar_one_or_none()
-        if agent is None:
-            return
-        user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-        profile = (await db.execute(
-            select(ResearcherProfile).where(ResearcherProfile.user_id == user_id)
-        )).scalar_one_or_none()
-        if user is None or profile is None:
-            return
-        publications = await scoped_publications_for_export(db, user_id, agent.agent_id)
-        await export_and_record(
-            db, user=user, profile=profile, agent=agent, publications=publications,
-            mechanism=None,
+
+def _warn_if_impersonated(
+    request: Request, current_user: User, action: str, user_id: uuid.UUID
+) -> str | None:
+    """The impersonation note for the revision, after a WARNING naming the real session
+    holder (the attribution columns name the worn account, operator decision 2026-09-10)."""
+    note = impersonation_note(current_user)
+    if note:
+        logger.warning(
+            "%s on PI %s recorded under impersonated user %s; real session holder is %s",
+            action, user_id, current_user.id, request.session.get("user_id"),
         )
-    except Exception:
-        logger.exception("Failed to re-export profile markdown for user %s after veto", user_id)
+    return note
+
+
+def _grants_redirect(user_id: uuid.UUID, error: str | None = None) -> RedirectResponse:
+    query = f"?error={error}" if error else ""
+    return RedirectResponse(url=f"/manager/pis/{user_id}{query}#grants", status_code=302)
+
+
+async def _identity_row(db: AsyncSession, user_id: uuid.UUID) -> PiGrantIdentity:
+    """The PI's ``pi_grant_identity`` row, locked FOR UPDATE; a new (unflushed) one if none."""
+    row = (await db.execute(
+        select(PiGrantIdentity).where(PiGrantIdentity.user_id == user_id).with_for_update()
+    )).scalar_one_or_none()
+    if row is None:
+        row = PiGrantIdentity(user_id=user_id)
+        db.add(row)
+    return row
+
+
+async def _after_identity_change(
+    request: Request, db: AsyncSession, target: User, current_user: User,
+    summary: str, action: str,
+) -> None:
+    """Record a ``grant_pin`` revision, request ``enrich_grants`` (a rerun flag when one is
+    processing), commit, then write the persona file."""
+    note = _warn_if_impersonated(request, current_user, action, target.id)
+    await reexport_persona(
+        db, target.id, mechanism="grant_pin", changed_by_user_id=current_user.id,
+        change_summary=note or summary,
+    )
+    await request_job(
+        db, type="enrich_grants", user_id=target.id,
+        payload={"user_id": str(target.id), "orcid": target.orcid},
+        priority=INTERACTIVE_PRIORITY,
+    )
+    await db.commit()
+    await write_persona_files(db, target.id)
 
 
 @router.post("/pis/{user_id}/grants/{grant_id}/veto")
@@ -548,41 +581,158 @@ async def manager_veto_grant(
     user_id: uuid.UUID, grant_id: uuid.UUID, request: Request,
     db: AsyncSession = _DB, current_user: User = _STAFF,
 ):
-    """Mark a RePORTER grant as 'not this PI'. Persisted; re-runs respect it.
-
-    The profile row is locked so a concurrent profile edit or veto cannot interleave
-    its grant_titles write (RA-13). Removes only the vetoed grant's title from
-    ``grant_titles`` (unless another un-vetoed grant carries the same title); a second
-    veto is a no-op. 404 for a non-PI account (A-17).
-    """
+    """Mark a RePORTER award as 'not this PI'. Persisted; re-runs keep it (vetoed rows are
+    never deleted). Records who vetoed and a `grant_veto` revision of the re-rendered
+    persona (U-10); profile_version is untouched, grants are not profile fields. A second
+    veto is a no-op (D-19). 404 for a non-PI account or another PI's grant (A-17)."""
     await _require_pi(db, user_id)
-    profile = (await db.execute(
-        select(ResearcherProfile).where(ResearcherProfile.user_id == user_id)
-        .with_for_update()
-    )).scalar_one_or_none()
     grant = (await db.execute(
         select(PiGrant).where(PiGrant.id == grant_id, PiGrant.user_id == user_id)
+        .with_for_update()
     )).scalar_one_or_none()
     if grant is None:
         raise HTTPException(status_code=404, detail="Grant not found")
     if grant.vetoed_at is not None:
-        # Idempotent (D-19): a replayed veto keeps the first vetoed_at.
-        return RedirectResponse(url=f"/manager/pis/{user_id}#grants", status_code=302)
+        return _grants_redirect(user_id)
     grant.vetoed_at = datetime.now(UTC)
-    still_backed = await db.scalar(
-        select(func.count(PiGrant.id)).where(
-            PiGrant.user_id == user_id, PiGrant.id != grant.id,
-            PiGrant.vetoed_at.is_(None), PiGrant.title == grant.title,
-        )
+    grant.vetoed_by_user_id = current_user.id
+    note = _warn_if_impersonated(request, current_user, "RePORTER grant veto", user_id)
+    await reexport_persona(
+        db, user_id, mechanism="grant_veto", changed_by_user_id=current_user.id,
+        change_summary=note or f"RePORTER grant vetoed: {grant.core_project_num}",
     )
-    if profile is not None and not still_backed:
-        # Remove only the vetoed title (D-19). Re-deriving the list from the
-        # remaining PiGrant rows dropped every title that never came from one
-        # (ORCID- or publication-sourced).
-        profile.grant_titles = [t for t in (profile.grant_titles or []) if t != grant.title]
     await db.commit()
-    await _reexport_profile_markdown_best_effort(db, user_id)
-    return RedirectResponse(url=f"/manager/pis/{user_id}#grants", status_code=302)
+    await write_persona_files(db, user_id)
+    return _grants_redirect(user_id)
+
+
+@router.post("/pis/{user_id}/grant-identity/pin")
+async def manager_pin_grant_identity(
+    user_id: uuid.UUID, request: Request, db: AsyncSession = _DB,
+    current_user: User = _STAFF,
+):
+    """"This is the PI": pin one or more RePORTER profile ids (a split record has several).
+    Ids come from the stored candidates (checkboxes) or one typed id, which a single
+    pi_profile_ids search must confirm. enrich_grants then fetches those ids' awards."""
+    target = await _require_pi(db, user_id)
+    form = await request.form()
+    typed = str(form.get("profile_id_text") or "").strip()
+    typed_id: int | None = None
+    if typed:
+        # The RePORTER call happens before the row lock below, never while holding it.
+        if not typed.isdigit():
+            return _grants_redirect(user_id, "invalid_reporter_id")
+        try:
+            exists = await profile_id_exists(int(typed))
+        except httpx.HTTPError:
+            return _grants_redirect(user_id, "reporter_unreachable")
+        if not exists:
+            return _grants_redirect(user_id, "invalid_reporter_id")
+        typed_id = int(typed)
+    identity = await _identity_row(db, user_id)
+    offered = {
+        int(c["id"]) for c in (identity.candidates or []) if str(c.get("id", "")).isdigit()
+    }
+    ids = {
+        int(v) for v in form.getlist("profile_ids")
+        if isinstance(v, str) and v.isdigit() and int(v) in offered
+    }
+    if typed_id is not None:
+        ids.add(typed_id)
+    if not ids:
+        return _grants_redirect(user_id, "no_profile_selected")
+    identity.pinned_profile_ids = sorted(ids)
+    identity.none_confirmed = False
+    identity.pinned_by_user_id = current_user.id
+    identity.pinned_at = datetime.now(UTC)
+    identity.status = "pinned"
+    await _after_identity_change(
+        request, db, target, current_user,
+        f"RePORTER profile pinned: {sorted(ids)}", "Grant identity pin",
+    )
+    flash(request, "RePORTER profile pinned; grants are being refreshed.", "success")
+    return _grants_redirect(user_id)
+
+
+@router.post("/pis/{user_id}/grant-identity/none")
+async def manager_confirm_no_reporter_profile(
+    user_id: uuid.UUID, request: Request, db: AsyncSession = _DB,
+    current_user: User = _STAFF,
+):
+    """"PI has no RePORTER profile": no RePORTER grants for this PI until Unpin."""
+    target = await _require_pi(db, user_id)
+    identity = await _identity_row(db, user_id)
+    identity.pinned_profile_ids = None
+    identity.none_confirmed = True
+    identity.pinned_by_user_id = current_user.id
+    identity.pinned_at = datetime.now(UTC)
+    identity.status = "none_confirmed"
+    await _after_identity_change(
+        request, db, target, current_user,
+        "Marked: PI has no RePORTER profile", "Grant identity none-confirmed",
+    )
+    flash(request, "Marked: this PI has no RePORTER profile.", "success")
+    return _grants_redirect(user_id)
+
+
+@router.post("/pis/{user_id}/grant-identity/unpin")
+async def manager_unpin_grant_identity(
+    user_id: uuid.UUID, request: Request, db: AsyncSession = _DB,
+    current_user: User = _STAFF,
+):
+    """Remove a pin or a "no RePORTER profile" mark; enrich_grants re-runs the identity rule."""
+    target = await _require_pi(db, user_id)
+    identity = await _identity_row(db, user_id)
+    if not identity.pinned_profile_ids and not identity.none_confirmed:
+        return _grants_redirect(user_id)
+    identity.pinned_profile_ids = None
+    identity.none_confirmed = False
+    identity.pinned_by_user_id = None
+    identity.pinned_at = None
+    identity.status = None
+    await _after_identity_change(
+        request, db, target, current_user, "RePORTER pin removed", "Grant identity unpin",
+    )
+    flash(request, "Pin removed; the RePORTER identity is being re-evaluated.", "success")
+    return _grants_redirect(user_id)
+
+
+@router.post("/pis/{user_id}/orcid-fundings/{funding_id}/veto")
+async def manager_veto_orcid_funding(
+    user_id: uuid.UUID, funding_id: uuid.UUID, request: Request,
+    db: AsyncSession = _DB, current_user: User = _STAFF,
+):
+    """'Not this PI's' on one ORCID funding (D43); persisted across refreshes. Waits at
+    most ``ORCID_VETO_LOCK_TIMEOUT`` for a refresh holding the row, then says "try again"."""
+    await _require_pi(db, user_id)
+    await db.execute(text(f"SET LOCAL lock_timeout = '{ORCID_VETO_LOCK_TIMEOUT}'"))
+    try:
+        row = (await db.execute(
+            select(PiOrcidFunding).where(
+                PiOrcidFunding.id == funding_id, PiOrcidFunding.user_id == user_id
+            ).with_for_update()
+        )).scalar_one_or_none()
+    except DBAPIError as exc:
+        if getattr(exc.orig, "sqlstate", None) != _LOCK_NOT_AVAILABLE:
+            raise
+        await db.rollback()
+        flash(request, "ORCID fundings are being refreshed — try again in a moment.", "error")
+        return _grants_redirect(user_id, "orcid_busy")
+    await db.execute(text("SET LOCAL lock_timeout TO DEFAULT"))
+    if row is None:
+        raise HTTPException(status_code=404, detail="Funding not found")
+    if row.vetoed_at is not None:
+        return _grants_redirect(user_id)
+    row.vetoed_at = datetime.now(UTC)
+    row.vetoed_by_user_id = current_user.id
+    note = _warn_if_impersonated(request, current_user, "ORCID funding veto", user_id)
+    await reexport_persona(
+        db, user_id, mechanism="orcid_veto", changed_by_user_id=current_user.id,
+        change_summary=note or f"ORCID funding vetoed: {row.title[:120]}",
+    )
+    await db.commit()
+    await write_persona_files(db, user_id)
+    return _grants_redirect(user_id)
 
 
 @router.post("/pis/{user_id}/industry/{evidence_id}/veto")

@@ -64,6 +64,7 @@ from src.models import ProfileRevision, Publication, ResearcherProfile
 from src.services import orcid as orcid_service
 from src.services import profile_pipeline, pubmed
 from src.services.corpus import CorpusStageError
+from src.services.grant_sections import EMPTY_GRANT_SECTIONS
 from tests import factories
 
 pytestmark = [
@@ -315,7 +316,7 @@ def profile_prose(profile: ResearcherProfile) -> str:
     fields = [profile.research_summary or ""]
     for lst in (
         profile.techniques, profile.experimental_models, profile.disease_areas,
-        profile.key_targets, profile.keywords, profile.grant_titles,
+        profile.key_targets, profile.keywords,
     ):
         fields.extend(lst or [])
     return " ".join(fields)
@@ -781,7 +782,7 @@ async def test_t43_the_synthesis_context_is_bounded_and_contains_the_fetched_wor
 
     context = profile_pipeline._build_synthesis_context(
         orcid_profile=profile,
-        grant_titles=[],
+        grants=EMPTY_GRANT_SECTIONS,
         publications=for_synthesis,
         methods_by_pmid={},
     )
@@ -835,7 +836,8 @@ async def test_t43_the_synthesis_context_is_bounded_and_contains_the_fetched_wor
         src["year"] = 2100 - i          # strictly descending, so the order is knowable
         padded.append(src)
     capped = profile_pipeline._build_synthesis_context(
-        orcid_profile=profile, grant_titles=[], publications=padded, methods_by_pmid={}
+        orcid_profile=profile, grants=EMPTY_GRANT_SECTIONS, publications=padded,
+        methods_by_pmid={},
     )
     assert capped.count("\n### ") == 30, (
         f"a 40-publication corpus produced {capped.count(chr(10) + '### ')} sections; "

@@ -82,13 +82,15 @@ def wired(monkeypatch, tmp_path):
         },
         corpus=CorpusResult(kept=[], flagged=[]),
         contexts=[],
+        fundings=[],
     )
 
     async def fake_profile(orcid):
         return dict(ns.profile)
 
-    async def fake_grants(orcid):
-        return []
+    async def fake_fundings(orcid, *, strict):
+        assert strict is False, "the pipeline's step 2 is the soft fetch"
+        return ns.fundings
 
     async def fake_corpus(orcid, name, institution, *, cap=50):
         if isinstance(ns.corpus, Exception):
@@ -103,7 +105,7 @@ def wired(monkeypatch, tmp_path):
         return dict(_SYNTH)
 
     monkeypatch.setattr(profile_pipeline, "fetch_orcid_profile", fake_profile)
-    monkeypatch.setattr(profile_pipeline, "fetch_orcid_grants", fake_grants)
+    monkeypatch.setattr(profile_pipeline, "fetch_orcid_fundings", fake_fundings)
     monkeypatch.setattr(profile_pipeline, "resolve_corpus", fake_corpus)
     monkeypatch.setattr(profile_pipeline, "convert_pmids_to_pmcids", fake_pmcids)
     monkeypatch.setattr(profile_pipeline, "synthesize_profile", fake_synth)

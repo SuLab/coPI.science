@@ -8,6 +8,7 @@ reuse-existing-user and stub-on-fetch-failure behaviour, both of which
 
 import logging
 import re
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +18,7 @@ from src.models.job import INTERACTIVE_PRIORITY
 from src.services.agent_identity import derive_agent_identity
 from src.services.jhu_rules import derive_employment_start, get_tenure_start, set_tenure_start
 from src.services.orcid import fetch_orcid_profile
+from src.services.person_names import name_from_machine_source
 from src.services.profile_jobs import enqueue_profile_job_if_absent
 from src.services.user_email import assign_user_email
 
@@ -89,9 +91,13 @@ async def find_or_create_pi_by_orcid(db: AsyncSession, orcid: str) -> User:
     except Exception as exc:
         raise ValueError(f"Could not fetch ORCID profile for {orcid}: {exc}") from exc
 
+    # An ORCID-sourced name is cut to the D60 allowlist; a cut is stamped for the
+    # manager PI page. An iD or letter-less name is stored as is.
+    name, cut = name_from_machine_source(profile_data.get("name", orcid))
     user = User(
         orcid=orcid,
-        name=profile_data.get("name", orcid),
+        name=name,
+        name_sanitized_at=datetime.now(UTC) if cut else None,
         institution=profile_data.get("institution"),
         department=profile_data.get("department"),
         user_role=USER_ROLE_PI,
@@ -169,11 +175,16 @@ async def create_pending_agent_for(db: AsyncSession, user: User) -> AgentRegistr
         return existing
 
     agent_id, bot_name = await derive_agent_identity(db, user.name, orcid=user.orcid)
+    # The slug keeps reading users.name (slugs never change); the agent's pi_name is
+    # the sanitised form, and a cut is stamped on the user.
+    pi_name, cut = name_from_machine_source(user.name)
+    if cut:
+        user.name_sanitized_at = datetime.now(UTC)
     agent = AgentRegistry(
         agent_id=agent_id,
         user_id=user.id,
         bot_name=bot_name,
-        pi_name=user.name,
+        pi_name=pi_name,
         status="pending",
     )
     db.add(agent)

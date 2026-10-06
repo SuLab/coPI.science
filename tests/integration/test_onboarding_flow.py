@@ -50,6 +50,7 @@ from src.routers import onboarding as onboarding_router
 from src.routers import profile as profile_router
 from src.routers import settings as settings_router
 from src.services import profile_export
+from src.services.grant_sections import EMPTY_GRANT_SECTIONS, GrantLine, GrantSections
 from src.services.tenure_scope import scope_for_export
 from tests import factories
 from tests.session_support import session_cookie_name, session_headers
@@ -121,10 +122,13 @@ def no_external_calls(monkeypatch):
     for fn in (
         "fetch_orcid_record",
         "fetch_orcid_profile",
-        "fetch_orcid_grants",
         "fetch_orcid_works",
     ):
         monkeypatch.setattr(f"src.services.orcid.{fn}", _boom(f"orcid.{fn}"))
+    monkeypatch.setattr(
+        "src.services.orcid_fundings.fetch_orcid_fundings",
+        _boom("orcid_fundings.fetch_orcid_fundings"),
+    )
     for fn in ("synthesize_profile", "generate_agent_response"):
         monkeypatch.setattr(f"src.services.llm.{fn}", _boom(f"llm.{fn}"))
 
@@ -836,7 +840,6 @@ async def test_the_public_export_never_carries_the_private_profile(
         disease_areas=["glioma"],
         key_targets=["EGFR"],
         keywords=["kinase", "structure"],
-        grant_titles=["R01 Something Important"],
         private_profile_md="PRIVATE-CANARY-never-export-me",
     )
     pubs = [
@@ -849,7 +852,18 @@ async def test_the_public_export_never_carries_the_private_profile(
         )
     ]
 
-    path = profile_export.export_profile_to_markdown(user, prof, "exportpi", publications=scope_for_export(pubs, None))
+    grants = GrantSections(
+        active=(
+            GrantLine(
+                "nih_reporter", "R01XX000001", "Something Important", "NIH R01", 2019, 2027
+            ),
+        ),
+        past=(),
+        tenure_start=None,
+    )
+    path = profile_export.export_profile_to_markdown(
+        user, prof, "exportpi", publications=scope_for_export(pubs, None), grants=grants
+    )
     assert path == export_dirs.public / "exportpi.md"
     text = path.read_text(encoding="utf-8")
 
@@ -865,7 +879,7 @@ async def test_the_public_export_never_carries_the_private_profile(
         "- glioma",
         "- EGFR",
         "kinase, structure",
-        "- R01 Something Important",
+        "- Something Important (NIH R01, 2019–2027)",
         "A structural paper. *Cell*. (2020). https://doi.org/10.1016/j.cell.2020.01.001",
     ):
         assert expected in text, f"the public export dropped {expected!r}"
@@ -882,11 +896,15 @@ async def test_the_public_export_is_gated_on_an_agent_registry_id(db_session, ex
     user = await factories.make_user(db_session)
     prof = await factories.make_profile(db_session, user=user)
 
-    assert profile_export.export_profile_to_markdown(user, prof, None) is None
+    assert profile_export.export_profile_to_markdown(
+        user, prof, None, grants=EMPTY_GRANT_SECTIONS
+    ) is None
     assert not export_dirs.public.exists()
 
     # control: with an agent id the export writes.
-    assert profile_export.export_profile_to_markdown(user, prof, "gated") is not None
+    assert profile_export.export_profile_to_markdown(
+        user, prof, "gated", grants=EMPTY_GRANT_SECTIONS
+    ) is not None
 
 
 async def test_the_export_drops_a_doi_that_contradicts_the_journal(db_session):
@@ -904,7 +922,8 @@ async def test_the_export_drops_a_doi_that_contradicts_the_journal(db_session):
         pmid="31111111",
     )
     text = profile_export.export_profile_to_markdown(
-        user, prof, "doipi", publications=scope_for_export([mismatch], None)
+        user, prof, "doipi", publications=scope_for_export([mismatch], None),
+        grants=EMPTY_GRANT_SECTIONS,
     ).read_text(encoding="utf-8")
     assert "https://pubmed.ncbi.nlm.nih.gov/31111111/" in text
     assert "10.1126/science.aaa1234" not in text
@@ -919,7 +938,8 @@ async def test_the_export_drops_a_doi_that_contradicts_the_journal(db_session):
         pmid="31111111",
     )
     text = profile_export.export_profile_to_markdown(
-        user, prof, "doipi", publications=scope_for_export([match], None)
+        user, prof, "doipi", publications=scope_for_export([match], None),
+        grants=EMPTY_GRANT_SECTIONS,
     ).read_text(encoding="utf-8")
     assert "https://doi.org/10.1126/science.aaa1234" in text
 
@@ -932,7 +952,8 @@ async def test_the_export_keeps_the_twenty_most_recent_publications(db_session):
         for year in range(1990, 2015)  # 25 of them
     ]
     text = profile_export.export_profile_to_markdown(
-        user, prof, "manypi", publications=scope_for_export(pubs, None)
+        user, prof, "manypi", publications=scope_for_export(pubs, None),
+        grants=EMPTY_GRANT_SECTIONS,
     ).read_text(encoding="utf-8")
 
     assert "Paper 2014" in text  # newest kept

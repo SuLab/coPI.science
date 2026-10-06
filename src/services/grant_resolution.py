@@ -1,19 +1,28 @@
 """Turn RePORTER rows into per-PI grant records: identity, tenure, collapse.
 
-Identity rule (adversarial analysis A1–A5): a RePORTER ``profile_id`` is the
-PI iff one of its projects links (RePORTER publications endpoint) to a PMID in
-the PI's own ORCID/PubMed-anchored corpus; failing that, iff it is the ONLY
-Hopkins candidate with an exact first-name match. Two unlinked candidates →
-nobody, never a guess.
+Identity rule (spec 2026-10-05 §6.1; P1, E-1, D2, D56):
+1. Stage 1 searches `pi_names` with each surname candidate of the PI's name
+   (`person_names.surname_candidates`) at JOHNS HOPKINS UNIVERSITY exactly; a total over
+   the cap is `firehose`.
+2. A candidate is a PI entry on a JHU row whose `last_name` shares a key with the PI's
+   `surname_keys` and whose `first_name` agrees (`given_names_agree`). Co-PIs on the same
+   award are not candidates: a shared core no longer lends its PMIDs to every name on it.
+3. A candidate is accepted when one of ITS OWN cores links (RePORTER publications
+   endpoint) to a PMID stored for the PI, pre-tenure rows included (D62a).
+4. One accepted: `resolved`; more than one: `held`; none accepted and exactly one
+   candidate: `unconfirmed` (D56); otherwise `no_match`. A staff pin overrides all of
+   these (`pinned`, `none_confirmed`); a stage-2 total over the cap is `firehose`. Only
+   `resolved` and `pinned` render RePORTER grants (D9).
 
-Tenure rule (B6–B8): a fiscal-year row counts iff org == JHU exact AND
-fiscal_year >= tenure_start. With no tenure start the year half is skipped and
-the mode is reported as ``org_only`` so the UI can show the weaker guarantee.
+Tenure rule (B6-B8): a fiscal-year row counts iff org == JHU exact AND fiscal_year >=
+tenure_start (`jhu_rules.export_tenure_start`). With no tenure start the year half is
+skipped and the mode is `org_only`; the persona then shows Active Grants only (D57).
 """
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from src.services.nih_reporter import JHU_ORG_EXACT
+from src.services.person_names import PersonName, given_names_agree, surname_keys
 
 LLM_ACTIVITY_CODES = frozenset({
     "R01", "R21", "R33", "R35", "R37", "R00", "R56", "R03", "RF1", "DP1", "DP2",
@@ -39,6 +48,28 @@ class GrantRecord:
     total_award_in_tenure: int | None
     is_contact_pi: bool | None
     is_subproject: bool
+    #: "First Last" as RePORTER spells the PI's entry on the latest fiscal-year row.
+    name_on_award: str | None = None
+
+
+@dataclass(frozen=True)
+class Candidate:
+    profile_id: int
+    name_on_award: str
+    cores: frozenset[str]
+    linking_pmids: frozenset[str] = frozenset()
+
+    def as_json(self) -> dict:
+        """The `pi_grant_identity.candidates` element (id, name on award, linked, linking PMIDs)."""
+        return {"id": self.profile_id, "name_on_award": self.name_on_award,
+                "linked": bool(self.linking_pmids), "linking_pmids": sorted(self.linking_pmids)}
+
+
+@dataclass(frozen=True)
+class IdentityResult:
+    status: str                         # resolved | held | unconfirmed | no_match
+    accepted_profile_ids: tuple[int, ...]
+    candidates: tuple[Candidate, ...]
 
 
 def _org(row: dict) -> str:
@@ -49,30 +80,52 @@ def _pis(row: dict) -> list[dict]:
     return row.get("principal_investigators") or []
 
 
-def resolve_profile_ids(rows: list[dict], corpus_pmids: set[str], links: dict[str, set[str]],
-                        first_name: str) -> tuple[set[int], dict]:
-    cores_by_pid: dict[int, set[str]] = {}
-    first_by_pid: dict[int, set[str]] = {}
-    for r in rows:
-        if _org(r) != JHU_ORG_EXACT:
+def award_name(pi_entry: dict) -> str:
+    """"First Last" as RePORTER spells this PI entry."""
+    parts = ((pi_entry.get("first_name") or "").strip(), (pi_entry.get("last_name") or "").strip())
+    return " ".join(p for p in parts if p)
+
+
+def names_the_pi(pi_entry: dict, person: PersonName) -> bool:
+    """Step 2's name test: a shared surname key and agreeing given names."""
+    return bool(surname_keys(pi_entry.get("last_name") or "") & person.surname_keys) and \
+        given_names_agree(pi_entry.get("first_name") or "", person.first)
+
+
+def find_candidates(rows: list[dict], person: PersonName) -> dict[int, Candidate]:
+    """Name-matched PI entries on JHU rows, by profile id, with their own cores (step 2)."""
+    names: dict[int, str] = {}
+    cores: dict[int, set[str]] = {}
+    for row in rows:
+        if _org(row) != JHU_ORG_EXACT:
             continue
-        for p in _pis(r):
-            pid = p.get("profile_id")
-            if pid is None:
+        for entry in _pis(row):
+            pid = entry.get("profile_id")
+            if pid is None or not names_the_pi(entry, person):
                 continue
-            cores_by_pid.setdefault(pid, set()).add(r["core_project_num"])
-            first_by_pid.setdefault(pid, set()).add((p.get("first_name") or "").strip().lower())
-    pmid_linked = [pid for pid, cores in cores_by_pid.items()
-                   if any(links.get(c, set()) & corpus_pmids for c in cores)]
-    accepted = set(pmid_linked)
-    unique_name: list[int] = []
-    if not accepted and len(cores_by_pid) == 1:
-        (pid, _), = cores_by_pid.items()
-        if first_name.strip().lower() in first_by_pid[pid]:
-            accepted.add(pid)
-            unique_name.append(pid)
-    rejected = sorted(set(cores_by_pid) - accepted)
-    return accepted, {"pmid_linked": sorted(pmid_linked), "unique_name": unique_name, "rejected": rejected}
+            names.setdefault(pid, award_name(entry))
+            cores.setdefault(pid, set()).add(row["core_project_num"])
+    return {pid: Candidate(pid, names[pid], frozenset(cores[pid])) for pid in sorted(cores)}
+
+
+def resolve_identity(candidates: dict[int, Candidate], links: dict[str, set[str]],
+                     corpus_pmids: set[str]) -> IdentityResult:
+    """Steps 3-4: link each candidate through its own cores, then name the status."""
+    linked = []
+    for pid in sorted(candidates):
+        c = candidates[pid]
+        pmids = set().union(*(links.get(core, set()) for core in c.cores)) & corpus_pmids
+        linked.append(Candidate(c.profile_id, c.name_on_award, c.cores, frozenset(pmids)))
+    accepted = tuple(c.profile_id for c in linked if c.linking_pmids)
+    if len(accepted) == 1:
+        status = "resolved"
+    elif accepted:
+        status = "held"
+    elif len(linked) == 1:
+        status = "unconfirmed"
+    else:
+        status = "no_match"
+    return IdentityResult(status, accepted, tuple(linked))
 
 
 def _dt(s: str | None) -> datetime | None:
@@ -119,11 +172,19 @@ def filter_and_collapse(rows: list[dict], profile_ids: set[int], tenure_start: i
             total_award_in_tenure=sum(int(x.get("award_amount") or 0) for x in rs),
             is_contact_pi=me.get("is_contact_pi"),
             is_subproject=any(x.get("subproject_id") for x in rs),
+            name_on_award=award_name(me) if me else None,
         ))
     return records, mode
 
 
-def derive_grant_titles(records: list[GrantRecord]) -> list[str]:
-    eligible = [r for r in records if (r.activity_code or "") in LLM_ACTIVITY_CODES]
-    eligible.sort(key=lambda r: (r.last_fy or 0), reverse=True)
-    return [r.title for r in eligible]
+def grant_evidence(record: GrantRecord, links: dict[str, set[str]], corpus_pmids: set[str],
+                   rule: str) -> dict:
+    """`pi_grants.identity_evidence` (P12): what ties THIS award to the PI. `rule` is
+    `pmid_link` (resolved through the corpus) or `pinned` (a staff pin)."""
+    return {
+        "matched_profile_id": record.reporter_profile_id,
+        "name_on_award": record.name_on_award,
+        "linking_pmids": sorted(links.get(record.core_project_num, set()) & corpus_pmids),
+        "rule": rule,
+    }
+

@@ -18,13 +18,14 @@ from src.dependencies import (
 from src.models import AgentRegistry, Publication, ResearcherProfile, User
 from src.models.job import INTERACTIVE_PRIORITY
 from src.services.admin_invariant import LastAdminError, ensure_admin_remains
+from src.services.grant_sections import load_grant_sections
 from src.services.profile_edit import (
     apply_profile_edits,
     list_fields_from_form,
     parse_expected_version,
 )
 from src.services.profile_jobs import enqueue_profile_job_if_absent
-from src.services.tenure_scope import scoped_publications_for
+from src.services.tenure_scope import publication_order_by, scoped_publications_for
 from src.services.user_deletion import delete_user_account
 from src.web.flash import flash
 from src.web.templating import make_templates
@@ -75,7 +76,7 @@ async def profile_view(
     pub_result = await db.execute(
         select(Publication)
         .where(Publication.user_id == current_user.id)
-        .order_by(Publication.year.desc())
+        .order_by(*publication_order_by())
     )
     publications = pub_result.scalars().all()
 
@@ -104,6 +105,7 @@ async def profile_view(
             profile=profile,
             publications=pub_scope.publications,
             pub_scope=pub_scope,
+            grant_sections=await load_grant_sections(db, current_user.id),
             just_completed_onboarding=onboarding_complete,
         ),
     )

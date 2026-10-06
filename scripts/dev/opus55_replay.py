@@ -685,10 +685,12 @@ async def sample(db: Any) -> dict[str, list[Any]]:
 async def sample_profiles(db: Any) -> list[dict[str, Any]]:
     """3 PIs with a validated stored profile and >= 5 abstracts; context rebuilt with the
     pipeline's own ``_build_synthesis_context`` over the STORED corpus, tenure-filtered as the
-    pipeline does — approximate: no live ORCID/PMC fetch, today's grant_titles (plan Task 0)."""
+    pipeline does — approximate: no live ORCID/PMC fetch, the stored grant sections
+    (plan Task 0)."""
     from sqlalchemy import func, select
 
     from src.models import Publication, ResearcherProfile, User
+    from src.services.grant_sections import load_grant_sections
     from src.services.jhu_rules import get_tenure_start, tenure_filter
     from src.services.profile_pipeline import _build_synthesis_context
 
@@ -730,7 +732,7 @@ async def sample_profiles(db: Any) -> list[dict[str, Any]]:
         context = _build_synthesis_context(
             orcid_profile={"name": user.name, "institution": user.institution,
                            "department": user.department},
-            grant_titles=list(profile.grant_titles or []),
+            grants=await load_grant_sections(db, user.id),
             publications=in_tenure,
             methods_by_pmid=methods,
         )

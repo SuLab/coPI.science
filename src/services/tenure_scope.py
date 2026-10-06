@@ -20,6 +20,8 @@ misses, so this module owns the rule instead:
   accident. That type is the whole point: the old signature took
   ``list[Publication]``, and six callers passed one straight out of a
   ``select(Publication)``.
+* :func:`publication_order_by` / :func:`publication_sort_key` — the one
+  publication order (spec 2026-10-05 §6.1), in SQL and in Python.
 
 Three rules, stated once so no surface invents its own:
 
@@ -39,16 +41,52 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import BigInteger, case, cast, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import AppSetting, Publication
 from src.services.jhu_rules import LEGACY_TENURE_KEY, TENURE_KEY_PREFIX, export_tenure_start
 
 logger = logging.getLogger(__name__)
+
+#: pmid as a number when it is one (it is a String column): pmid "9" sorts below "10".
+_PMID_NUMERIC = case(
+    (Publication.pmid.op("~")(r"^[0-9]{1,18}$"), cast(Publication.pmid, BigInteger)),
+    else_=None,
+)
+
+
+def publication_order_by() -> tuple:
+    """ORDER BY for every publication load (spec 2026-10-05 §6.1 "Publication ordering",
+    P19/G-13): year DESC NULLS LAST, pmid numeric DESC NULLS LAST, doi (C collation, so
+    Python's str order agrees), id. `publication_sort_key` is the same order in Python."""
+    return (
+        Publication.year.desc().nullslast(),
+        _PMID_NUMERIC.desc().nullslast(),
+        Publication.doi.collate("C").asc().nullslast(),
+        Publication.id.asc(),
+    )
+
+
+def publication_sort_key(pub: Publication | Mapping[str, Any]) -> tuple:
+    """`sorted(pubs, key=publication_sort_key)`: the order of publication_order_by(), for
+    ORM rows and the pipeline's dict records alike (a missing key reads as NULL)."""
+    if isinstance(pub, Mapping):
+        get = pub.get
+    else:
+        def get(name: str) -> Any:
+            return getattr(pub, name, None)
+    year, pmid, doi, ident = get("year"), get("pmid"), get("doi"), get("id")
+    text = "" if pmid is None else str(pmid)
+    pmid_n = int(text) if text.isascii() and text.isdigit() and len(text) <= 18 else None
+    return (
+        year is None, -(year or 0), pmid_n is None, -(pmid_n or 0),
+        doi is None, doi or "", "" if ident is None else str(ident),
+    )
 
 
 @dataclass(frozen=True)
@@ -296,7 +334,7 @@ async def scoped_publications_for(
                 await db.execute(
                     select(Publication)
                     .where(Publication.user_id == user_id)
-                    .order_by(Publication.year.desc().nullslast())
+                    .order_by(*publication_order_by())
                 )
             )
             .scalars()

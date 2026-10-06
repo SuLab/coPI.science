@@ -47,6 +47,7 @@ import dataclasses
 import logging
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select
@@ -100,11 +101,13 @@ _SHOWN_NAME_CHARS = 40
 
 
 async def enqueue_company_discovery(
-    db: AsyncSession, user_id: uuid.UUID, *, priority: int
+    db: AsyncSession, user_id: uuid.UUID, *, priority: int,
+    not_before: datetime | None = None,
 ) -> uuid.UUID | None:
     """Queue discovery for one PI and return the new job id, or None when the PI
     already has one pending or processing (whose priority is raised to `priority` if
-    lower, `job_queue.insert_job_if_absent`) or the user does not exist. Adds to the
+    lower, `job_queue.insert_job_if_absent`) or the user does not exist. `not_before`
+    delays a new job (a bulk repair's pacing slot, spec 2026-10-05 §4.2). Adds to the
     caller's transaction; the caller commits."""
     orcid = await db.scalar(select(User.orcid).where(User.id == user_id))
     if orcid is None:
@@ -112,21 +115,26 @@ async def enqueue_company_discovery(
     return await insert_job_if_absent(
         db, type=COMPANY_DISCOVERY, user_id=user_id,
         payload={"user_id": str(user_id), "orcid": orcid}, priority=priority,
+        not_before=not_before,
     )
 
 
 async def enqueue_first_company_discovery(
-    db: AsyncSession, user_id: uuid.UUID, *, priority: int
+    db: AsyncSession, user_id: uuid.UUID, *, priority: int,
+    not_before: datetime | None = None,
 ) -> uuid.UUID | None:
     """The profile pipeline's step-10 enqueue: only when the PI has NO
     `company_discovery` row in any status, so only the first successful generation
-    queues it and regenerations and refreshes do not (spec §7.5 Job)."""
+    queues it and regenerations and refreshes do not (spec §7.5 Job). `not_before` is
+    passed to `enqueue_company_discovery`."""
     seen = await db.scalar(
         select(Job.id).where(Job.user_id == user_id, Job.type == COMPANY_DISCOVERY).limit(1)
     )
     if seen is not None:
         return None
-    return await enqueue_company_discovery(db, user_id, priority=priority)
+    return await enqueue_company_discovery(
+        db, user_id, priority=priority, not_before=not_before
+    )
 
 
 async def latest_discovery_job(db: AsyncSession, user_id: uuid.UUID) -> Job | None:

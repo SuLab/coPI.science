@@ -119,6 +119,10 @@
             {% elif request.query_params.get('error') == 'profile_generating' %}Profile is being generated — try again shortly.
             {% elif request.query_params.get('error') == 'field_too_long' %}Name, institution and department are limited to 255 characters each.
             {% elif request.query_params.get('error') == 'no_agent' %}This PI has no lab agent yet, so there is nothing to mute or unmute.
+            {% elif request.query_params.get('error') == 'orcid_busy' %}ORCID fundings are being refreshed — try the veto again in a moment.
+            {% elif request.query_params.get('error') == 'invalid_reporter_id' %}No RePORTER project lists that profile id.
+            {% elif request.query_params.get('error') == 'reporter_unreachable' %}NIH RePORTER could not be reached — try again.
+            {% elif request.query_params.get('error') == 'no_profile_selected' %}Select a candidate or enter a RePORTER profile id.
             {% else %}Something went wrong saving changes.{% endif %}
         </p>
     </div>
@@ -150,6 +154,12 @@
                 <dd class="text-xs text-green-700 mt-1">Email address marked verified.</dd>
                 {% endif %}
             </div>
+            {% if target_user.name_sanitized_at %}
+            <div>
+                <dt class="text-gray-500">Name</dt>
+                <dd class="text-xs text-amber-700">Cleaned from its ORCID/OAuth form on {{ target_user.name_sanitized_at | ts("date") }}; check the spelling.</dd>
+            </div>
+            {% endif %}
             <div>
                 <dt class="text-gray-500">ORCID</dt>
                 <dd>
@@ -291,26 +301,82 @@
     </div>
     {% endif %}
 
-    <!-- NIH grants (RePORTER) -->
+    <!-- Grants: NIH RePORTER identity and awards, ORCID fundings (spec 2026-10-05 §6.1) -->
     <section id="grants" class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
-      <h2 class="font-semibold text-gray-800 mb-1">NIH grants at JHU ({{ grants | selectattr('vetoed_at', 'none') | list | length }})</h2>
-      <p class="text-xs text-gray-500 mb-4">Source: NIH RePORTER. Tenure filter:
+      <h2 class="font-semibold text-gray-800 mb-1">Grants</h2>
+      {% set gi = grant_identity %}
+      <p class="text-sm mb-2">RePORTER identity:
+        {% if gi is none or gi.status is none %}<span class="text-amber-700">not evaluated yet</span>
+        {% elif gi.status == 'resolved' %}<span class="text-green-700">resolved</span> (profile {{ gi.accepted_profile_ids | join(', ') }})
+        {% elif gi.status == 'pinned' %}<span class="text-green-700">pinned by staff</span> (profile {{ gi.pinned_profile_ids | join(', ') }})
+        {% elif gi.status == 'none_confirmed' %}staff confirmed: no RePORTER profile
+        {% else %}<span class="text-amber-700">{{ gi.status | replace('_', ' ') }}</span> — no RePORTER grants are shown{% endif %}
+        {% if gi is not none and gi.evaluated_at %}<span class="text-xs text-gray-500">· evaluated {{ gi.evaluated_at | ts }}</span>{% endif %}
+      </p>
+      {% if grant_sections.tenure_start is none %}<p class="text-xs text-amber-700 mb-2">No JHU tenure start recorded: set a tenure year to show past grants.</p>{% endif %}
+      <p class="text-xs text-gray-500 mb-4">In the persona: {{ grant_sections.active | length }} active, {{ grant_sections.past | length }} past.</p>
+
+      {% if effective_user.is_staff and (gi is none or gi.status != 'resolved') %}
+      <form method="post" action="/manager/pis/{{ target_user.id }}/grant-identity/pin" class="mb-3 text-sm">
+        {% if gi is not none and gi.candidates %}
+        <p class="font-medium mb-1">Candidates</p>
+        <ul class="mb-2">
+          {% for c in gi.candidates %}
+          <li><label><input type="checkbox" name="profile_ids" value="{{ c.id }}"{% if gi.pinned_profile_ids and c.id in gi.pinned_profile_ids %} checked{% endif %}>
+            {{ c.name_on_award }} · RePORTER profile {{ c.id }} ·
+            {% if c.linked %}<span class="text-green-700">linked: PMID {{ c.linking_pmids | join(', ') }}</span>{% else %}no link to this PI's papers{% endif %}</label></li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+        <label class="block mb-2">RePORTER profile id <input type="text" name="profile_id_text" inputmode="numeric" class="border border-gray-300 rounded-lg px-3 py-2 text-sm"></label>
+        <button class="text-xs text-red-700 underline">This is the PI</button>
+      </form>
+      {% if gi is none or not gi.none_confirmed %}
+      <form method="post" action="/manager/pis/{{ target_user.id }}/grant-identity/none" class="mb-3"><button class="text-xs text-red-700 underline">PI has no RePORTER profile</button></form>
+      {% endif %}
+      {% endif %}
+      {% if effective_user.is_staff and gi is not none and (gi.pinned_profile_ids or gi.none_confirmed) %}
+      <form method="post" action="/manager/pis/{{ target_user.id }}/grant-identity/unpin" class="mb-3"><button class="text-xs text-red-700 underline">Unpin</button></form>
+      {% endif %}
+
+      <h3 class="font-medium text-gray-800 mb-1">NIH RePORTER awards ({{ grants | selectattr('vetoed_at', 'none') | list | length }})</h3>
+      <p class="text-xs text-gray-500 mb-2">Tenure filter:
         {% if grants and grants[0].tenure_filter_mode == 'org_only' %}<span class="text-amber-700">organisation only — no JHU tenure start recorded</span>{% else %}organisation and fiscal year ≥ tenure start{% endif %}.
-        Vetoing a grant removes it from the profile's grant list and keeps it out on re-runs.</p>
-      {% if not grants %}<p class="text-sm text-gray-500">No RePORTER match yet (job pending, or no JHU award found).</p>{% endif %}
-      <ul class="divide-y">
+        A veto keeps the award out of the persona and out of re-runs.</p>
+      {% if not grants %}<p class="text-sm text-gray-500">No RePORTER awards stored.</p>{% endif %}
+      <ul class="divide-y mb-4">
       {% for g in grants %}
+        {% set ev = g.identity_evidence or {} %}
         <li class="py-2 flex justify-between gap-4 {% if g.vetoed_at %}opacity-50{% endif %}">
           <div>
             <div class="font-medium">{{ g.title }}</div>
             <div class="text-xs text-gray-500">{{ g.core_project_num }} · {{ g.activity_code }} · FY{{ g.first_fy }}–{{ g.last_fy }}
               {% if g.is_subproject %}· subproject{% endif %}
-              · {% if g.identity_evidence and g.identity_evidence.pmid_linked %}<span class="text-green-700">PMID-linked</span>{% elif g.identity_evidence and g.identity_evidence.unique_name %}<span class="text-amber-700">unique name</span>{% endif %}
+              · {% if ev.rule == 'pinned' %}<span class="text-green-700">staff pin · profile {{ ev.matched_profile_id }}</span>
+                {% elif ev.rule == 'pmid_link' %}profile {{ ev.matched_profile_id }} · {{ ev.name_on_award }} ·
+                  {% if ev.linking_pmids %}<span class="text-green-700">PMID {{ ev.linking_pmids | join(', ') }}</span>{% else %}same RePORTER profile, linked through another award{% endif %}
+                {% else %}<span class="text-amber-700">evidence from before the 2026-10 remediation; refreshed at the next run</span>{% endif %}
             </div>
           </div>
           {% if not g.vetoed_at and effective_user.is_staff %}
           <form method="post" action="/manager/pis/{{ target_user.id }}/grants/{{ g.id }}/veto"><button class="text-xs text-red-700 underline">Not this PI</button></form>
           {% elif g.vetoed_at %}<span class="text-xs text-gray-600">vetoed</span>{% endif %}
+        </li>
+      {% endfor %}
+      </ul>
+
+      <h3 class="font-medium text-gray-800 mb-1">ORCID fundings ({{ orcid_fundings | selectattr('vetoed_at', 'none') | list | length }})</h3>
+      {% if not orcid_fundings %}<p class="text-sm text-gray-500">No ORCID fundings stored.</p>{% endif %}
+      <ul class="divide-y">
+      {% for f in orcid_fundings %}
+        <li class="py-2 flex justify-between gap-4 {% if f.vetoed_at %}opacity-50{% endif %}">
+          <div>
+            <div class="font-medium">{{ f.title }}</div>
+            <div class="text-xs text-gray-500">{{ f.funder_name or 'funder not given' }} · {{ f.start_year or '?' }}–{{ f.end_year or '' }}</div>
+          </div>
+          {% if not f.vetoed_at and effective_user.is_staff %}
+          <form method="post" action="/manager/pis/{{ target_user.id }}/orcid-fundings/{{ f.id }}/veto"><button class="text-xs text-red-700 underline">Not this PI</button></form>
+          {% elif f.vetoed_at %}<span class="text-xs text-gray-600">vetoed</span>{% endif %}
         </li>
       {% endfor %}
       </ul>

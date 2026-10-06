@@ -1,9 +1,9 @@
 """An edit committed between pipeline steps 6 and 9 survives in the database and
-in the export; the run still stores its publications and grants."""
+in the export; the run still stores its publications and ORCID fundings."""
 import pytest
 from sqlalchemy import func, select, update
 
-from src.models import Publication, ResearcherProfile
+from src.models import PiOrcidFunding, Publication, ResearcherProfile
 from src.services import profile_export, profile_pipeline
 from tests import factories
 from tests.characterization.test_profile_pipeline_gm import _install_fakes
@@ -44,7 +44,12 @@ async def test_a_concurrent_human_edit_survives_steps_6_to_9(db_session, monkeyp
         .execution_options(populate_existing=True)
     )).scalar_one()
     assert (stored.research_summary, stored.profile_version) == ("HUMAN EDIT WINS", 3)
-    assert stored.grant_titles == ["Difference Engine Program", "Analytical Engine Grant"]
+    titles = (await db_session.execute(
+        select(PiOrcidFunding.title)
+        .where(PiOrcidFunding.user_id == user.id)
+        .order_by(PiOrcidFunding.title)
+    )).scalars().all()
+    assert titles == ["Analytical Engine Grant", "Difference Engine Program"]
     assert await db_session.scalar(
         select(func.count()).select_from(Publication).where(Publication.user_id == user.id)
     ) == 2, "publications are still stored"

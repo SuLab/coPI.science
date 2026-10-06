@@ -1,8 +1,8 @@
 """The /manager surface: deny-by-default, PI-scoped, and read-only except for
-an explicit, mechanically-enumerated allowlist of fifteen write routes (design
+an explicit, mechanically-enumerated allowlist of nineteen write routes (design
 D1, amended 2026-09-10 by F2, 2026-09-11 by the two enrichment vetoes,
 2026-10-01 by email verification, 2026-10-02 by the five Companies routes and
-2026-10-05 by the profile retry)."""
+2026-10-05 by the profile retry and the four grant-identity and ORCID-veto routes)."""
 
 import re
 import uuid
@@ -56,8 +56,8 @@ def _manager_get_paths(param_values: dict[str, str] | None = None) -> list[str]:
 
 def test_manager_router_mutations_are_an_explicit_allowlist():
     """D12 amended, not abolished (design decision D1): the manager router may
-    have non-GET routes now, but only these fifteen, named exactly. A future
-    accidental sixteenth write route still fails this test loudly. The two
+    have non-GET routes now, but only these nineteen, named exactly. A future
+    accidental twentieth write route still fails this test loudly. The two
     provisioning routes joined the list with F2 (2026-09-10): a manager may
     install a PI's Slack bot and activate the agent from /manager/pis/{id}.
     The grant veto joined 2026-09-11 (Task 5 of
@@ -71,6 +71,8 @@ def test_manager_router_mutations_are_an_explicit_allowlist():
     manager may add, delete, confirm and reject a PI's company ties and queue
     company discovery. The profile retry joined 2026-10-05: a manager may queue
     generation again for a PI whose job died or whose profile is ungrounded.
+    The four grant-identity and ORCID-veto routes joined 2026-10-05 (spec
+    2026-10-05 §6.1).
     """
     allowed_post_paths = {
         "/pis",
@@ -81,6 +83,10 @@ def test_manager_router_mutations_are_an_explicit_allowlist():
         "/pis/{user_id}/slack/provision",
         "/pis/{user_id}/activate",
         "/pis/{user_id}/grants/{grant_id}/veto",
+        "/pis/{user_id}/grant-identity/pin",
+        "/pis/{user_id}/grant-identity/unpin",
+        "/pis/{user_id}/grant-identity/none",
+        "/pis/{user_id}/orcid-fundings/{funding_id}/veto",
         "/pis/{user_id}/industry/{evidence_id}/veto",
         "/pis/{user_id}/verify-email",
         "/pis/{user_id}/companies",

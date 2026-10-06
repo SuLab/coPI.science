@@ -66,17 +66,26 @@ iD's last four digits. Slack restricts bot display names to ASCII, and the
 The `generate_profile` job now enqueues two follow-on jobs of its own,
 `enrich_grants` and `industry_evidence`, which run on the worker independently
 of the corpus pipeline and never block or fail the profile it followed. The
-first pulls NIH RePORTER grants for the PI, tenure-filters them, and REPLACES the
-ORCID-fundings seed in `grant_titles` with the LLM-eligible RePORTER titles when it
-finds any (it keeps the seed when it finds none). `grant_titles` is the persona's
-"Active Grants" section, so the job re-exports `profiles/public/{agent_id}.md` and
-records a `pipeline` revision when the list changed (2026-10-05; before that the
-persona kept the ORCID seed until an unrelated edit re-exported, and 47 files were
-behind). The second scores industry interest from
+first resolves the PI's NIH RePORTER identity: only candidates whose name on the
+award matches the PI's are considered, and a candidate is accepted when one of its
+own awards links to a PMID stored for the PI. The outcome is a status in
+`pi_grant_identity` (`resolved`, `held`, `unconfirmed`, `no_match`, `firehose`, or
+the staff-set `pinned` / `none_confirmed`); only `resolved` and `pinned` render
+RePORTER grants. The job writes `pi_grants` and `pi_grant_identity`, refreshes the
+PI's ORCID fundings into `pi_orcid_fundings`, and re-exports
+`profiles/public/{agent_id}.md` after its commit when the rendered persona changed.
+The persona's `## Active Grants` and `## Past Grants (since <year>)` sections are
+derived at export time from those two tables (`src/services/grant_sections.py`);
+`researcher_profiles.grant_titles` is retired (no readers or writers). A daily
+worker sweep, gated by the app setting `persona_sweep_enabled`, re-exports every
+persona whose file differs from a fresh render, so an award that has ended leaves
+the Active section without an unrelated edit. The second scores industry interest from
 OpenAlex/PubMed/USPTO/ClinicalTrials.gov evidence and writes nothing a prompt or a
 profile export reads. The grants panel and the industry-interest score are
-manager-only surfaces on `/manager/pis/{id}`, each row individually vetoable ("not
-this PI's") via the two veto routes below. OpenAlex is keyless here: 1000
+manager-only surfaces on `/manager/pis/{id}`: each RePORTER grant, ORCID funding and
+piece of industry evidence is individually vetoable ("not this PI's"), and staff can
+pin the PI's RePORTER profile or confirm the PI has none, via the routes below.
+OpenAlex is keyless here: 1000
 credits/day per IP (`x-ratelimit-limit`), reset at 00:00 UTC; a spent budget
 answers 429 and fails the job. Backfill in batches that fit the day's budget. `scripts/enqueue_enrichment.py` backfills both jobs for
 PIs who predate this feature — it previews by default, needs `--apply` to
@@ -213,7 +222,7 @@ doc's §8.
 - **PI** — the original account: own profile, own lab agent, `/profile` and `/agent`.
 - **Manager** — global, read-mostly: `/manager/pis`, `/manager/assessments`,
   `/manager/discussions`, `/manager/activity`. A scoped, deliberate reversal of the
-  original all-GET guarantee (design D1) adds exactly fifteen write routes — `POST
+  original all-GET guarantee (design D1) adds exactly nineteen write routes — `POST
   /manager/pis` (create a PI via ORCID), `/manager/pis/{id}/profile` (edit a PI's
   profile fields), `/manager/pis/{id}/profile/retry` (queue profile generation again
   after a dead job or for an ungrounded profile), `/manager/pis/{id}/mute` / `/unmute` (toggle a PI's agent),
@@ -221,13 +230,17 @@ doc's §8.
   `/manager/pis/{id}/slack/provision` / `/activate` (install a pending PI's Slack
   bot and bring the agent live), `/manager/pis/{id}/grants/{grant_id}/veto` /
   `/manager/pis/{id}/industry/{evidence_id}/veto` (mark a RePORTER-derived grant
-  or a piece of industry evidence as not this PI's), and the five Companies routes
+  or a piece of industry evidence as not this PI's),
+  `/manager/pis/{id}/orcid-fundings/{funding_id}/veto` (mark an ORCID funding as not
+  this PI's), `/manager/pis/{id}/grant-identity/pin`, `/unpin` and `/none` (staff pin
+  of the PI's RePORTER profile, removing the pin, and "PI has no RePORTER profile"),
+  and the five Companies routes
   (scout_hub 1.10.0) — `/manager/pis/{id}/companies` (add a company by hand),
   `/manager/pis/{id}/companies/{company_id}/delete`, `/confirm` and `/reject`
   (review a discovered or confirmed company), and `/manager/pis/{id}/companies/discover`
   (queue company discovery) — and nothing else;
   `tests/integration/test_manager_views.py`'s
-  `test_manager_router_mutations_are_an_explicit_allowlist` fails loudly on a sixteenth.
+  `test_manager_router_mutations_are_an_explicit_allowlist` fails loudly on a twentieth.
   **Still cannot impersonate** or set roles (both stay admin-only), and there is
   deliberately no LLM-call drill-down and no export. A manager MAY provision a Slack
   bot and activate a pending PI's agent from `/manager/pis/{id}` (F2, 2026-09-10) —

@@ -16,14 +16,23 @@ spec): the entries that embed the scout_hub prompt set are regenerated once,
 for scout_hub 1.10.0, and the `.ambr` diff must be exactly the prompt diff
 plus its version and hash stamps, reviewed line by line. It licenses no other
 regeneration, and `test_agent_turn_gm.ambr` is not touched by it.
+
+A second owner-approved exception (D1 and §8 of
+docs/specs/2026-10-05-pi-profile-remediation-design.md, 2026-10-05): each phase
+of the PI-profile remediation regenerates only the entries its §8 row lists
+(Phase 1: the six `test_export_via_*_gm` entries and
+`test_profile_synthesis_request_gm`), and each `.ambr` diff must equal the
+intended text change, reviewed line by line. `test_agent_turn_gm.ambr` is not
+touched by it either.
 """
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import httpx
 import pytest
 import respx
+from sqlalchemy import select
 
 from src.agent.message_log import LogEntry
 from src.agent.prompt_safety import delimit
@@ -42,14 +51,17 @@ from src.models import (
     Job,
     OpportunityAssessment,
     PiGrant,
+    PiGrantIdentity,
+    PiOrcidFunding,
     Publication,
 )
 from src.models.assessment_chat import CHAT_TIER_STAFF
 from src.services import assessment_chat as chat
-from src.services import llm, patents, profile_export, profile_pipeline
+from src.services import grant_sections, llm, patents, profile_export, profile_pipeline
 from src.services.assessment_headline import render_assessment_headline
 from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH, RUBRIC_VERSION
 from src.services.build_info import BuildInfo
+from src.services.grant_sections import GrantLine, GrantSections
 from src.services.jhu_rules import set_tenure_start
 from src.services.llm import set_call_log_callback
 from src.services.patents import PriorArtResult
@@ -554,8 +566,8 @@ _SYNTHESIS_VALID = {
 
 
 async def test_profile_synthesis_request_gm(snapshot, monkeypatch):
-    """Grant titles, more than 30 papers (so the top-30 cut applies, with year
-    ties) and methods text."""
+    """Grant sections (Active and Past, D41), more than 30 papers (so the top-30
+    cut applies, with year ties) and methods text."""
     publications = [
         {
             "pmid": str(40000000 + i),
@@ -571,7 +583,17 @@ async def test_profile_synthesis_request_gm(snapshot, monkeypatch):
             "name": "Jane Wang", "institution": "Johns Hopkins University",
             "department": "Oncology", "lab_website": "https://example.org/wang",
         },
-        grant_titles=["R01 Organoid screening platform", "U54 Colorectal consortium"],
+        grants=GrantSections(
+            active=(GrantLine(
+                "nih_reporter", "R01CA000001", "Organoid screening platform", "NIH R01",
+                2021, 2027,
+            ),),
+            past=(GrantLine(
+                "orcid", "orcid:hash:golden-consortium", "Colorectal consortium",
+                "Golden Foundation", 2012, 2016,
+            ),),
+            tenure_start=2010,
+        ),
         publications=publications,
         methods_by_pmid={
             "40000001": "Organoids were derived from resected tissue.",
@@ -665,6 +687,38 @@ def _export_papers():
     return papers[1::2] + papers[0::2]
 
 
+_GOLDEN_TODAY = date(2026, 10, 5)
+#: (core, title, activity code, first FY, last FY, project end). The T32 is outside
+#: LLM_ACTIVITY_CODES and never renders; the R21 ended before today (Past).
+_EXPORT_GRANTS = (
+    ("R01GM000001", "Golden Grant One", "R01", 2021, 2026, datetime(2027, 6, 30, tzinfo=UTC)),
+    ("R21CA000002", "Golden Grant Two", "R21", 2003, 2005, datetime(2005, 8, 31, tzinfo=UTC)),
+    ("T32GM000003", "Golden training grant", "T32", 2010, 2015, datetime(2015, 6, 30, tzinfo=UTC)),
+)
+#: An active foundation award; a pre-tenure fellowship (omitted, D58); an ORCID copy of the
+#: R21 (dropped as a duplicate of a pooled RePORTER award).
+_EXPORT_FUNDINGS = (
+    dict(
+        group_key="ext:grant_number:GF0001", title="Golden Foundation Award",
+        funder_name="Golden Foundation", funding_type="grant",
+        start_year=2024, start_month=1, end_year=2028, end_month=12,
+        external_ids=[{"type": "grant_number", "value": "GF-0001", "relationship": "self"}],
+    ),
+    dict(
+        group_key="hash:golden-pre-tenure", title="Golden pre-tenure fellowship",
+        funder_name="Golden Foundation", funding_type="award", start_year=1995, end_year=1998,
+    ),
+    dict(
+        group_key="ext:grant_number:1R21CA00000201", title="Golden Grant Two (ORCID copy)",
+        funder_name="National Institutes of Health", funding_type="grant",
+        start_year=2003, end_year=2005,
+        external_ids=[
+            {"type": "grant_number", "value": "1R21CA000002-01", "relationship": "self"},
+        ],
+    ),
+)
+
+
 _EXPORT_FORM = {
     "research_summary": "We build isogenic organoid panels for colorectal targets.",
     "techniques": ["organoids", "base editing"],
@@ -681,6 +735,7 @@ _EXPORT_FORM = {
 def export_dir(tmp_path, monkeypatch):
     out = tmp_path / "public"
     monkeypatch.setattr(profile_export, "PROFILES_DIR", out)
+    monkeypatch.setattr(grant_sections, "sections_today", lambda: _GOLDEN_TODAY)
     return out
 
 
@@ -695,12 +750,35 @@ async def _seed_export_pi(db_session, *, n):
         db_session, user=user, research_summary="Stored summary before the edit.",
         techniques=["organoids"], experimental_models=["organoids"],
         disease_areas=["colorectal cancer"], key_targets=["KRAS"], keywords=["organoids"],
-        grant_titles=["Golden Grant One", "Golden Grant Two"], profile_version=3,
+        profile_version=3,
     )
     agent = await factories.make_agent(
         db_session, user=user, agent_id=f"goldenexport{n}", bot_name=f"GoldenExport{n}Bot",
         pi_name="Jane Wang", status="active",
     )
+    profile_id = 9300000 + n
+    db_session.add(PiGrantIdentity(
+        user_id=user.id, status="resolved", accepted_profile_ids=[profile_id],
+        candidates=[{
+            "id": profile_id, "name_on_award": "Jane Wang", "linked": True,
+            "linking_pmids": ["50000000"],
+        }],
+        evaluated_at=datetime(2026, 10, 5, tzinfo=UTC),
+        orcid_fetched_at=datetime(2026, 10, 5, tzinfo=UTC),
+    ))
+    for core, title, code, first_fy, last_fy, end in _EXPORT_GRANTS:
+        db_session.add(PiGrant(
+            user_id=user.id, core_project_num=core, reporter_profile_id=profile_id, title=title,
+            activity_code=code, org_name="JOHNS HOPKINS UNIVERSITY", first_fy=first_fy,
+            last_fy=last_fy, project_end=end, tenure_filter_mode="org_and_year",
+            is_subproject=False,
+            identity_evidence={
+                "matched_profile_id": profile_id, "name_on_award": "Jane Wang",
+                "linking_pmids": [], "rule": "pmid_link",
+            },
+        ))
+    for funding in _EXPORT_FUNDINGS:
+        db_session.add(PiOrcidFunding(user_id=user.id, **funding))
     for i, (title, year) in enumerate(_export_papers()):
         db_session.add(Publication(
             user_id=user.id, title=title, year=year, journal="Golden Journal",
@@ -717,7 +795,14 @@ def _exported(export_dir, agent):
 async def test_export_via_pipeline_gm(snapshot, db_session, export_dir, monkeypatch):
     _install_fakes(monkeypatch)
     user, _profile, agent = await _seed_export_pi(db_session, n=1)
-    await profile_pipeline.run_profile_pipeline(user.id, db_session)
+    callbacks = []
+    await profile_pipeline.run_profile_pipeline(user.id, db_session, after_commit=callbacks)
+    assert not (export_dir / f"{agent.agent_id}.md").exists(), (
+        "the persona is written after the commit"
+    )
+    await db_session.commit()
+    for callback in callbacks:
+        await callback(db_session)
     assert _exported(export_dir, agent) == snapshot
 
 
@@ -772,18 +857,11 @@ async def test_export_via_grant_veto_gm(snapshot, client, db_session, export_dir
         db_session, name="Golden Veto Manager", orcid="0000-0000-0000-9291",
         email="golden-veto-manager@example.org", user_role=USER_ROLE_MANAGER,
     )
-    grants = []
-    for core, title in (("R01GM000001", "Golden Grant One"), ("R21CA000002", "Golden Grant Two")):
-        grant = PiGrant(
-            user_id=user.id, core_project_num=core, title=title,
-            org_name="JOHNS HOPKINS UNIVERSITY", tenure_filter_mode="in_tenure",
-            is_subproject=False, first_fy=2021, last_fy=2025,
-        )
-        db_session.add(grant)
-        grants.append(grant)
-    await db_session.flush()
+    grant = (await db_session.execute(select(PiGrant).where(
+        PiGrant.user_id == user.id, PiGrant.core_project_num == "R01GM000001",
+    ))).scalar_one()
     resp = await client.post(
-        f"/manager/pis/{user.id}/grants/{grants[0].id}/veto", headers=auth_headers(manager.id),
+        f"/manager/pis/{user.id}/grants/{grant.id}/veto", headers=auth_headers(manager.id),
     )
     assert resp.status_code == 302
     assert _exported(export_dir, agent) == snapshot

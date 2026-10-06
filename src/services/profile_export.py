@@ -6,11 +6,28 @@ from pathlib import Path
 
 from src.models import ResearcherProfile, User
 from src.services.fs import atomic_write_text
-from src.services.tenure_scope import TenureScopedPublications
+from src.services.grant_sections import GrantSections, grant_section_lines
+from src.services.tenure_scope import TenureScopedPublications, publication_sort_key
 
 logger = logging.getLogger(__name__)
 
 PROFILES_DIR = Path("profiles/public")
+
+
+def _check_inputs(publications: object, grants: object) -> None:
+    """Refuse a bare publication list and anything but a GrantSections for ``grants``."""
+    if publications is not None and not isinstance(publications, TenureScopedPublications):
+        raise TypeError(  # message unchanged: tests match "scoped_publications_for_export"
+            "export_profile_to_markdown requires a TenureScopedPublications "
+            "(see src.services.tenure_scope.scoped_publications_for_export), "
+            f"not {type(publications).__name__}"
+        )
+    if not isinstance(grants, GrantSections):
+        raise TypeError(
+            "export_profile_to_markdown requires a GrantSections "
+            "(see src.services.grant_sections.load_grant_sections), "
+            f"not {type(grants).__name__}"
+        )
 
 
 def export_profile_to_markdown(
@@ -18,6 +35,8 @@ def export_profile_to_markdown(
     profile: ResearcherProfile,
     agent_id: str | None,
     publications: TenureScopedPublications | None = None,
+    *,
+    grants: GrantSections,
 ) -> Path | None:
     """Export a database profile to profiles/public/{agent_id}.md.
 
@@ -29,19 +48,19 @@ def export_profile_to_markdown(
     tenure-attribution audit, which is how pre-tenure publications reached
     agent personas (audit H3).
 
+    ``grants`` is the persona's grant sections from
+    ``src.services.grant_sections.load_grant_sections``, required (spec
+    2026-10-05 §6.1); any other type raises ``TypeError``. The caller is the
+    post-commit writer ``profile_publish.write_persona_files``.
+
     Returns the path written, or None if the user has no AgentRegistry entry
     (``agent_id`` is empty) or the write fails.
     """
-    if publications is not None and not isinstance(publications, TenureScopedPublications):
-        raise TypeError(
-            "export_profile_to_markdown requires a TenureScopedPublications "
-            "(see src.services.tenure_scope.scoped_publications_for_export), "
-            f"not {type(publications).__name__}"
-        )
+    _check_inputs(publications, grants)
     if not agent_id:
         return None
 
-    text = _render_profile_markdown(user, profile, publications)
+    text = render_profile_markdown(user, profile, publications=publications, grants=grants)
     path = PROFILES_DIR / f"{agent_id}.md"
     try:
         PROFILES_DIR.mkdir(parents=True, exist_ok=True)
@@ -96,14 +115,10 @@ def _citation(pub) -> str:
 
 
 def _publication_lines(publications: TenureScopedPublications | None) -> list[str]:
-    """Recent Publications section (up to 20, most recent first); empty when none."""
+    """Recent Publications section (up to 20, publication_sort_key order); empty when none."""
     if not publications:
         return []
-    sorted_pubs = sorted(
-        [p for p in publications if p.title],
-        key=lambda p: p.year or 0,
-        reverse=True,
-    )[:20]
+    sorted_pubs = sorted([p for p in publications if p.title], key=publication_sort_key)[:20]
     if not sorted_pubs:
         return []
     lines = ["## Recent Publications\n"]
@@ -113,12 +128,17 @@ def _publication_lines(publications: TenureScopedPublications | None) -> list[st
     return lines
 
 
-def _render_profile_markdown(
+def render_profile_markdown(
     user: User,
     profile: ResearcherProfile,
     publications: TenureScopedPublications | None,
+    *,
+    grants: GrantSections,
 ) -> str:
-    """Render the exported markdown. Section order is part of the bot-facing contract."""
+    """Render the exported markdown. Section order is part of the bot-facing contract:
+    header, Research Summary, the tag sections, Recent Publications, Active Grants, Past
+    Grants (since <year>)."""
+    _check_inputs(publications, grants)
     lines = _header_lines(user)
 
     if profile.research_summary:
@@ -137,7 +157,7 @@ def _render_profile_markdown(
         lines.append("")
 
     lines.extend(_publication_lines(publications))
-    _bullet_section(lines, "Active Grants", profile.grant_titles)
+    lines.extend(grant_section_lines(grants))
     return "\n".join(lines)
 
 

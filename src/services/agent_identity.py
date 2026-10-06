@@ -7,12 +7,12 @@ agents through the same logic as self-service signup. It is the only copy
 """
 
 import logging
-import unicodedata
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import AgentRegistry
+from src.services.person_names import SLUG_SURNAME_MAX, ascii_letters, slug_surname
 
 logger = logging.getLogger(__name__)
 
@@ -22,46 +22,22 @@ _NUMERIC_TIER_MAX = 20
 # Slack caps an app name at 35 characters (docs.slack.dev/reference/app-manifest,
 # display_information.name). The longest bot name built below is the initial,
 # the surname, a two-digit suffix and "Bot": 1 + 28 + 2 + 3 = 34.
-_DISPLAY_MAX = 28
-
-# Latin letters NFKD does not decompose into an ASCII base letter.
-_ASCII_LETTERS = str.maketrans({
-    "ø": "o", "Ø": "O", "æ": "ae", "Æ": "AE", "œ": "oe", "Œ": "OE", "ß": "ss",
-    "đ": "d", "Đ": "D", "ð": "d", "Ð": "D", "ł": "l", "Ł": "L", "þ": "th",
-    "Þ": "Th", "ı": "i",
-})
-
-# Generational and degree suffixes an ORCID family-name field can carry
-# ("Smith Jr.", "Jones III", "Picard PhD"). Roman numerals count only in capitals:
-# "Ii" is a surname (Naoki Ii), "II" is a generation.
-_NAME_SUFFIXES = frozenset({
-    "jr", "sr", "phd", "md", "mph", "dphil", "dds", "dvm", "msc", "mba", "facs",
-    "frs", "esq",
-})
-_ROMAN_SUFFIXES = frozenset({"II", "III", "IV"})
+_DISPLAY_MAX = SLUG_SURNAME_MAX
 
 
 def _ascii_letters(text: str) -> str:
     """``text`` folded to ASCII with every character that is not an ASCII letter or
     digit dropped: "Müller" -> "Muller", "O'Brien" -> "OBrien"."""
-    folded = unicodedata.normalize("NFKD", text.translate(_ASCII_LETTERS))
-    return "".join(c for c in folded if c.isascii() and c.isalnum())
-
-
-def _is_suffix(word: str) -> bool:
-    return word.lower() in _NAME_SUFFIXES or word in _ROMAN_SUFFIXES
+    return ascii_letters(text)
 
 
 def _surname(full_name: str) -> str:
     """The last word of ``full_name`` that can be a surname, as ASCII letters: a word
     holding a digit (an ORCID iD standing in for a private name) and a trailing
     generational or degree suffix are skipped, the last remaining word never. Empty
-    when no word qualifies."""
-    words = [_ascii_letters(w) for w in full_name.split()]
-    words = [w for w in words if w and not any(c.isdigit() for c in w)]
-    while len(words) > 1 and _is_suffix(words[-1]):
-        words.pop()
-    return words[-1][:_DISPLAY_MAX] if words else ""
+    when no word qualifies (``person_names.slug_surname``, which the shared name parser
+    keeps identical so slugs never change)."""
+    return slug_surname(full_name)
 
 
 async def _is_taken(db: AsyncSession, agent_id: str) -> bool:

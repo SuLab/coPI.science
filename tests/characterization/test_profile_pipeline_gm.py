@@ -2,9 +2,9 @@
 
 Pins the end-to-end output of run_profile_pipeline for one researcher with every
 external dependency faked deterministically:
-  - ORCID/PubMed fetches are monkeypatched in the pipeline's and the corpus
-    module's namespaces (they are imported there by name; reconcile_pub_doi is
-    left REAL so DOI reconciliation is exercised for real).
+  - ORCID (profile, works, fundings) and PubMed fetches are monkeypatched in the
+    pipeline's and the corpus module's namespaces (they are imported there by name;
+    reconcile_pub_doi is left REAL so DOI reconciliation is exercised for real).
   - The Anthropic client is replaced via the src.services.llm.get_anthropic_client
     seam, scripted to return a valid public-profile JSON (retries on a failed
     validation consume additional scripted responses in order; the removal
@@ -16,14 +16,16 @@ version bump, DOI handling, abstract hashing) breaks this snapshot loudly.
 """
 
 import json
+from datetime import date
 
 import pytest
 from sqlalchemy import select
 
-from src.models import Job, Publication, ResearcherProfile
+from src.models import Job, PiOrcidFunding, Publication, ResearcherProfile
 from src.services import corpus as corpus_module
-from src.services import profile_pipeline
+from src.services import grant_sections, profile_pipeline
 from src.services.corpus import CorpusStageError
+from src.services.orcid_fundings import OrcidFunding
 from tests import factories
 from tests.fakes import FakeAnthropic
 
@@ -87,8 +89,18 @@ def _install_fakes(monkeypatch):
             "lab_website": "https://example.org/lab",
         }
 
-    async def fake_fetch_orcid_grants(orcid_id):
-        return ["Difference Engine Program", "Analytical Engine Grant"]
+    async def fake_fetch_orcid_fundings(orcid_id, *, strict):
+        return [
+            OrcidFunding(
+                "ext:grant_number:DEP0001", "Difference Engine Program", "Board of Longitude",
+                "grant", 2024, 1, 2027, 12,
+                ({"type": "grant_number", "value": "DEP-0001", "relationship": "self"},),
+            ),
+            OrcidFunding(
+                "hash:analytical-engine", "Analytical Engine Grant", "Royal Society",
+                "grant", 2010, None, 2012, None, (),
+            ),
+        ]
 
     _ADA = [{
         "last": "Lovelace", "fore": "Ada", "initials": "A",
@@ -150,7 +162,7 @@ def _install_fakes(monkeypatch):
     # Retrieval seams live in the CORPUS module now; resolve_corpus itself is
     # left REAL so its gates/ranking/cap run in every characterization test.
     monkeypatch.setattr(profile_pipeline, "fetch_orcid_profile", fake_fetch_orcid_profile)
-    monkeypatch.setattr(profile_pipeline, "fetch_orcid_grants", fake_fetch_orcid_grants)
+    monkeypatch.setattr(profile_pipeline, "fetch_orcid_fundings", fake_fetch_orcid_fundings)
     monkeypatch.setattr(corpus_module, "fetch_orcid_works", fake_fetch_orcid_works)
     monkeypatch.setattr(corpus_module, "fetch_works_by_orcid", fake_fetch_works_by_orcid)
     monkeypatch.setattr(corpus_module, "search_pmids", fake_search_pmids)
@@ -158,6 +170,8 @@ def _install_fakes(monkeypatch):
     monkeypatch.setattr(corpus_module, "fetch_pubmed_records", fake_fetch_pubmed_records)
     monkeypatch.setattr(profile_pipeline, "convert_pmids_to_pmcids", fake_convert_pmids_to_pmcids)
     monkeypatch.setattr(profile_pipeline, "fetch_pmc_methods", fake_fetch_pmc_methods)
+    # The export's Active/Past split is relative to today; freeze it.
+    monkeypatch.setattr(grant_sections, "sections_today", lambda: date(2026, 10, 5))
 
     # LLM: synthesize_profile calls src.services.llm.get_anthropic_client() at
     # call time. The removal cycle deleted the second, private-profile-seed
@@ -207,7 +221,9 @@ async def test_profile_pipeline_golden_master(db_session, monkeypatch, snapshot)
         "disease_areas": profile.disease_areas,
         "key_targets": profile.key_targets,
         "keywords": profile.keywords,
-        "grant_titles": profile.grant_titles,
+        "orcid_funding_titles": sorted((await db_session.execute(
+            select(PiOrcidFunding.title).where(PiOrcidFunding.user_id == user.id)
+        )).scalars().all()),
         "profile_version": profile.profile_version,
         "private_profile_md": profile.private_profile_md,
         "private_profile_seed": profile.private_profile_seed,
@@ -233,7 +249,7 @@ async def test_profile_pipeline_golden_master(db_session, monkeypatch, snapshot)
 async def test_profile_pipeline_llm_failure_leaves_fields_unset(db_session, monkeypatch, snapshot):
     """Pin the resilience path: when the public-synthesis LLM call raises, the
     pipeline swallows it, stores no synthesized fields, and leaves version at 0 —
-    but still records grant titles and the abstracts hash.
+    but still stores its ORCID fundings and the abstracts hash.
 
     The provenance columns stay NULL here, which is the third state they need: no
     synthesis was stored, so there is nothing to say about its validation or its
@@ -261,7 +277,9 @@ async def test_profile_pipeline_llm_failure_leaves_fields_unset(db_session, monk
         "research_summary": profile.research_summary,
         "techniques": profile.techniques,
         "disease_areas": profile.disease_areas,
-        "grant_titles": profile.grant_titles,
+        "orcid_funding_titles": sorted((await db_session.execute(
+            select(PiOrcidFunding.title).where(PiOrcidFunding.user_id == user.id)
+        )).scalars().all()),
         "profile_version": profile.profile_version,
         "private_profile_seed": profile.private_profile_seed,
         "raw_abstracts_hash_is_set": profile.raw_abstracts_hash is not None,
@@ -286,7 +304,7 @@ async def test_profile_pipeline_doi_correction_stores_authoritative(
     async def fake_fetch_orcid_profile(orcid_id):
         return {"name": "Ada Lovelace", "orcid": orcid_id}
 
-    async def fake_fetch_orcid_grants(orcid_id):
+    async def fake_fetch_orcid_fundings(orcid_id, *, strict):
         return []
 
     async def fake_fetch_orcid_works(orcid_id, *, strict=False):
@@ -330,7 +348,7 @@ async def test_profile_pipeline_doi_correction_stores_authoritative(
         return ""
 
     monkeypatch.setattr(profile_pipeline, "fetch_orcid_profile", fake_fetch_orcid_profile)
-    monkeypatch.setattr(profile_pipeline, "fetch_orcid_grants", fake_fetch_orcid_grants)
+    monkeypatch.setattr(profile_pipeline, "fetch_orcid_fundings", fake_fetch_orcid_fundings)
     monkeypatch.setattr(corpus_module, "fetch_orcid_works", fake_fetch_orcid_works)
     monkeypatch.setattr(corpus_module, "fetch_works_by_orcid", fake_fetch_works_by_orcid)
     monkeypatch.setattr(corpus_module, "search_pmids", fake_search_pmids)
