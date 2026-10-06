@@ -120,6 +120,7 @@
             {% elif request.query_params.get('error') == 'field_too_long' %}Name, institution and department are limited to 255 characters each.
             {% elif request.query_params.get('error') == 'no_agent' %}This PI has no lab agent yet, so there is nothing to mute or unmute.
             {% elif request.query_params.get('error') == 'orcid_busy' %}ORCID fundings are being refreshed — try the veto again in a moment.
+            {% elif request.query_params.get('error') == 'persona_busy' %}This PI's profile is being regenerated or updated — try again in a moment.
             {% elif request.query_params.get('error') == 'invalid_reporter_id' %}No RePORTER project lists that profile id.
             {% elif request.query_params.get('error') == 'reporter_unreachable' %}NIH RePORTER could not be reached — try again.
             {% elif request.query_params.get('error') == 'no_profile_selected' %}Select a candidate or enter a RePORTER profile id.

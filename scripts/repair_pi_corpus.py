@@ -102,6 +102,7 @@ from src.services.corpus import (  # noqa: E402
     resolve_corpus,
 )
 from src.services.corpus_additions import lock_corpus, select_corpus_additions  # noqa: E402
+from src.services.profile_publish import lock_persona_writer  # noqa: E402
 from src.services.pubmed import fetch_pubmed_records  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -564,6 +565,8 @@ async def _apply_plan(db: AsyncSession, plan: PiRepairPlan) -> None:
     planning is skipped rather than inserted twice.
     """
     try:
+        # Persona writer locks first (profile_publish lock order), then the corpus lock.
+        await lock_persona_writer(db, plan.user_id)
         await lock_corpus(db, plan.user_id)
         stored_now = set(
             (

@@ -29,6 +29,12 @@ the other needs, and neither can wait on the other while holding something it wa
 A writer that writes child rows first and takes the locks later can still deadlock with a
 deletion; Postgres then aborts one of the two transactions.
 
+The profile pipeline (``profile_pipeline``) holds these locks from tenure derivation through
+its export, LLM synthesis included, until the job commits, so a concurrent manager write or
+deletion for that PI waits minutes. The manager grant and ORCID funding routes bound that
+wait with ``SET LOCAL lock_timeout`` and answer "try again"; ``job_progress.record``, which runs on its own
+connection during the run, bounds its own wait on the ``jobs`` row the same way.
+
 The caller passes the publications to step 1, so each path keeps its own query (FA3-V3);
 step 2 always uses ``scoped_publications_for_export``. A post-commit write failure is
 logged at ERROR and swallowed (``agents.persona_export_failed_at`` arrives with migration

@@ -10,6 +10,13 @@ Implements the pipeline from profile-ingestion.md:
 7. LLM synthesis (public profile)
 8. Validation
 9. Store, gated on validation and recorded on the profile row (migration 0023)
+
+Locking: steps 1-2 commit before the corpus is resolved, and the run then takes the
+persona writer locks (``profile_publish.lock_persona_writer``) BEFORE its first write
+to the PI's rows (tenure keys, publications, the profile) and holds them until the job
+commits, through the LLM synthesis and the export. Manager writes and account deletion
+for this PI wait for the run meanwhile (lock order: ``profile_publish`` module
+docstring).
 """
 
 import hashlib
@@ -137,6 +144,7 @@ async def run_profile_pipeline(
     await _step1_orcid_profile(run)
     await _step2_grants(run)
     await _steps3_4_resolve_corpus(run)
+    await _lock_persona(run)
     await _derive_tenure_start(run)
     await _store_corpus_publications(run)
     await _load_synthesis_inputs(run)
@@ -200,8 +208,9 @@ async def _step2_grants(run: PipelineRun) -> None:
     # Step 2: ORCID fundings, soft (spec 2026-10-05 §6.1). Step 1's writes commit first, the
     # fetch runs with no transaction open, and the store commits in its own short
     # transaction before the main work: an ORCID outage keeps the stored rows and never
-    # fails generation (the activation gate refuses a dead generate_profile), and the ORCID
-    # veto never waits behind a whole pipeline run for these rows.
+    # fails generation (the activation gate refuses a dead generate_profile). The ORCID
+    # veto still waits, bounded, behind the persona lock the run takes from tenure
+    # derivation on (_lock_persona).
     await run.progress("step2", "Fetching ORCID fundings...")
     await db.commit()
     fundings = await fetch_orcid_fundings(run.orcid_id, strict=False)
@@ -264,6 +273,24 @@ async def _steps3_4_resolve_corpus(run: PipelineRun) -> None:
             "sparse_corpus",
             f"Only {len(corpus_result.kept)} publications resolved across "
             "ORCID, OpenAlex and PubMed.",
+        )
+
+
+async def _lock_persona(run: PipelineRun) -> None:
+    """Take the persona writer locks for the rest of the job's transaction.
+
+    Everything before this point either committed (steps 1-2) or only read and called
+    the network (steps 3-4), so the run holds no lock on the PI's rows that a concurrent
+    ``delete_user_account`` needs: a deletion either commits first, which this waits
+    for and then refuses below, or queues behind the whole run. Writing first and
+    locking later held FK and row locks through the LLM calls while deletion held the
+    job's ``jobs`` row, which ``job_progress.record`` then waited on unboundedly.
+    """
+    from src.services.profile_publish import lock_persona_writer
+    await lock_persona_writer(run.db, run.user_id)
+    if await run.db.scalar(select(User.id).where(User.id == run.user_id)) is None:
+        raise ValueError(
+            f"User {run.user_id} was deleted mid-pipeline; aborting before any write"
         )
 
 
@@ -549,7 +576,8 @@ async def _step6_profile_record(run: PipelineRun) -> None:
         await db.flush()
     run.profile = profile
     # The version this run read. Step 9 writes the synthesized text only if it
-    # still holds: a human edit committed while the run synthesized wins.
+    # still holds. Writers that take the persona lock cannot commit before this run
+    # does (_lock_persona); the check keeps any other writer's edit.
     run.loaded_version = profile.profile_version or 0
 
 
@@ -637,11 +665,8 @@ async def _step9_store(run: PipelineRun) -> None:
     # A monthly refresh that fails validation, or one that runs while PubMed is
     # down, keeps the profile that is already there.
     await run.progress("step9", "Saving profile to database...")
-    # Persona writer locks before this transaction's profile writes (lock order:
-    # profile_publish module docstring), held until the job commits. Taken here, after
-    # synthesis, so the lock is not held across the LLM calls.
-    from src.services.profile_publish import lock_persona_writer
-    await lock_persona_writer(db, user.id)
+    # The persona writer locks are already held (_lock_persona, before tenure
+    # derivation) and stay held until the job commits.
     # Records this run's INPUT (change detection), so it is written even when the
     # synthesized fields below are not. The evidence counts are the ones that
     # describe the stored profile.
@@ -687,8 +712,8 @@ async def _step9_store(run: PipelineRun) -> None:
             await db.flush()
             # SQL-side increment (the Python read-modify-write lost updates when
             # two writers raced), and conditional on the version step 6 read: an
-            # edit a human committed while this run synthesized wins, and the
-            # run keeps the human's text.
+            # edit committed since by a writer that bypasses the persona lock wins,
+            # and the run keeps that text.
             result = await db.execute(
                 update(ResearcherProfile)
                 .where(
@@ -796,19 +821,21 @@ async def _export_profile(run: PipelineRun) -> None:
     # agent_reg was loaded before step 3 (the tenure map needed it);
     # it gates the revision and the persona write here.
 
-    # A concurrent account deletion can commit while this pipeline is between
-    # flushes (the worker holds no lock on the users row). Re-check before the
-    # render below so a deleted account gets no revision and no scheduled write
-    # (deletion audit 2026-08-25, F10); the writer itself re-selects under the
-    # per-PI lock and writes nothing for a deleted account (spec 2026-10-05 §4.3).
+    # Deletion takes the per-PI advisory lock before it deletes anything, so with
+    # the persona lock held since _lock_persona it cannot commit mid-run; this
+    # re-check is defence in depth so a deleted account gets no revision and no
+    # scheduled write (deletion audit 2026-08-25, F10). The writer itself re-selects
+    # under the per-PI lock and writes nothing for a deleted account (spec
+    # 2026-10-05 §4.3).
     if await db.scalar(select(User.id).where(User.id == user.id)) is None:
         raise ValueError(
             f"User {user.id} was deleted mid-pipeline; aborting before export"
         )
 
-    # Re-read what the export will render: a human edit committed after step 6
-    # must reach the persona file in BOTH branches, the kept-edit branch above
-    # and the keep-stored branch that never wrote the text at all.
+    # Re-read what the export will render: an edit committed after step 6 (only
+    # possible for a writer that bypasses the persona lock) must reach the persona
+    # file in BOTH branches, the kept-edit branch above and the keep-stored branch
+    # that never wrote the text at all.
     await db.refresh(profile)
     await db.refresh(user)
 

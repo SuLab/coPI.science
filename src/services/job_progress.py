@@ -5,18 +5,27 @@ A handler's pipeline transaction never modifies its jobs row: that row used to b
 dirtied by every progress append and so stayed row-locked for the whole run, and
 progress only became visible at the final commit. `record` commits each entry on
 its own session, so /onboarding shows progress mid-run, and a failed run keeps the
-progress that explains it. Best-effort: a failed write never fails the job (and
-logs nothing, so the pipeline's log stream is unchanged).
+progress that explains it. Best-effort: a failed write never fails the job; it is
+logged at WARNING and dropped.
+
+Each write waits at most ``RECORD_LOCK_TIMEOUT`` for the jobs row: a concurrent
+``delete_user_account`` can hold that row while it waits behind the very pipeline that is
+recording progress, and an unbounded wait here would hang that pipeline undetected.
 """
 from __future__ import annotations
 
-import contextlib
+import logging
 import uuid
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
+
+#: ``SET LOCAL lock_timeout`` for one progress write.
+RECORD_LOCK_TIMEOUT = "2s"
 
 _factory: Callable[[], AbstractAsyncContextManager[AsyncSession]] | None = None
 
@@ -38,14 +47,19 @@ def configure(factory: Callable[[], AbstractAsyncContextManager[AsyncSession]] |
 
 
 async def record(job_id: uuid.UUID | None, step: str, detail: str = "") -> None:
-    """Append `{"step", "detail"}` to the job's progress and commit it at once."""
+    """Append `{"step", "detail"}` to the job's progress and commit it at once. Never
+    raises: a lock wait past ``RECORD_LOCK_TIMEOUT`` or any other error is logged at
+    WARNING and the entry is dropped."""
     if job_id is None:
         return
     factory = _factory
     if factory is None:
         from src.database import get_session_factory
         factory = get_session_factory()
-    with contextlib.suppress(Exception):
+    try:
         async with factory() as session:
+            await session.execute(text(f"SET LOCAL lock_timeout = '{RECORD_LOCK_TIMEOUT}'"))
             await session.execute(_APPEND_SQL, {"id": job_id, "step": step, "detail": detail})
             await session.commit()
+    except Exception as exc:  # best-effort: progress never fails the job
+        logger.warning("Job %s progress entry %r not recorded: %s", job_id, step, exc)

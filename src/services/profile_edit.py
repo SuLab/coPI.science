@@ -137,6 +137,21 @@ async def _write_tenure_if_changed(
         )
 
 
+async def _bounded_persona_lock(db: AsyncSession, user_id: uuid.UUID) -> bool:
+    """``lock_persona_writer`` under ``PROFILE_INSERT_LOCK_TIMEOUT``; False (the session
+    rolled back) when the wait timed out because a generation job holds the lock."""
+    await db.execute(text(f"SET LOCAL lock_timeout = '{PROFILE_INSERT_LOCK_TIMEOUT}'"))
+    try:
+        await lock_persona_writer(db, user_id)
+    except DBAPIError as exc:
+        if getattr(exc.orig, "sqlstate", None) != _LOCK_NOT_AVAILABLE:
+            raise
+        await db.rollback()
+        return False
+    await db.execute(text("SET LOCAL lock_timeout TO DEFAULT"))
+    return True
+
+
 async def _load_or_create_profile(
     db: AsyncSession, user_id: uuid.UUID,
 ) -> ResearcherProfile | None:
@@ -243,7 +258,11 @@ async def apply_profile_edits(
         return "invalid_tenure_year"
     # Persona writer locks before the first write (the email, user, tenure and profile
     # rows; lock order: profile_publish module docstring), held until the commit below.
-    await lock_persona_writer(db, target_user.id)
+    # Bounded like the profile-row insert: a generation job holds the persona lock from
+    # tenure derivation through export, so a save that slipped past the in-flight check
+    # (the job was claimed just after it) refuses instead of waiting out the whole run.
+    if not await _bounded_persona_lock(db, target_user.id):
+        return PROFILE_GENERATING
     if form.get("email") is not None:
         email_error = await _apply_email(db, target_user, form["email"], email_required)
         if email_error:

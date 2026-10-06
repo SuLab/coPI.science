@@ -7,8 +7,10 @@ different paper than the one cited — the failure mode behind the bad-link
 incident (see GitHub issue #5).
 
 Classifies each row and, with --fix, corrects the DB and re-exports the
-affected public profiles through `reexport_persona` (a `reexport` revision in the
-fix's transaction, committed, then the post-commit `write_persona_files`).
+affected public profiles one PI at a time: under that PI's persona writer locks
+(`lock_persona_writer`) it re-reads and corrects the PI's rows and records a
+`reexport` revision (`reexport_persona`), commits, then runs the post-commit
+`write_persona_files`.
 
 Categories:
   ok           stored DOI matches the PMID's authoritative DOI
@@ -45,7 +47,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from src.config import get_settings
 from src.models import AgentRegistry, Publication, User
-from src.services.profile_publish import reexport_persona, write_persona_files
+from src.services.profile_publish import (
+    lock_persona_writer,
+    reexport_persona,
+    write_persona_files,
+)
 from src.services.pubmed import fetch_authoritative_dois, reconcile_pub_doi
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -142,29 +148,52 @@ async def _run(orcids: list[str], agents: list[str], fix: bool) -> int:
             print("\nAll DOI links are valid. Nothing to fix.")
 
         if fix and changes:
-            for p, new_doi, _ in changes:
-                p.doi = new_doi
-            await db.commit()
-            print(f"\nCommitted {len(changes)} DOI updates.")
-
-            # Re-export affected public profiles.
-            print(f"Re-exporting {len(affected_users)} profile(s)...")
-            for uid in affected_users:
-                rendered = await reexport_persona(
-                    db, uid, mechanism="reexport",
-                    change_summary="DOI links corrected (audit_pub_dois)",
-                )
-                if rendered is None:
-                    print(f"  SKIP {uid}: missing profile/agent")
-                    continue
-                await db.commit()
-                path = await write_persona_files(db, uid)
-                print(f"  {path.name if path else 'FAILED (see the ERROR log)'}")
+            await _fix_per_pi(db, changes, authoritative, affected_users)
         elif changes:
             print("\n[report only] Re-run with --fix to apply and re-export.")
 
     await engine.dispose()
     return 0
+
+
+async def _fix_per_pi(
+    db: AsyncSession,
+    changes: list[tuple[Publication, str | None, str]],
+    authoritative: dict[str, str],
+    affected_users: set[uuid.UUID],
+) -> None:
+    """Correct and re-export each affected PI in its own transaction, under that PI's
+    persona writer locks taken before the first write (lock order: ``profile_publish``
+    module docstring). The audit read its rows without the lock, so each PI's rows are
+    re-read under it and reconciled again: a pipeline run that committed meanwhile wins."""
+    pub_ids: dict[uuid.UUID, list[uuid.UUID]] = {}
+    for p, _, _ in changes:
+        pub_ids.setdefault(p.user_id, []).append(p.id)
+    await db.commit()  # end the audit's read transaction before the first lock
+    written = 0
+    print(f"\nCorrecting and re-exporting {len(affected_users)} profile(s)...")
+    for uid in affected_users:
+        await lock_persona_writer(db, uid)
+        fresh = (await db.execute(
+            select(Publication).where(Publication.id.in_(pub_ids[uid]))
+            .execution_options(populate_existing=True)
+        )).scalars().all()
+        for p in fresh:
+            final_doi, action = reconcile_pub_doi(p.doi, authoritative.get(str(p.pmid)))
+            if action in ("corrected", "filled", "ok") and (final_doi or None) != (p.doi or None):
+                p.doi = final_doi
+                written += 1
+        rendered = await reexport_persona(
+            db, uid, mechanism="reexport",
+            change_summary="DOI links corrected (audit_pub_dois)",
+        )
+        await db.commit()
+        if rendered is None:
+            print(f"  SKIP {uid}: missing profile/agent (DOI updates committed)")
+            continue
+        path = await write_persona_files(db, uid)
+        print(f"  {path.name if path else 'FAILED (see the ERROR log)'}")
+    print(f"Committed {written} DOI updates.")
 
 
 def main() -> None:

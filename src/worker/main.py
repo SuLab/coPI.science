@@ -420,9 +420,11 @@ async def process_job(job_id: uuid.UUID, job_type: str, job_attempts: int, job_m
     Both the initial re-fetch and the failure bookkeeping tolerate that — the
     account is gone, so there is no state anyone still needs updated.
 
-    After the handler's commit, `ctx.after_commit` runs in order on the same
-    session, before the job is marked completed; a failed or deferred handler runs
-    none of it. `JobDeferred` returns the job to pending without counting the attempt.
+    After the handler's commit, each `ctx.after_commit` callback runs in order,
+    before the job is marked completed, and is passed the handler's session; the
+    persona writer (`profile_publish.write_persona_files`, the only callback queued
+    today) does not write on it but opens its own session on that session's bind and
+    commits that. A failed or deferred handler runs none of them. `JobDeferred` returns the job to pending without counting the attempt.
     """
     async with session_factory() as db:
         row = (await db.execute(select(Job).where(Job.id == job_id))).scalar_one_or_none()

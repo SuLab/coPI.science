@@ -59,10 +59,14 @@ async def test_step2_orcid_outage_keeps_stored_rows_and_pipeline_completes(
 async def test_the_persona_writer_locks_come_before_the_fundings_and_profile_writes(
     db_session, wired, monkeypatch  # noqa: F811
 ):
-    """Before: step 2 and step 9 wrote the PI's rows without the persona writer locks, so a
-    concurrent account deletion could deadlock with the run (lock order, spec §4.3)."""
+    """Before: the run wrote tenure keys, publications and the profile row before it took
+    the persona writer locks (at step 9), holding those row locks through the LLM calls, so
+    a concurrent account deletion could hang or deadlock with it (lock order, spec §4.3)."""
     events = []
     real_lock, real_store = profile_publish.lock_persona_writer, profile_pipeline.store_orcid_fundings
+    real_clear = profile_pipeline.clear_provisional_tenure_start
+    real_provisional = profile_pipeline.set_provisional_tenure_start
+    real_corpus = profile_pipeline.lock_corpus
 
     async def lock(db, user_id):
         events.append("lock")
@@ -72,14 +76,30 @@ async def test_the_persona_writer_locks_come_before_the_fundings_and_profile_wri
         events.append("store")
         await real_store(db, user_id, fundings)
 
+    async def clear(db, user_id):
+        events.append("tenure")
+        await real_clear(db, user_id)
+
+    async def provisional(db, user_id, year):
+        events.append("tenure")
+        await real_provisional(db, user_id, year)
+
+    async def corpus(db, user_id):
+        events.append("corpus")
+        await real_corpus(db, user_id)
+
     monkeypatch.setattr(profile_publish, "lock_persona_writer", lock)
     monkeypatch.setattr(profile_pipeline, "store_orcid_fundings", store)
+    monkeypatch.setattr(profile_pipeline, "clear_provisional_tenure_start", clear)
+    monkeypatch.setattr(profile_pipeline, "set_provisional_tenure_start", provisional)
+    monkeypatch.setattr(profile_pipeline, "lock_corpus", corpus)
     wired.fundings = [LIVE]
     wired.corpus = _uncapped([_rec(1, 2020, "Paper", hopkins_pi=True)])
     user, _agent, job = await _make_pi(db_session)
     await run_profile_pipeline(user.id, db_session, job.id)
-    # Step 2 (before the store), step 9 (before the profile writes), the export's own.
-    assert events == ["lock", "store", "lock", "lock"], events
+    # Step 2 (before the store); before the tenure keys and the publications, held from
+    # there through synthesis and step 9; the export's own.
+    assert events == ["lock", "store", "lock", "tenure", "corpus", "lock"], events
 
 
 async def test_step2_store_error_rolls_back_only_the_savepoint(

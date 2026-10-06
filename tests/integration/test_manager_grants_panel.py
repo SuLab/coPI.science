@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -25,6 +26,8 @@ from src.models import (
 from src.models.job import INTERACTIVE_PRIORITY
 from src.routers import manager as manager_routes
 from src.services import profile_export
+from src.services.advisory_locks import lock_agent_persona
+from src.services.profile_publish import lock_persona_writer
 from tests import factories
 from tests.integration.test_manager_access import auth_headers
 
@@ -413,6 +416,82 @@ async def test_orcid_veto_refuses_on_a_lock_timeout(engine, tmp_path, monkeypatc
             assert vetoed_at is None
     finally:
         async with factory() as s:
+            await s.execute(text("DELETE FROM users WHERE id IN (:a, :b)"),
+                            {"a": pi.id, "b": mgr.id})
+            await s.commit()
+
+
+async def test_grant_veto_refuses_while_a_pipeline_holds_the_persona_lock(
+    engine, tmp_path, monkeypatch
+):
+    """A profile pipeline holds the PI's persona lock for minutes: the veto gives up after
+    PERSONA_LOCK_TIMEOUT with error=persona_busy and vetoes nothing."""
+    monkeypatch.setattr(manager_routes, "PERSONA_LOCK_TIMEOUT", "200ms")
+    monkeypatch.setattr(profile_export, "PROFILES_DIR", tmp_path / "public")
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as s:
+        pi = await factories.make_user(s)
+        mgr = await factories.make_user(s, user_role=USER_ROLE_MANAGER)
+        agent = await factories.make_agent(s, user=pi)
+        g = _grant(pi.id, "R01AI000001", "Busy award")
+        s.add(g)
+        await s.commit()
+    try:
+        async with factory() as holder:
+            await lock_persona_writer(holder, pi.id)
+            async with factory() as s2:
+                resp = await asyncio.wait_for(manager_routes.manager_veto_grant(
+                    pi.id, g.id, request=SimpleNamespace(session={}), db=s2, current_user=mgr,
+                ), timeout=10)
+            assert "error=persona_busy" in resp.headers["location"]
+            await holder.rollback()
+        async with factory() as s:
+            vetoed_at = (await s.execute(
+                select(PiGrant.vetoed_at).where(PiGrant.id == g.id)
+            )).scalar_one()
+            assert vetoed_at is None
+    finally:
+        async with factory() as s:
+            await s.execute(text("DELETE FROM agents WHERE id = :g"), {"g": agent.id})
+            await s.execute(text("DELETE FROM users WHERE id IN (:a, :b)"),
+                            {"a": pi.id, "b": mgr.id})
+            await s.commit()
+
+
+async def test_none_route_waiting_behind_an_account_deletion_is_404(
+    engine, tmp_path, monkeypatch
+):
+    """A route that waited on the persona lock while the account was deleted gets a 404,
+    not a foreign-key IntegrityError from the identity-row insert."""
+    monkeypatch.setattr(profile_export, "PROFILES_DIR", tmp_path / "public")
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as s:
+        pi = await factories.make_user(s)
+        mgr = await factories.make_user(s, user_role=USER_ROLE_MANAGER)
+        agent = await factories.make_agent(s, user=pi)
+        await s.commit()
+    try:
+        async with factory() as deleter:
+            # delete_user_account's order: the agents row FOR UPDATE, then the advisory lock.
+            await deleter.execute(
+                text("SELECT 1 FROM agents WHERE user_id = :u FOR UPDATE"), {"u": pi.id}
+            )
+            await lock_agent_persona(deleter, pi.id)
+            async with factory() as s2:
+                route = asyncio.create_task(manager_routes.manager_confirm_no_reporter_profile(
+                    pi.id, request=SimpleNamespace(session={}), db=s2, current_user=mgr,
+                ))
+                await asyncio.sleep(0.5)
+                assert not route.done()
+                await deleter.execute(text("DELETE FROM agents WHERE user_id = :u"), {"u": pi.id})
+                await deleter.execute(text("DELETE FROM users WHERE id = :u"), {"u": pi.id})
+                await deleter.commit()
+                with pytest.raises(HTTPException) as exc_info:
+                    await asyncio.wait_for(route, timeout=10)
+            assert exc_info.value.status_code == 404
+    finally:
+        async with factory() as s:
+            await s.execute(text("DELETE FROM agents WHERE id = :g"), {"g": agent.id})
             await s.execute(text("DELETE FROM users WHERE id IN (:a, :b)"),
                             {"a": pi.id, "b": mgr.id})
             await s.commit()

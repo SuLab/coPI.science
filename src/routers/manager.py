@@ -38,8 +38,10 @@ import hashlib
 import logging
 import re
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TypeVar
 
 import httpx
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
@@ -525,11 +527,54 @@ async def manager_verify_pi_email(
     return RedirectResponse(url=f"/manager/pis/{user_id}?email_verified=1", status_code=302)
 
 
-#: ``SET LOCAL lock_timeout`` for the ORCID veto (spec 2026-10-05 §6.1): a refresh holds the
-#: PI's funding rows only for its short store transaction; past this the veto says "try again".
+#: ``SET LOCAL lock_timeout`` for the ORCID veto (spec 2026-10-05 §6.1). An ORCID refresh
+#: holds the PI's funding rows only for its short store transaction, but a profile pipeline
+#: holds the PI's persona lock from tenure derivation until its job commits (minutes, LLM
+#: synthesis included); past this the veto says "try again".
 ORCID_VETO_LOCK_TIMEOUT = "5s"
+#: ``SET LOCAL lock_timeout`` for the RePORTER grant veto, pin, none and unpin routes: the
+#: same persona-lock wait as the ORCID veto; past this the route says "try again".
+PERSONA_LOCK_TIMEOUT = "5s"
 #: Postgres SQLSTATE lock_not_available.
 _LOCK_NOT_AVAILABLE = "55P03"
+
+
+_T = TypeVar("_T")
+
+
+class _PersonaBusy(Exception):
+    """A bounded lock wait expired (SQLSTATE 55P03); the transaction was rolled back."""
+
+
+async def _bounded_persona_locks(
+    db: AsyncSession, user_id: uuid.UUID, timeout: str,
+    lock_rows: Callable[[], Awaitable[_T]],
+) -> _T:
+    """``lock_persona_writer`` for ``user_id``, then ``lock_rows()``, each lock wait bounded
+    by ``timeout`` (``SET LOCAL lock_timeout``, reset to the default afterwards).
+
+    Raises ``_PersonaBusy`` after rolling back when a wait expires, and a 404 when the PI's
+    account was deleted while this waited (deletion takes the same advisory lock before it
+    deletes anything, so the re-check under the lock is final; without it an identity-row
+    INSERT would fail on the foreign key)."""
+    await db.execute(text(f"SET LOCAL lock_timeout = '{timeout}'"))
+    try:
+        await lock_persona_writer(db, user_id)
+        if await db.scalar(select(User.id).where(User.id == user_id)) is None:
+            raise HTTPException(status_code=404, detail="PI not found")
+        result = await lock_rows()
+    except DBAPIError as exc:
+        if getattr(exc.orig, "sqlstate", None) != _LOCK_NOT_AVAILABLE:
+            raise
+        await db.rollback()
+        raise _PersonaBusy from exc
+    await db.execute(text("SET LOCAL lock_timeout TO DEFAULT"))
+    return result
+
+
+def _persona_busy_redirect(request: Request, user_id: uuid.UUID) -> RedirectResponse:
+    flash(request, "This PI's profile is being updated — try again in a moment.", "error")
+    return _grants_redirect(user_id, "persona_busy")
 
 
 def _warn_if_impersonated(
@@ -571,7 +616,8 @@ async def _locked_identity_row(
     """The PI's ``pi_grant_identity`` row, locked FOR UPDATE. With ``create`` an absent row
     is inserted first (``ON CONFLICT DO NOTHING``, so a concurrent insert is not an
     IntegrityError); without it an absent row returns None. The caller has already taken
-    ``lock_persona_writer``."""
+    ``lock_persona_writer`` and re-checked that the user exists (``_bounded_persona_locks``),
+    so the insert cannot fail on the foreign key."""
     if create:
         await db.execute(
             pg_insert(PiGrantIdentity).values(user_id=user_id)
@@ -585,7 +631,7 @@ async def _locked_identity_row(
 async def _identity_row(db: AsyncSession, user_id: uuid.UUID) -> PiGrantIdentity:
     """The PI's ``pi_grant_identity`` row locked FOR UPDATE, inserted when absent."""
     row = await _locked_identity_row(db, user_id, create=True)
-    if row is None:  # only a concurrent account deletion removes the row just inserted
+    if row is None:  # defence in depth: the caller's lock rules out a concurrent deletion
         raise HTTPException(status_code=404, detail="PI not found")
     return row
 
@@ -618,13 +664,22 @@ async def manager_veto_grant(
     """Mark a RePORTER award as 'not this PI'. Persisted; re-runs keep it (vetoed rows are
     never deleted). Records who vetoed and a `grant_veto` revision of the re-rendered
     persona (U-10); profile_version is untouched, grants are not profile fields. A second
-    veto is a no-op (D-19). 404 for a non-PI account or another PI's grant (A-17)."""
+    veto is a no-op (D-19). 404 for a non-PI account or another PI's grant (A-17). Waits at
+    most ``PERSONA_LOCK_TIMEOUT`` for the PI's persona lock or the row, then says "try
+    again"."""
     await _require_pi(db, user_id)
-    await lock_persona_writer(db, user_id)  # before the child-row lock (spec §4.3 order)
-    grant = (await db.execute(
-        select(PiGrant).where(PiGrant.id == grant_id, PiGrant.user_id == user_id)
-        .with_for_update()
-    )).scalar_one_or_none()
+
+    async def lock_grant() -> PiGrant | None:
+        return (await db.execute(
+            select(PiGrant).where(PiGrant.id == grant_id, PiGrant.user_id == user_id)
+            .with_for_update()
+        )).scalar_one_or_none()
+
+    try:
+        # The persona writer lock before the child-row lock (spec §4.3 order).
+        grant = await _bounded_persona_locks(db, user_id, PERSONA_LOCK_TIMEOUT, lock_grant)
+    except _PersonaBusy:
+        return _persona_busy_redirect(request, user_id)
     if grant is None:
         raise HTTPException(status_code=404, detail="Grant not found")
     if grant.vetoed_at is not None:
@@ -665,8 +720,12 @@ async def manager_pin_grant_identity(
             return _grants_redirect(user_id, "reporter_unreachable")
         if not exists:
             return _grants_redirect(user_id, "invalid_reporter_id")
-    await lock_persona_writer(db, user_id)
-    identity = await _identity_row(db, user_id)
+    try:
+        identity = await _bounded_persona_locks(
+            db, user_id, PERSONA_LOCK_TIMEOUT, lambda: _identity_row(db, user_id)
+        )
+    except _PersonaBusy:
+        return _persona_busy_redirect(request, user_id)
     offered = {
         pid for c in (identity.candidates or []) if isinstance(c, dict)
         if (pid := _parse_profile_id(str(c.get("id", "")))) is not None
@@ -699,8 +758,12 @@ async def manager_confirm_no_reporter_profile(
 ):
     """"PI has no RePORTER profile": no RePORTER grants for this PI until Unpin."""
     target = await _require_pi(db, user_id)
-    await lock_persona_writer(db, user_id)
-    identity = await _identity_row(db, user_id)
+    try:
+        identity = await _bounded_persona_locks(
+            db, user_id, PERSONA_LOCK_TIMEOUT, lambda: _identity_row(db, user_id)
+        )
+    except _PersonaBusy:
+        return _persona_busy_redirect(request, user_id)
     identity.pinned_profile_ids = None
     identity.none_confirmed = True
     identity.pinned_by_user_id = current_user.id
@@ -722,8 +785,13 @@ async def manager_unpin_grant_identity(
     """Remove a pin or a "no RePORTER profile" mark; enrich_grants re-runs the identity rule.
     No identity row means nothing to unpin, and none is created."""
     target = await _require_pi(db, user_id)
-    await lock_persona_writer(db, user_id)
-    identity = await _locked_identity_row(db, user_id, create=False)
+    try:
+        identity = await _bounded_persona_locks(
+            db, user_id, PERSONA_LOCK_TIMEOUT,
+            lambda: _locked_identity_row(db, user_id, create=False),
+        )
+    except _PersonaBusy:
+        return _persona_busy_redirect(request, user_id)
     if identity is None or (not identity.pinned_profile_ids and not identity.none_confirmed):
         return _grants_redirect(user_id)
     identity.pinned_profile_ids = None
@@ -747,23 +815,22 @@ async def manager_veto_orcid_funding(
     most ``ORCID_VETO_LOCK_TIMEOUT`` for a refresh holding the PI's persona lock or the
     row, then says "try again"."""
     await _require_pi(db, user_id)
-    await db.execute(text(f"SET LOCAL lock_timeout = '{ORCID_VETO_LOCK_TIMEOUT}'"))
-    try:
-        # The persona writer lock before the child-row lock (spec §4.3 order); both waits
-        # are bounded by the lock_timeout above.
-        await lock_persona_writer(db, user_id)
-        row = (await db.execute(
+
+    async def lock_funding() -> PiOrcidFunding | None:
+        return (await db.execute(
             select(PiOrcidFunding).where(
                 PiOrcidFunding.id == funding_id, PiOrcidFunding.user_id == user_id
             ).with_for_update()
         )).scalar_one_or_none()
-    except DBAPIError as exc:
-        if getattr(exc.orig, "sqlstate", None) != _LOCK_NOT_AVAILABLE:
-            raise
-        await db.rollback()
+
+    try:
+        # The persona writer lock before the child-row lock (spec §4.3 order).
+        row = await _bounded_persona_locks(
+            db, user_id, ORCID_VETO_LOCK_TIMEOUT, lock_funding
+        )
+    except _PersonaBusy:
         flash(request, "ORCID fundings are being refreshed — try again in a moment.", "error")
         return _grants_redirect(user_id, "orcid_busy")
-    await db.execute(text("SET LOCAL lock_timeout TO DEFAULT"))
     if row is None:
         raise HTTPException(status_code=404, detail="Funding not found")
     if row.vetoed_at is not None:
