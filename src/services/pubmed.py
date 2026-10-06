@@ -25,6 +25,10 @@ EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 # because _pace() only counts the request it issues, the real rate against NCBI was
 # twice what the pacer believed.
 IDCONV_BASE = "https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles/"
+# DOI query strings are much larger than PMID lists. Smaller converter batches
+# avoid repeated 429 responses observed for large DOI requests, without treating
+# transport failures as evidence that the papers do not exist.
+IDCONV_DOI_BATCH_SIZE = 100
 
 # Strips a leading "doi:" or a doi.org URL prefix from a raw DOI string.
 _DOI_PREFIX_RE = re.compile(r"^\s*(?:doi:\s*|https?://(?:dx\.)?doi\.org/)", re.IGNORECASE)
@@ -747,8 +751,8 @@ async def _idconv_phase(dois: list[str], mapping: dict[str, str], *, strict: boo
     # matching no request even case-folded is dropped, and that input then
     # falls through to the ESearch phase, which round-trip-verifies before
     # accepting anything.
-    for i in range(0, len(dois), 200):
-        batch = dois[i : i + 200]
+    for i in range(0, len(dois), IDCONV_DOI_BATCH_SIZE):
+        batch = dois[i : i + IDCONV_DOI_BATCH_SIZE]
         requested_by_fold: dict[str, str] = {}
         for d in batch:
             requested_by_fold.setdefault(_doi_fold(d), d)

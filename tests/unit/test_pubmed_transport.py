@@ -151,6 +151,30 @@ async def test_idconv_issues_no_redirect(monkeypatch):
     assert paths == ["/tools/idconv/api/v1/articles/"]
 
 
+async def test_large_doi_pool_is_resolved_without_oversized_converter_batches(monkeypatch):
+    # The live converter repeatedly rejected a 200-DOI request with 429 while
+    # requests for its smaller subsets succeeded. A transport retry cannot make
+    # the same oversized batch usable; splitting must preserve every DOI mapping.
+    dois = [f"10.1158/1078-0432.A{index:05d}" for index in range(223)]
+    pmids = {doi: str(50000000 + index) for index, doi in enumerate(dois)}
+    batches = []
+
+    def handler(request):
+        assert "idconv" in request.url.path
+        batch = request.url.params["ids"].split(",")
+        batches.append(batch)
+        if len(batch) > 100:
+            return httpx.Response(429, text="Too Many Requests")
+        return httpx.Response(200, json={"records": [
+            {"doi": doi.lower(), "pmid": pmids[doi]} for doi in batch
+        ]})
+
+    monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
+    out = await pubmed.convert_dois_to_pmids(dois, strict=True)
+    assert out == pmids
+    assert [doi for batch in batches for doi in batch] == dois
+
+
 async def test_an_unresolvable_doi_is_not_reported_as_a_nonexistent_paper(monkeypatch):
     # convert_dois_to_pmids swallows its own failures too, so "could not resolve"
     # covers both "PubMed has no record" and "the lookup broke". The message has to
