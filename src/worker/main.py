@@ -96,6 +96,7 @@ async def claim_job(db: AsyncSession) -> Job | None:
     job.attempts += 1
     job.rerun_requested_at = None  # this run will see every change committed before now
     job.rerun_not_before = None
+    job.rerun_priority = None
     await db.commit()
     return job
 
@@ -159,20 +160,20 @@ async def requeue_stale_processing_jobs(
         .where(*stale, Job.attempts >= Job.max_attempts)
         .values(status="dead", last_error=note, completed_at=now)
         .returning(Job.type, Job.user_id, Job.payload, Job.priority,
-                   Job.rerun_requested_at, Job.rerun_not_before)
+                   Job.rerun_requested_at, Job.rerun_not_before, Job.rerun_priority)
     )
     dead_rows = dead.all()
     pending = await db.execute(
         update(Job)
         .where(*stale, Job.attempts < Job.max_attempts)
         .values(status="pending", last_error=note,
-                rerun_requested_at=None, rerun_not_before=None)
+                rerun_requested_at=None, rerun_not_before=None, rerun_priority=None)
     )
     for row in dead_rows:
         await _spawn_requested_rerun(
             db, job_type=row.type, user_id=row.user_id, payload=row.payload,
             priority=row.priority, rerun_requested_at=row.rerun_requested_at,
-            rerun_not_before=row.rerun_not_before,
+            rerun_not_before=row.rerun_not_before, rerun_priority=row.rerun_priority,
         )
     await db.commit()
     n_dead = len(dead_rows)
@@ -196,25 +197,28 @@ class JobContext:
     payload: dict
     attempts: int
     max_attempts: int
-    #: Async callables process_job runs, in order, on the handler's session after the
-    #: handler's commit (spec §4.3): the post-commit persona write.
+    #: Async callables process_job runs, in order, with the handler's session after the
+    #: handler's commit (spec §4.3): the post-commit persona write, which opens its own
+    #: session on that session's bind.
     after_commit: list[AfterCommit] = field(default_factory=list, compare=False)
 
 
 async def _spawn_requested_rerun(
     db: AsyncSession, *, job_type: str, user_id: uuid.UUID | None, payload: dict | None,
     priority: int | None, rerun_requested_at: datetime | None,
-    rerun_not_before: datetime | None,
+    rerun_not_before: datetime | None, rerun_priority: int | None = None,
 ) -> uuid.UUID | None:
     """The fresh job a `request_job` call asked for while this one ran (spec §4.2):
-    the payload minus `progress`, the same priority, `not_before = rerun_not_before`.
-    Call after the ending status flip is flushed, so the one-active-job index allows it."""
+    the payload minus `progress`, the higher of `priority` and `rerun_priority` (NULLs
+    ignored, as SQL GREATEST), `not_before = rerun_not_before`. Call after the ending
+    status flip is flushed, so the one-active-job index allows it."""
     if rerun_requested_at is None or user_id is None or job_type not in PER_USER_JOB_TYPES:
         return None
     fresh = {k: v for k, v in (payload or {}).items() if k != "progress"}
+    stated = [p for p in (priority, rerun_priority) if p is not None]
     new_id = await insert_job_if_absent(
-        db, type=job_type, user_id=user_id, payload=fresh, priority=priority,
-        not_before=rerun_not_before,
+        db, type=job_type, user_id=user_id, payload=fresh,
+        priority=max(stated) if stated else None, not_before=rerun_not_before,
     )
     logger.info(
         "Rerun of %s for user %s requested during the last run: job %s",
@@ -229,7 +233,7 @@ async def _spawn_for(db: AsyncSession, job: Job) -> None:
     await _spawn_requested_rerun(
         db, job_type=job.type, user_id=job.user_id, payload=job.payload,
         priority=job.priority, rerun_requested_at=job.rerun_requested_at,
-        rerun_not_before=job.rerun_not_before,
+        rerun_not_before=job.rerun_not_before, rerun_priority=job.rerun_priority,
     )
 
 
@@ -359,6 +363,7 @@ async def _mark_failed(
             job.not_before = func.now() + retry_delay(job.attempts)
             job.rerun_requested_at = None
             job.rerun_not_before = None
+            job.rerun_priority = None
             logger.info(
                 "Job %s will be retried after %s (attempt %d of %d failed)",
                 job_id, retry_delay(job.attempts), job.attempts, job.max_attempts,
@@ -388,6 +393,7 @@ async def _mark_deferred(
         job.not_before = exc.not_before
         job.rerun_requested_at = None
         job.rerun_not_before = None
+        job.rerun_priority = None
         job.last_error = f"deferred until {exc.not_before.isoformat()}: {exc.reason}"[:2000]
         await db.commit()
     logger.info("Job %s deferred until %s", job_id, exc.not_before)

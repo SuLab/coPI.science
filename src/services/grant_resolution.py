@@ -11,7 +11,8 @@ Identity rule (spec 2026-10-05 §6.1; P1, E-1, D2, D56):
    endpoint) to a PMID stored for the PI, pre-tenure rows included (D62a).
 4. One accepted: `resolved`; more than one: `held`; none accepted and exactly one
    candidate: `unconfirmed` (D56); otherwise `no_match`. A staff pin overrides all of
-   these (`pinned`, `none_confirmed`); a stage-2 total over the cap is `firehose`. Only
+   these (`pinned`, `none_confirmed`); a stage-2 total over the cap is `firehose`, except
+   under a pin, where the status stays `pinned` and the stored awards are kept. Only
    `resolved` and `pinned` render RePORTER grants (D9).
 
 Tenure rule (B6-B8): a fiscal-year row counts iff org == JHU exact AND fiscal_year >=

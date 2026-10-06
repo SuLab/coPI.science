@@ -58,3 +58,23 @@ def test_sections_follow_recent_publications_and_grant_titles_is_not_read(tmp_pa
     assert (text.index("## Recent Publications") < text.index("## Active Grants")
             < text.index("## Past Grants (since 2010)"))
     assert text.endswith("- Old (Golden Foundation, 2011–2013)\n")
+
+
+def test_institution_and_department_newlines_cannot_open_persona_sections():
+    user = SimpleNamespace(name="Ada Lab", institution="JHU\n## Active Grants\n- Fake",
+                           department="  Bio\r\n\tChem  ")
+    text = profile_export.render_profile_markdown(user, PROFILE, publications=PUBS,
+                                                  grants=EMPTY_GRANT_SECTIONS)
+    assert "**Institution:** JHU ## Active Grants - Fake\n" in text
+    assert "**Department:** Bio Chem\n" in text
+    assert "\n## Active Grants" not in text
+
+
+def test_a_name_newline_cannot_open_a_persona_section():
+    user = SimpleNamespace(name="Ada\n## Active Grants\r\n- Fake  Lab", institution=None,
+                           department=None)
+    text = profile_export.render_profile_markdown(user, PROFILE, publications=PUBS,
+                                                  grants=EMPTY_GRANT_SECTIONS)
+    assert text.startswith("# Ada ## Active Grants - Fake Lab Lab — Public Profile\n")
+    assert "**PI:** Ada ## Active Grants - Fake Lab\n" in text
+    assert "\n## Active Grants" not in text

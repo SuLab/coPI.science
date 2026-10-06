@@ -136,11 +136,14 @@ async def test_downgrade_drops_everything_and_upgrade_restores_it(db_session):
     assert "name_sanitized_at" not in await _columns(db_session, "users")
     assert "rerun_requested_at" not in await _columns(db_session, "jobs")
     assert "rerun_not_before" not in await _columns(db_session, "jobs")
+    assert "rerun_priority" not in await _columns(db_session, "jobs")
     assert "vetoed_by_user_id" not in await _columns(db_session, "pi_grants")
     assert await _columns(db_session, "pi_grant_identity") == set()
     assert await _columns(db_session, "pi_orcid_fundings") == set()
     await _run(db_session, "upgrade")
-    assert {"rerun_requested_at", "rerun_not_before"} <= await _columns(db_session, "jobs")
+    assert {"rerun_requested_at", "rerun_not_before", "rerun_priority"} <= await _columns(
+        db_session, "jobs"
+    )
     assert "none_confirmed" in await _columns(db_session, "pi_grant_identity")
     assert "group_key" in await _columns(db_session, "pi_orcid_fundings")
     assert "vetoed_by_user_id" in await _columns(db_session, "pi_grants")

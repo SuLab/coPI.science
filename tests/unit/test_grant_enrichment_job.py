@@ -9,6 +9,7 @@ from sqlalchemy import select, text
 from src.models import Job, PiGrant, PiGrantIdentity, PiOrcidFunding, ProfileRevision, Publication
 from src.services import grant_enrichment as ge
 from src.services import pi_companies, profile_export
+from src.services.grant_resolution import GrantRecord
 from src.services.jhu_rules import set_provisional_tenure_start, set_tenure_start
 from src.services.nih_reporter import ReporterFirehoseError
 from src.services.orcid_fundings import OrcidFunding
@@ -224,18 +225,78 @@ async def test_stage_two_uses_the_provisional_tenure_year(db_session, monkeypatc
     assert calls[-1]["fiscal_years"][0] == 2016
 
 
-async def test_a_pin_committed_during_the_run_wins_the_status(db_session):
-    """store_grant_outcome reads the staff columns at write time, not the run's view."""
+def _record(pid, core="R01AI000001"):
+    return GrantRecord(core, pid, f"T {core}", None, None, "R01", "AI", "Non-SBIR/STTR",
+                       "JOHNS HOPKINS UNIVERSITY", 2020, 2024, None, None, 10, True, False)
+
+
+async def _identity_cols(db_session, uid):
+    return (await db_session.execute(text(
+        "SELECT status, pinned_profile_ids FROM pi_grant_identity WHERE user_id = :u"),
+        {"u": uid})).one()
+
+
+async def test_a_pin_committed_during_the_run_wins_and_its_rerun_writes(db_session):
+    """store_grant_outcome reads the staff columns at write time, not the run's view: an
+    unpinned run's records are not stored under a pin, and the pin's status stands."""
     u = await factories.make_user(db_session)
     db_session.add(PiGrantIdentity(user_id=u.id, status="unconfirmed"))
     await db_session.flush()
-    await db_session.execute(text("UPDATE pi_grant_identity SET pinned_profile_ids = ARRAY[222] "
-                                  "WHERE user_id = :u"), {"u": u.id})
-    outcome = ge.GrantOutcome("resolved", (111,), (), (111,), (), "org_only", {}, True, "resolved")
+    await db_session.execute(text("UPDATE pi_grant_identity SET pinned_profile_ids = ARRAY[222], "
+                                  "status = 'pinned' WHERE user_id = :u"), {"u": u.id})
+    outcome = ge.GrantOutcome("resolved", (111,), (), (111,), (_record(111),), "org_only", {},
+                              True, "resolved")
     await ge.store_grant_outcome(db_session, u.id, outcome, now=datetime.now(UTC))
-    status = (await db_session.execute(text("SELECT status FROM pi_grant_identity WHERE user_id = :u"),
-                                       {"u": u.id})).scalar_one()
-    assert status == "pinned"
+    assert await _grants(db_session, u.id) == []
+    assert tuple(await _identity_cols(db_session, u.id)) == ("pinned", [222])
+
+
+async def test_a_no_profile_mark_committed_during_the_run_clears_the_awards(db_session):
+    """Before, the run's `resolved` records were inserted and only the status switched to
+    none_confirmed, leaving rendering-eligible rows under that status."""
+    u = await factories.make_user(db_session)
+    db_session.add(PiGrantIdentity(user_id=u.id, status="unconfirmed"))
+    await db_session.flush()
+    await db_session.execute(text("UPDATE pi_grant_identity SET none_confirmed = true, "
+                                  "status = 'none_confirmed' WHERE user_id = :u"), {"u": u.id})
+    outcome = ge.GrantOutcome("resolved", (111,), (), (111,), (_record(111),), "org_only", {},
+                              True, "resolved")
+    await ge.store_grant_outcome(db_session, u.id, outcome, now=datetime.now(UTC))
+    assert await _grants(db_session, u.id) == []
+    assert (await _identity_cols(db_session, u.id)).status == "none_confirmed"
+
+
+async def test_an_unpin_during_a_pinned_run_leaves_the_identity_unevaluated(db_session):
+    """Before, the pinned run wrote status 'pinned' with pinned_profile_ids NULL (the
+    manager page then broke) and stored the pinned awards."""
+    u = await factories.make_user(db_session)
+    db_session.add(PiGrantIdentity(user_id=u.id, status="pinned", pinned_profile_ids=[111],
+                                   pinned_at=datetime.now(UTC)))
+    await db_session.flush()
+    await db_session.execute(text("UPDATE pi_grant_identity SET pinned_profile_ids = NULL, "
+                                  "status = NULL WHERE user_id = :u"), {"u": u.id})
+    outcome = ge.GrantOutcome("pinned", (), (), (111,), (_record(111),), "org_only", {},
+                              False, "pinned")
+    await ge.store_grant_outcome(db_session, u.id, outcome, now=datetime.now(UTC))
+    assert await _grants(db_session, u.id) == []
+    assert tuple(await _identity_cols(db_session, u.id)) == (None, None)
+
+
+async def test_a_pinned_stage_two_firehose_keeps_the_stored_awards(db_session, monkeypatch):
+    """Before, a pinned PI's over-cap stage 2 deleted every non-vetoed row while the
+    status stayed `pinned`."""
+    u, job, _ = await _setup(db_session, monkeypatch, stage2=ReporterFirehoseError("x"))
+    identity = PiGrantIdentity(user_id=u.id, status="pinned", pinned_profile_ids=[111],
+                               pinned_at=datetime.now(UTC))
+    db_session.add(identity)
+    db_session.add(PiGrant(user_id=u.id, core_project_num="R01KEPT0001", title="kept",
+                           org_name="X", tenure_filter_mode="org_only", reporter_profile_id=111))
+    await db_session.flush()
+    await ge.execute_enrich_grants(_ctx(job), db_session)
+    assert [g.core_project_num for g in await _grants(db_session, u.id)] == ["R01KEPT0001"]
+    assert (await _identity_cols(db_session, u.id)).status == "pinned"
+    outcome = await ge.resolve_grants(db_session, u, identity)
+    assert outcome.stage2_firehose and "firehose" in outcome.note
 
 
 async def test_enqueue_skips_an_active_type_and_carries_not_before(db_session):

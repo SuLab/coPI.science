@@ -1921,6 +1921,7 @@ def test_0060_plans_its_new_objects():
         ("column", "name_sanitized_at"),
         ("column", "rerun_requested_at"),
         ("column", "rerun_not_before"),
+        ("column", "rerun_priority"),
         ("column", "vetoed_by_user_id"),
         ("constraint", "fk_pi_grants_vetoed_by_user_id_users"),
         ("index", "ix_pi_grants_vetoed_by_user_id"),

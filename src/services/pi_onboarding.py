@@ -175,16 +175,14 @@ async def create_pending_agent_for(db: AsyncSession, user: User) -> AgentRegistr
         return existing
 
     agent_id, bot_name = await derive_agent_identity(db, user.name, orcid=user.orcid)
-    # The slug keeps reading users.name (slugs never change); the agent's pi_name is
-    # the sanitised form, and a cut is stamped on the user.
-    pi_name, cut = name_from_machine_source(user.name)
-    if cut:
-        user.name_sanitized_at = datetime.now(UTC)
+    # pi_name is users.name as stored. A machine-sourced name was already sanitised (and
+    # name_sanitized_at stamped) where it entered users.name; a human-typed one is not
+    # rewritten here, so nothing is stamped (the flag means users.name was cut).
     agent = AgentRegistry(
         agent_id=agent_id,
         user_id=user.id,
         bot_name=bot_name,
-        pi_name=pi_name,
+        pi_name=user.name,
         status="pending",
     )
     db.add(agent)

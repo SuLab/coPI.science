@@ -36,6 +36,7 @@ away at a lint ceiling that later tasks still need headroom under (see
 
 import hashlib
 import logging
+import re
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -44,6 +45,7 @@ import httpx
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import func, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -126,7 +128,11 @@ from src.services.profile_edit import (
     parse_expected_version,
 )
 from src.services.profile_jobs import enqueue_profile_job_if_absent, profile_retry_warranted
-from src.services.profile_publish import reexport_persona, write_persona_files
+from src.services.profile_publish import (
+    lock_persona_writer,
+    reexport_persona,
+    write_persona_files,
+)
 from src.services.slack_tokens import token_for_agent_row
 from src.services.star_topology import ensure_lab_spoke
 from src.services.thread_panel import panel_cards_by_thread
@@ -545,14 +551,42 @@ def _grants_redirect(user_id: uuid.UUID, error: str | None = None) -> RedirectRe
     return RedirectResponse(url=f"/manager/pis/{user_id}{query}#grants", status_code=302)
 
 
-async def _identity_row(db: AsyncSession, user_id: uuid.UUID) -> PiGrantIdentity:
-    """The PI's ``pi_grant_identity`` row, locked FOR UPDATE; a new (unflushed) one if none."""
-    row = (await db.execute(
+#: A RePORTER profile id as the pin form accepts it: ASCII digits only (``str.isdigit``
+#: also admits "²" and digit strings ``int()`` refuses), within Postgres ``integer``.
+_PROFILE_ID_RE = re.compile(r"[0-9]{1,10}")
+_PROFILE_ID_MAX = 2_147_483_647
+
+
+def _parse_profile_id(value: object) -> int | None:
+    """``value`` as a RePORTER profile id (1..2^31-1), or None when it is not one."""
+    if not isinstance(value, str) or not _PROFILE_ID_RE.fullmatch(value):
+        return None
+    parsed = int(value)
+    return parsed if 1 <= parsed <= _PROFILE_ID_MAX else None
+
+
+async def _locked_identity_row(
+    db: AsyncSession, user_id: uuid.UUID, *, create: bool
+) -> PiGrantIdentity | None:
+    """The PI's ``pi_grant_identity`` row, locked FOR UPDATE. With ``create`` an absent row
+    is inserted first (``ON CONFLICT DO NOTHING``, so a concurrent insert is not an
+    IntegrityError); without it an absent row returns None. The caller has already taken
+    ``lock_persona_writer``."""
+    if create:
+        await db.execute(
+            pg_insert(PiGrantIdentity).values(user_id=user_id)
+            .on_conflict_do_nothing(index_elements=[PiGrantIdentity.user_id])
+        )
+    return (await db.execute(
         select(PiGrantIdentity).where(PiGrantIdentity.user_id == user_id).with_for_update()
     )).scalar_one_or_none()
-    if row is None:
-        row = PiGrantIdentity(user_id=user_id)
-        db.add(row)
+
+
+async def _identity_row(db: AsyncSession, user_id: uuid.UUID) -> PiGrantIdentity:
+    """The PI's ``pi_grant_identity`` row locked FOR UPDATE, inserted when absent."""
+    row = await _locked_identity_row(db, user_id, create=True)
+    if row is None:  # only a concurrent account deletion removes the row just inserted
+        raise HTTPException(status_code=404, detail="PI not found")
     return row
 
 
@@ -586,6 +620,7 @@ async def manager_veto_grant(
     persona (U-10); profile_version is untouched, grants are not profile fields. A second
     veto is a no-op (D-19). 404 for a non-PI account or another PI's grant (A-17)."""
     await _require_pi(db, user_id)
+    await lock_persona_writer(db, user_id)  # before the child-row lock (spec §4.3 order)
     grant = (await db.execute(
         select(PiGrant).where(PiGrant.id == grant_id, PiGrant.user_id == user_id)
         .with_for_update()
@@ -619,23 +654,26 @@ async def manager_pin_grant_identity(
     typed = str(form.get("profile_id_text") or "").strip()
     typed_id: int | None = None
     if typed:
-        # The RePORTER call happens before the row lock below, never while holding it.
-        if not typed.isdigit():
+        # The RePORTER call happens before the locks below, never while holding them.
+        typed_id = _parse_profile_id(typed)
+        if typed_id is None:
             return _grants_redirect(user_id, "invalid_reporter_id")
         try:
-            exists = await profile_id_exists(int(typed))
-        except httpx.HTTPError:
+            exists = await profile_id_exists(typed_id)
+        except (httpx.HTTPError, ValueError, AttributeError, TypeError, KeyError):
+            # Unreachable, an error status, or a body that is not JSON of the expected shape.
             return _grants_redirect(user_id, "reporter_unreachable")
         if not exists:
             return _grants_redirect(user_id, "invalid_reporter_id")
-        typed_id = int(typed)
+    await lock_persona_writer(db, user_id)
     identity = await _identity_row(db, user_id)
     offered = {
-        int(c["id"]) for c in (identity.candidates or []) if str(c.get("id", "")).isdigit()
+        pid for c in (identity.candidates or []) if isinstance(c, dict)
+        if (pid := _parse_profile_id(str(c.get("id", "")))) is not None
     }
     ids = {
-        int(v) for v in form.getlist("profile_ids")
-        if isinstance(v, str) and v.isdigit() and int(v) in offered
+        pid for v in form.getlist("profile_ids")
+        if (pid := _parse_profile_id(v)) is not None and pid in offered
     }
     if typed_id is not None:
         ids.add(typed_id)
@@ -661,6 +699,7 @@ async def manager_confirm_no_reporter_profile(
 ):
     """"PI has no RePORTER profile": no RePORTER grants for this PI until Unpin."""
     target = await _require_pi(db, user_id)
+    await lock_persona_writer(db, user_id)
     identity = await _identity_row(db, user_id)
     identity.pinned_profile_ids = None
     identity.none_confirmed = True
@@ -680,10 +719,12 @@ async def manager_unpin_grant_identity(
     user_id: uuid.UUID, request: Request, db: AsyncSession = _DB,
     current_user: User = _STAFF,
 ):
-    """Remove a pin or a "no RePORTER profile" mark; enrich_grants re-runs the identity rule."""
+    """Remove a pin or a "no RePORTER profile" mark; enrich_grants re-runs the identity rule.
+    No identity row means nothing to unpin, and none is created."""
     target = await _require_pi(db, user_id)
-    identity = await _identity_row(db, user_id)
-    if not identity.pinned_profile_ids and not identity.none_confirmed:
+    await lock_persona_writer(db, user_id)
+    identity = await _locked_identity_row(db, user_id, create=False)
+    if identity is None or (not identity.pinned_profile_ids and not identity.none_confirmed):
         return _grants_redirect(user_id)
     identity.pinned_profile_ids = None
     identity.none_confirmed = False
@@ -703,10 +744,14 @@ async def manager_veto_orcid_funding(
     db: AsyncSession = _DB, current_user: User = _STAFF,
 ):
     """'Not this PI's' on one ORCID funding (D43); persisted across refreshes. Waits at
-    most ``ORCID_VETO_LOCK_TIMEOUT`` for a refresh holding the row, then says "try again"."""
+    most ``ORCID_VETO_LOCK_TIMEOUT`` for a refresh holding the PI's persona lock or the
+    row, then says "try again"."""
     await _require_pi(db, user_id)
     await db.execute(text(f"SET LOCAL lock_timeout = '{ORCID_VETO_LOCK_TIMEOUT}'"))
     try:
+        # The persona writer lock before the child-row lock (spec §4.3 order); both waits
+        # are bounded by the lock_timeout above.
+        await lock_persona_writer(db, user_id)
         row = (await db.execute(
             select(PiOrcidFunding).where(
                 PiOrcidFunding.id == funding_id, PiOrcidFunding.user_id == user_id

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import case, delete, func, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,7 +38,11 @@ from src.services.nih_reporter import (
 )
 from src.services.orcid_fundings import fetch_orcid_fundings, store_orcid_fundings
 from src.services.person_names import parse_person_name, surname_candidates
-from src.services.profile_publish import reexport_persona, schedule_persona_write
+from src.services.profile_publish import (
+    lock_persona_writer,
+    reexport_persona,
+    schedule_persona_write,
+)
 
 if TYPE_CHECKING:
     from src.worker.main import JobContext
@@ -61,6 +65,8 @@ class GrantOutcome:
     evidence_by_core: dict[str, dict]        # core_project_num -> identity_evidence
     evaluated: bool                          # False when the staff state skipped steps 1-4
     note: str                                # the progress detail
+    #: True when a pinned run's stage 2 hit the firehose cap: the stored awards are kept.
+    stage2_firehose: bool = False
 
 
 async def enqueue_enrichment_jobs(
@@ -121,10 +127,14 @@ async def _stage2(*, status: str, ids: tuple[int, ...], accepted: tuple[int, ...
     try:
         rows = await search_projects(criteria, PROJECT_FIELDS, max_total=STAGE2_MAX_TOTAL)
     except ReporterFirehoseError:
-        return GrantOutcome(
-            "firehose", accepted, candidates, (), (), _mode(tenure_start), {}, evaluated,
-            f"firehose: stage-2 total over {STAGE2_MAX_TOTAL} for profile ids {list(ids)}",
-        )
+        note = f"firehose: stage-2 total over {STAGE2_MAX_TOTAL} for profile ids {list(ids)}"
+        if status == "pinned":
+            # A staff pin stands; an over-cap fetch must not wipe the awards it rendered.
+            return GrantOutcome("pinned", accepted, candidates, ids, (), _mode(tenure_start), {},
+                                evaluated, f"pinned, {note}; stored awards kept",
+                                stage2_firehose=True)
+        return GrantOutcome("firehose", accepted, candidates, (), (), _mode(tenure_start), {},
+                            evaluated, note)
     records, mode = filter_and_collapse(rows, set(ids), tenure_start)
     evidence = {r.core_project_num: grant_evidence(r, links, corpus, rule) for r in records}
     return GrantOutcome(status, accepted, candidates, ids, tuple(records), mode, evidence,
@@ -182,45 +192,85 @@ async def resolve_grants(db: AsyncSession, user: User,
                          rule="pmid_link", evaluated=True)
 
 
-async def store_grant_outcome(db: AsyncSession, user_id: uuid.UUID, outcome: GrantOutcome, *,
-                              now: datetime) -> None:
-    """Write `outcome`: replace the PI's non-vetoed pi_grants rows (with the stage-2
-    records only when the status renders), and upsert pi_grant_identity. Never writes
-    the staff columns (pinned_*, none_confirmed); `accepted_profile_ids` and
-    `candidates` only when the run evaluated. Flushes, never commits."""
+def _effective(pins: list[int] | None, none_confirmed: bool,
+               outcome: GrantOutcome) -> tuple[bool, str | None, str]:
+    """(write_status, status, rows) for `outcome` against the staff columns as they stand
+    at write time; `rows` is "keep" (touch no pi_grants row), "clear" (delete the
+    non-vetoed rows) or "replace" (clear, then insert the stage-2 records)."""
+    if pins:
+        if outcome.status == "pinned" and sorted(outcome.profile_ids) == sorted(pins):
+            return True, "pinned", "keep" if outcome.stage2_firehose else "replace"
+        # Pinned (or re-pinned) while this run fetched: the pin route set the status and
+        # requested a rerun, which fetches the pinned ids.
+        return False, None, "keep"
+    if none_confirmed:
+        return True, "none_confirmed", "clear"
+    if outcome.status in ("pinned", "none_confirmed"):
+        # Unpinned while this run fetched: unevaluated until the requested rerun.
+        return True, None, "clear"
+    rows = "replace" if outcome.status in GRANT_RENDERING_STATUSES else "clear"
+    return True, outcome.status, rows
+
+
+async def _replace_grants(db: AsyncSession, user_id: uuid.UUID, outcome: GrantOutcome,
+                          records: tuple[GrantRecord, ...]) -> None:
+    """Delete the PI's non-vetoed pi_grants rows, then insert `records` except vetoed cores."""
     await db.execute(delete(PiGrant).where(PiGrant.user_id == user_id, PiGrant.vetoed_at.is_(None)))
-    # Read AFTER the DELETE: every row left is vetoed, including one vetoed while this run
-    # fetched, so no insert below can collide with it on (user_id, core_project_num).
+    # Read AFTER the DELETE: every row left is vetoed, so no insert below can collide with
+    # one on (user_id, core_project_num).
     vetoed = {c for (c,) in (await db.execute(select(PiGrant.core_project_num).where(
         PiGrant.user_id == user_id))).all()}
-    if outcome.status in GRANT_RENDERING_STATUSES:
-        for r in outcome.records:
-            if r.core_project_num in vetoed:
-                continue
-            db.add(PiGrant(
-                user_id=user_id, source="nih_reporter", core_project_num=r.core_project_num,
-                reporter_profile_id=r.reporter_profile_id, title=r.title, phr_text=r.phr_text,
-                terms=r.terms, activity_code=r.activity_code, agency_ic=r.agency_ic,
-                funding_mechanism=r.funding_mechanism, org_name=r.org_name, first_fy=r.first_fy,
-                last_fy=r.last_fy, project_start=r.project_start, project_end=r.project_end,
-                total_award_in_tenure=r.total_award_in_tenure, is_contact_pi=r.is_contact_pi,
-                is_subproject=r.is_subproject, tenure_filter_mode=outcome.tenure_mode,
-                identity_evidence=outcome.evidence_by_core.get(r.core_project_num),
-            ))
-    values: dict = {"status": outcome.status, "evaluated_at": now}
-    if outcome.evaluated:
-        values["accepted_profile_ids"] = list(outcome.accepted_profile_ids)
-        values["candidates"] = [c.as_json() for c in outcome.candidates]
-    stmt = pg_insert(PiGrantIdentity).values(user_id=user_id, **values)
-    # The staff columns as they stand NOW decide the status: a pin or "no profile" mark
-    # committed while this run fetched wins over what the run computed (the request_job
-    # flag then brings a fresh run that honours it).
-    on_conflict = {**values, "status": case(
-        (func.cardinality(PiGrantIdentity.pinned_profile_ids) > 0, "pinned"),
-        (PiGrantIdentity.none_confirmed, "none_confirmed"),
-        else_=stmt.excluded.status,
-    )}
-    await db.execute(stmt.on_conflict_do_update(index_elements=["user_id"], set_=on_conflict))
+    for r in records:
+        if r.core_project_num in vetoed:
+            continue
+        db.add(PiGrant(
+            user_id=user_id, source="nih_reporter", core_project_num=r.core_project_num,
+            reporter_profile_id=r.reporter_profile_id, title=r.title, phr_text=r.phr_text,
+            terms=r.terms, activity_code=r.activity_code, agency_ic=r.agency_ic,
+            funding_mechanism=r.funding_mechanism, org_name=r.org_name, first_fy=r.first_fy,
+            last_fy=r.last_fy, project_start=r.project_start, project_end=r.project_end,
+            total_award_in_tenure=r.total_award_in_tenure, is_contact_pi=r.is_contact_pi,
+            is_subproject=r.is_subproject, tenure_filter_mode=outcome.tenure_mode,
+            identity_evidence=outcome.evidence_by_core.get(r.core_project_num),
+        ))
+
+
+async def store_grant_outcome(db: AsyncSession, user_id: uuid.UUID, outcome: GrantOutcome, *,
+                              now: datetime) -> None:
+    """Write `outcome` under a FOR UPDATE lock on the PI's pi_grant_identity row (inserted,
+    status NULL, when absent). The staff columns as they stand under that lock decide
+    the effective status and the pi_grants rows (`_effective`), so a pin, unpin or "no
+    RePORTER profile" committed while this run fetched wins over what the run computed:
+
+    - pinned now: `pinned` with the run's records only when the run fetched those same
+      ids (a pinned stage-2 firehose keeps the stored rows); otherwise nothing is
+      written, and the rerun the pin route requested does the work;
+    - "no profile" now: `none_confirmed`, non-vetoed rows deleted;
+    - neither, but the run was pinned/none_confirmed: status NULL, non-vetoed rows deleted;
+    - else the run's status; the non-vetoed rows are replaced by the stage-2 records
+      when it renders (`resolved`), deleted otherwise.
+
+    Vetoed rows are never touched. Never writes the staff columns (pinned_*,
+    none_confirmed); `accepted_profile_ids` and `candidates` only when the run
+    evaluated. Flushes, never commits."""
+    await db.execute(pg_insert(PiGrantIdentity).values(user_id=user_id)
+                     .on_conflict_do_nothing(index_elements=["user_id"]))
+    pins, none_confirmed = (await db.execute(
+        select(PiGrantIdentity.pinned_profile_ids, PiGrantIdentity.none_confirmed)
+        .where(PiGrantIdentity.user_id == user_id).with_for_update()
+    )).one()
+    write_status, status, rows = _effective(pins, bool(none_confirmed), outcome)
+    if rows != "keep":
+        await _replace_grants(db, user_id, outcome, outcome.records if rows == "replace" else ())
+    if write_status:
+        values: dict = {"status": status}
+        if status is not None:
+            values["evaluated_at"] = now
+        if outcome.evaluated:
+            values["accepted_profile_ids"] = list(outcome.accepted_profile_ids)
+            values["candidates"] = [c.as_json() for c in outcome.candidates]
+        await db.execute(update(PiGrantIdentity).where(PiGrantIdentity.user_id == user_id)
+                         .values(**values))
     await db.flush()
 
 
@@ -238,6 +288,10 @@ async def execute_enrich_grants(ctx: JobContext, db: AsyncSession) -> None:
                               f"ORCID fundings and RePORTER identity for {user.name}")
     fundings = await fetch_orcid_fundings(user.orcid, strict=True) or []
     outcome = await resolve_grants(db, user, identity)
+    # Network work is done; take the persona-writer lock before any child-row lock
+    # (pi_orcid_fundings, pi_grant_identity, pi_grants), the order the manager routes
+    # use, so a concurrent veto or pin cannot deadlock with this job (spec §4.3).
+    await lock_persona_writer(db, user_id)
     await store_orcid_fundings(db, user_id, fundings)
     await store_grant_outcome(db, user_id, outcome, now=datetime.now(UTC))
     text = await reexport_persona(

@@ -12,11 +12,14 @@ This module is the one place deletion policy lives. Both delete routes call
 
 Two phases, deliberately:
 
-* **in-transaction** — suspend the linked agent, purge revisions/DMs/tenure
-  key (and optionally the allowlist row), delete the user, COMMIT. Just before
-  the commit it takes the per-PI persona lock (``lock_agent_persona``, spec
-  2026-10-05 §4.3) and purges revisions again, so no persona file or revision
-  written by a concurrent publish outlives the deletion.
+* **in-transaction** — lock, suspend the linked agent, purge revisions/DMs/
+  tenure key (and optionally the allowlist row), delete the user, COMMIT. It
+  first takes the PI's ``agents`` row FOR UPDATE and then the per-PI persona
+  lock (``lock_agent_persona``), the lock order every profile writer follows
+  (``profile_publish`` module docstring, spec 2026-10-05 §4.3): a writer holding
+  ``lock_persona_writer`` commits before this deletes anything, so its revision
+  is purged and its persona file removed below, and a writer that starts later
+  finds no user and records or writes nothing.
 * **post-commit** — filesystem cleanup and Slack token revocation. External
   effects that cannot roll back run only once the DB state is durable; a
   failure lands on the report and in the log, never raises. A half-failed
@@ -130,20 +133,21 @@ def _delete_agent_files(agent_id: str, report: DeletionReport) -> None:
             logger.error("Deletion teardown: could not remove %s: %s", path, exc)
 
 
-async def delete_user_account(
-    db: AsyncSession,
-    user: User,
-    *,
-    remove_from_allowlist: bool = False,
-) -> DeletionReport:
-    """Tear down and delete ``user``. Commits. See module docstring."""
-    report = DeletionReport(user_id=user.id, orcid=user.orcid)
-
+async def _delete_in_transaction(
+    db: AsyncSession, user: User, report: DeletionReport, *, remove_from_allowlist: bool,
+) -> str | None:
+    """The in-transaction phase, through its COMMIT; fills ``report`` and returns the
+    agent's stored Slack token (None without an agent)."""
+    # Lock order (profile_publish module docstring): the agents row FOR UPDATE, then the
+    # per-PI advisory lock, before any write. FOR UPDATE waits for a writer holding the row
+    # FOR KEY SHARE, and blocks new revision inserts (their FK check) until this commits.
     agent = (
         await db.execute(
             select(AgentRegistry).where(AgentRegistry.user_id == user.id)
+            .with_for_update().execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
+    await lock_agent_persona(db, report.user_id)
     token: str | None = None
 
     if agent is not None:
@@ -187,21 +191,26 @@ async def delete_user_account(
         report.allowlist_removed = bool(res.rowcount)
 
     await db.delete(user)
-    # Flush the cascading DELETE first, then take the persona lock (spec 2026-10-05 §4.3):
-    # a post-commit persona write in flight finishes before this commits, and one that
-    # starts after it finds no agent for this user and writes nothing. Taking the lock
-    # BEFORE the DELETE would deadlock against a pipeline transaction holding row locks.
-    await db.flush()
-    await lock_agent_persona(db, report.user_id)
-    if agent is not None:
-        # A revision transaction that held the lock may have committed a revision after
-        # the purge above; it is visible now and goes too. agent.id is the agents primary
-        # key, untouched by the cascade's SET NULL of agents.user_id.
-        res = await db.execute(
-            sa_delete(ProfileRevision).where(ProfileRevision.agent_registry_id == agent.id)
-        )
-        report.revisions_deleted += res.rowcount or 0
     await db.commit()
+    return token
+
+
+async def delete_user_account(
+    db: AsyncSession,
+    user: User,
+    *,
+    remove_from_allowlist: bool = False,
+) -> DeletionReport:
+    """Tear down and delete ``user``. Commits. See module docstring.
+
+    Never retries: a database error in the in-transaction phase propagates with ``db``'s
+    transaction left for the caller to roll back (re-running the phase after a rollback
+    would run without the locks the caller took in that transaction, such as the routes'
+    ``ensure_admin_remains`` admin lock)."""
+    report = DeletionReport(user_id=user.id, orcid=user.orcid)
+    token = await _delete_in_transaction(
+        db, user, report, remove_from_allowlist=remove_from_allowlist
+    )
 
     # ---- post-commit, best-effort: external effects that cannot roll back ----
     if report.agent_id is not None:

@@ -5,6 +5,7 @@ from src.services import agent_identity
 from src.services.company_sources import pi_name
 from src.services.person_names import (
     InvalidPersonName,
+    is_orcid_like,
     name_from_machine_source,
     parse_person_name,
     sanitize_person_name,
@@ -103,3 +104,17 @@ def test_machine_names_keep_todays_fallback_for_ids():
     assert name_from_machine_source("Jane Doe™") == ("Jane Doe", True)
     assert name_from_machine_source("Jane Doe") == ("Jane Doe", False)
     assert name_from_machine_source("0000-0002-1825-009X") == ("0000-0002-1825-009X", False)
+
+
+def test_machine_id_names_are_collapsed_and_cut_to_the_allowlist():
+    name, cut = name_from_machine_source(" 0000-0002-1825-009X\n")
+    assert (name, cut) == ("0000-0002-1825-009X", False)  # whitespace alone is no cut
+    assert is_orcid_like(name)
+    name, cut = name_from_machine_source("0000-0002-1825-009X\n# **`")
+    assert (name, cut) == ("0000-0002-1825-009X", True)
+    assert is_orcid_like(name)
+    name, cut = name_from_machine_source("1234\n\n5678 [](#)")
+    assert (name, cut) == ("1234 5678", True)
+    assert is_orcid_like(name)
+    assert name_from_machine_source(None) == (None, False)
+    assert name_from_machine_source("\n*\t") == ("", True)

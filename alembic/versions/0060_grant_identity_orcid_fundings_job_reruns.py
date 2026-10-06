@@ -12,7 +12,8 @@ Additive:
   CASCADE with the PI; ``vetoed_by_user_id`` SET NULL.
 - ``pi_grants.vetoed_by_user_id`` (uuid, NULL, FK SET NULL): NULL on every row vetoed
   before 0060; never backfilled.
-- ``jobs.rerun_requested_at`` / ``jobs.rerun_not_before`` (timestamptz, NULL).
+- ``jobs.rerun_requested_at`` / ``jobs.rerun_not_before`` (timestamptz, NULL) and
+  ``jobs.rerun_priority`` (smallint, NULL).
 - ``users.name_sanitized_at`` (timestamptz, NULL): when an ORCID- or OAuth-sourced name was
   cut to the D60 allowlist; NULL on every existing row, never backfilled.
 
@@ -25,7 +26,7 @@ page), ``User`` maps ``name_sanitized_at`` (every login and page), ``PiGrant`` m
 code serves, with the worker STOPPED (spec §3). The engine imports src.models: rebuild the
 agent image with it.
 
-Downgrade drops both tables with every row in them, the FK, the index and the four
+Downgrade drops both tables with every row in them, the FK, the index and the five
 columns.
 
 Revision ID: 0060
@@ -58,6 +59,7 @@ def upgrade() -> None:
     op.add_column(
         "jobs", sa.Column("rerun_not_before", sa.DateTime(timezone=True), nullable=True)
     )
+    op.add_column("jobs", sa.Column("rerun_priority", sa.SmallInteger, nullable=True))
 
     op.add_column(
         "pi_grants",
@@ -123,6 +125,7 @@ def downgrade() -> None:
     op.drop_index("ix_pi_grants_vetoed_by_user_id", table_name="pi_grants")
     op.drop_constraint("fk_pi_grants_vetoed_by_user_id_users", "pi_grants", type_="foreignkey")
     op.drop_column("pi_grants", "vetoed_by_user_id")
+    op.drop_column("jobs", "rerun_priority")
     op.drop_column("jobs", "rerun_not_before")
     op.drop_column("jobs", "rerun_requested_at")
     op.drop_column("users", "name_sanitized_at")

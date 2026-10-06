@@ -1,11 +1,12 @@
 """ORCID fundings -> pi_orcid_fundings (spec 2026-10-05 §6.1 "ORCID fundings"; D4, D8, D43).
 
 One row per ORCID funding GROUP; the summary with the lowest display-index supplies the
-fields. `group_key` is the group's grant identifier (type `grant_number` preferred, else
-its first `self` id), else "hash:" + sha1 of the normalised title and funder; a key over
-200 characters is hashed. Titles are read from group[].funding-summary[].title.title.value,
-dates from the start-date/year/value shape `orcid.fetch_orcid_profile` reads for
-employments; every chain is null-safe, `(x.get(k) or {})` (G-20).
+fields. `group_key` is the group's own grant identifier (a `self` or relationship-less id,
+type `grant_number` preferred), else "hash:" + sha1 of the normalised title and funder; a
+key over 200 characters is hashed. A veto follows its funding across a key change when
+title, funder and any self id still match (`_carried_vetoes`). Titles are read from
+group[].funding-summary[].title.title.value, dates from the start-date/year/value shape
+`orcid.fetch_orcid_profile` reads for employments; every chain is null-safe, `(x.get(k) or {})` (G-20).
 
 Two fetch modes: strict (the enrich_grants job and the repair) raises on anything but a
 record-state answer, so the job retries; soft (pipeline step 2) returns None on failure
@@ -23,7 +24,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import httpx
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -104,23 +105,31 @@ def _display_index(summary: dict) -> int:
         return 999
 
 
+def _id_value(value) -> str:
+    return _NON_ID.sub("", str(value or "")).upper()
+
+
+def _title_hash(title: str | None, funder: str | None) -> str:
+    basis = f"{normalise_title(title or '')}|{normalise_title(funder or '')}"
+    return hashlib.sha1(basis.encode()).hexdigest()
+
+
 def group_key(title: str, funder: str | None, ids: list[dict]) -> str:
-    """The upsert key: `ext:grant_number:<id>`, else `ext:<type>:<id>` of the first
-    self (or relationship-less) id, else `hash:<sha1>` of normalised title and funder.
-    Ids are reduced to `[0-9A-Z]`; a key over GROUP_KEY_MAX becomes `ext:sha1:<sha1>`."""
-    grant_numbers = sorted(
-        _NON_ID.sub("", e["value"]).upper() for e in ids if e["type"] == "grant_number"
-    )
-    self_ids = sorted(f'{e["type"]}:{_NON_ID.sub("", e["value"]).upper()}'
-                      for e in ids if e["relationship"] in (None, "self"))
+    """The upsert key, from the self (or relationship-less) ids only, so a part-of or
+    funded-by id cannot merge distinct groups: `ext:grant_number:<id>`, else
+    `ext:<type>:<id>` of the first such id, else `hash:<sha1>` of normalised title and
+    funder. Ids are reduced to `[0-9A-Z]`; a key over GROUP_KEY_MAX becomes
+    `ext:sha1:<sha1>`."""
+    own = [e for e in ids if e["relationship"] in (None, "self")]
+    grant_numbers = sorted(_id_value(e["value"]) for e in own if e["type"] == "grant_number")
+    self_ids = sorted(f'{e["type"]}:{_id_value(e["value"])}' for e in own)
     grant_numbers = [g for g in grant_numbers if g]
     if grant_numbers:
         key = f"ext:grant_number:{grant_numbers[0]}"
     elif self_ids:
         key = f"ext:{self_ids[0]}"
     else:
-        basis = f"{normalise_title(title)}|{normalise_title(funder or '')}"
-        key = f"hash:{hashlib.sha1(basis.encode()).hexdigest()}"
+        key = f"hash:{_title_hash(title, funder)}"
     if len(key) > GROUP_KEY_MAX:
         key = "ext:sha1:" + hashlib.sha1(key.encode()).hexdigest()
     return key
@@ -196,6 +205,63 @@ def _end_order(f: OrcidFunding) -> tuple[int, int, int, int]:
     return (f.end_year or 0, f.end_month or 0, f.start_year or 0, f.start_month or 0)
 
 
+def _self_id_values(ids) -> set[str]:
+    """The reduced values of the ``self`` and relationship-less ids (as ``group_key``
+    reads them): a part-of or funded-by id is shared by distinct fundings."""
+    return {
+        v for e in ids or []
+        if isinstance(e, dict) and e.get("relationship") in (None, "self")
+        and (v := _id_value(e.get("value")))
+    }
+
+
+def _inherits_veto(new: OrcidFunding, new_ids: set[str], old: PiOrcidFunding) -> bool:
+    """Whether ``new`` is the same funding as the orphaned vetoed row ``old``.
+
+    An old row with self (or relationship-less) ids is the same funding exactly when it
+    shares one of them with ``new``: a grant number identifies the award even if its title
+    or funder was corrected. An old row without self ids (keyed by its title hash) is the
+    same funding when ``new`` has the same non-empty normalised title and funder, which is
+    the case of a PI adding a grant number to an award staff vetoed. part-of and
+    funded-by ids never count (`_self_id_values`), so a sibling award under one centre
+    grant does not inherit."""
+    old_ids = _self_id_values(old.external_ids)
+    if old_ids:
+        return bool(old_ids & new_ids)
+    return bool(normalise_title(new.title or "")) and (
+        _title_hash(old.title, old.funder_name) == _title_hash(new.title, new.funder_name)
+    )
+
+
+async def _carried_vetoes(db: AsyncSession, user_id: uuid.UUID,
+                          latest: dict[str, OrcidFunding]) -> dict[str, PiOrcidFunding]:
+    """group_key -> the vetoed row whose veto that new key inherits.
+
+    An incoming funding whose key has no row inherits the veto of an orphaned vetoed
+    row (its key not returned) that ``_inherits_veto`` matches: a shared self or
+    relationship-less id when the old row had one, else the same non-empty normalised
+    title and funder (a funding vetoed under a ``hash:`` key that later gained a grant
+    number). Each old row is claimed at most once."""
+    # FOR UPDATE: a veto committed after this read would otherwise miss the carry.
+    existing = (await db.execute(
+        select(PiOrcidFunding).where(PiOrcidFunding.user_id == user_id).with_for_update()
+        .execution_options(populate_existing=True)
+    )).scalars().all()
+    keys = {r.group_key for r in existing}
+    orphans = [r for r in existing if r.vetoed_at is not None and r.group_key not in latest]
+    carried: dict[str, PiOrcidFunding] = {}
+    for key, f in latest.items():
+        if key in keys or not orphans:
+            continue
+        new_ids = _self_id_values(f.external_ids)
+        for old in orphans:
+            if _inherits_veto(f, new_ids, old):
+                carried[key] = old
+                orphans.remove(old)
+                break
+    return carried
+
+
 async def store_orcid_fundings(db: AsyncSession, user_id: uuid.UUID,
                                fundings: Sequence[OrcidFunding]) -> None:
     """Replace the PI's non-vetoed ORCID rows with `fundings` and stamp
@@ -203,20 +269,28 @@ async def store_orcid_fundings(db: AsyncSession, user_id: uuid.UUID,
 
     Fundings sharing a group_key collapse first (latest end wins): a multi-row
     ON CONFLICT that hits one key twice raises CardinalityViolation. The upsert
-    refreshes the ORCID fields only, so a vetoed row keeps its veto. Flushes, never
-    commits."""
+    refreshes the ORCID fields only, so a vetoed row keeps its veto; a funding whose
+    key changed takes over the veto of the old vetoed row `_carried_vetoes` matches it
+    to, and that row is deleted. Flushes, never commits."""
     latest: dict[str, OrcidFunding] = {}
     for f in fundings:
         if f.group_key not in latest or _end_order(f) > _end_order(latest[f.group_key]):
             latest[f.group_key] = f
     now = datetime.now(UTC)
+    carried = await _carried_vetoes(db, user_id, latest) if latest else {}
+    vetoes = {k: (r.vetoed_at, r.vetoed_by_user_id) for k, r in carried.items()}
+    if carried:
+        await db.execute(delete(PiOrcidFunding).where(
+            PiOrcidFunding.id.in_([r.id for r in carried.values()])))
     if latest:
         stmt = pg_insert(PiOrcidFunding).values([
             {"id": uuid.uuid4(), "user_id": user_id, "group_key": f.group_key, "title": f.title,
              "funder_name": f.funder_name, "funding_type": f.funding_type,
              "start_year": f.start_year, "start_month": f.start_month,
              "end_year": f.end_year, "end_month": f.end_month,
-             "external_ids": list(f.external_ids) or None, "fetched_at": now}
+             "external_ids": list(f.external_ids) or None, "fetched_at": now,
+             "vetoed_at": vetoes.get(f.group_key, (None, None))[0],
+             "vetoed_by_user_id": vetoes.get(f.group_key, (None, None))[1]}
             for f in latest.values()
         ])
         refreshed = ("title", "funder_name", "funding_type", "start_year", "start_month",

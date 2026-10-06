@@ -307,8 +307,8 @@
       {% set gi = grant_identity %}
       <p class="text-sm mb-2">RePORTER identity:
         {% if gi is none or gi.status is none %}<span class="text-amber-700">not evaluated yet</span>
-        {% elif gi.status == 'resolved' %}<span class="text-green-700">resolved</span> (profile {{ gi.accepted_profile_ids | join(', ') }})
-        {% elif gi.status == 'pinned' %}<span class="text-green-700">pinned by staff</span> (profile {{ gi.pinned_profile_ids | join(', ') }})
+        {% elif gi.status == 'resolved' %}<span class="text-green-700">resolved</span> (profile {{ (gi.accepted_profile_ids or []) | join(', ') }})
+        {% elif gi.status == 'pinned' %}<span class="text-green-700">pinned by staff</span> (profile {{ (gi.pinned_profile_ids or []) | join(', ') }})
         {% elif gi.status == 'none_confirmed' %}staff confirmed: no RePORTER profile
         {% else %}<span class="text-amber-700">{{ gi.status | replace('_', ' ') }}</span> — no RePORTER grants are shown{% endif %}
         {% if gi is not none and gi.evaluated_at %}<span class="text-xs text-gray-500">· evaluated {{ gi.evaluated_at | ts }}</span>{% endif %}
@@ -352,7 +352,7 @@
             <div class="font-medium">{{ g.title }}</div>
             <div class="text-xs text-gray-500">{{ g.core_project_num }} · {{ g.activity_code }} · FY{{ g.first_fy }}–{{ g.last_fy }}
               {% if g.is_subproject %}· subproject{% endif %}
-              · {% if ev.rule == 'pinned' %}<span class="text-green-700">staff pin · profile {{ ev.matched_profile_id }}</span>
+              · {% if ev.rule == 'pinned' %}<span class="text-green-700">staff pin · profile {{ ev.matched_profile_id }}</span>{% if ev.name_on_award %} · {{ ev.name_on_award }}{% endif %}
                 {% elif ev.rule == 'pmid_link' %}profile {{ ev.matched_profile_id }} · {{ ev.name_on_award }} ·
                   {% if ev.linking_pmids %}<span class="text-green-700">PMID {{ ev.linking_pmids | join(', ') }}</span>{% else %}same RePORTER profile, linked through another award{% endif %}
                 {% else %}<span class="text-amber-700">evidence from before the 2026-10 remediation; refreshed at the next run</span>{% endif %}

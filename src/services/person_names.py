@@ -286,11 +286,32 @@ def sanitize_person_name(raw: str | None) -> SanitizedName | None:
     return SanitizedName(name=cleaned, changed=cleaned != collapsed)
 
 
+_ASCII_DIGITS = frozenset("0123456789")
+
+
+def _letterless_fallback(raw: str) -> SanitizedName:
+    """``raw`` (an iD or a letter-less text) whitespace-collapsed and cut to the D60
+    allowlist plus ASCII digits, at most NAME_MAX_CHARS: an ORCID iD survives intact, so
+    ``is_orcid_like`` still recognises it, while newlines and markdown never get stored."""
+    text = unicodedata.normalize("NFC", raw)
+    collapsed = " ".join(text.split())
+    cleaned = " ".join(
+        "".join(ch if _allowed_char(ch) or ch in _ASCII_DIGITS else " " for ch in text).split()
+    )
+    cleaned = cleaned[:NAME_MAX_CHARS].strip()
+    return SanitizedName(name=cleaned, changed=cleaned != collapsed)
+
+
 def name_from_machine_source(raw: str | None) -> tuple[str | None, bool]:
     """(name to store, was it cut?) for an ORCID- or OAuth-sourced name (D60): the
-    sanitised name, or ``raw`` unchanged when sanitize_person_name refuses it (an iD or a
-    letter-less text: today's fallback, until Phase 3's refusal and repair)."""
-    cleaned = sanitize_person_name(raw)
-    if cleaned is None:
-        return raw, False
-    return cleaned.name, cleaned.changed
+    sanitised name, or, for an iD or a letter-less text (today's fallback, until Phase
+    3's refusal and repair), ``raw`` with whitespace collapsed and only allowlisted
+    characters and digits kept. An iD wrapped in stray symbols or a trailing newline
+    also takes the fallback, which keeps the iD, rather than the sanitiser, which drops
+    its digits. None stays None; a text with nothing left becomes ""."""
+    if raw is None:
+        return None, False
+    fallback = _letterless_fallback(raw)
+    cleaned = None if is_orcid_like(fallback.name) else sanitize_person_name(raw)
+    chosen = cleaned or fallback
+    return chosen.name, chosen.changed

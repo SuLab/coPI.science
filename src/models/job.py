@@ -90,9 +90,12 @@ class Job(Base):
     #: A change requested while this job was processing (migration 0060, spec §4.2):
     #: `job_queue.request_job` sets it; `claim_job` clears it; when the job ends
     #: (`completed` or `dead`) the worker inserts a fresh pending job carrying
-    #: `rerun_not_before`; a retry back to `pending` clears both.
+    #: `rerun_not_before` and GREATEST(`priority`, `rerun_priority`); a retry back to
+    #: `pending` clears all three.
     rerun_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     rerun_not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: The highest priority a rerun was requested at (NULL: none stated).
+    rerun_priority: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
 
     __table_args__ = (
         Index(

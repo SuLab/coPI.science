@@ -70,6 +70,46 @@ async def test_resumed_jobs_are_staggered_from_now(db_session):
 
 
 @pytest.mark.integration
+async def test_resume_scoped_to_user_ids_requeues_only_those_users(db_session):
+    x, y = await factories.make_user(db_session), await factories.make_user(db_session)
+    for u in (x, y):
+        db_session.add(Job(type="enrich_grants", user_id=u.id, status="dead",
+                           payload={"user_id": str(u.id), be.TAG_KEY: "t4"}))
+    await db_session.flush()
+    again = await be.resume_dead(db_session, job_type="enrich_grants", tag="t4", credits_per_job=0,
+                                 daily_credits=500, user_ids=[x.id])
+    assert [(await db_session.get(Job, i)).user_id for i in again] == [x.id]
+    assert await be.resume_dead(db_session, job_type="enrich_grants", tag="t4", credits_per_job=0,
+                                daily_credits=500, user_ids=[]) == []
+
+
+@pytest.mark.integration
+async def test_main_resume_with_orcid_requeues_only_that_pi(db_session, monkeypatch):
+    x, y = await factories.make_user(db_session), await factories.make_user(db_session)
+    for u in (x, y):
+        db_session.add(Job(type="enrich_grants", user_id=u.id, status="dead",
+                           payload={"user_id": str(u.id), be.TAG_KEY: "t5"}))
+    await db_session.flush()
+
+    class _Shared:
+        """The test session, as `async with session_factory()` yields it."""
+
+        async def __aenter__(self):
+            return db_session
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(be, "get_session_factory", lambda: _Shared)
+    await be._main(["--type", "enrich_grants", "--tag", "t5", "--resume", "--apply",
+                    "--orcid", x.orcid])
+    fresh = (await db_session.execute(select(Job).where(
+        Job.type == "enrich_grants", Job.status == "pending",
+        Job.payload[be.TAG_KEY].as_string() == "t5"))).scalars().all()
+    assert [j.user_id for j in fresh] == [x.id]
+
+
+@pytest.mark.integration
 async def test_run_status_ignores_jobs_from_earlier_runs(db_session):
     old_only = await factories.make_user(db_session)
     rerun = await factories.make_user(db_session)

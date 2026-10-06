@@ -50,6 +50,7 @@ from src.services.orcid_fundings import (  # noqa: E402
 from src.services.person_names import parse_person_name, surname_keys  # noqa: E402
 from src.services.persona_sweep import enable_persona_sweep, sweep_enabled  # noqa: E402
 from src.services.profile_publish import (  # noqa: E402
+    lock_persona_writer,
     persona_file_text,
     reexport_persona,
     render_persona_from_db,
@@ -238,6 +239,8 @@ async def apply_orcid(factory, population, *, pace: float) -> list[str]:
         try:
             fundings = await fetch_orcid_fundings(orcid, strict=True) or []
             async with factory() as db:
+                # Persona writer locks first (lock order: profile_publish module docstring).
+                await lock_persona_writer(db, uid)
                 await store_orcid_fundings(db, uid, fundings)
                 await db.commit()
             print(f"  ORCID {name}: {len(fundings)} funding(s)")

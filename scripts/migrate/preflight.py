@@ -489,6 +489,7 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0060", "column", "name_sanitized_at", "users"),
     PlannedObject("0060", "column", "rerun_requested_at", "jobs"),
     PlannedObject("0060", "column", "rerun_not_before", "jobs"),
+    PlannedObject("0060", "column", "rerun_priority", "jobs"),
     PlannedObject("0060", "column", "vetoed_by_user_id", "pi_grants"),
     PlannedObject("0060", "constraint", "fk_pi_grants_vetoed_by_user_id_users", "pi_grants"),
     PlannedObject("0060", "index", "ix_pi_grants_vetoed_by_user_id", "pi_grants"),

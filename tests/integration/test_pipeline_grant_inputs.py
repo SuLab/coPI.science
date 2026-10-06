@@ -4,10 +4,9 @@ from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.exc import SQLAlchemyError
 
 from src.models import Job, PiOrcidFunding
-from src.services import profile_pipeline
+from src.services import profile_pipeline, profile_publish
 from src.services.grant_sections import GrantLine, GrantSections
 from src.services.orcid_fundings import OrcidFunding
 from src.services.profile_pipeline import _build_synthesis_context, run_profile_pipeline
@@ -57,19 +56,58 @@ async def test_step2_orcid_outage_keeps_stored_rows_and_pipeline_completes(
     assert await _funding_titles(db_session, user.id) == ["Kept award"]
 
 
+async def test_the_persona_writer_locks_come_before_the_fundings_and_profile_writes(
+    db_session, wired, monkeypatch  # noqa: F811
+):
+    """Before: step 2 and step 9 wrote the PI's rows without the persona writer locks, so a
+    concurrent account deletion could deadlock with the run (lock order, spec §4.3)."""
+    events = []
+    real_lock, real_store = profile_publish.lock_persona_writer, profile_pipeline.store_orcid_fundings
+
+    async def lock(db, user_id):
+        events.append("lock")
+        await real_lock(db, user_id)
+
+    async def store(db, user_id, fundings):
+        events.append("store")
+        await real_store(db, user_id, fundings)
+
+    monkeypatch.setattr(profile_publish, "lock_persona_writer", lock)
+    monkeypatch.setattr(profile_pipeline, "store_orcid_fundings", store)
+    wired.fundings = [LIVE]
+    wired.corpus = _uncapped([_rec(1, 2020, "Paper", hopkins_pi=True)])
+    user, _agent, job = await _make_pi(db_session)
+    await run_profile_pipeline(user.id, db_session, job.id)
+    # Step 2 (before the store), step 9 (before the profile writes), the export's own.
+    assert events == ["lock", "store", "lock", "lock"], events
+
+
 async def test_step2_store_error_rolls_back_only_the_savepoint(
     db_session, wired, monkeypatch  # noqa: F811
 ):
     wired.fundings = [LIVE]
+    wired.profile["name"] = "Rachel Green™"
     wired.corpus = _uncapped([_rec(1, 2020, "Paper", hopkins_pi=True)])
 
     async def broken_store(db, user_id, fundings):
-        raise SQLAlchemyError("simulated store failure")
+        # A real write inside the savepoint, then SQL that fails there: a second row under
+        # an existing (user_id, group_key) violates uq_pi_orcid_fundings_user_group.
+        db.add(PiOrcidFunding(user_id=user_id, group_key="hash:new", title="Half-stored"))
+        await db.flush()
+        db.add(PiOrcidFunding(user_id=user_id, group_key="hash:kept", title="Duplicate"))
+        await db.flush()
 
     monkeypatch.setattr(profile_pipeline, "store_orcid_fundings", broken_store)
     user, _agent, job = await _make_pi(db_session)
+    user.name = ""
+    db_session.add(PiOrcidFunding(user_id=user.id, group_key="hash:kept", title="Kept award"))
+    await db_session.flush()
     profile = await run_profile_pipeline(user.id, db_session, job.id)
-    assert profile.research_summary and user.name  # no expired-object load
+    assert profile.research_summary
+    # Step 1's committed name and the pre-existing funding survive; the savepoint's own
+    # write is gone.
+    assert user.name == "Rachel Green" and user.name_sanitized_at is not None
+    assert await _funding_titles(db_session, user.id) == ["Kept award"]
 
 
 async def test_after_commit_defers_the_write_and_none_writes_inline(

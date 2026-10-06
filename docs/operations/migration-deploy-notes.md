@@ -1087,7 +1087,7 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > identity status, accepted and pinned profile ids, candidates, the staff `none_confirmed`
 > flag, `evaluated_at`, `orcid_fetched_at`), `pi_orcid_fundings` (one row per ORCID
 > funding group, unique `(user_id, group_key)`), `pi_grants.vetoed_by_user_id`,
-> `jobs.rerun_requested_at` / `jobs.rerun_not_before` and `users.name_sanitized_at` (when an
+> `jobs.rerun_requested_at` / `jobs.rerun_not_before` / `jobs.rerun_priority` and `users.name_sanitized_at` (when an
 > ORCID- or OAuth-sourced name was cut to the allowed characters; the manager PI page
 > flags it). Design:
 > `docs/specs/2026-10-05-pi-profile-remediation-design.md` §6.1, §4.2.

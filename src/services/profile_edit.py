@@ -19,7 +19,11 @@ from src.models.job import INTERACTIVE_PRIORITY
 from src.services.grant_sections import load_grant_sections
 from src.services.jhu_rules import get_tenure_start, set_tenure_start
 from src.services.job_queue import request_job
-from src.services.profile_publish import export_and_record, write_persona_files
+from src.services.profile_publish import (
+    export_and_record,
+    lock_persona_writer,
+    write_persona_files,
+)
 from src.services.tenure_scope import scoped_publications_for_export
 from src.services.user_email import assign_user_email
 from src.services.validators import is_valid_email
@@ -237,6 +241,9 @@ async def apply_profile_edits(
     tenure_field = (jhu_tenure_start or "").strip()
     if tenure_field and not re.fullmatch(r"\d{4}", tenure_field):
         return "invalid_tenure_year"
+    # Persona writer locks before the first write (the email, user, tenure and profile
+    # rows; lock order: profile_publish module docstring), held until the commit below.
+    await lock_persona_writer(db, target_user.id)
     if form.get("email") is not None:
         email_error = await _apply_email(db, target_user, form["email"], email_required)
         if email_error:

@@ -210,8 +210,12 @@ async def _step2_grants(run: PipelineRun) -> None:
             "step2_orcid_unavailable", "ORCID fundings unavailable; kept the stored ones."
         )
     else:
+        from src.services.profile_publish import lock_persona_writer
         try:
             async with db.begin_nested():
+                # Persona writer locks before the child-row writes (lock order:
+                # profile_publish module docstring); a lock error stays soft too.
+                await lock_persona_writer(db, run.user_id)
                 await store_orcid_fundings(db, run.user_id, fundings)
         except SQLAlchemyError as exc:
             logger.warning(
@@ -633,6 +637,11 @@ async def _step9_store(run: PipelineRun) -> None:
     # A monthly refresh that fails validation, or one that runs while PubMed is
     # down, keeps the profile that is already there.
     await run.progress("step9", "Saving profile to database...")
+    # Persona writer locks before this transaction's profile writes (lock order:
+    # profile_publish module docstring), held until the job commits. Taken here, after
+    # synthesis, so the lock is not held across the LLM calls.
+    from src.services.profile_publish import lock_persona_writer
+    await lock_persona_writer(db, user.id)
     # Records this run's INPUT (change detection), so it is written even when the
     # synthesized fields below are not. The evidence counts are the ones that
     # describe the stored profile.

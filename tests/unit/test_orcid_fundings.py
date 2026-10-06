@@ -66,6 +66,15 @@ def test_a_long_identifier_is_hashed_into_the_column():
     assert len(f.group_key) <= of.GROUP_KEY_MAX and f.group_key.startswith("ext:sha1:")
 
 
+def test_only_the_groups_own_ids_make_the_key():
+    """Before, a part-of grant_number (the parent award) keyed the group, so distinct
+    sub-awards of one parent collapsed into one row."""
+    parent = {"type": "grant_number", "value": "P01 AI-1", "relationship": "part-of"}
+    doi = {"type": "doi", "value": "10.1/x", "relationship": "self"}
+    assert of.group_key("T", "F", [parent, doi]) == "ext:doi:101X"
+    assert of.group_key("T", "F", [parent]) == of.group_key("T", "F", [])
+
+
 def test_out_of_range_years_read_as_unknown():
     f, = of.parse_orcid_fundings({"group": [{"funding-summary": [
         _summary("T", start=("0019", "13"), end=("20190", None))]}]})
@@ -125,3 +134,68 @@ async def test_refresh_keeps_vetoes_and_deletes_unreturned_rows_and_stamps(db_se
     assert left == ["a"], "a refresh never deletes a vetoed row"
     identity = await db_session.get(PiGrantIdentity, pi.id)
     assert identity.orcid_fetched_at is not None and identity.status is None
+
+
+def _gn(*values):
+    return tuple({"type": "grant_number", "value": v, "relationship": "self"} for v in values)
+
+
+def _keyed(title, ids, funder="F"):
+    return of.OrcidFunding(of.group_key(title, funder, list(ids)), title, funder, "grant", 2010,
+                           None, 2028, None, ids)
+
+
+def _part_of(value):
+    return {"type": "grant_number", "value": value, "relationship": "part-of"}
+
+
+async def _veto_then_store(db_session, before, after):
+    """Store ``before``, veto it, store ``after``; the rows left, by group_key."""
+    pi = await factories.make_user(db_session)
+    staff = await factories.make_user(db_session, user_role="manager")
+    await of.store_orcid_fundings(db_session, pi.id, [before])
+    [row] = await _rows(db_session, pi.id)
+    row.vetoed_at, row.vetoed_by_user_id = datetime.now(UTC), staff.id
+    await db_session.flush()
+    await of.store_orcid_fundings(db_session, pi.id, [after])
+    return {r.group_key: r for r in await _rows(db_session, pi.id)}, staff.id
+
+
+@pytest.mark.integration
+async def test_a_veto_follows_its_funding_when_the_key_changes(db_session):
+    """Before, the new key's row came in un-vetoed and the veto stayed on an orphan row."""
+    before = _keyed("Golden award", _gn("R01B"))
+    after = _keyed("Golden award", _gn("R01B", "R01A"))
+    rows, staff_id = await _veto_then_store(db_session, before, after)
+    assert set(rows) == {after.group_key} and after.group_key != before.group_key
+    assert rows[after.group_key].vetoed_by_user_id == staff_id
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(("before", "after"), [
+    (_keyed("Golden award", ()), _keyed("Golden award", _gn("GF-1"))),
+    (_keyed("Old title", _gn("R01B")), _keyed("New title", _gn("R01B", "R01A"))),
+    (_keyed("Golden award", _gn("R01B")), _keyed("Golden award", _gn("R01B", "R01A"), "G")),
+], ids=["hash_gains_grant_number", "shared_id_new_title", "shared_id_new_funder"])
+async def test_a_veto_follows_the_same_funding(db_session, before, after):
+    """A PI adding a grant number to a title-keyed award, or correcting the title or
+    funder of an award with a grant number, keeps the staff veto."""
+    rows, staff_id = await _veto_then_store(db_session, before, after)
+    assert set(rows) == {after.group_key}
+    assert rows[after.group_key].vetoed_by_user_id == staff_id
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(("before", "after"), [
+    (_keyed("Program project", (_part_of("P01X"),)),
+     _keyed("Core B", (_part_of("P01X"), *_gn("P01X-B")))),
+    (_keyed("Golden award", _gn("R01B")), _keyed("Golden award", _gn("R01C"))),
+    (_keyed("Golden award", ()), _keyed("Another award", ())),
+], ids=["shared_part_of_id_only", "renewal_new_grant_number", "different_title_no_ids"])
+async def test_a_veto_is_not_carried_to_a_different_funding(db_session, before, after):
+    """A shared part-of id, a new grant number under the same title, or a different
+    title without ids is a different funding: it comes in unvetoed."""
+    rows, _ = await _veto_then_store(db_session, before, after)
+    assert set(rows) == {before.group_key, after.group_key}
+    assert rows[before.group_key].vetoed_at is not None
+    assert rows[after.group_key].vetoed_at is None

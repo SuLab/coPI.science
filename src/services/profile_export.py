@@ -1,7 +1,6 @@
 """Export a ResearcherProfile from the database to a markdown file for agent consumption."""
 
 import logging
-import re
 from pathlib import Path
 
 from src.models import ResearcherProfile, User
@@ -73,12 +72,18 @@ def export_profile_to_markdown(
 
 
 def _header_lines(user: User) -> list[str]:
-    """Title, PI, institution and department lines, ending with a blank line."""
-    lines = [f"# {user.name} Lab — Public Profile\n", f"**PI:** {user.name}"]
-    if user.institution:
-        lines.append(f"**Institution:** {user.institution}")
-    if user.department:
-        lines.append(f"**Department:** {user.department}")
+    """Title, PI, institution and department lines, ending with a blank line. The name,
+    institution and department are whitespace-collapsed, so a newline in any of them
+    cannot start a line (a heading or a section) of its own in the persona."""
+    # A missing name renders as before ("None"); only its whitespace is collapsed.
+    name = user.name if user.name is None else " ".join(user.name.split())
+    lines = [f"# {name} Lab — Public Profile\n", f"**PI:** {name}"]
+    institution = " ".join((user.institution or "").split())
+    department = " ".join((user.department or "").split())
+    if institution:
+        lines.append(f"**Institution:** {institution}")
+    if department:
+        lines.append(f"**Department:** {department}")
     lines.append("")
     return lines
 

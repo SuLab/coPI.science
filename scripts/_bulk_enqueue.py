@@ -125,19 +125,25 @@ def _newest_per_user(*criteria):
     )
 
 
-async def _resumable(db: AsyncSession, job_type: str, tag: str) -> list[tuple[uuid.UUID, dict]]:
-    """(user_id, payload) of every user whose newest ``job_type`` job tagged ``tag`` is dead."""
-    rows = (await db.execute(_newest_per_user(
-        Job.type == job_type, Job.payload[TAG_KEY].as_string() == tag))).all()
+async def _resumable(db: AsyncSession, job_type: str, tag: str,
+                     user_ids: Sequence[uuid.UUID] | None = None) -> list[tuple[uuid.UUID, dict]]:
+    """(user_id, payload) of every user whose newest ``job_type`` job tagged ``tag`` is dead;
+    only users in ``user_ids`` when it is given (an empty sequence matches nobody)."""
+    criteria = [Job.type == job_type, Job.payload[TAG_KEY].as_string() == tag]
+    if user_ids is not None:
+        criteria.append(Job.user_id.in_(list(user_ids)))
+    rows = (await db.execute(_newest_per_user(*criteria))).all()
     return [(r.user_id, r.payload) for r in rows if r.status == "dead"]
 
 
 async def resume_dead(db: AsyncSession, *, job_type: str, tag: str, credits_per_job: int,
-                      daily_credits: float) -> list[uuid.UUID]:
+                      daily_credits: float,
+                      user_ids: Sequence[uuid.UUID] | None = None) -> list[uuid.UUID]:
     """Re-enqueue every user whose newest job of this type and tag is dead (skipping users
     with an active one), on a fresh schedule starting now: the same stagger as the first
-    pass (D53). Returns the new ids. Commits."""
-    dead = await _resumable(db, job_type, tag)
+    pass (D53). ``user_ids`` limits it to those users (``--orcid``); None means every
+    user with such a dead job. Returns the new ids. Commits."""
+    dead = await _resumable(db, job_type, tag, user_ids)
     slots = plan_schedule([uid for uid, _ in dead], job_type=job_type, start=datetime.now(UTC),
                           credits_per_job=credits_per_job, daily_credits=daily_credits)
     created: list[uuid.UUID] = []
@@ -259,9 +265,10 @@ async def _main(argv: Sequence[str] | None = None) -> None:
             await _preview(db, a, population, datetime.now(UTC))
             return
         if a.resume:
+            scope = [uid for uid, _, _ in population] if a.orcid else None
             created = await resume_dead(db, job_type=a.type, tag=a.tag,
                                         credits_per_job=a.credits_per_job,
-                                        daily_credits=a.daily_credits)
+                                        daily_credits=a.daily_credits, user_ids=scope)
         else:
             created = await enqueue_paced(db, job_type=a.type,
                                           users=[(uid, orcid) for uid, orcid, _ in population],
