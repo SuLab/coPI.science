@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import select
 
 import scripts._bulk_enqueue as be
-from src.models import Job
+from src.models import Job, PiIndustryScore
 from src.models.job import BULK_PRIORITY
 from tests import factories
 
@@ -124,3 +124,81 @@ async def test_run_status_ignores_jobs_from_earlier_runs(db_session):
     counts = await be.run_status(db_session, job_type="enrich_grants", user_ids=[old_only.id, rerun.id],
                                  tag="t3", since=datetime(2026, 10, 6, tzinfo=UTC))
     assert counts == {"completed": 1}
+
+
+@pytest.mark.integration
+async def test_users_with_scorer_version_skips_veto_only_rows(db_session):
+    scored, veto_only, old = [await factories.make_user(db_session) for _ in range(3)]
+    db_session.add_all([
+        PiIndustryScore(user_id=scored.id, components={}, scorer_version="2.0.0",
+                        coverage={"openalex": "ok"}),
+        PiIndustryScore(user_id=veto_only.id, components={}, scorer_version="2.0.0",
+                        coverage={"openalex": "unavailable:not_refreshed"}),
+        PiIndustryScore(user_id=old.id, components={}, scorer_version="1.0.0"),
+    ])
+    await db_session.flush()
+    assert await be.users_with_scorer_version(db_session, "2.0.0") == {scored.id}
+
+
+@pytest.mark.integration
+async def test_main_missing_scorer_version_enqueues_only_unscored_pis(db_session, monkeypatch):
+    scored, missing = await factories.make_user(db_session), await factories.make_user(db_session)
+    db_session.add(PiIndustryScore(user_id=scored.id, components={}, scorer_version="2.0.0",
+                                   coverage={"openalex": "ok"}))
+    await db_session.flush()
+
+    class _Shared:
+        """The test session, as `async with session_factory()` yields it."""
+
+        async def __aenter__(self):
+            return db_session
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(be, "get_session_factory", lambda: _Shared)
+    await be._main(["--type", "industry_evidence", "--tag", "t9", "--missing-scorer-version",
+                    "2.0.0", "--apply", "--credits-per-job", "0"])
+    queued = {j.user_id for j in (await db_session.execute(select(Job).where(
+        Job.type == "industry_evidence", Job.payload[be.TAG_KEY].as_string() == "t9"))).scalars()}
+    assert missing.id in queued and scored.id not in queued
+
+
+def test_adaptive_pacing_is_the_default_and_staggers_nothing():
+    a = be._parse_args(["--type", "generate_profile"])
+    slots = be.plan_schedule([uuid.uuid4(), uuid.uuid4()], job_type="generate_profile", start=START,
+                             credits_per_job=a.credits_per_job, daily_credits=a.daily_credits)
+    assert a.credits_per_job == 0
+    assert all(s.not_before is None and s.followon_not_before is None for s in slots)
+
+
+def test_fixed_schedule_keeps_the_d53_stagger():
+    a = be._parse_args(["--type", "generate_profile", "--fixed-schedule"])
+    assert a.credits_per_job == be.OPENALEX_CREDITS_PER_JOB["generate_profile"]
+    b = be._parse_args(["--type", "industry_evidence", "--fixed-schedule", "--credits-per-job", "3"])
+    assert b.credits_per_job == 3
+
+
+def test_credits_per_job_without_fixed_schedule_is_refused():
+    with pytest.raises(SystemExit):
+        be._parse_args(["--type", "industry_evidence", "--credits-per-job", "12"])
+    assert be._parse_args(["--type", "industry_evidence", "--credits-per-job", "0"]).credits_per_job == 0
+
+
+@pytest.mark.integration
+async def test_partial_selects_only_re_runnable_gaps_in_the_latest_row(db_session):
+    gap, permanent, healed, clean = [await factories.make_user(db_session) for _ in range(4)]
+    db_session.add_all([
+        PiIndustryScore(user_id=gap.id, components={}, scorer_version="2.0.0",
+                        coverage={"openalex": "unavailable:http_429", "uspto": "ok"}),
+        PiIndustryScore(user_id=permanent.id, components={}, scorer_version="2.0.0",
+                        coverage={"uspto": "unavailable:no_api_key", "ctgov": "unavailable:no_usable_name"}),
+        PiIndustryScore(user_id=healed.id, components={}, scorer_version="2.0.0",
+                        coverage={"openalex": "unavailable:ReadTimeout"},
+                        computed_at=START - timedelta(days=1)),
+        PiIndustryScore(user_id=healed.id, components={}, scorer_version="2.0.0",
+                        coverage={"openalex": "ok"}, computed_at=START),
+        PiIndustryScore(user_id=clean.id, components={}, scorer_version="2.0.0", coverage={"openalex": "ok"}),
+    ])
+    await db_session.flush()
+    assert await be.users_with_transient_gaps(db_session, "2.0.0") == {gap.id}

@@ -79,18 +79,42 @@ derived at export time from those two tables (`src/services/grant_sections.py`);
 `researcher_profiles.grant_titles` is retired (no readers or writers). A daily
 worker sweep, gated by the app setting `persona_sweep_enabled`, re-exports every
 persona whose file differs from a fresh render, so an award that has ended leaves
-the Active section without an unrelated edit. The second scores industry interest from
-OpenAlex/PubMed/USPTO/ClinicalTrials.gov evidence and writes nothing a prompt or a
-profile export reads. The grants panel and the industry-interest score are
-manager-only surfaces on `/manager/pis/{id}`: each RePORTER grant, ORCID funding and
-piece of industry evidence is individually vetoable ("not this PI's"), and staff can
-pin the PI's RePORTER profile or confirm the PI has none, via the routes below.
-OpenAlex is keyless here: 1000
-credits/day per IP (`x-ratelimit-limit`), reset at 00:00 UTC; a spent budget
-answers 429 and fails the job. Backfill in batches that fit the day's budget. `scripts/enqueue_enrichment.py` backfills both jobs for
-PIs who predate this feature — it previews by default, needs `--apply` to
-enqueue for real, and takes `--only grants` / `--only industry` and
-`--orcid` to scope a run.
+the Active section without an unrelated edit.
+The second scores industry interest from OpenAlex, PubMed competing-interest, USPTO and
+ClinicalTrials.gov evidence and writes nothing a prompt or a profile export reads
+(`tests/unit/test_enrichment_isolation.py` walks the imports). A competing-interest
+statement credits a company to the PI only when the run of named persons nearest before
+it names the PI, or says "all/each author(s)" (`src/services/coi_attribution.py`). USPTO
+and ClinicalTrials.gov are paged; each score row records what every source covered
+(`ok`, `truncated` or `unavailable:<reason>`), and the manager pages show "partial" when a
+source is not `ok` (its stored rows are kept, and scored only from the tenure start on).
+Evidence rows are upserted, so a row keeps its id and its veto across runs. The
+percentile and the reason (`no_tenure_start`, `no_evidence`, `cohort_too_small`, `ok`) are
+computed when the page renders, from each PI's latest row of the current
+`SCORER_VERSION`; a PI with only older rows shows "rescoring". The grants panel and the
+industry-interest score are manager-only surfaces on `/manager/pis/{id}`: each RePORTER
+grant, ORCID funding and piece of industry evidence is individually vetoable ("not this
+PI's"), and staff can pin the PI's RePORTER profile or confirm the PI has none, via the
+routes below. OpenAlex is keyless here: 1000 credits/day per IP (`x-ratelimit-limit`),
+reset at 00:00 UTC; a spent budget makes OpenAlex unavailable for that run while the other
+sources still refresh. Re-run every PI through `scripts/_bulk_enqueue.py`: the worker
+reads OpenAlex's free meter (a singleton lookup costs nothing) before each BULK job that
+spends credits and defers it to 00:00 UTC once it would eat into the 10% reserve kept for
+org1 (`src/services/openalex_budget.py`; an unreadable meter falls back to one job per
+fixed slot); `--fixed-schedule` staggers the jobs instead. `scripts/enqueue_enrichment.py` backfills both jobs for PIs who
+predate this feature — it previews by default, needs `--apply` to enqueue for real, and
+takes `--only grants` / `--only industry` and `--orcid` to scope a run.
+
+Company discovery (`company_discovery`) runs after every successful profile generation (a
+request while one runs flags a rerun) and on Find companies. Its Claude extraction of
+founder claims from the PI's own competing-interest statements is capped at
+`COMPANY_DISCOVERY_DAILY_USD_LIMIT` dollars per rolling 24 h ($20 by default), counted in
+`company_discovery_usage`; at the ceiling the job waits, without using up an attempt, until
+the budget frees, and the Companies card says until when. `company_discovery_coi_ledger`
+keeps each statement's outcome per way of naming the PI, so a statement is paid for once
+and its claims come back on later runs. Delete on a confirmed company records it as
+rejected, so discovery never suggests it again; adding the same name by hand later revives
+it as a confirmed manual entry.
 
 ### 1. Create user records and generate profiles
 
@@ -237,7 +261,8 @@ doc's §8.
   and the five Companies routes
   (scout_hub 1.10.0) — `/manager/pis/{id}/companies` (add a company by hand),
   `/manager/pis/{id}/companies/{company_id}/delete`, `/confirm` and `/reject`
-  (review a discovered or confirmed company), and `/manager/pis/{id}/companies/discover`
+  (review a discovered or confirmed company; delete records a confirmed company as
+  rejected, and a manual add of that name revives it), and `/manager/pis/{id}/companies/discover`
   (queue company discovery) — and nothing else;
   `tests/integration/test_manager_views.py`'s
   `test_manager_router_mutations_are_an_explicit_allowlist` fails loudly on a twentieth.

@@ -8,7 +8,7 @@ import pytest
 import respx
 
 from src.services import odp, patents
-from src.services.industry_sources import uspto_inventor
+from src.services.industry_sources import Paged, uspto_inventor
 
 pytestmark = pytest.mark.asyncio
 
@@ -35,12 +35,13 @@ async def test_uspto_inventor_request_is_unchanged(monkeypatch):
     monkeypatch.setattr(uspto_inventor, "get_settings",
                         lambda: type("S", (), {"uspto_api_key": "key1"})())
     route = respx.post(odp.ODP_SEARCH_URL).mock(return_value=httpx.Response(200, json={"patentFileWrapperDataBag": []}))
-    assert await uspto_inventor.fetch_jhu_applications("Jane Doe") == []
+    assert await uspto_inventor.fetch_jhu_applications("Jane Doe") == Paged([])
     req = route.calls[0].request
     assert req.headers["X-API-KEY"] == "key1"
     body = json.loads(req.content)
     assert body["fields"] == uspto_inventor._FIELDS
     assert body["pagination"] == {"offset": 0, "limit": 100}
+    assert body["sort"] == [{"field": "applicationMetaData.filingDate", "order": "desc"}]
 
 
 @respx.mock
@@ -50,4 +51,4 @@ async def test_uspto_inventor_404_is_empty(monkeypatch):
     monkeypatch.setattr(uspto_inventor, "get_settings",
                         lambda: type("S", (), {"uspto_api_key": "key1"})())
     respx.post(odp.ODP_SEARCH_URL).mock(return_value=httpx.Response(404))
-    assert await uspto_inventor.fetch_jhu_applications("Jane Doe") == []
+    assert await uspto_inventor.fetch_jhu_applications("Jane Doe") == Paged([])

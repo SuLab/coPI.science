@@ -383,23 +383,33 @@
       </ul>
     </section>
 
-    <!-- Industry interest (read-only score; never enters the profile or prompts) -->
+    <!-- Industry interest (read-only score; never enters the profile or prompts). The
+         percentile and the reason are computed when this page renders, from the PI's latest
+         row of the current scorer version (src/services/directory.py industry_views). -->
     <section id="industry" class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
-      <h2 class="font-semibold text-gray-800 mb-1">Industry interest</h2>
-      {% if not industry_score %}<p class="text-sm text-gray-500">Not computed yet.</p>
-      {% elif industry_score.score is none %}<p class="text-sm"><span class="font-medium text-amber-700">Unscored</span> —
-        {% if industry_score.reason == 'no_tenure_start' %}no JHU tenure start recorded; set one above and re-run.{% else %}{{ industry_score.reason }}{% endif %}</p>
+      <h2 class="font-semibold text-gray-800 mb-1">Industry interest{% if industry and industry.partial %}
+        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 ml-2">partial</span>{% endif %}</h2>
+      {% if not industry or industry.reason == 'not_computed' %}<p class="text-sm text-gray-500">Not computed yet.</p>
+      {% elif industry.reason == 'rescoring' %}<p class="text-sm text-gray-500">Rescoring: the scorer changed, and this PI's new score appears when their industry job finishes.</p>
+      {% elif industry.percentile is none %}<p class="text-sm"><span class="font-medium text-amber-700">Unscored</span> —
+        {% if industry.reason == 'no_tenure_start' %}no JHU tenure start recorded; set one above and re-run.{% elif industry.reason == 'no_evidence' %}no evidence that scores above zero.{% else %}fewer than three other PIs are scored yet.{% endif %}</p>
       {% else %}
-      <p class="text-3xl font-semibold">{{ '%.1f' % industry_score.score }}<span class="text-sm text-gray-500 font-normal"> / 100 cohort percentile · raw {{ '%.1f' % industry_score.raw_sum }} · {{ industry_score.evidence_count }} evidence rows · scorer v{{ industry_score.scorer_version }} · tenure ≥ {{ industry_score.tenure_start_used }}</span></p>
+      <p class="text-3xl font-semibold">{{ '%.1f' % industry.percentile }}<span class="text-sm text-gray-500 font-normal"> / 100 cohort percentile · raw {{ '%.1f' % industry.row.raw_sum }} · {{ industry.row.evidence_count }} evidence rows · scorer v{{ industry.row.scorer_version }} · tenure ≥ {{ industry.row.tenure_start_used }}</span></p>
+      {% endif %}
+      {% if industry and industry.row and industry.row.components %}
       <dl class="grid grid-cols-2 gap-x-6 text-sm mt-3">
-        {% for kind, c in industry_score.components.items() %}<dt class="text-gray-500">{{ kind.replace('_',' ') }}</dt><dd>{{ c.distinct_companies }} companies → {{ '%.1f' % c.weighted }}</dd>{% endfor %}
+        {% for kind, c in industry.row.components.items() %}<dt class="text-gray-500">{{ kind.replace('_',' ') }}</dt><dd>{{ c.distinct_companies }} companies → {{ '%.1f' % c.weighted }}</dd>{% endfor %}
       </dl>
+      {% endif %}
+      {% if industry and industry.partial %}
+      <p class="text-xs text-amber-700 mt-2">Partial: {% for source, state in industry.coverage.items() if state != 'ok' %}{{ source }} {{ state }}{% if not loop.last %}; {% endif %}{% endfor %}. Stored rows a source could not refresh are kept, and scored only from the tenure start on.</p>
       {% endif %}
       <details class="mt-4"><summary class="text-sm text-blue-700 cursor-pointer">Evidence ({{ industry_evidence | length }})</summary>
         <ul class="divide-y mt-2">
         {% for e in industry_evidence %}
           <li class="py-2 flex justify-between gap-4 text-sm {% if e.vetoed_at %}opacity-50{% endif %}">
             <div><span class="font-medium">{{ e.company_name or '—' }}</span> <span class="text-xs text-gray-500">{{ e.kind.replace('_',' ') }} · {{ e.company_class }} · {{ e.year }} · PI role {{ e.pi_role or '—' }} · {{ e.source }}</span>
+              {% if e.evidence.pi_mention %}<div class="text-xs text-gray-500">credited via “{{ e.evidence.pi_mention }}”</div>{% endif %}
               {% if e.evidence.span %}<div class="text-xs text-gray-600 italic">"{{ e.evidence.span }}"</div>{% endif %}
               {% if e.evidence.title %}<div class="text-xs text-gray-600">{{ e.evidence.title }}</div>{% endif %}</div>
             {% if not e.vetoed_at and effective_user.is_staff %}<form method="post" action="/manager/pis/{{ target_user.id }}/industry/{{ e.id }}/veto"><button class="text-xs text-red-700 underline">Not this PI / not industry</button></form>{% elif e.vetoed_at %}<span class="text-xs text-gray-600">vetoed</span>{% endif %}
@@ -435,7 +445,7 @@
           </div>
           {% if effective_user.is_staff %}
           <form method="post" action="/manager/pis/{{ target_user.id }}/companies/{{ c.id }}/delete"
-                data-confirm="Remove {{ c.company_name }} from this PI's companies? BlackbirdBot stops seeing it at once.">
+                data-confirm="Remove {{ c.company_name }} from this PI's companies? BlackbirdBot stops seeing it at once, and discovery will not suggest it again.">
             <button type="submit" class="text-xs text-red-700 underline">Delete</button>
           </form>
           {% endif %}
@@ -564,7 +574,7 @@
           <button type="submit" id="find-companies" class="text-sm px-3 py-1 rounded bg-indigo-600 text-white hover:opacity-90 disabled:opacity-50"{% if discovery and discovery.active %} disabled{% endif %}>Find companies</button>
         </form>
         <p class="text-xs text-gray-600 mt-1">
-          {% if discovery and discovery.active %}Discovery is {{ 'running' if discovery.status == 'processing' else 'queued' }} (since {{ discovery.at | ts }}); reload this page to see its suggestions.
+          {% if discovery and discovery.active %}Discovery is {{ 'running' if discovery.status == 'processing' else 'queued' }} (since {{ discovery.at | ts }}){% if discovery.deferred_until %}, waiting for the daily COI extraction budget until {{ discovery.deferred_until | ts }}{% endif %}; reload this page to see its suggestions.
           {% elif discovery and discovery.status in ('failed', 'dead') %}Last run {{ discovery.at | ts }}: failed{% if discovery.error %} ({{ discovery.error }}){% endif %}. Press Find companies to try again.
           {% elif discovery %}Last run {{ discovery.at | ts }}: {{ discovery.outcome or 'finished' }}.
           {% else %}Discovery has not run for this PI yet.{% endif %}

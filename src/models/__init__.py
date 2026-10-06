@@ -48,7 +48,7 @@ from src.models.enrichment import (
 )
 from src.models.job import Job
 from src.models.opportunity import AssessmentDrop, OpportunityAssessment
-from src.models.pi_company import PiCompany
+from src.models.pi_company import CompanyDiscoveryCoiLedger, CompanyDiscoveryUsage, PiCompany
 from src.models.profile import ResearcherProfile
 from src.models.profile_revision import ProfileRevision
 from src.models.proposal_vote import VOTE_DOWN, VOTE_UP, ProposalVote
@@ -135,6 +135,8 @@ __all__ = [
     "PiIndustryEvidence",
     "PiIndustryScore",
     "PiCompany",
+    "CompanyDiscoveryUsage",
+    "CompanyDiscoveryCoiLedger",
     "AssessmentChatTurn",
     "AssessmentChatUsage",
     "AssessmentChatSuggestionSet",

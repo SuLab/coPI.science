@@ -11,6 +11,10 @@ waits behind at most one of those calls (CALL_TIMEOUT_SECONDS, 3 minutes, at wor
 and runs the daily persona re-export sweep when it is due
 (`src.services.persona_sweep.run_persona_sweep`, spec 2026-10-05 D54).
 
+A BULK-priority job that spends OpenAlex credits first reads OpenAlex's free daily
+meter and defers itself to the meter's reset when it would eat into the reserve kept
+for org1 (`src.services.openalex_budget`, spec 2026-10-05 D67).
+
 A handler may raise `job_queue.NonRetryableJobError` (dead at once) or
 `job_queue.JobDeferred` (back to pending, attempt not counted), and may append
 post-commit steps to `JobContext.after_commit`. A `request_job` call that flagged a
@@ -36,8 +40,8 @@ from sqlalchemy.ext.asyncio import (
 from src.config import get_settings
 from src.database import make_engine
 from src.models import Job, User
-from src.models.job import PER_USER_JOB_TYPES
-from src.services import job_progress
+from src.models.job import BULK_PRIORITY, PER_USER_JOB_TYPES
+from src.services import job_progress, openalex_budget
 from src.services.assessment_chat_suggestions import (
     SWEEP_INTERVAL_SECONDS as SUGGESTION_SWEEP_SECONDS,
 )
@@ -425,6 +429,8 @@ async def process_job(job_id: uuid.UUID, job_type: str, job_attempts: int, job_m
     persona writer (`profile_publish.write_persona_files`, the only callback queued
     today) does not write on it but opens its own session on that session's bind and
     commits that. A failed or deferred handler runs none of them. `JobDeferred` returns the job to pending without counting the attempt.
+    A BULK-priority job passes `openalex_budget.defer_if_low` before its handler, which
+    may defer it the same way.
     """
     async with session_factory() as db:
         row = (await db.execute(select(Job).where(Job.id == job_id))).scalar_one_or_none()
@@ -438,9 +444,12 @@ async def process_job(job_id: uuid.UUID, job_type: str, job_attempts: int, job_m
             id=row.id, type=row.type, user_id=row.user_id, payload=dict(row.payload or {}),
             attempts=row.attempts, max_attempts=row.max_attempts,
         )
+        bulk = (row.priority or 0) <= BULK_PRIORITY
         await db.commit()
 
         try:
+            if bulk:
+                await openalex_budget.defer_if_low(ctx.type)
             if ctx.type == "monthly_refresh":
                 await execute_monthly_refresh(ctx, db)
             handler = JOB_HANDLERS.get(ctx.type)

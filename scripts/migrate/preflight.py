@@ -75,7 +75,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0060"
+DEFAULT_TARGET = "0061"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -109,13 +109,13 @@ DEFAULT_TARGET = "0060"
 #: on llm_call_logs), 0033 (two composite indexes on thread_decisions plus 18
 #: unindexed ondelete-FK columns — see issue #25 P1), 0034 (two nullable columns plus
 #: one foreign-key constraint on agents), 0035 (three nullable columns across three
-#: tables, no backfill), and the 0036-0060 objects enumerated in PLANNED_OBJECTS (and
+#: tables, no backfill), and the 0036-0061 objects enumerated in PLANNED_OBJECTS (and
 #: PLANNED_RECREATES) below.
 SUPPORTED_START_REVISIONS = (
     "0018", "0019", "0020", "0021", "0023", "0024", "0025", "0026", "0027", "0028", "0029",
     "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040",
     "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
-    "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059",
+    "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060",
 )
 
 #: Tables whose row counts are snapshotted for postflight. Empty = every user table.
@@ -177,7 +177,7 @@ BACKUP_GLOBS = ("*.sql", "*.sql.gz", "*.dump", "*.dmp", "*.pgdump", "*.custom", 
 # ---------------------------------------------------------------------------
 # What the migration chain CREATES (PLANNED_OBJECTS), DROPS (PLANNED_DROPS) and drops and
 # creates again under the same name (PLANNED_RECREATES), per revision. Derived by reading
-# 0019-0060; tests/unit/test_migration_checks.py re-derives them from the migration
+# 0019-0061; tests/unit/test_migration_checks.py re-derives them from the migration
 # files' upgrade() bodies and asserts they still match, so they cannot silently drift.
 # ---------------------------------------------------------------------------
 
@@ -499,11 +499,28 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0060", "table", "pi_orcid_fundings"),
     PlannedObject("0060", "constraint", "uq_pi_orcid_fundings_user_group", "pi_orcid_fundings"),
     PlannedObject("0060", "index", "ix_pi_orcid_fundings_vetoed_by_user_id", "pi_orcid_fundings"),
+    # 0061_industry_coverage_discovery_budget. The tables' inline FKs are unnamed, as
+    # 0060's are.
+    PlannedObject("0061", "column", "coverage", "pi_industry_scores"),
+    PlannedObject("0061", "table", "company_discovery_usage"),
+    PlannedObject(
+        "0061", "constraint", "ck_company_discovery_usage_status", "company_discovery_usage",
+    ),
+    PlannedObject("0061", "index", "ix_company_discovery_usage_created", "company_discovery_usage"),
+    PlannedObject("0061", "index", "ix_company_discovery_usage_user_id", "company_discovery_usage"),
+    PlannedObject("0061", "table", "company_discovery_coi_ledger"),
+    PlannedObject(
+        "0061", "constraint", "uq_company_discovery_coi_ledger_key", "company_discovery_coi_ledger",
+    ),
+    PlannedObject(
+        "0061", "constraint", "ck_company_discovery_coi_ledger_outcome",
+        "company_discovery_coi_ledger",
+    ),
 )
 
 #: What ``upgrade()`` DROPS. Kept apart from PLANNED_OBJECTS because the collision check
 #: must never treat a drop's precondition (the object exists) as a collision. 0026 is
-#: the only upgrade-time ``drop_table`` in 0019-0060.
+#: the only upgrade-time ``drop_table`` in 0019-0061.
 PLANNED_DROPS: tuple[PlannedObject, ...] = (
     PlannedObject("0026", "table", "grantbot_posted_foas"),
 )
@@ -522,6 +539,7 @@ REVISION_ORDER = (
     "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039",
     "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
     "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060",
+    "0061",
 )
 
 

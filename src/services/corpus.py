@@ -42,6 +42,7 @@ from src.services.pubmed import (
     ncbi_session,
     search_pmids,
 )
+from src.services.query_escaping import phrase_term, pubmed_author_term
 
 logger = logging.getLogger(__name__)
 
@@ -297,8 +298,11 @@ def build_pubmed_query(name: str, affiliations: list[str]) -> str:
     ORed: the full name keeps its precision where PubMed has it, the initial
     reaches everything else, and the affiliation clause plus the caller's own
     identity gate do the disambiguating the broader term gives up.
+
+    Names and affiliations are escaped for PubMed's term syntax (`query_escaping`,
+    P29), so a name cannot add a clause.
     """
-    parts = name.strip().split()
+    parts = pubmed_author_term(name).split()
     if not parts:
         return ""
     last = parts[-1]
@@ -311,8 +315,9 @@ def build_pubmed_query(name: str, affiliations: list[str]) -> str:
         author_term = f"{last} {first[0]}[Author]"
     else:
         author_term = f"{last}[Author]"
-    if affiliations:
-        aff_terms = " OR ".join(f'"{a}"[Affiliation]' for a in affiliations[:2])
+    affs = [a for a in (phrase_term(x) for x in affiliations[:2]) if a]
+    if affs:
+        aff_terms = " OR ".join(f'"{a}"[Affiliation]' for a in affs)
         return f"({author_term}) AND ({aff_terms})"
     return author_term
 

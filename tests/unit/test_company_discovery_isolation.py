@@ -1,6 +1,7 @@
 """Company discovery must not import what tests/unit/test_enrichment_isolation.py forbids
-(the industry score/evidence modules), nor `industry_sources/pubmed_coi.py`, whose
-attribution is wrong (spec F13, §7.5), nor the profile pipeline (which imports it)."""
+(the industry score/evidence modules, `industry_sources/pubmed_coi.py` among them), nor the
+profile pipeline (which imports it). The COI attribution it shares with the industry side
+lives in `src/services/coi_attribution.py`, which is guarded here too."""
 import ast
 from pathlib import Path
 
@@ -13,6 +14,8 @@ FORBIDDEN = {
 }
 MODULES = [
     "src/services/company_discovery.py",
+    "src/services/company_discovery_budget.py",
+    "src/services/coi_attribution.py",
     *sorted(str(p.relative_to(ROOT)) for p in (ROOT / "src/services/company_sources").glob("*.py")),
 ]
 
@@ -29,7 +32,7 @@ def _imports(path: Path) -> set[str]:
 
 
 def test_discovery_modules_import_nothing_forbidden():
-    assert len(MODULES) == 6, MODULES
+    assert len(MODULES) == 8, MODULES
     for rel in MODULES:
         hit = {m for m in _imports(ROOT / rel) if any(m == f or m.startswith(f + ".") for f in FORBIDDEN)}
         assert not hit, f"{rel} imports {hit}"

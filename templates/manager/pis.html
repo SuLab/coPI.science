@@ -134,7 +134,9 @@
                     {% endif %}
                 </td>
                 <td class="px-4 py-3 text-sm text-gray-600 hidden md:table-cell">
-                    {{ '%.1f' % item.industry_score if item.industry_score is not none else ('unscored' if item.industry_reason else '—') }}
+                    {% set iv = item.industry %}
+                    {% if iv.percentile is not none %}{{ '%.1f' % iv.percentile }}{% elif iv.reason == 'rescoring' %}rescoring{% elif iv.reason == 'not_computed' %}—{% else %}unscored{% endif %}
+                    {% if iv.partial %}<span class="text-xs text-amber-700" title="Some evidence sources were unavailable or truncated">· partial</span>{% endif %}
                 </td>
                 <td class="px-4 py-3 text-sm text-gray-600 hidden lg:table-cell">
                     {{ (item.profile.profile_version or '—') if item.profile else '—' }}

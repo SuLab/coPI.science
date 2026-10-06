@@ -7,12 +7,17 @@ reach profile text or prompts (tests/unit/test_enrichment_isolation.py), while t
 for the hub's ``retrieve_profile`` (src/services/pi_companies.py). Only ``confirmed`` rows
 leave the table: ``suggested`` rows wait for a manager, and ``rejected`` rows exist only
 so company discovery never suggests the same normalized name again.
+
+The company discovery COI budget and ledger (migration 0061, spec 2026-10-05 §6.2) live
+here too, for the same reason: src/services/company_discovery_budget.py writes them and is
+imported by code that must not reach the industry tables.
 """
 
 from __future__ import annotations
 
 import uuid
 from datetime import date, datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
@@ -20,6 +25,9 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
+    Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -33,6 +41,19 @@ from src.database import Base
 PI_COMPANY_ROLES = ("founder", "co_founder", "board", "advisor")
 PI_COMPANY_STATUSES = ("suggested", "confirmed", "rejected")
 PI_COMPANY_ORIGINS = ("manual", "discovered")
+#: company_discovery_usage.status (migration 0061): reserved before a COI extraction call,
+#: settled after it (src/services/company_discovery_budget.py).
+COI_USAGE_STATUSES = ("reserved", "settled")
+#: company_discovery_coi_ledger.outcome: the extraction's `coi_llm.CoiOutcome.status`.
+COI_LEDGER_OUTCOMES = ("ok", "skipped", "unavailable")
+#: The outcomes a later run does not send again; an "unavailable" statement is re-sent.
+COI_LEDGER_TERMINAL = ("ok", "skipped")
+#: How many BILLED failed extractions (a refusal, a truncated or malformed reply: the
+#: model answered and was paid) an "unavailable" statement gets: after the second, later
+#: runs stop paying for it (review 2026-10-06; discovery runs after every generation). An
+#: unbilled failure (prompt missing, API error status, transport error, a cancellation)
+#: does not count.
+COI_MAX_ATTEMPTS = 2
 
 
 def _sql_in(values: tuple[str, ...]) -> str:
@@ -96,3 +117,80 @@ class PiCompany(Base):
 
     def __repr__(self) -> str:
         return f"<PiCompany {self.company_name!r} user={self.user_id} status={self.status}>"
+
+
+class CompanyDiscoveryUsage(Base):
+    """One COI extraction call's cost record (spec 2026-10-05 §6.2, D36, D62c). Reserved at
+    `reserved_usd` in a committed transaction of its own before the call; settled after it
+    with the priced usage. The rolling 24 h sum of coalesce(cost_usd, reserved_usd) is the
+    spend `company_discovery_daily_usd_limit` caps. Holds no content."""
+
+    __tablename__ = "company_discovery_usage"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({_sql_in(COI_USAGE_STATUSES)})", name="ck_company_discovery_usage_status"
+        ),
+        Index("ix_company_discovery_usage_created", "created_at"),
+        Index("ix_company_discovery_usage_user_id", "user_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    pmid: Mapped[str] = mapped_column(String(20), nullable=False)
+    #: The configured model (settings.llm_coi_model) the call was reserved for.
+    model: Mapped[str] = mapped_column(String(100), nullable=False)
+    #: The model that answered last (a server-side fallback differs). NULL with no reply.
+    served_by_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    status: Mapped[str] = mapped_column(String(10), nullable=False)
+    reserved_usd: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False)
+    #: The settled cost; NULL while reserved (the ceiling then counts `reserved_usd`).
+    cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_read_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_creation_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: [{"model", "billed", <token counts>}] per API iteration
+    #: (`assessment_chat_stream.usage_entries`). NULL: no usage known.
+    usage_by_model: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CompanyDiscoveryCoiLedger(Base):
+    """The last extraction of one competing-interest statement for one way of naming the
+    PI (spec 2026-10-05 §6.2, D36): `statement_hash` is sha256 of the statement,
+    `name_forms_hash` sha256 of the PI block the prompt sends (`coi_llm._pi_block`), so a
+    name change sends the statement again. `claims` are the verified FounderClaims of an
+    "ok" outcome ([] for "skipped", NULL for "unavailable"); later runs merge them back in
+    without a call (COI_LEDGER_TERMINAL)."""
+
+    __tablename__ = "company_discovery_coi_ledger"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "pmid", "statement_hash", "name_forms_hash",
+            name="uq_company_discovery_coi_ledger_key",
+        ),
+        CheckConstraint(
+            f"outcome IN ({_sql_in(COI_LEDGER_OUTCOMES)})",
+            name="ck_company_discovery_coi_ledger_outcome",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    pmid: Mapped[str] = mapped_column(String(20), nullable=False)
+    statement_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    name_forms_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(12), nullable=False)
+    claims: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    #: Billed failed extractions of this key so far (COI_MAX_ATTEMPTS).
+    attempts: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
+    processed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

@@ -54,3 +54,22 @@ async def test_an_interactive_enqueue_raises_a_pending_bulk_rows_priority(db_ses
     await enqueue_profile_job_if_absent(db_session, user, priority=BULK_PRIORITY)
     await db_session.refresh(first)
     assert first.priority == INTERACTIVE_PRIORITY
+
+
+async def test_an_interactive_enqueue_lifts_an_openalex_gate_deferral(db_session):
+    """The OpenAlex gate binds BULK jobs only: once the person asks, a gate-deferred row runs
+    now; any other deferral keeps its time (semantic review 2026-10-06)."""
+    later = datetime.now(UTC) + timedelta(hours=10)
+    gated, other = await factories.make_user(db_session), await factories.make_user(db_session)
+    rows = {}
+    for user, reason in ((gated, "OpenAlex free budget: 90 of 1000 credits left, 100 kept in reserve"),
+                         (other, "company discovery: the COI budget is spent")):
+        job = await enqueue_profile_job_if_absent(db_session, user, priority=BULK_PRIORITY)
+        job.not_before, job.last_error = later, f"deferred until {later.isoformat()}: {reason}"
+        rows[user.id] = job
+    await db_session.flush()
+    for user in (gated, other):
+        await enqueue_profile_job_if_absent(db_session, user, priority=INTERACTIVE_PRIORITY)
+        await db_session.refresh(rows[user.id])
+    assert rows[gated.id].not_before is None and rows[gated.id].priority == INTERACTIVE_PRIORITY
+    assert rows[other.id].not_before == later

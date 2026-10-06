@@ -1,19 +1,26 @@
-"""Paced bulk enqueue for every repair script (spec 2026-10-05 §4.2, D53). Preview by default.
+"""Paced bulk enqueue for every repair script (spec 2026-10-05 §4.2, D53, D67). Preview by default.
 
 Jobs go in at BULK priority through job_queue.insert_job_if_absent (idempotent: a user
-with a pending or processing job of the type gets none). Their `not_before` is staggered
-so OpenAlex use stays inside the keyless budget: 1000 credits a day per IP
-(src/services/industry_sources/openalex_industry.py), shared with org1 (hence
-DEFAULT_BUDGET_SHARE). Each slot is sized for the parent job's credits plus its step-10
-follow-ons (OPENALEX_CREDITS_PER_JOB), times RETRY_HEADROOM, because an automatic retry
-(4 then 16 minutes later) spends the budget again. A `generate_profile` parent carries
-`followon_not_before` in its payload; step 10 gives its follow-ons that not_before.
-Every job carries `bulk_tag`, so `--resume` re-enqueues only this run's dead jobs and
-`--wait` counts only this run's jobs.
+with a pending or processing job of the type gets none). OpenAlex use must stay inside
+the keyless budget: 1000 credits a day per IP, shared with org1.
+
+By default (adaptive pacing, D67) jobs are not staggered: the worker reads OpenAlex's
+free daily meter before each BULK job that spends credits and defers the job to the
+meter's reset once it would eat into the 10% reserve (src/services/openalex_budget.py).
+
+`--fixed-schedule` restores the D53 stagger: each job's `not_before` is a slot sized for
+the parent job's credits plus its step-10 follow-ons (OPENALEX_CREDITS_PER_JOB), times
+RETRY_HEADROOM, because an automatic retry (4 then 16 minutes later) spends the budget
+again, against DEFAULT_BUDGET_SHARE of the day. A staggered `generate_profile` parent
+carries `followon_not_before` in its payload; step 10 gives its follow-ons that
+not_before. Every job carries `bulk_tag`, so `--resume` re-enqueues only this run's dead
+jobs and `--wait` counts only this run's jobs.
 
   $DC run --rm blackbird-app python scripts/_bulk_enqueue.py --type enrich_grants          # preview
   $DC run --rm blackbird-app python scripts/_bulk_enqueue.py --type enrich_grants --apply --wait
   $DC run --rm blackbird-app python scripts/_bulk_enqueue.py --type enrich_grants --tag <tag> --resume --apply --wait
+  $DC run --rm blackbird-app python scripts/_bulk_enqueue.py --type industry_evidence --missing-scorer-version 2.0.0 --apply   # only PIs not yet scored at 2.0.0
+  $DC run --rm blackbird-app python scripts/_bulk_enqueue.py --type industry_evidence --partial 2.0.0 --apply   # only PIs whose latest 2.0.0 row lost a source to a transient failure
 """
 from __future__ import annotations
 
@@ -32,8 +39,9 @@ from sqlalchemy import func, or_, select, union  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from src.database import get_session_factory  # noqa: E402
-from src.models import AgentRegistry, Job, User  # noqa: E402
+from src.models import AgentRegistry, Job, PiIndustryScore, User  # noqa: E402
 from src.models.job import BULK_PRIORITY  # noqa: E402
+from src.services.industry_evidence import NOT_REFRESHED  # noqa: E402
 from src.services.job_queue import insert_job_if_absent  # noqa: E402
 
 OPENALEX_DAILY_CREDITS = 1000
@@ -43,7 +51,7 @@ RETRY_HEADROOM = 2
 #: call sites, not measurements.
 OPENALEX_CREDITS_PER_JOB: dict[str, int] = {
     "enrich_grants": 0,         # RePORTER + ORCID only (src/services/grant_enrichment.py)
-    "industry_evidence": 8,     # openalex_industry: /works per 50 PMIDs, /funders, /institutions
+    "industry_evidence": 8,     # openalex_industry: /works per 100 PMIDs, /funders, /institutions
     "company_discovery": 0,
     "generate_profile": 13,     # corpus fetch_works_by_orcid (<= 5 pages) + its industry_evidence
 }
@@ -70,6 +78,37 @@ async def pi_population(db: AsyncSession) -> list[tuple[uuid.UUID, str, str]]:
         .order_by(User.name, User.id)
     )).all()
     return [(r.id, r.orcid, r.name) for r in rows]
+
+
+async def users_with_scorer_version(db: AsyncSession, version: str) -> set[uuid.UUID]:
+    """Users with a `version` industry score row that is not a veto's not-refreshed row
+    (src/services/industry_evidence.py NOT_REFRESHED): the PIs `--missing-scorer-version`
+    leaves out, because a real `industry_evidence` run already scored them at `version`."""
+    rows = (await db.execute(
+        select(PiIndustryScore.user_id, PiIndustryScore.coverage)
+        .where(PiIndustryScore.scorer_version == version)
+    )).all()
+    return {uid for uid, coverage in rows if NOT_REFRESHED not in (coverage or {}).values()}
+
+
+#: Coverage reasons a re-run cannot fix (a missing key or name), which `--partial` ignores.
+PERMANENT_UNAVAILABLE = ("unavailable:no_api_key", "unavailable:no_usable_name")
+
+
+async def users_with_transient_gaps(db: AsyncSession, version: str) -> set[uuid.UUID]:
+    """Users whose latest `version` score row has a source "unavailable" for a reason a
+    re-run can fix (an HTTP status, a transport error, not refreshed), i.e. not
+    PERMANENT_UNAVAILABLE: the PIs `--partial` re-runs."""
+    rows = (await db.execute(
+        select(PiIndustryScore.user_id, PiIndustryScore.coverage)
+        .where(PiIndustryScore.scorer_version == version)
+        .order_by(PiIndustryScore.user_id, PiIndustryScore.computed_at.desc(),
+                  PiIndustryScore.id.desc())
+        .distinct(PiIndustryScore.user_id)  # DISTINCT ON (user_id): the latest row
+    )).all()
+    return {uid for uid, coverage in rows
+            if any(str(v).startswith("unavailable:") and v not in PERMANENT_UNAVAILABLE
+                   for v in (coverage or {}).values())}
 
 
 def plan_schedule(user_ids: Sequence[uuid.UUID], *, job_type: str, start: datetime,
@@ -141,7 +180,8 @@ async def resume_dead(db: AsyncSession, *, job_type: str, tag: str, credits_per_
                       user_ids: Sequence[uuid.UUID] | None = None) -> list[uuid.UUID]:
     """Re-enqueue every user whose newest job of this type and tag is dead (skipping users
     with an active one), on a fresh schedule starting now: the same stagger as the first
-    pass (D53). ``user_ids`` limits it to those users (``--orcid``); None means every
+    pass (D53). ``user_ids`` limits it to those users (``--orcid``,
+    ``--missing-scorer-version``); None means every
     user with such a dead job. Returns the new ids. Commits."""
     dead = await _resumable(db, job_type, tag, user_ids)
     slots = plan_schedule([uid for uid, _ in dead], job_type=job_type, start=datetime.now(UTC),
@@ -208,6 +248,15 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
                    help="OpenAlex credits per job (default from OPENALEX_CREDITS_PER_JOB)")
     p.add_argument("--daily-credits", type=float,
                    default=OPENALEX_DAILY_CREDITS * DEFAULT_BUDGET_SHARE)
+    p.add_argument("--fixed-schedule", action="store_true",
+                   help="stagger not_before by --credits-per-job/--daily-credits (D53) "
+                        "instead of the worker's adaptive pacing (D67)")
+    p.add_argument("--missing-scorer-version", metavar="VERSION",
+                   help="only PIs with no industry score row at VERSION "
+                        "(the catch-up after a SCORER_VERSION bump)")
+    p.add_argument("--partial", metavar="VERSION",
+                   help="only PIs whose latest VERSION score row lost a source to a failure "
+                        "a re-run can fix (after the regeneration's 429s or outages)")
     p.add_argument("--apply", action="store_true", help="write jobs (default: preview)")
     p.add_argument("--resume", action="store_true", help="re-enqueue this tag's dead jobs")
     p.add_argument("--wait", action="store_true", help="block until the jobs drain")
@@ -215,8 +264,14 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p.add_argument("--since", type=datetime.fromisoformat,
                    help="ISO time --wait counts jobs from (default: this invocation's start)")
     a = p.parse_args(argv)
+    if a.credits_per_job and not a.fixed_schedule:
+        p.error("--credits-per-job only sizes --fixed-schedule slots; the worker's adaptive "
+                "gate uses src/services/openalex_budget.py JOB_CREDITS")
     if a.credits_per_job is None:
         a.credits_per_job = OPENALEX_CREDITS_PER_JOB[a.type]
+    if not a.fixed_schedule:
+        # Adaptive pacing: plan_schedule staggers nothing for a zero-credit job.
+        a.credits_per_job = 0
     if a.tag is None:
         a.tag = f"{a.type}-{datetime.now(UTC).date().isoformat()}"
     if a.since is not None and a.since.tzinfo is None:
@@ -261,11 +316,20 @@ async def _main(argv: Sequence[str] | None = None) -> None:
         population = await pi_population(db)
         if a.orcid:
             population = [p for p in population if p[1] == a.orcid]
+        if a.missing_scorer_version:
+            scored = await users_with_scorer_version(db, a.missing_scorer_version)
+            population = [p for p in population if p[0] not in scored]
+            print(f"{len(population)} PI(s) without a {a.missing_scorer_version} score row")
+        if a.partial:
+            gaps = await users_with_transient_gaps(db, a.partial)
+            population = [p for p in population if p[0] in gaps]
+            print(f"{len(population)} PI(s) with a re-runnable gap in their {a.partial} row")
         if not a.apply:
             await _preview(db, a, population, datetime.now(UTC))
             return
         if a.resume:
-            scope = [uid for uid, _, _ in population] if a.orcid else None
+            scope = ([uid for uid, _, _ in population]
+                     if (a.orcid or a.missing_scorer_version or a.partial) else None)
             created = await resume_dead(db, job_type=a.type, tag=a.tag,
                                         credits_per_job=a.credits_per_job,
                                         daily_credits=a.daily_credits, user_ids=scope)

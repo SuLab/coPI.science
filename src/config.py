@@ -333,6 +333,11 @@ class Settings(BaseSettings):
     # src/services/llm_pricing.py (claude-opus-5-5 is). Opus 5.5 cannot disable
     # thinking, so the caller passes `thinking` explicitly.
     llm_coi_model: str = "claude-opus-5-5"
+    # Company discovery's COI extraction ceiling (spec docs/specs/2026-10-05-pi-profile-
+    # remediation-design.md §6.2, D36): dollars per rolling 24 h, counted from
+    # company_discovery_usage (a call in flight at its reservation, a settled one at its
+    # priced usage). At the ceiling the job defers itself until the budget frees.
+    company_discovery_daily_usd_limit: float = 20.0
     # Kill switch. `.env` is read when a container is CREATED, so changing it needs
     # `$DC up -d --force-recreate blackbird-app`, not a restart.
     assessment_chat_enabled: bool = True
@@ -580,7 +585,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _guard_assessment_chat_settings(self) -> "Settings":
-        """Fall back to the default for an assessment-chat limit that cannot work.
+        """Fall back to the default for an assessment-chat or company-discovery limit that cannot work.
 
         Same warn-and-fall-back treatment as ``_guard_rate_limiter_settings``: a typo'd
         ``.env`` value should cost a WARNING, not the feature. A non-positive cap,
@@ -600,6 +605,7 @@ class Settings(BaseSettings):
             "assessment_chat_max_question_chars",
             "assessment_chat_max_turns",
             "assessment_chat_suggestions_daily_usd_limit",
+            "company_discovery_daily_usd_limit",
         ):
             value = getattr(self, name)
             if not math.isfinite(value):

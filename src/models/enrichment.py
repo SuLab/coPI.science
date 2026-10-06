@@ -1,7 +1,9 @@
-"""External-enrichment tables: NIH RePORTER grants, industry evidence, industry score.
+"""External-enrichment tables: NIH RePORTER grants and ORCID fundings, industry evidence,
+industry score.
 
-The score tables are deliberately NOT imported by profile_export, thread_guidance,
-tools.py or simulation.py — tests/unit/test_enrichment_isolation.py enforces it.
+Nothing that builds profile text, a prompt, a tool result, the assessment chat or the
+review bot may reach the two industry tables, directly or through a helper module:
+tests/unit/test_enrichment_isolation.py walks the imports transitively.
 """
 import uuid
 from datetime import datetime
@@ -99,16 +101,29 @@ class PiIndustryScore(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    score: Mapped[float | None] = mapped_column(Float, nullable=True)          # 0..100, NULL = unscored
+    #: Written by SCORER_VERSION 1.0.0 rows only. From 2.0.0 the percentile and the reason
+    #: are computed when a page renders (src/services/directory.py `industry_views`; spec
+    #: 2026-10-05 §6.2, D13). Kept, never dropped (D34).
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
     raw_sum: Mapped[float | None] = mapped_column(Float, nullable=True)
-    reason: Mapped[str | None] = mapped_column(String(40), nullable=True)      # no_tenure_start | no_evidence | cohort_too_small | ok
+    #: Written by 1.0.0 rows only (see `score`).
+    reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
     components: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    #: Never written (D34).
     field_percentile: Mapped[float | None] = mapped_column(Float, nullable=True)
+    #: Written by 1.0.0 rows only (D34, E-14).
     primary_field: Mapped[str | None] = mapped_column(String(120), nullable=True)
     tenure_start_used: Mapped[int | None] = mapped_column(Integer, nullable=True)
     evidence_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     scorer_version: Mapped[str] = mapped_column(String(20), nullable=False)
+    #: Set to clock_timestamp() by the writer (src/services/industry_evidence.py), so a long
+    #: job's row never sorts before a quicker one's; the server default is now().
     computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    #: Per evidence source, what the run that wrote this row covered (migration 0061, spec
+    #: 2026-10-05 §6.2): "ok", "truncated" (paging stopped at its cap) or
+    #: "unavailable:<reason>". NULL on rows written before 0061. The manager pages show
+    #: "partial" when any value is not "ok".
+    coverage: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
 
 
 class PiOrcidFunding(Base):

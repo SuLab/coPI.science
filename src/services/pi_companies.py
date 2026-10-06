@@ -2,7 +2,8 @@
 
 A row is a company the PI founded, co-founded, advises or sits on the board of
 (src/models/pi_company.py). Managers add rows by hand, which are confirmed at once (O9),
-and confirm or reject the rows company discovery suggests. Only ``confirmed`` rows leave
+and confirm or reject the rows company discovery suggests, and a deleted confirmed row is
+kept as rejected; adding a rejected name by hand revives it. Only ``confirmed`` rows leave
 the table: ``export_companies_file`` writes them to ``profiles/private/companies/<agent_id>.md``,
 which the hub's ``retrieve_profile`` appends fenced as ``staff_company_record``
 (src/agent/tools.py).
@@ -261,12 +262,7 @@ def _check_funding(funding_usd: int | None, funding_as_of: date | None) -> None:
 def _duplicate_message(row: PiCompany) -> str:
     if row.status == "confirmed":
         return f"{row.company_name} is already on this PI's confirmed list."
-    if row.status == "suggested":
-        return f"{row.company_name} is already suggested for this PI: confirm it under Suggested."
-    return (
-        f"{row.company_name} was rejected for this PI earlier. Rejected names are kept so "
-        "discovery never suggests them again, so it cannot be added here."
-    )
+    return f"{row.company_name} is already suggested for this PI: confirm it under Suggested."
 
 
 def _text(value: object) -> str | None:
@@ -421,8 +417,9 @@ async def add_company(
     created_by_user_id: uuid.UUID | None,
 ) -> PiCompany:
     """Add a manual entry, confirmed at creation (O9) and so reviewed by its creator at
-    that moment. A name whose normalized form the PI already has, in any status, is
-    refused with a message naming the existing row. Commits, then re-exports."""
+    that moment. A name whose normalized form the PI already has as confirmed or suggested
+    is refused with a message naming the existing row; a rejected one is revived as this
+    manual entry (a deleted company added back). Commits, then re-exports."""
     name, normalized = _clean_name(company_name)
     role = _check_role(pi_role)
     url = _check_url(source_url)
@@ -431,12 +428,25 @@ async def add_company(
         await db.execute(
             select(PiCompany).where(
                 PiCompany.user_id == user_id, PiCompany.normalized_name == normalized
-            )
+            ).execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
+    now = datetime.now(UTC)
+    if existing is not None and existing.status == "rejected":
+        # A deleted company, or a suggestion staff rejected, added back by hand: the row
+        # becomes this manual, confirmed entry (spec 2026-10-05 §6.2, D37). Nothing else
+        # writes a rejected row (confirm, reject and delete refuse it), so no lock is needed.
+        existing.company_name, existing.pi_role = name, role
+        existing.funding_usd, existing.funding_as_of = funding_usd, funding_as_of
+        existing.source_url, existing.funding_source_url = url, None
+        existing.status, existing.origin, existing.evidence = "confirmed", "manual", None
+        existing.created_by_user_id = created_by_user_id
+        existing.reviewed_by_user_id, existing.reviewed_at = created_by_user_id, now
+        await db.commit()
+        await export_companies_file(db, user_id)
+        return existing
     if existing is not None:
         raise CompanyValidationError(_duplicate_message(existing))
-    now = datetime.now(UTC)
     row = PiCompany(
         user_id=user_id, company_name=name, normalized_name=normalized, pi_role=role,
         funding_usd=funding_usd, funding_as_of=funding_as_of, source_url=url,
@@ -456,18 +466,26 @@ async def add_company(
     return row
 
 
-async def delete_company(db: AsyncSession, *, user_id: uuid.UUID, company_id: uuid.UUID) -> None:
-    """Delete one confirmed row. A suggestion is rejected instead, and a rejected row is
-    kept, so discovery never offers either name again; both are refused here. Commits,
-    then re-exports (the last confirmed row's delete removes the file)."""
+async def delete_company(
+    db: AsyncSession, *, user_id: uuid.UUID, company_id: uuid.UUID, reviewer_id: uuid.UUID | None,
+) -> PiCompany:
+    """Remove a confirmed row from the PI's companies by recording it as rejected (spec
+    2026-10-05 §6.2, D37): it leaves the hub's file at once and, like a rejected
+    suggestion, stays in the table so discovery never offers the name again. A suggestion
+    is rejected instead, and a rejected row is already off the list; both are refused here.
+    Recorded as reviewed by ``reviewer_id`` now. Commits, then re-exports (removing the last
+    confirmed row removes the file)."""
     row = await _load_row(db, user_id, company_id)
     if row.status != "confirmed":
         raise CompanyValidationError(
             "Only confirmed entries can be deleted; reject a suggestion instead."
         )
-    await db.delete(row)
+    row.status = "rejected"
+    row.reviewed_by_user_id = reviewer_id
+    row.reviewed_at = datetime.now(UTC)
     await db.commit()
     await export_companies_file(db, user_id)
+    return row
 
 
 async def confirm_company(

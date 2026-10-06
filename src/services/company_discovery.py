@@ -21,7 +21,9 @@ the handler returns, and writes the job's status in separate sessions. The job r
 what it needs (the user, the publication PMIDs; later the names already listed) and
 commits each read before the network work that follows it, so no snapshot or lock is
 held while PubMed, Claude, Wikidata or SEC answer; those commits persist nothing,
-because nothing has been written yet. Every network lookup (PubMed, the COI
+because nothing has been written yet. The COI budget's usage and ledger rows are the
+exception: they commit in short transactions of their own, on separate sessions
+(`company_discovery_budget`), while the extraction calls run. Every network lookup (PubMed, the COI
 extraction calls, Wikidata, then SEC Form D for each new candidate) runs before the
 first insert: an uncommitted `pi_companies` row would otherwise hold its
 `(user_id, normalized_name)` key through minutes of SEC requests and block a manager's
@@ -32,7 +34,13 @@ Bounds per run: only records that pass the deterministic gate
 most `coi_llm.MAX_COI_CALLS_PER_PI` of them (newest first), at most `COI_CONCURRENCY`
 calls in flight; at most `MAX_NEW_CANDIDATES` new names get a Form D lookup and a row.
 The outcome line reports the extraction's token spend ("coi: N calls, I in / O out
-tokens").
+tokens"). Each send is reserved against the COI budget first and settled with its ledger
+row after it (`company_discovery_budget`): a statement already settled as "ok" or
+"skipped" under the PI's current name forms is not sent again and its stored claims are
+merged back in, so a candidate `capped_new` cut on an earlier run returns; at the ceiling
+the job defers itself (`job_queue.JobDeferred`) once the calls in flight have settled,
+writing no suggestion. Discovery is requested after every successful generation
+(`request_company_discovery`, spec 2026-10-05 D37).
 
 Upstream text is untrusted: every candidate name passes the same cleaner a manual entry
 does (`pi_companies._clean_name`), and a refused one is skipped with a note.
@@ -48,6 +56,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select
@@ -56,7 +65,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import get_settings
 from src.models import Job, PiCompany, Publication, User
+from src.models.pi_company import COI_MAX_ATTEMPTS
 from src.services import job_progress, pubmed
+from src.services.company_discovery_budget import (
+    BudgetExhausted,
+    CallTooLarge,
+    CoiBudget,
+    LedgerKey,
+    budget_for,
+    ledger_key,
+)
 from src.services.company_sources import (
     PiName,
     coi_founders,
@@ -65,7 +83,7 @@ from src.services.company_sources import (
     sec_form_d,
     wikidata,
 )
-from src.services.job_queue import insert_job_if_absent
+from src.services.job_queue import JobDeferred, insert_job_if_absent, request_job
 from src.services.pi_companies import (
     _MAX_FUNDING_USD,
     CompanyValidationError,
@@ -119,21 +137,21 @@ async def enqueue_company_discovery(
     )
 
 
-async def enqueue_first_company_discovery(
+async def request_company_discovery(
     db: AsyncSession, user_id: uuid.UUID, *, priority: int,
     not_before: datetime | None = None,
 ) -> uuid.UUID | None:
-    """The profile pipeline's step-10 enqueue: only when the PI has NO
-    `company_discovery` row in any status, so only the first successful generation
-    queues it and regenerations and refreshes do not (spec §7.5 Job). `not_before` is
-    passed to `enqueue_company_discovery`."""
-    seen = await db.scalar(
-        select(Job.id).where(Job.user_id == user_id, Job.type == COMPANY_DISCOVERY).limit(1)
-    )
-    if seen is not None:
+    """The profile pipeline's step-10 request (spec 2026-10-05 §6.2, D37): make sure a
+    discovery run follows this generation (`job_queue.request_job`): a new job (its id), or
+    the pending one kept and row-locked until the caller commits, or the processing one
+    flagged for a rerun (None). None also when the user does not exist. Adds to the
+    caller's transaction; the caller commits."""
+    orcid = await db.scalar(select(User.orcid).where(User.id == user_id))
+    if orcid is None:
         return None
-    return await enqueue_company_discovery(
-        db, user_id, priority=priority, not_before=not_before
+    return await request_job(
+        db, type=COMPANY_DISCOVERY, user_id=user_id,
+        payload={"user_id": str(user_id), "orcid": orcid}, priority=priority, not_before=not_before,
     )
 
 
@@ -208,7 +226,7 @@ async def _publication_years(db: AsyncSession, user_id: uuid.UUID) -> dict[str, 
 
 async def _coi_claims(
     user_id: uuid.UUID, year_by_pmid: dict[str, int | None], name: PiName | None,
-    notes: list[str],
+    notes: list[str], budget: CoiBudget,
 ) -> list[coi_founders.FounderClaim]:
     """Founder claims from the PubMed records of `year_by_pmid`'s PMIDs. Network only:
     the caller has already read the PMIDs and ended its transaction."""
@@ -218,7 +236,7 @@ async def _coi_claims(
         notes.append("pubmed: no usable PI name")
         return []
     records = await _fetch_coi_records(user_id, list(year_by_pmid), notes)
-    return await _extract_claims(user_id, records, name, year_by_pmid, notes)
+    return await _extract_claims(user_id, records, name, year_by_pmid, notes, budget)
 
 
 def _gated(record: dict, name: PiName) -> bool:
@@ -228,17 +246,106 @@ def _gated(record: dict, name: PiName) -> bool:
     return coi_founders.mentions_founding(statement) and coi_founders.locate_pi(record, name) is not None
 
 
+@dataclass
+class _Stop:
+    """Set when the budget refused a reservation: no further record is sent this run."""
+
+    refused: bool = False
+    #: The largest reservation refused (`BudgetExhausted.amount`), for `wake_time`.
+    needed: Decimal = Decimal(0)
+
+
 async def _extract_one(
-    user_id: uuid.UUID, record: dict, name: PiName, slots: asyncio.Semaphore
-) -> coi_llm.CoiOutcome:
-    """One record's extraction under `slots`; a raise becomes "unavailable", so one odd
-    record never costs the others (or cancels them under `gather`)."""
+    user_id: uuid.UUID, record: dict, key: LedgerKey, name: PiName,
+    slots: asyncio.Semaphore, budget: CoiBudget, stop: _Stop,
+) -> coi_llm.CoiOutcome | None:
+    """One record's extraction under `slots`. The reservation comes first and outside the
+    catch-all, so a refusal stops the remaining records (None) and is never turned into
+    "unavailable". A raise from the extraction itself becomes "unavailable", so one odd
+    record never costs the others. The settle (usage and ledger row) commits before this
+    returns, so a paid result is kept whatever the job does next. A cancellation (a
+    sibling's settle failed, or the job is stopping) still settles: mid-call as
+    "unavailable" at the reservation, since the request may already be billed; while
+    waiting to settle, with the real outcome. A record whose reservation would exceed the
+    whole ceiling is not sent ("unavailable", reason "too_large")."""
     async with slots:
+        if stop.refused:
+            return None
+        reserving = asyncio.ensure_future(
+            budget.reserve(key, prompt_chars=coi_llm.prompt_chars(record, name)))
         try:
-            return await coi_llm.extract_founder_claims(record, name)
+            reservation = await asyncio.shield(reserving)
+        except asyncio.CancelledError:
+            # A reservation committed under the cancellation is settled at $0 (no call).
+            await asyncio.wait([reserving])
+            if not reserving.cancelled() and reserving.exception() is None:
+                await _settle_after_cancel(
+                    budget, reserving.result(),
+                    coi_llm.CoiOutcome("unavailable", [], reason="cancelled", entries=[]),
+                    record.get("pmid"))
+            raise
+        except BudgetExhausted as exc:
+            stop.refused = True
+            stop.needed = max(stop.needed, exc.amount)
+            return None
+        except CallTooLarge:
+            logger.warning("company_discovery %s: PMID %s is too large to send under the ceiling",
+                           user_id, record.get("pmid"))
+            return coi_llm.CoiOutcome("unavailable", [], reason="too_large", entries=[])
+        try:
+            outcome = await coi_llm.extract_founder_claims(record, name)
+        except asyncio.CancelledError:
+            await _settle_after_cancel(
+                budget, reservation, coi_llm.CoiOutcome("unavailable", [], reason="cancelled"),
+                record.get("pmid"))
+            raise
         except Exception:
             logger.exception("company_discovery %s: COI extraction failed for PMID %s", user_id, record.get("pmid"))
-            return coi_llm.CoiOutcome("unavailable", [], reason="error")
+            outcome = coi_llm.CoiOutcome("unavailable", [], reason="error")
+        await _settle_through_cancel(budget, reservation, outcome)
+        return outcome
+
+
+async def _settle_after_cancel(budget: CoiBudget, reservation, outcome, pmid) -> None:
+    """Settle under a cancellation already raised: shielded, and a failure only logged, so
+    the caller re-raises the cancellation, not a database error."""
+    try:
+        await asyncio.shield(budget.settle(reservation, outcome))
+    except Exception:
+        logger.exception("company_discovery: settling PMID %s after a cancellation failed", pmid)
+
+
+async def _settle_through_cancel(budget: CoiBudget, reservation, outcome) -> None:
+    """Settle with the real outcome even if this task is cancelled while it waits on the
+    budget's lock (the call is already billed); a cancellation is re-raised once settled."""
+    task = asyncio.ensure_future(budget.settle(reservation, outcome))
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await asyncio.wait([task])
+        raise
+
+
+async def _send(
+    user_id: uuid.UUID, to_send: list[tuple[dict, LedgerKey]], name: PiName, budget: CoiBudget,
+) -> dict[LedgerKey, coi_llm.CoiOutcome]:
+    """Run the extractions, COI_CONCURRENCY at a time. When the budget refused a
+    reservation, every call already sent finishes and settles, then JobDeferred is raised
+    (spec §6.2) with `budget.wake_time()`, read after those settles: the worker returns the
+    job to pending without counting the attempt."""
+    slots = asyncio.Semaphore(COI_CONCURRENCY)
+    stop = _Stop()
+    try:
+        async with asyncio.TaskGroup() as group:
+            tasks = [group.create_task(_extract_one(user_id, record, key, name, slots, budget, stop))
+                     for record, key in to_send]
+    except ExceptionGroup as failed:  # a settle's database error: the other tasks were cancelled
+        raise failed.exceptions[0] from None
+    if stop.refused:
+        raise JobDeferred(await budget.wake_time(stop.needed),
+                          "company discovery: the daily COI extraction budget is spent")
+    return {key: outcome for (_, key), task in zip(to_send, tasks, strict=True)
+            if (outcome := task.result()) is not None}
 
 
 def spend_note(outcomes: list[coi_llm.CoiOutcome]) -> str | None:
@@ -259,15 +366,16 @@ def spend_note(outcomes: list[coi_llm.CoiOutcome]) -> str | None:
 
 async def _extract_claims(
     user_id: uuid.UUID, records: list[dict], name: PiName,
-    year_by_pmid: dict[str, int | None], notes: list[str],
+    year_by_pmid: dict[str, int | None], notes: list[str], budget: CoiBudget,
 ) -> list[coi_founders.FounderClaim]:
-    """Extraction over the records that pass the gate (`_gated`), newest first: the
-    first `coi_llm.MAX_COI_CALLS_PER_PI` of them are sent, `COI_CONCURRENCY` at a
-    time, and "coi: capped at N disclosures" is noted only when gated records were left
-    unsent. A record that fails the gate costs nothing and takes no slot under the cap.
-    An "unavailable" outcome, or a raise, costs that record alone ("coi: N of M
-    disclosures unavailable", M = records sent and not skipped). Claims keep the
-    records' newest-first order whatever order the calls finish in."""
+    """Extraction over the records that pass the gate (`_gated`), newest first. A record
+    whose ledger row is terminal under the current name forms (`budget.terminal`) is not
+    sent: its stored claims are used. Of the rest, the first `coi_llm.MAX_COI_CALLS_PER_PI`
+    are sent, `COI_CONCURRENCY` at a time ("coi: capped at N disclosures" when some were
+    left unsent); none when the model is unpriced. A record that fails the gate costs
+    nothing and takes no slot. An "unavailable" outcome, or a raise, costs that record
+    alone ("coi: N of M disclosures unavailable", M = records sent and not skipped). Claims
+    keep the records' newest-first order whatever order the calls finish in."""
     def newest(record: dict) -> tuple[int, int]:
         pmid = str(record.get("pmid") or "")
         year = year_by_pmid.get(pmid) or record.get("year") or 0
@@ -275,26 +383,43 @@ async def _extract_claims(
 
     cap = coi_llm.MAX_COI_CALLS_PER_PI
     gated = [r for r in sorted(records, key=newest, reverse=True) if _gated(r, name)]
-    if len(gated) > cap:
+    keyed = [(r, key) for r in gated if (key := ledger_key(r, name)) is not None]
+    stored = await budget.terminal([key for _, key in keyed])
+    unsent = [(r, key) for r, key in keyed if key not in stored]
+    if len(unsent) > cap:
         notes.append(f"coi: capped at {cap} disclosures")
-    slots = asyncio.Semaphore(COI_CONCURRENCY)
-    outcomes = list(await asyncio.gather(*(_extract_one(user_id, r, name, slots) for r in gated[:cap])))
+    to_send = unsent[:cap]
+    if to_send and not budget.priced:
+        notes.append(f"coi: model {budget.model} is not priced; nothing sent")
+        to_send = []
+    outcomes = await _send(user_id, to_send, name, budget)
     claims: list[coi_founders.FounderClaim] = []
     sent = unavailable = 0
-    for outcome in outcomes:
-        if outcome.status == "skipped":  # the extractor's own gate disagreed: no call
-            continue
-        sent += 1
-        if outcome.status != "ok":
-            unavailable += 1
-            continue
-        for claim in outcome.claims:
+    exhausted = 0
+    for _record, key in keyed:
+        if key in stored:
+            found = stored[key]
+            if found is None:  # not retried after COI_MAX_ATTEMPTS billed failures
+                exhausted += 1
+                continue
+        else:
+            outcome = outcomes.get(key)
+            if outcome is None or outcome.status == "skipped":
+                continue
+            sent += 1
+            if outcome.status != "ok":
+                unavailable += 1
+                continue
+            found = outcome.claims
+        for claim in found:
             if claim.year is None:
                 claim = dataclasses.replace(claim, year=year_by_pmid.get(claim.pmid))
             claims.append(claim)
     if unavailable:
         notes.append(f"coi: {unavailable} of {sent} disclosures unavailable")
-    spend = spend_note(outcomes)
+    if exhausted:
+        notes.append(f"coi: {exhausted} disclosures not retried after {COI_MAX_ATTEMPTS} failed extractions")
+    spend = spend_note(list(outcomes.values()))
     if spend:
         notes.append(spend)
     return claims
@@ -466,12 +591,13 @@ async def execute_company_discovery(ctx: JobContext, db: AsyncSession) -> None:
     name = pi_name(display_name)
     sec_user_agent = get_settings().sec_user_agent
     notes: list[str] = []
+    budget = budget_for(db, user_id, slots=COI_CONCURRENCY)
     year_by_pmid = await _publication_years(db, user_id)
     # Nothing is written yet: end the read transaction before PubMed and Claude run
     # (module docstring, "Transactions").
     await db.commit()
 
-    claims = valid_names(await _coi_claims(user_id, year_by_pmid, name, notes), notes)
+    claims = valid_names(await _coi_claims(user_id, year_by_pmid, name, notes, budget), notes)
     companies = valid_names(await _wikidata_companies(user_id, orcid, sec_user_agent, notes), notes)
     candidates = merge_candidates(claims, companies)
 

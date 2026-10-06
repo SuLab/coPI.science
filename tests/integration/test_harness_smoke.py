@@ -87,7 +87,9 @@ async def test_container_is_migrated(engine):
         #      assessment_chat_usage.question_origin (the chat's opening questions)
         # 0060 pi_grant_identity / pi_orcid_fundings, pi_grants.vetoed_by_user_id, jobs rerun
         #      columns, users.name_sanitized_at (grants remediation)
-        assert v == "0060"
+        # 0061 pi_industry_scores.coverage, company_discovery_usage /
+        #      company_discovery_coi_ledger (industry remediation)
+        assert v == "0061"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

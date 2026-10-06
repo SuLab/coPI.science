@@ -1,5 +1,5 @@
-"""NonRetryableJobError, JobDeferred, JobContext.after_commit and the persona-sweep hook
-(spec 2026-10-05 §4.2, §4.3, D54)."""
+"""NonRetryableJobError, JobDeferred, JobContext.after_commit, the persona-sweep hook and
+the OpenAlex budget gate (spec 2026-10-05 §4.2, §4.3, D54, D67)."""
 import uuid
 from datetime import UTC, datetime
 
@@ -8,6 +8,8 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.models import Job, User
+from src.models.job import BULK_PRIORITY, INTERACTIVE_PRIORITY
+from src.services import openalex_budget
 from src.services.job_queue import JobDeferred, NonRetryableJobError
 from src.worker import main as worker
 from src.worker.main import JobContext
@@ -22,11 +24,11 @@ def factory(engine):
     return async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
-async def _seed(factory, attempts=1):
+async def _seed(factory, attempts=1, type="enrich_grants", priority=None):
     async with factory() as s:
         user = await factories.make_user(s, name="Infra PI")
-        job = Job(type="enrich_grants", user_id=user.id, payload={"user_id": str(user.id)},
-                  status="processing", attempts=attempts)
+        job = Job(type=type, user_id=user.id, payload={"user_id": str(user.id)},
+                  status="processing", attempts=attempts, priority=priority)
         s.add(job)
         await s.flush()
         await s.commit()
@@ -73,6 +75,47 @@ async def test_deferral_returns_to_pending_without_counting_the_attempt(factory,
         assert (job.status, job.attempts, job.not_before) == ("pending", 0, LATER)
         async with factory() as s:
             assert (await s.execute(select(User.name).where(User.id == user_id))).scalar_one() == "Infra PI"
+    finally:
+        await _drop(factory, user_id)
+
+
+async def test_a_bulk_openalex_job_defers_to_the_meter_reset_before_its_handler_runs(factory, monkeypatch):
+    user_id, job_id = await _seed(factory, type="generate_profile", priority=BULK_PRIORITY)
+    ran = []
+
+    async def low():
+        return openalex_budget.Meter(1000, 50, 3600)
+
+    async def handler(ctx, db):
+        ran.append(ctx.id)
+
+    monkeypatch.setattr(openalex_budget, "read_meter", low)
+    monkeypatch.setitem(worker.JOB_HANDLERS, "generate_profile", handler)
+    try:
+        await worker.process_job(job_id, "generate_profile", 1, 3, factory)
+        job = await _job(factory, job_id)
+        assert ran == [] and (job.status, job.attempts) == ("pending", 0)
+        assert job.not_before > datetime.now(UTC) and "OpenAlex free budget" in job.last_error
+    finally:
+        await _drop(factory, user_id)
+
+
+@pytest.mark.parametrize("priority", [None, INTERACTIVE_PRIORITY])
+async def test_a_non_bulk_job_never_reads_the_meter(factory, monkeypatch, priority):
+    user_id, job_id = await _seed(factory, type="generate_profile", priority=priority)
+    ran = []
+
+    async def never():
+        raise AssertionError("only BULK jobs read the meter")
+
+    async def handler(ctx, db):
+        ran.append(ctx.id)
+
+    monkeypatch.setattr(openalex_budget, "read_meter", never)
+    monkeypatch.setitem(worker.JOB_HANDLERS, "generate_profile", handler)
+    try:
+        await worker.process_job(job_id, "generate_profile", 1, 3, factory)
+        assert ran == [job_id] and (await _job(factory, job_id)).status == "completed"
     finally:
         await _drop(factory, user_id)
 

@@ -1,13 +1,14 @@
 """src/services/pi_companies.py against the database (spec 2026-10-02 §7.2, §7.5): manual
 entries are confirmed at creation, every write validates, a normalized name is unique per
-PI in every status, and confirm and reject act only on suggestions."""
+PI in every status (a manual add revives a rejected one), confirm and reject act only on
+suggestions, and a delete keeps the row as rejected (spec 2026-10-05 §6.2, D37)."""
 
 import uuid
 from datetime import date
 
 import pytest
 
-from src.models import USER_ROLE_MANAGER
+from src.models import USER_ROLE_MANAGER, PiCompany
 from src.services.pi_companies import (
     CompanyNotFoundError,
     CompanyValidationError,
@@ -84,9 +85,10 @@ async def test_a_bad_entry_is_refused_and_nothing_is_written(db_session, overrid
 @pytest.mark.parametrize("status,message", [
     ("confirmed", "already on this PI"),
     ("suggested", "already suggested for this PI"),
-    ("rejected", "was rejected for this PI earlier"),
 ])
-async def test_a_name_the_pi_already_has_is_refused_in_every_status(db_session, status, message):
+async def test_a_name_the_pi_already_has_is_refused_while_confirmed_or_suggested(
+    db_session, status, message
+):
     pi, _agent, manager = await _pi_agent_manager(db_session)
     await seed_company(db_session, pi, company_name="Delfi Diagnostics, Inc.", status=status)
     with pytest.raises(CompanyValidationError, match=message) as err:
@@ -95,6 +97,21 @@ async def test_a_name_the_pi_already_has_is_refused_in_every_status(db_session, 
             **{**_GOOD, "company_name": "DELFI Diagnostics"},
         )
     assert "Delfi Diagnostics, Inc." in str(err.value)
+    assert len(await list_companies(db_session, pi.id)) == 1
+
+
+async def test_a_manual_add_revives_a_rejected_name(db_session):
+    pi, _agent, manager = await _pi_agent_manager(db_session)
+    rejected = await seed_company(
+        db_session, pi, company_name="Delfi Diagnostics, Inc.", status="rejected"
+    )
+    row = await add_company(db_session, user_id=pi.id, created_by_user_id=manager.id,
+                            **{**_GOOD, "company_name": "DELFI Diagnostics"})
+    assert row.id == rejected.id
+    assert (row.status, row.origin, row.company_name) == (
+        "confirmed", "manual", "DELFI Diagnostics"
+    )
+    assert row.evidence is None and row.reviewed_by_user_id == manager.id == row.created_by_user_id
     assert len(await list_companies(db_session, pi.id)) == 1
 
 
@@ -219,16 +236,26 @@ async def test_reject_keeps_the_row_so_the_name_stays_taken(db_session):
     assert [r.id for r in await list_companies(db_session, pi.id)] == [row.id]
 
 
-async def test_delete_removes_a_confirmed_row_and_refuses_the_others(db_session):
+async def test_delete_rejects_a_confirmed_row_and_refuses_the_others(db_session):
     pi, _agent, manager = await _pi_agent_manager(db_session)
     kept = await add_company(db_session, user_id=pi.id, created_by_user_id=manager.id, **_GOOD)
     gone = await add_company(db_session, user_id=pi.id, created_by_user_id=manager.id,
                              **{**_GOOD, "company_name": "Acme Bio"})
     suggested = await seed_company(db_session, pi)
-    await delete_company(db_session, user_id=pi.id, company_id=gone.id)
-    with pytest.raises(CompanyValidationError, match="reject a suggestion instead"):
-        await delete_company(db_session, user_id=pi.id, company_id=suggested.id)
-    assert [r.id for r in await list_companies(db_session, pi.id)] == [kept.id, suggested.id]
+    gone = await delete_company(
+        db_session, user_id=pi.id, company_id=gone.id, reviewer_id=manager.id
+    )
+    assert gone.status == "rejected" and gone.reviewed_by_user_id == manager.id
+    assert gone.reviewed_at is not None
+    assert await db_session.get(PiCompany, gone.id) is not None
+    for refused in (suggested, gone):
+        with pytest.raises(CompanyValidationError, match="reject a suggestion instead"):
+            await delete_company(
+                db_session, user_id=pi.id, company_id=refused.id, reviewer_id=manager.id
+            )
+    # list_companies returns every status; the deleted row stays, as rejected.
+    assert {r.id: r.status for r in await list_companies(db_session, pi.id)} == {
+        kept.id: "confirmed", gone.id: "rejected", suggested.id: "suggested"}
 
 
 async def test_another_pis_row_is_not_found(db_session):
@@ -236,10 +263,12 @@ async def test_another_pis_row_is_not_found(db_session):
     other = await factories.make_user(db_session)
     row = await seed_company(db_session, other)
     for call in (
-        delete_company(db_session, user_id=pi.id, company_id=row.id),
+        delete_company(db_session, user_id=pi.id, company_id=row.id, reviewer_id=manager.id),
         confirm_company(db_session, user_id=pi.id, company_id=row.id, reviewer_id=manager.id),
         reject_company(db_session, user_id=pi.id, company_id=row.id, reviewer_id=manager.id),
-        delete_company(db_session, user_id=pi.id, company_id=uuid.uuid4()),
+        delete_company(
+            db_session, user_id=pi.id, company_id=uuid.uuid4(), reviewer_id=manager.id
+        ),
     ):
         with pytest.raises(CompanyNotFoundError):
             await call

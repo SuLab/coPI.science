@@ -1,9 +1,13 @@
+import json
+
 import httpx
 import pytest
 import respx
 
-from src.services.industry_sources import ctgov
+from src.services import odp
+from src.services.industry_sources import ctgov, uspto_inventor
 from src.services.industry_sources.ctgov import evidence_from_study
+from src.services.industry_sources.registry import SourceUnavailable
 from src.services.industry_sources.uspto_inventor import evidence_from_application
 
 
@@ -84,10 +88,114 @@ def test_missing_collaborator_name_or_nct_is_skipped_not_a_crash():
     assert evidence_from_study(st2, 2018, {"lymphoma"}) == []
 
 
+def _odp_pages(total: int):
+    """An ODP stand-in answering each offset/limit from `total` numbered applications."""
+    def answer(request: httpx.Request) -> httpx.Response:
+        page = json.loads(request.content)["pagination"]
+        start, limit = page["offset"], page["limit"]
+        bag = [{"applicationNumberText": f"{n:08d}"} for n in range(start, min(start + limit, total))]
+        if not bag and total == 0:
+            return httpx.Response(404, json={"error": "no matches"})
+        return httpx.Response(200, json={"count": total, "patentFileWrapperDataBag": bag})
+    return answer
+
+
+@pytest.fixture
+def _odp_key(monkeypatch):
+    monkeypatch.setattr(odp, "ODP_PACE_INTERVAL", 0.0)
+    odp.ODP_PACER.reset()
+    monkeypatch.setattr(uspto_inventor, "get_settings", lambda: type("S", (), {"uspto_api_key": "k"})())
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_uspto_pages_until_the_reported_count(_odp_key):
+    route = respx.post(uspto_inventor.SEARCH_URL).mock(side_effect=_odp_pages(250))
+    paged = await uspto_inventor.fetch_jhu_applications("Jane Wang")
+    assert len(paged.items) == 250 and paged.truncated is False
+    assert [json.loads(c.request.content)["pagination"]["offset"] for c in route.calls] == [0, 100, 200]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_uspto_stops_at_the_page_cap_and_says_truncated(_odp_key):
+    route = respx.post(uspto_inventor.SEARCH_URL).mock(side_effect=_odp_pages(1500))
+    paged = await uspto_inventor.fetch_jhu_applications("Jane Wang")
+    assert route.call_count == uspto_inventor.MAX_PAGES == 10
+    assert len(paged.items) == 1000 and paged.truncated is True
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_exactly_the_cap_is_not_truncated(_odp_key):
+    respx.post(uspto_inventor.SEARCH_URL).mock(side_effect=_odp_pages(1000))
+    paged = await uspto_inventor.fetch_jhu_applications("Jane Wang")
+    assert len(paged.items) == 1000 and paged.truncated is False
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_uspto_404_is_no_applications(_odp_key):
+    """ODP answers 404 for a query with no matches; that is an empty result, not three
+    failures and a dead job."""
+    respx.post(uspto_inventor.SEARCH_URL).mock(side_effect=_odp_pages(0))
+    paged = await uspto_inventor.fetch_jhu_applications("Jane Wang")
+    assert paged.items == [] and paged.truncated is False
+
+
+@pytest.mark.asyncio
+async def test_uspto_without_a_key_is_unavailable(monkeypatch):
+    monkeypatch.setattr(uspto_inventor, "get_settings", lambda: type("S", (), {"uspto_api_key": ""})())
+    with pytest.raises(SourceUnavailable) as raised:
+        await uspto_inventor.fetch_jhu_applications("Jane Wang")
+    assert raised.value.reason == "no_api_key"
+
+
+@pytest.mark.asyncio
+async def test_an_orcid_id_name_is_unavailable_for_both_sources(monkeypatch):
+    monkeypatch.setattr(uspto_inventor, "get_settings", lambda: type("S", (), {"uspto_api_key": "k"})())
+    for fetch in (uspto_inventor.fetch_jhu_applications, ctgov.fetch_jhu_industry_trials):
+        with pytest.raises(SourceUnavailable) as raised:
+            await fetch("0000-0002-1825-0097")
+        assert raised.value.reason == "no_usable_name"
+
+
+def _study(nct: str) -> dict:
+    return study() | {"protocolSection": {**study()["protocolSection"],
+                                          "identificationModule": {"nctId": nct, "briefTitle": "T"}}}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_ctgov_follows_next_page_tokens():
+    pages = {None: (["NCT1", "NCT2"], "t2"), "t2": (["NCT3"], None)}
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        ids, nxt = pages[request.url.params.get("pageToken")]
+        body = {"studies": [_study(i) for i in ids]} | ({"nextPageToken": nxt} if nxt else {})
+        return httpx.Response(200, json=body)
+
+    route = respx.get(ctgov.BASE).mock(side_effect=answer)
+    paged = await ctgov.fetch_jhu_industry_trials("Jane Wang")
+    assert [s["protocolSection"]["identificationModule"]["nctId"] for s in paged.items] == [
+        "NCT1", "NCT2", "NCT3"]
+    assert paged.truncated is False and route.call_count == 2
+    assert route.calls[0].request.url.params["pageSize"] == "100"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_ctgov_stops_at_the_page_cap_and_says_truncated():
+    respx.get(ctgov.BASE).mock(return_value=httpx.Response(
+        200, json={"studies": [_study("NCT9")], "nextPageToken": "again"}))
+    paged = await ctgov.fetch_jhu_industry_trials("Jane Wang")
+    assert len(paged.items) == ctgov.MAX_PAGES and paged.truncated is True
+
+
 @pytest.mark.contract
 async def test_fetch_jhu_industry_trials_response_shape_flows_into_evidence_from_study():
-    """Guards against fields= drifting back to the flat v2 legacy names,
-    which evidence_from_study cannot parse (it reads nested protocolSection.*)."""
+    """Guards against fields= drifting back to the flat v2 legacy names, which
+    evidence_from_study cannot parse (it reads nested protocolSection.*)."""
     response_body = {
         "studies": [
             {
@@ -105,21 +213,6 @@ async def test_fetch_jhu_industry_trials_response_shape_flows_into_evidence_from
     }
     with respx.mock() as router:
         router.get(ctgov.BASE).mock(return_value=httpx.Response(200, json=response_body))
-        studies = await ctgov.fetch_jhu_industry_trials("Someone MD")
-    items = [item for study_ in studies for item in evidence_from_study(study_, 2018, {"lymphoma"})]
+        paged = await ctgov.fetch_jhu_industry_trials("Someone MD")
+    items = [item for study_ in paged.items for item in evidence_from_study(study_, 2018, {"lymphoma"})]
     assert len(items) == 1 and items[0].kind == "trial_industry_collab"
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_a_uspto_404_is_no_applications(monkeypatch):
-    """ODP answers 404 for a query with no matches; that is an empty result, not
-    three failures and a dead job."""
-    from src.services.industry_sources import uspto_inventor
-
-    monkeypatch.setattr(
-        "src.services.industry_sources.uspto_inventor.get_settings",
-        lambda: type("S", (), {"uspto_api_key": "k"})(),
-    )
-    respx.post(uspto_inventor.SEARCH_URL).mock(return_value=httpx.Response(404, json={"error": "none"}))
-    assert await uspto_inventor.fetch_jhu_applications("Jane Wang") == []

@@ -26,7 +26,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -37,13 +36,14 @@ import anthropic
 from src.agent.prompt_safety import delimit
 from src.config import get_settings
 from src.services import llm
-from src.services.company_sources import PiName, fold, name_key, strip_accents
+from src.services.assessment_chat_stream import usage_entries
+from src.services.coi_attribution import Statement
+from src.services.coi_attribution import last_run as _last_run
+from src.services.coi_attribution import norm as _norm
+from src.services.company_sources import PiName, strip_accents
 from src.services.company_sources.coi_founders import (
     FounderClaim,
     PiForms,
-    _author_given,
-    _author_last,
-    _author_letter_forms,
     locate_pi,
     mentions_founding,
 )
@@ -97,13 +97,19 @@ class CoiOutcome:
     `usage` is the reply's token counts (`input_tokens`, `output_tokens`,
     `cache_read_input_tokens`, `cache_creation_input_tokens`; a count the reply leaves
     unset is 0), so the job can report spend. None when no reply came back: a skipped
-    record, a missing prompt, an API error, or a reply without usage."""
+    record, a missing prompt, an API error, or a reply without usage. `entries` is what
+    the job prices the call by (src/services/company_discovery_budget.py)."""
 
     status: Literal["ok", "skipped", "unavailable"]
     claims: list[FounderClaim] = field(default_factory=list)
     reason: str | None = None
     dropped: int = 0
     usage: dict[str, int] | None = None
+    #: The reply's usage as ledger entries (`assessment_chat_stream.usage_entries`): one
+    #: per API iteration, each under the model that billed it. [] when no call was made or
+    #: the API answered an error status (never billed); None when no usage is known (a
+    #: timeout, a connection error, a reply without usage). Not part of equality.
+    entries: list[dict] | None = field(default=None, compare=False)
 
 
 # --- request ------------------------------------------------------------------
@@ -147,8 +153,8 @@ def _pi_block(pi: PiName, forms: PiForms) -> str:
 
 #: "<" and ">" in untrusted text become the single guillemets "‹" and "›" before it is
 #: fenced: `delimit` only strips an exact tag, so "</sta</statement>tement>" would
-#: reassemble one and a forged "<pi>" block would read as ours. `_TYPOGRAPHY` folds the
-#: guillemets back, so a quote that echoes the escaped statement still matches the
+#: reassemble one and a forged "<pi>" block would read as ours. `coi_attribution.TYPOGRAPHY`
+#: folds the guillemets back, so a quote that echoes the escaped statement still matches the
 #: original, which is what the verifier reads.
 _FENCE_ESCAPE = str.maketrans({"<": "‹", ">": "›"})
 
@@ -157,11 +163,32 @@ def _escape(text: str) -> str:
     return text.translate(_FENCE_ESCAPE)
 
 
+#: Most author lines one call shows. A consortium paper can list thousands, which would
+#: make one call cost several times its budget reservation
+#: (`company_discovery_budget.COI_RESERVE_USD`); past this the list is cut to a window
+#: around the PI, keeping the original numbering (security review 2026-10-06).
+MAX_AUTHOR_LINES = 100
+
+
+def _author_lines(authors: list[dict], position: int) -> list[str]:
+    """Each author's numbered line; past MAX_AUTHOR_LINES, only the MAX_AUTHOR_LINES
+    around ``position`` (1-based, 0 when unknown), with the omissions marked."""
+    if len(authors) <= MAX_AUTHOR_LINES:
+        return [_author_line(i, a) for i, a in enumerate(authors, 1)]
+    start = min(max(position - MAX_AUTHOR_LINES // 2, 1), len(authors) - MAX_AUTHOR_LINES + 1)
+    end = start + MAX_AUTHOR_LINES - 1
+    lines = [f"(authors 1-{start - 1} omitted)"] if start > 1 else []
+    lines += [_author_line(i, authors[i - 1]) for i in range(start, end + 1)]
+    if end < len(authors):
+        lines.append(f"(authors {end + 1}-{len(authors)} omitted)")
+    return lines
+
+
 def _user_content(record: dict, pi: PiName, forms: PiForms) -> str:
-    """The user turn: the author list, the PI's forms and the statement, each escaped
-    (`_escape`) and fenced."""
+    """The user turn: the author list (cut per `_author_lines`), the PI's forms and the
+    statement, each escaped (`_escape`) and fenced."""
     authors = [a for a in (record.get("authors") or []) if isinstance(a, dict)]
-    author_text = "\n".join(_author_line(i, a) for i, a in enumerate(authors, 1))
+    author_text = "\n".join(_author_lines(authors, forms.position))
     statement = (record.get("coi_statement") or "").strip()
     return (
         "Author list of the article:\n" + delimit(_escape(author_text), "authors")
@@ -171,11 +198,26 @@ def _user_content(record: dict, pi: PiName, forms: PiForms) -> str:
     )
 
 
+#: The output ceiling of one extraction call (`_request`); sizes its budget reservation.
+MAX_TOKENS = 4000
+
+
+def prompt_chars(record: dict, pi: PiName) -> int | None:
+    """The characters one extraction call for `record` would send (system prompt and user
+    turn), for sizing its budget reservation; None when the gate would not send it or
+    the prompt is missing."""
+    forms = locate_pi(record, pi)
+    system = _load_prompt()
+    if forms is None or system is None:
+        return None
+    return len(system) + len(_user_content(record, pi, forms))
+
+
 def _request(system: str, user: str) -> dict[str, Any]:
     return {
         "model": get_settings().llm_coi_model,
         # Answers are a few short claims; adaptive thinking at medium effort shares this.
-        "max_tokens": 4000,
+        "max_tokens": MAX_TOKENS,
         "thinking": {"type": "adaptive"},
         "output_config": {
             "effort": "medium",
@@ -257,347 +299,30 @@ def _payload_claims(payload: object) -> list | None:
     return payload["claims"]
 
 
-_TYPOGRAPHY = str.maketrans({
-    "‐": "-", "‑": "-", "‒": "-", "–": "-", "—": "-",
-    "−": "-", "‘": "'", "’": "'", "“": '"', "”": '"',
-    "‹": "<", "›": ">",  # undo `_escape` in a quote that echoes the escaped statement
-})
-
-
-def _norm_map(text: str) -> tuple[str, list[int]]:
-    """`_norm(text)` and, for each of its characters, the index in `text` of the
-    character it came from, so a match in the normalised form maps back to the
-    original. NFKC runs per base character plus its combining marks, so a decomposed
-    accent composes the same way on both sides."""
-    chars: list[str] = []
-    origin: list[int] = []
-    i = 0
-    while i < len(text):
-        j = i + 1
-        while j < len(text) and unicodedata.combining(text[j]):
-            j += 1
-        for ch in unicodedata.normalize("NFKC", text[i:j]).translate(_TYPOGRAPHY):
-            chars.append(ch)
-            origin.append(i)
-        i = j
-    out: list[str] = []
-    where: list[int] = []
-    gap: int | None = None  # index of the first whitespace character of a pending run
-    for ch, at in zip(chars, origin, strict=True):
-        if ch.isspace():
-            gap = at if gap is None else gap
-            continue
-        if gap is not None and out:
-            out.append(" ")
-            where.append(gap)
-        gap = None
-        out.append(ch)
-        where.append(at)
-    return "".join(out), where
-
-
-def _norm(text: str) -> str:
-    """NFKC, typographic dashes and quotes folded to ASCII, whitespace runs collapsed:
-    the form in which a quoted sentence must occur in the statement. The folding only
-    forgives a model that retyped a curly quote or a non-breaking hyphen, or echoed an
-    angle bracket as `_escape` sent it."""
-    return _norm_map(text)[0]
-
-
-# --- sentences ------------------------------------------------------------------
-
-#: A candidate sentence end: ".", "!" or "?", any closing quotes or brackets, then
-#: whitespace; group 1 is the next word character, which must be a capital or a digit.
-#: ";" and ":" never end a sentence here, so a semicolon-chained disclosure ("…
-#: personal fees from X; and is a co-founder of Y.") and an eLife block entry stay whole.
-_SENTENCE_END = re.compile(r"[.!?][\"'”’)\]]*\s+(?=[\"“‘(\[]?(\w))")
-#: Words whose period never ends a sentence, compared case-folded: honorifics, "et al.",
-#: "vs.", "no." / "nos." (serial and patent numbers), "vol.", "fig.", "approx.", "ca.".
-#: Any one-letter word is protected as well: initials ("V.E.V.", "A."), "e.g.", "i.e.",
-#: "S.A.".
-_ABBREVIATIONS = frozenset({
-    "dr", "prof", "mr", "mrs", "ms", "mx", "jr", "sr", "st", "al", "vs",
-    "no", "nos", "vol", "fig", "approx", "ca",
-})
-#: Corporate abbreviations ("A/S" counts too). Their period is part of the name only when
-#: another corporate word follows ("Acme Co. Ltd."); before any other capital it ends the
-#: sentence ("… Novo Nordisk A/S. V.E.V. is a founder of …"), so one sentence never
-#: absorbs the next sentence's subject. A bracketed or quoted group right after the
-#: period is looked past first (`_continues_after_corporate`).
-_CORPORATE = frozenset({"inc", "ltd", "co", "corp", "llc", "gmbh", "ag"})
-_CORPORATE_NEXT = _CORPORATE | {"kg", "sa", "plc", "pty", "limited", "company", "corporation"}
-_LAST_WORD = re.compile(r"[^\W\d_]+$")
-_NEXT_WORD = re.compile(r"[^\W\d_]+")
-#: Opening brackets and quotes, each with its closer.
-_OPENERS = {"(": ")", "[": "]", '"': '"', "“": "”", "‘": "’"}
-
-
-def _continues_after_corporate(text: str, after: int) -> bool:
-    """Whether the text from `after` continues the name or sentence that a corporate
-    abbreviation's period sits in: another corporate word ("Acme Co. Ltd."), or, when a
-    bracketed or quoted group opens there, a lower-case word or punctuation after its
-    closer ("Acme Inc. (Baltimore, MD) and owns stock"). An unclosed group, or a capital
-    after it, ends the sentence."""
-    if after < len(text) and text[after] in _OPENERS:
-        close = text.find(_OPENERS[text[after]], after + 1)
-        if close < 0:
-            return False
-        rest = text[close + 1:].lstrip()
-        if rest[:1] and (rest[0] in ",;:.!?)]" or rest[0].islower()):
-            return True  # a later stop, if any, is the sentence end
-        after = len(text) - len(rest)
-    nxt = _NEXT_WORD.match(text, after)
-    return nxt is not None and nxt.group().casefold() in _CORPORATE_NEXT
-
-
-def _protected_period(text: str, at: int, after: int) -> bool:
-    """Whether the "." at `at` closes an initial or an abbreviation that does not end
-    the sentence; `after` is where the next sentence would start."""
-    word = _LAST_WORD.search(text, max(0, at - 12), at)
-    if word is None:
-        return False
-    w = word.group().casefold()
-    slash = word.start() > 0 and text[word.start() - 1] == "/"  # the "S" of "A/S"
-    if w in _ABBREVIATIONS or (len(w) == 1 and not slash):
-        return True
-    if w in _CORPORATE or slash:
-        return _continues_after_corporate(text, after)
-    return False
-
-
-def _trimmed(text: str, start: int, end: int) -> tuple[int, int]:
-    while start < end and text[start].isspace():
-        start += 1
-    while end > start and text[end - 1].isspace():
-        end -= 1
-    return start, end
-
-
-def _sentence_spans(text: str) -> list[tuple[int, int]]:
-    """(start, end) offsets of each sentence of `text`, whitespace trimmed. A sentence
-    ends at "." "!" or "?" (plus closing quotes or brackets) followed by whitespace and
-    a capital or a digit, unless the "." closes an initial, a listed abbreviation or a
-    corporate abbreviation that continues the name (`_protected_period`)."""
-    spans: list[tuple[int, int]] = []
-    start = 0
-    for m in _SENTENCE_END.finditer(text):
-        nxt = m.group(1)
-        if not (nxt.isupper() or nxt.isdigit()):
-            continue
-        if text[m.start()] == "." and _protected_period(text, m.start(), m.end()):
-            continue
-        spans.append(_trimmed(text, start, m.start() + len(m.group().rstrip())))
-        start = m.end()
-    spans.append(_trimmed(text, start, len(text)))
-    return [(s, e) for s, e in spans if s < e]
-
-
-# --- names ------------------------------------------------------------------------
-
-_HONORIFIC = r"(?:Drs|Dr|Profs|Prof|Professors|Professor|Mr|Mrs|Ms|Mx)\.?\s"
-
-
-def _initials_pattern(letters: str) -> str:
-    """One initials string in any written form ("VEV", "V.E.V.", "V. E. V.", "V.E.V"),
-    never as part of a longer run: no letter or period before it, no word character,
-    ".X" or " X." after it ("V.E.V.S." and "V. E. V. S." are someone else).
-
-    A two-letter string written without a period ("CA", "MD") is too often a state or a
-    degree: it counts only at the start of the text or right after ", " or "; ", and
-    only when a space and a word follow ("CA is a founder", "…, BV Founder of"), never
-    in "(San Diego, CA)". Its dotted forms ("C.A.", "C. A.") count anywhere."""
-    head = r"(?<![\w.])(?<![A-Z]\.\s)"
-    tail = r"(?!\w)(?!\.[^\W\d_])(?!\.?\s[A-Z]\.)"
-    if len(letters) == 2:
-        a, b = (re.escape(ch) for ch in letters)
-        dotted = rf"{head}{a}\.\s?{b}\.?{tail}"
-        bare = rf"(?:^|(?<=, )|(?<=; )){a}{b}(?=\s\w)(?!\s[A-Z]\.)"
-        return rf"(?:{dotted}|{bare})"
-    body = r"\.?\s?".join(re.escape(ch) for ch in letters)
-    return rf"{head}{body}\.?{tail}"
-
-
-def _name_patterns(forms: PiForms) -> list[str]:
-    """The surname forms (case as indexed, or with a capital first letter) after an
-    honorific, an initial or one of the given names ("Dr Velculescu", "V. Velculescu",
-    "Victor E. Velculescu"). A surname of four or more letters also counts alone, in the
-    group named `bare` ("Velculescu"); a shorter one ("He", "Li") never does, so a
-    pronoun or a common word is never the person. A `bare` match that is one word of a
-    longer capitalised name is discarded by `_Person.mentions`."""
-    surname = strip_accents(forms.surname).strip()
-    if not surname:
-        return []
-    variants = sorted({surname, surname[:1].upper() + surname[1:]})
-    tail = "(?:" + "|".join(re.escape(v) for v in variants) + r")(?!\w)"
-    prefixes = [_HONORIFIC, r"[A-Z]\.\s?"] + [
-        re.escape(strip_accents(f).title()) + r"\s(?:[A-Z]\.?\s)?" for f in forms.first_names
-    ]
-    patterns = [rf"(?<!\w){p}{tail}" for p in prefixes]
-    if len(name_key(surname)) >= 4:
-        patterns.append(rf"(?P<bare>(?<!\w){tail})")
-    return patterns
-
-
-def _pi_regex(forms: PiForms, *, names: bool) -> re.Pattern[str]:
-    """What names one person in a text: every initials form, plus the surname forms
-    when `names` is set. Run on `strip_accents(_norm(sentence))`; case-sensitive."""
-    patterns = [_initials_pattern(s) for s in sorted(forms.letters, key=lambda x: (-len(x), x))]
-    if names:
-        patterns += _name_patterns(forms)
-    return re.compile("|".join(patterns) or r"(?!)")
-
-
-#: A capitalised word ending right before a bare surname, by a space or a hyphen
-#: ("Johns Hopkins", "Bristol-Myers"); and a hyphen joining one right after it.
-_CAPITALISED_BEFORE = re.compile(r"(?<![\w'’])[A-Z][\w'’]*[ -]$")
-_CAPITALISED_AFTER = re.compile(r"-[A-Z]")
-
-
-@dataclass(frozen=True)
-class _Person:
-    """How one author of the record is named in a sentence (`_pi_regex`)."""
-
-    pattern: re.Pattern[str]
-
-    def mentions(self, text: str) -> list[tuple[int, int]]:
-        """(start, end) of each mention in `text`. A bare surname (`_name_patterns`)
-        right after a capitalised word or hyphen-joined to one is part of another name
-        ("Johns Hopkins" is not Dr Hopkins, "Bristol-Myers" is not Dr Myers) and is
-        skipped; a given name or honorific before it is matched as a prefixed form."""
-        out = []
-        for m in self.pattern.finditer(text):
-            if m.groupdict().get("bare") is not None and (
-                _CAPITALISED_BEFORE.search(text[: m.start()]) or _CAPITALISED_AFTER.match(text, m.end())
-            ):
-                continue
-            out.append(m.span())
-        return out
-
-
-def _other_authors(authors: list[dict], forms: PiForms) -> tuple[_Person, ...]:
-    """Every author but the PI (`forms.position`), named by their initials forms and
-    their surname forms. With `position` 0 the PI is not excluded, so every PI mention
-    also reads as another author's and nothing verifies."""
-    out = []
-    for n, author in enumerate(authors, 1):
-        if n == forms.position or author.get("collective"):
-            continue
-        given = _author_given(author)
-        other = PiForms(
-            letters=frozenset(_author_letter_forms(author)),
-            first_names=(fold(given),) if len(name_key(given)) > 1 else (),
-            first_initial=name_key(given)[:1],
-            surname=_author_last(author),
-        )
-        out.append(_Person(_pi_regex(other, names=True)))
-    return tuple(out)
-
-
-def _clause_splits(authors: list[dict]) -> re.Pattern[str]:
-    """Where a sentence splits into clauses for `_Statement.names_pi`: at ";" and at an
-    eLife block start, ", " before an author's undotted initials form of two to four
-    letters and a capitalised word ("…, BV Founder of …", "…, SZ Hold equity …")."""
-    letters = {
-        s for author in authors for s in _author_letter_forms(author) if 2 <= len(s) <= 4
-    }
-    alts = "|".join(sorted(letters, key=lambda x: (-len(x), x)))
-    return re.compile(";" + (rf"|, (?=(?:{alts}) [A-Z])" if alts else ""))
-
-
 #: A founder phrase: "founder(s)", "founded", "founding", with or without "co"
 #: ("co-founder", "Cofounders", "founder's"); not "Foundation", not a bare "found".
 _FOUNDER = re.compile(r"(?<![^\W\d_])(?:co)?found(?:ers?|ed|ing)(?![^\W\d_])", re.IGNORECASE)
-#: What may separate two names of one list of subjects: ", ", " and ", ", and ", " & ".
-_LIST_SEP = re.compile(r"\s*,?\s*(?:(?:and|&)\s+)?")
 #: The words between a company and a founder phrase after it that make the phrase a
 #: relative clause about that company: ", which he co-", ", a company he ".
 _RELATIVE = re.compile(r",\s(?:which|that|a company|the company)\b[^,;]*")
 
 
-def _last_run(text: str, mentions: list[tuple[int, int, bool]]) -> list[tuple[int, int, bool]]:
-    """The trailing run of `mentions` (sorted, non-empty) separated only by `_LIST_SEP`:
-    the list of names that ends nearest the company ("B.V., K.W.K. and S.Z.")."""
-    run = [mentions[-1]]
-    for m in reversed(mentions[:-1]):
-        if m[1] > run[0][0] or not _LIST_SEP.fullmatch(text, m[1], run[0][0]):
-            break
-        run.insert(0, m)
-    return run
-
-
 # --- verify -----------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class _Statement:
-    """A statement prepared for verification: the original text, its normalised form
-    with the map back to original offsets, its sentence spans, the PI, the other
-    authors and the clause splitter."""
-
-    text: str
-    norm: str
-    origin: list[int]
-    spans: list[tuple[int, int]]
-    pi: _Person
-    others: tuple[_Person, ...]
-    splits: re.Pattern[str]
-
-    @classmethod
-    def of(cls, text: str, forms: PiForms, authors: Sequence[object]) -> _Statement:
-        """`authors` is the record's author list in the order `forms.position` counts
-        (non-dict entries are dropped, as `locate_pi` drops them)."""
-        dicts = [a for a in authors if isinstance(a, dict)]
-        norm, origin = _norm_map(text)
-        return cls(
-            text, norm, origin, _sentence_spans(text),
-            # Another author with the PI's surname: only the initials forms name the PI.
-            _Person(_pi_regex(forms, names=not forms.surname_shared)),
-            _other_authors(dicts, forms), _clause_splits(dicts),
-        )
-
-    def sentence(self, quote: str) -> tuple[int, str] | None:
-        """(offset, original text) of the one sentence that contains the normalised
-        `quote`'s first occurrence; None when the quote is absent or spans sentences."""
-        at = self.norm.find(quote) if quote else -1
-        if at < 0:
-            return None
-        start, end = self.origin[at], self.origin[at + len(quote) - 1] + 1
-        for s, e in self.spans:
-            if s <= start and end <= e:
-                return s, self.text[s:e]
-        return None
-
-    def _clause(self, text: str, company: tuple[int, int]) -> tuple[int, int]:
-        """The clause (`_clause_splits`) holding the company span; a split inside the
-        company's own name is ignored. A clause that names no author before the company
-        continues the subject of the clause before it across a ";" ("C. Bettegowda
-        reports fees from X; and is a co-founder of OrisDx"), never across an eLife
-        block start."""
-        splits = list(self.splits.finditer(text))
-        after = [m.start() for m in splits if m.start() >= company[1]]
-        before = [m for m in splits if m.end() <= company[0]]
-        start = before[-1].end() if before else 0
-        while before and before[-1].group() == ";" and not self._mentions(text, start, company[0]):
-            before.pop()
-            start = before[-1].end() if before else 0
-        return start, after[0] if after else len(text)
-
-    def _mentions(self, text: str, start: int, end: int) -> list[tuple[int, int, bool]]:
-        """(start, end, is the PI) of every author mention inside text[start:end], sorted."""
-        found = [(s, e, True) for s, e in self.pi.mentions(text)]
-        found += [(s, e, False) for p in self.others for s, e in p.mentions(text)]
-        return sorted(m for m in found if start <= m[0] and m[1] <= end)
+class _Statement(Statement):
+    """`coi_attribution.Statement` plus the founder rule (`names_pi`)."""
 
     def names_pi(self, text: str, company: tuple[int, int]) -> bool:
         """Whether `text` (a sentence as `strip_accents(_norm(…))`) says the PI founded
         the company at span `company`. True exactly when, inside the clause holding the
-        company (`_clause`: split at ";" and eLife block starts, a subjectless clause
+        company (`clause`: split at ";" and eLife block starts, a subjectless clause
         extended back across ";"):
 
-        - the author names nearest before the company form one list (`_last_run`: names
-          joined only by ",", "and", "&") and the PI (`_pi_regex`, `_Person.mentions`)
-          is in it, so no other author's initials or surname form stands between the
-          PI's list and the company;
+        - the author names nearest before the company form one list
+          (`coi_attribution.last_run`: names joined only by ",", "and", "&") and the PI
+          (`coi_attribution.pi_regex`, `Person.mentions`) is in it, so no other author's
+          initials or surname form stands between the PI's list and the company;
         - and a founder phrase (`_FOUNDER`) lies between the end of that list and the
           company, or right after the company as a relative clause (`_RELATIVE`: ",
           which he co-founded", ", a company he founded") with no author named between
@@ -606,8 +331,8 @@ class _Statement:
         It does not check what the other words mean: "V.E.V. is a founder of X and an
         advisor to Acme" passes for Acme, and "B.V. and V.E.V. are founders of X and Y,
         respectively" passes for either company with either person."""
-        cs, ce = self._clause(text, company)
-        mentions = self._mentions(text, cs, ce)
+        cs, ce = self.clause(text, company)
+        mentions = self.mentions(text, cs, ce)
         before = [m for m in mentions if m[1] <= company[0]]
         if not before:
             return False
@@ -695,7 +420,7 @@ def verify_claims(
     result for the record whose author list is `authors`. A claim is kept only when:
 
     - its quote (after `_norm`) occurs in the statement inside one sentence
-      (`_sentence_spans`) and mentions founding; a quote spanning two sentences is
+      (`coi_attribution.sentence_spans`) and mentions founding; a quote spanning two sentences is
       dropped;
     - the company occurs in that sentence as a whole word, case-insensitively, not
       followed by "-" and a letter (`_company_spans`);
@@ -750,31 +475,35 @@ async def extract_founder_claims(
     the gate refuses the record."""
     statement = (record.get("coi_statement") or "").strip()
     if not statement:
-        return CoiOutcome("skipped", [], "no_statement")
+        return CoiOutcome("skipped", [], "no_statement", entries=[])
     forms = locate_pi(record, pi)
     if forms is None:
-        return CoiOutcome("skipped", [], "pi_not_located")
+        return CoiOutcome("skipped", [], "pi_not_located", entries=[])
     if not mentions_founding(statement):
-        return CoiOutcome("skipped", [], "no_founding_wording")
+        return CoiOutcome("skipped", [], "no_founding_wording", entries=[])
     pmid = str(record.get("pmid") or "")
     system = _load_prompt()
     if system is None:
         logger.warning("coi_llm: %s missing or empty; PMID %s unavailable", COI_PROMPT_PATH, pmid)
-        return CoiOutcome("unavailable", [], "prompt_missing")
+        return CoiOutcome("unavailable", [], "prompt_missing", entries=[])
     message, reason = await _call(client, _request(system, _user_content(record, pi, forms)))
     payload, usage = None, None
+    entries: list[dict] | None = None
     if reason is None:
         usage = _usage(message)
+        entries = usage_entries(message) if usage is not None else None
         payload, reason = _reply_payload(message)
+    elif reason.startswith("api_status_"):
+        entries = []  # an error status is never billed (assessment_chat_suggestions' rule)
     if reason is None and _payload_claims(payload) is None:
         reason = "schema_mismatch"
     if reason is not None:
         logger.warning("coi_llm: PMID %s unavailable (%s)", pmid, reason)
-        return CoiOutcome("unavailable", [], reason, usage=usage)
+        return CoiOutcome("unavailable", [], reason, usage=usage, entries=entries)
     year = record.get("year") if isinstance(record.get("year"), int) else None
     claims, dropped = verify_claims(
         statement, payload, pmid=pmid, year=year, forms=forms, authors=record.get("authors") or []
     )
     if dropped:
         logger.info("coi_llm: PMID %s: verifier dropped %d of the model's claims", pmid, dropped)
-    return CoiOutcome("ok", claims, None, dropped, usage)
+    return CoiOutcome("ok", claims, None, dropped, usage, entries=entries)

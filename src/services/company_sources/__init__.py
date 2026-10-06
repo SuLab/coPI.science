@@ -3,9 +3,11 @@ PubMed competing-interest statements (gated by `coi_founders`, extracted by Clau
 `coi_llm`, spec O14), Wikidata "founded by" claims
 by ORCID (`wikidata`), and SEC Form D funding (`sec_form_d`).
 
-Nothing here imports the industry-evidence modules (tests/unit/test_enrichment_isolation.py)
-or `industry_sources/pubmed_coi.py`, whose attribution is wrong (spec F13). This package
-holds the name folding the three sources share, re-exported from
+Nothing here imports the industry-evidence modules
+(tests/unit/test_company_discovery_isolation.py). Founder extraction (`coi_llm`) and the
+industry COI source (`industry_sources/pubmed_coi.py`) share their deterministic name-run
+attribution through `src/services/coi_attribution.py`, which imports neither side's job
+modules. This package holds the name folding the three sources share, re-exported from
 `src/services/person_names.py`, so a PI's name compares the same way against a PubMed
 author list and a Form D related-person list (Review Focus #2).
 """

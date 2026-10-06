@@ -14,11 +14,30 @@ from src.models import (
 from src.services import industry_evidence as ie
 from src.services import pubmed
 from src.services.industry_score import SCORER_VERSION
-from src.services.industry_sources import ctgov, openalex_industry, uspto_inventor
+from src.services.industry_sources import Paged, ctgov, openalex_industry, uspto_inventor
 from src.services.jhu_rules import set_tenure_start
 from src.worker.main import JobContext
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("progress_on_test_connection")]
+
+LAM = {"last": "Lamichhane", "fore": "Gyanu", "initials": "G", "collective": None}
+DECK = {"last": "Deck", "fore": "Daniel H", "initials": "DH", "collective": None}
+SERIO = {"last": "Serio", "fore": "Alisa W", "initials": "AW", "collective": None}
+
+_PARATEK_WORK = {
+    "id": "https://openalex.org/W1", "ids": {"pmid": "https://pubmed.ncbi.nlm.nih.gov/38980071"},
+    "publication_year": 2024, "funders": [],
+    "authorships": [
+        {"author": {"orcid": "https://orcid.org/0000-0002-2214-0114"},
+         "institutions": [{"id": "https://openalex.org/I145311948", "type": "education"}],
+         "author_position": "last", "is_corresponding": True},
+        {"author": {"orcid": None},
+         "institutions": [{"id": "https://openalex.org/I4210091798",
+                           "display_name": "Paratek Pharmaceuticals (United States)",
+                           "type": "company"}],
+         "author_position": "middle"},
+    ],
+}
 
 
 def _ctx(job):
@@ -26,59 +45,40 @@ def _ctx(job):
                       attempts=job.attempts, max_attempts=job.max_attempts)
 
 
-async def _seed_peers(db_session, n, raw_sum=1.0, reason="ok"):
-    for i in range(n):
-        peer = User(orcid=f"0000-0009-9999-{i:04d}", name=f"Peer {i}", user_role="pi")
-        db_session.add(peer)
-        await db_session.flush()
-        db_session.add(PiIndustryScore(user_id=peer.id, score=(50.0 if reason == "ok" else None),
-                                        raw_sum=(0.0 if reason == "no_evidence" else raw_sum + i), reason=reason,
-                                        components={}, evidence_count=(0 if reason == "no_evidence" else 1),
-                                        scorer_version=SCORER_VERSION))
-    await db_session.flush()
+def _attributed_founder(user_id, external_id="k1"):
+    return PiIndustryEvidence(
+        user_id=user_id, source="pubmed", kind="coi_relationship", external_id=external_id,
+        company_name="Startup Inc", company_class="pharma_biotech", year=2021, pi_role=None,
+        in_tenure=True, evidence={"relationship": "founder", "attributed": True, "pi_mention": "G.L."})
 
 
-async def test_no_tenure_start_writes_unscored_row_and_collects_nothing(db_session, monkeypatch):
-    u = User(orcid="0000-0001-1111-2222", name="No Tenure", user_role="pi")
+async def _user(db_session, orcid, name):
+    u = User(orcid=orcid, name=name, user_role="pi")
     db_session.add(u)
     await db_session.flush()
-    job = Job(type="industry_evidence", user_id=u.id, payload={"user_id": str(u.id), "orcid": u.orcid})
-    db_session.add(job)
-    await db_session.flush()
-    called = []
-
-    async def boom(*a, **k):
-        called.append(1)
-        return []
-
-    monkeypatch.setattr(openalex_industry, "fetch_works_for_pmids", boom)
-    await ie.execute_industry_evidence(_ctx(job), db_session)
-    s = (await db_session.execute(select(PiIndustryScore).where(PiIndustryScore.user_id == u.id))).scalar_one()
-    assert s.score is None and s.reason == "no_tenure_start" and called == []
+    return u
 
 
-async def test_job_stores_evidence_and_score(db_session, monkeypatch):
-    u = User(orcid="0000-0002-2214-0114", name="Gyanu Lamichhane", user_role="pi")
-    db_session.add(u)
-    await db_session.flush()
+async def _lamichhane_job(db_session, monkeypatch, *, authors, coi_statement):
+    """The Lamichhane PI with one 2024 paper, a tenure start of 2018, and stand-ins for
+    every upstream: OpenAlex returns the Paratek co-authored work, PubMed one record with
+    `authors` and `coi_statement`, USPTO and ClinicalTrials.gov nothing."""
+    u = await _user(db_session, "0000-0002-2214-0114", "Gyanu Lamichhane")
     db_session.add(ResearcherProfile(user_id=u.id, keywords=["tuberculosis"], disease_areas=["Tuberculosis"]))
     db_session.add(Publication(user_id=u.id, pmid="38980071", title="p", year=2024))
     await set_tenure_start(u.id, 2018, "manual", db=db_session)
-    await _seed_peers(db_session, 3)
     job = Job(type="industry_evidence", user_id=u.id, payload={"user_id": str(u.id), "orcid": u.orcid})
     db_session.add(job)
     await db_session.flush()
 
     async def works(pmids):
-        return [{"id": "https://openalex.org/W1", "ids": {"pmid": "https://pubmed.ncbi.nlm.nih.gov/38980071"}, "publication_year": 2024, "funders": [],
-                 "authorships": [{"author": {"orcid": "https://orcid.org/0000-0002-2214-0114"}, "institutions": [{"id": "https://openalex.org/I145311948", "type": "education"}], "author_position": "last", "is_corresponding": True},
-                                 {"author": {"orcid": None}, "institutions": [{"id": "https://openalex.org/I4210091798", "display_name": "Paratek Pharmaceuticals (United States)", "type": "company"}], "author_position": "middle"}]}]
+        return Paged([_PARATEK_WORK])
 
     async def recs(pmids, **kw):
-        return [{"pmid": "38980071", "year": 2024, "coi_statement": "A and B are employees of Paratek Pharmaceuticals, Inc.", "affiliations": []}]
+        return [{"pmid": "38980071", "year": 2024, "authors": authors, "coi_statement": coi_statement}]
 
     async def none(*a, **k):
-        return []
+        return Paged([])
 
     async def cf(ids):
         return set()
@@ -88,75 +88,81 @@ async def test_job_stores_evidence_and_score(db_session, monkeypatch):
     monkeypatch.setattr(uspto_inventor, "fetch_jhu_applications", none)
     monkeypatch.setattr(ctgov, "fetch_jhu_industry_trials", none)
     monkeypatch.setattr(openalex_industry, "company_funder_ids", cf)
+    return u, job
 
+
+async def test_no_tenure_start_writes_an_unscored_row_and_collects_nothing(db_session, monkeypatch):
+    u = await _user(db_session, "0000-0001-1111-2222", "No Tenure")
+    job = Job(type="industry_evidence", user_id=u.id, payload={"user_id": str(u.id), "orcid": u.orcid})
+    db_session.add(job)
+    await db_session.flush()
+    called = []
+
+    async def boom(*a, **k):
+        called.append(1)
+        return Paged([])
+
+    monkeypatch.setattr(openalex_industry, "fetch_works_for_pmids", boom)
+    await ie.execute_industry_evidence(_ctx(job), db_session)
+    s = (await db_session.execute(select(PiIndustryScore).where(PiIndustryScore.user_id == u.id))).scalar_one()
+    assert s.tenure_start_used is None and s.coverage == {} and s.scorer_version == SCORER_VERSION
+    assert s.score is None and s.reason is None and called == []
+
+
+async def test_job_stores_attributed_evidence_and_a_score_row(db_session, monkeypatch):
+    u, job = await _lamichhane_job(
+        db_session, monkeypatch, authors=[LAM],
+        coi_statement="G.L. is an employee of Paratek Pharmaceuticals, Inc.")
     await ie.execute_industry_evidence(_ctx(job), db_session)
     rows = (await db_session.execute(select(PiIndustryEvidence).where(PiIndustryEvidence.user_id == u.id))).scalars().all()
     assert {r.kind for r in rows} == {"coauthor_company", "coi_relationship"}
-    s = (await db_session.execute(select(PiIndustryScore).where(PiIndustryScore.user_id == u.id).order_by(PiIndustryScore.computed_at.desc()))).scalars().first()
-    assert s.reason == "ok" and s.raw_sum == 4.5 + 5 and s.evidence_count == 2 and s.tenure_start_used == 2018
-    assert s.score is not None
+    coi = next(r for r in rows if r.kind == "coi_relationship")
+    assert coi.evidence["attributed"] is True and coi.evidence["pi_mention"] == "G.L."
+    s = (await db_session.execute(select(PiIndustryScore).where(PiIndustryScore.user_id == u.id))).scalar_one()
+    assert s.raw_sum == 4.5 + 5 and s.evidence_count == 2 and s.tenure_start_used == 2018
+    assert s.coverage == {"openalex": "ok", "pubmed": "ok", "uspto": "ok", "ctgov": "ok", "nih_reporter": "ok"}
+    assert s.score is None and s.reason is None and s.primary_field is None
 
 
-async def test_rescore_with_no_evidence_is_unscored(db_session):
-    u = User(orcid="0000-0003-3333-4444", name="No Evidence", user_role="pi")
-    db_session.add(u)
+async def test_the_paratek_statement_credits_nothing(db_session, monkeypatch):
+    """Inverted end to end (P4): "A and B are employees of Paratek…" names other people."""
+    u, job = await _lamichhane_job(
+        db_session, monkeypatch, authors=[DECK, SERIO, LAM],
+        coi_statement="Daniel H. Deck and Alisa W. Serio are employees of Paratek Pharmaceuticals, Inc.")
+    await ie.execute_industry_evidence(_ctx(job), db_session)
+    rows = (await db_session.execute(select(PiIndustryEvidence).where(PiIndustryEvidence.user_id == u.id))).scalars().all()
+    assert {r.kind for r in rows} == {"coauthor_company"}
+
+
+async def test_rescore_with_no_evidence_records_a_zero_raw(db_session):
+    u = await _user(db_session, "0000-0003-3333-4444", "No Evidence")
+    s = await ie.rescore_user(db_session, u.id, tenure_start=2018)
+    assert s.raw_sum == 0.0 and s.evidence_count == 0 and s.score is None and s.reason is None
+
+
+async def test_rescore_counts_an_attributed_founder_twice(db_session):
+    u = await _user(db_session, "0000-0004-4444-5555", "Founder PI")
+    db_session.add(_attributed_founder(u.id))
     await db_session.flush()
     s = await ie.rescore_user(db_session, u.id, tenure_start=2018)
-    assert s.score is None and s.reason == "no_evidence" and s.raw_sum == 0.0
+    assert s.raw_sum == 10.0 and s.evidence_count == 1
 
 
-async def test_rescore_with_evidence_but_no_peers_is_cohort_too_small(db_session):
-    u = User(orcid="0000-0004-4444-5555", name="Lonely PI", user_role="pi")
-    db_session.add(u)
-    await db_session.flush()
-    db_session.add(PiIndustryEvidence(user_id=u.id, source="pubmed", kind="coi_relationship", external_id="k1",
-                                       company_name="Startup Inc", company_class="pharma_biotech", year=2021,
-                                       pi_role=None, in_tenure=True, evidence={"relationship": "founder"}))
+async def test_live_evidence_that_scores_zero_has_a_zero_raw(db_session):
+    """Ported from the fix wave (0fb613c): a class-gated cro_vendor co-author is live
+    evidence with raw 0.0, which read time calls no_evidence (Task 5's test)."""
+    u = await _user(db_session, "0000-0007-7777-8888", "Vendor PI")
+    db_session.add(PiIndustryEvidence(user_id=u.id, source="openalex", kind="coauthor_company",
+                                      external_id="W1:I1", company_name="Applied BioPhysics",
+                                      company_class="cro_vendor", year=2021, pi_role="last",
+                                      in_tenure=True, evidence={}))
     await db_session.flush()
     s = await ie.rescore_user(db_session, u.id, tenure_start=2018)
-    assert s.score is None and s.reason == "cohort_too_small" and s.raw_sum > 0
-
-
-async def test_rescore_with_evidence_and_enough_peers_is_scored(db_session):
-    u = User(orcid="0000-0005-5555-6666", name="Popular PI", user_role="pi")
-    db_session.add(u)
-    await db_session.flush()
-    db_session.add(PiIndustryEvidence(user_id=u.id, source="pubmed", kind="coi_relationship", external_id="k1",
-                                       company_name="Startup Inc", company_class="pharma_biotech", year=2021,
-                                       pi_role=None, in_tenure=True, evidence={"relationship": "founder"}))
-    await _seed_peers(db_session, 3)
-    s = await ie.rescore_user(db_session, u.id, tenure_start=2018)
-    assert s.reason == "ok" and s.score is not None and s.raw_sum == 10.0
-
-
-async def test_zero_evidence_peers_do_not_count_toward_the_cohort(db_session):
-    u = User(orcid="0000-0007-7777-8888", name="Guarded PI", user_role="pi")
-    db_session.add(u)
-    await db_session.flush()
-    db_session.add(PiIndustryEvidence(user_id=u.id, source="pubmed", kind="coi_relationship", external_id="k1",
-                                       company_name="Startup Inc", company_class="pharma_biotech", year=2021,
-                                       pi_role=None, in_tenure=True, evidence={"relationship": "founder"}))
-    await _seed_peers(db_session, 3, reason="no_evidence")
-    s = await ie.rescore_user(db_session, u.id, tenure_start=2018)
-    assert s.score is None and s.reason == "cohort_too_small" and s.raw_sum > 0
-
-
-async def test_cohort_too_small_peers_do_count_toward_the_cohort(db_session):
-    u = User(orcid="0000-0008-8888-9999", name="Bootstrapped PI", user_role="pi")
-    db_session.add(u)
-    await db_session.flush()
-    db_session.add(PiIndustryEvidence(user_id=u.id, source="pubmed", kind="coi_relationship", external_id="k1",
-                                       company_name="Startup Inc", company_class="pharma_biotech", year=2021,
-                                       pi_role=None, in_tenure=True, evidence={"relationship": "founder"}))
-    await _seed_peers(db_session, 3, reason="cohort_too_small")
-    s = await ie.rescore_user(db_session, u.id, tenure_start=2018)
-    assert s.reason == "ok" and s.score is not None
+    assert s.raw_sum == 0.0 and s.evidence_count == 1
 
 
 async def test_rescore_re_reads_tenure_start_when_omitted(db_session):
-    u = User(orcid="0000-0006-6666-7777", name="Rescored PI", user_role="pi")
-    db_session.add(u)
-    await db_session.flush()
+    u = await _user(db_session, "0000-0006-6666-7777", "Rescored PI")
     await set_tenure_start(u.id, 2018, "manual", db=db_session)
     s = await ie.rescore_user(db_session, u.id)
     assert s.tenure_start_used == 2018
@@ -164,9 +170,7 @@ async def test_rescore_re_reads_tenure_start_when_omitted(db_session):
 
 @respx.mock
 async def test_the_job_completes_when_uspto_answers_404(db_session, monkeypatch):
-    u = User(orcid="0000-0005-5555-6666", name="No Patents", user_role="pi")
-    db_session.add(u)
-    await db_session.flush()
+    u = await _user(db_session, "0000-0005-5555-6666", "No Patents")
     await set_tenure_start(u.id, 2018, "manual", db=db_session)
     job = Job(type="industry_evidence", user_id=u.id, payload={"user_id": str(u.id), "orcid": u.orcid})
     db_session.add(job)
@@ -175,12 +179,15 @@ async def test_the_job_completes_when_uspto_answers_404(db_session, monkeypatch)
     async def none(*a, **k):
         return []
 
+    async def no_pages(*a, **k):
+        return Paged([])
+
     async def cf(ids):
         return set()
 
-    monkeypatch.setattr(openalex_industry, "fetch_works_for_pmids", none)
+    monkeypatch.setattr(openalex_industry, "fetch_works_for_pmids", no_pages)
     monkeypatch.setattr(pubmed, "fetch_pubmed_records", none)
-    monkeypatch.setattr(ctgov, "fetch_jhu_industry_trials", none)
+    monkeypatch.setattr(ctgov, "fetch_jhu_industry_trials", no_pages)
     monkeypatch.setattr(openalex_industry, "company_funder_ids", cf)
     monkeypatch.setattr(
         "src.services.industry_sources.uspto_inventor.get_settings",

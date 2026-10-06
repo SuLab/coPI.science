@@ -320,7 +320,7 @@ async def manager_pi_detail(
             grant_identity=detail["grant_identity"],
             orcid_fundings=detail["orcid_fundings"],
             grant_sections=detail["grant_sections"],
-            industry_score=detail["industry_score"],
+            industry=detail["industry"],
             industry_evidence=detail["industry_evidence"],
             tenure_start=tenure_start,
             has_bot_token=bool(agent is not None and token_for_agent_row(agent)),
@@ -535,6 +535,13 @@ ORCID_VETO_LOCK_TIMEOUT = "5s"
 #: ``SET LOCAL lock_timeout`` for the RePORTER grant veto, pin, none and unpin routes: the
 #: same persona-lock wait as the ORCID veto; past this the route says "try again".
 PERSONA_LOCK_TIMEOUT = "5s"
+#: ``SET LOCAL lock_timeout`` for the industry-evidence veto (spec 2026-10-05 §6.2): an
+#: industry_evidence job holds the PI's evidence rows from its upsert until it commits
+#: (its rescore follows at once); past this the veto says "try again".
+INDUSTRY_VETO_LOCK_TIMEOUT = "5s"
+#: ``SET LOCAL lock_timeout`` for Find companies: a profile generation's step 10 holds a
+#: pending discovery job's row (`job_queue.request_job`) until the generation commits.
+DISCOVERY_ENQUEUE_LOCK_TIMEOUT = "5s"
 #: Postgres SQLSTATE lock_not_available.
 _LOCK_NOT_AVAILABLE = "55P03"
 
@@ -854,33 +861,48 @@ async def manager_veto_industry_evidence(
 ):
     """'Not this PI / not industry' veto on one evidence row; persisted and
     rescored immediately. Idempotent: a replayed POST on an already-vetoed
-    row is a no-op redirect, so a double-click never rescores twice."""
+    row is a no-op redirect, so a double-click never rescores twice. Waits at most
+    INDUSTRY_VETO_LOCK_TIMEOUT for the row, then says "try again" and changes nothing."""
     await _require_pi(db, user_id)
-    row = (await db.execute(
-        select(PiIndustryEvidence).where(
-            PiIndustryEvidence.id == evidence_id, PiIndustryEvidence.user_id == user_id
+    await db.execute(text(f"SET LOCAL lock_timeout = '{INDUSTRY_VETO_LOCK_TIMEOUT}'"))
+    try:
+        row = (await db.execute(
+            select(PiIndustryEvidence).where(
+                PiIndustryEvidence.id == evidence_id, PiIndustryEvidence.user_id == user_id
+            ).with_for_update()
+        )).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Evidence not found")
+        if row.vetoed_at is None:
+            row.vetoed_at = datetime.now(UTC)
+            # `current_user` is the EFFECTIVE user (`_STAFF` = `get_staff_user`),
+            # which is the impersonated manager while an admin is impersonating
+            # one — so the attribution column, per branch convention, still
+            # names the worn account. The real actor is recorded only in this
+            # log line, keyed off the session itself (unaffected by the
+            # impersonation cookie) rather than off `current_user`.
+            row.vetoed_by_user_id = current_user.id
+            if getattr(current_user, "_is_impersonated", False):
+                logger.warning(
+                    "Industry-evidence veto on %s recorded under impersonated "
+                    "user %s; real session holder is %s",
+                    evidence_id, current_user.id, request.session.get("user_id"),
+                )
+            # No tenure_start passed: rescore_user re-reads it itself when omitted.
+            await rescore_user(db, user_id)
+            await db.commit()
+    except DBAPIError as exc:
+        if getattr(exc.orig, "sqlstate", None) != _LOCK_NOT_AVAILABLE:
+            raise
+        await db.rollback()
+        flash(
+            request,
+            "This PI's industry evidence is being refreshed — try again in a moment.",
+            "error",
         )
-    )).scalar_one_or_none()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Evidence not found")
-    if row.vetoed_at is None:
-        row.vetoed_at = datetime.now(UTC)
-        # `current_user` is the EFFECTIVE user (`_STAFF` = `get_staff_user`),
-        # which is the impersonated manager while an admin is impersonating
-        # one — so the attribution column, per branch convention, still
-        # names the worn account. The real actor is recorded only in this
-        # log line, keyed off the session itself (unaffected by the
-        # impersonation cookie) rather than off `current_user`.
-        row.vetoed_by_user_id = current_user.id
-        if getattr(current_user, "_is_impersonated", False):
-            logger.warning(
-                "Industry-evidence veto on %s recorded under impersonated "
-                "user %s; real session holder is %s",
-                evidence_id, current_user.id, request.session.get("user_id"),
-            )
-        # No tenure_start passed: rescore_user re-reads it itself when omitted.
-        await rescore_user(db, user_id)
-        await db.commit()
+        return RedirectResponse(
+            url=f"/manager/pis/{user_id}?error=industry_busy#industry", status_code=302
+        )
     return RedirectResponse(url=f"/manager/pis/{user_id}#industry", status_code=302)
 
 
@@ -1078,8 +1100,10 @@ def _discovery_view(job: Job | None) -> dict | None:
     """What the Companies card says about discovery (spec 2026-10-02 §7.2), from the PI's
     latest company_discovery job: whether it is queued or running (the Find companies
     button is then disabled), when it last ran (``completed_at``, else ``enqueued_at``),
-    its outcome (the detail of its last DISCOVERY_DONE_STEP progress entry) and, for a
-    failed run, the start of its ``last_error``. None when discovery was never queued."""
+    its outcome (the detail of its last DISCOVERY_DONE_STEP progress entry), for a
+    failed run, the start of its ``last_error`` and, for a job that deferred itself at the
+    COI budget ceiling (``last_error`` "deferred until …", src/worker/main.py
+    ``_mark_deferred``), until when it waits. None when discovery was never queued."""
     if job is None:
         return None
     progress = (job.payload or {}).get("progress") or []
@@ -1097,6 +1121,9 @@ def _discovery_view(job: Job | None) -> dict | None:
         "at": job.completed_at or job.enqueued_at,
         "outcome": outcome or None,
         "error": (job.last_error or "")[:200] or None,
+        "deferred_until": job.not_before if (
+            job.status == "pending" and (job.last_error or "").startswith("deferred until")
+        ) else None,
     }
 
 
@@ -1144,13 +1171,27 @@ async def manager_discover_companies(
     §7.5). While one is pending or processing a press inserts nothing (the per-user
     unique index), and a pending bulk job is raised to interactive instead. Discovery
     reads the PI's own papers and Wikidata by ORCID iD, so a PI without one is told so
-    and nothing is queued."""
+    and nothing is queued. Waits at most DISCOVERY_ENQUEUE_LOCK_TIMEOUT behind a
+    generation's step 10."""
     target = await _require_pi(db, user_id)
     if not (target.orcid or "").strip():
         flash(request, "Company discovery needs the PI's ORCID iD; none is recorded.", "error")
         return _companies_redirect(user_id)
-    job_id = await enqueue_company_discovery(db, user_id, priority=INTERACTIVE_PRIORITY)
-    await db.commit()
+    await db.execute(text(f"SET LOCAL lock_timeout = '{DISCOVERY_ENQUEUE_LOCK_TIMEOUT}'"))
+    try:
+        job_id = await enqueue_company_discovery(db, user_id, priority=INTERACTIVE_PRIORITY)
+        await db.commit()
+    except DBAPIError as exc:
+        if getattr(exc.orig, "sqlstate", None) != _LOCK_NOT_AVAILABLE:
+            raise
+        await db.rollback()
+        flash(
+            request,
+            "A profile generation is queueing discovery for this PI right now — "
+            "try again in a moment.",
+            "error",
+        )
+        return _companies_redirect(user_id)
     if job_id is None:
         flash(request, "Company discovery is already queued or running for this PI.", "info")
     else:
@@ -1164,18 +1205,22 @@ async def manager_delete_company(
     user_id: uuid.UUID, company_id: uuid.UUID, request: Request,
     db: AsyncSession = _DB, current_user: User = _STAFF,
 ):
-    """Remove a confirmed entry; the hub's file is rewritten, or removed with the last
-    entry, at once. The form asks first (``data-confirm``). A suggestion is rejected, never
-    deleted, so discovery does not offer it again."""
+    """Remove a confirmed entry: it is recorded as rejected (spec 2026-10-05 §6.2, D37), so
+    it leaves the hub's file at once and discovery never offers it again. The form asks
+    first (``data-confirm``). A suggestion is rejected, never deleted."""
     await _require_pi(db, user_id)
+    # The reviewer column names the worn account; the real session holder goes to the log.
+    _warn_if_impersonated(request, current_user, "Company delete", user_id)
     try:
-        await delete_company(db, user_id=user_id, company_id=company_id)
+        row = await delete_company(
+            db, user_id=user_id, company_id=company_id, reviewer_id=current_user.id
+        )
     except CompanyNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Company not found") from exc
     except CompanyValidationError as exc:
         flash(request, str(exc), "error")
         return _companies_redirect(user_id)
-    flash(request, "Company removed.", "success")
+    flash(request, f"Removed {row.company_name}; discovery will not suggest it again.", "success")
     return _companies_redirect(user_id)
 
 

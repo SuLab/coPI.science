@@ -21,12 +21,12 @@ import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 
-from sqlalchemy import DateTime, SmallInteger, bindparam, case, func, text, update
+from sqlalchemy import DateTime, SmallInteger, bindparam, case, func, null, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import Job
-from src.models.job import ONE_ACTIVE_PER_USER_TYPE_WHERE, PER_USER_JOB_TYPES
+from src.models.job import BULK_PRIORITY, ONE_ACTIVE_PER_USER_TYPE_WHERE, PER_USER_JOB_TYPES
 
 #: A step the worker runs on the handler's session after the handler's commit
 #: (`JobContext.after_commit`, spec §4.3).
@@ -35,6 +35,11 @@ AfterCommit = Callable[[AsyncSession], Awaitable[object]]
 #: `request_job`'s insert-or-update rounds before it gives up. Each round that fails
 #: means a conflicting job ended, or another one committed, between two statements.
 REQUEST_JOB_ROUNDS = 3
+
+
+#: `jobs.last_error` of a job the OpenAlex gate deferred (src/services/openalex_budget.py
+#: reasons start "OpenAlex "; the worker writes "deferred until <time>: <reason>").
+OPENALEX_GATE_DEFERRAL = "deferred until %: OpenAlex %"
 
 
 class NonRetryableJobError(Exception):
@@ -58,9 +63,10 @@ async def insert_job_if_absent(
     """Insert a pending job and return its id, or None when the user already has
     a pending or processing job of this type. On that conflict a higher
     ``priority`` is carried onto the existing PENDING row, so a person now waiting
-    on it is not left behind a bulk enqueue's lower priority; ``not_before`` applies
-    only to a newly inserted row. Adds to the caller's transaction; the caller
-    commits."""
+    on it is not left behind a bulk enqueue's lower priority; lifted above BULK, the row
+    also loses a ``not_before`` the OpenAlex gate set (OPENALEX_GATE_DEFERRAL), which binds
+    BULK jobs only. A stated ``not_before`` applies only to a newly inserted row. Adds to
+    the caller's transaction; the caller commits."""
     if type not in PER_USER_JOB_TYPES:
         raise ValueError(f"{type!r} is not a per-user job type")
     stmt = (
@@ -76,11 +82,15 @@ async def insert_job_if_absent(
     )
     new_id = (await db.execute(stmt)).scalar_one_or_none()
     if new_id is None and priority is not None:
+        values: dict = {"priority": priority}
+        if priority > BULK_PRIORITY:
+            values["not_before"] = case(
+                (Job.last_error.like(OPENALEX_GATE_DEFERRAL), null()), else_=Job.not_before)
         await db.execute(
             update(Job)
             .where(Job.user_id == user_id, Job.type == type, Job.status == "pending",
                    func.coalesce(Job.priority, 0) < priority)
-            .values(priority=priority)
+            .values(values)
         )
     return new_id
 

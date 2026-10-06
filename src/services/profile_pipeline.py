@@ -793,24 +793,22 @@ async def _step9_store(run: PipelineRun) -> None:
 
 
 async def _enqueue_enrichment(run: PipelineRun) -> None:
-    """Step 10: grant and industry enrichment on every generation; company discovery
-    (spec §7.5) only when the PI has never had a discovery job, i.e. after the first
-    successful generation. Both inserts join this transaction, so a run that fails
-    later queues neither."""
-    from src.services.company_discovery import enqueue_first_company_discovery
+    """Step 10: grant and industry enrichment, and company discovery, on every successful
+    generation (spec 2026-10-05 §6.2, D37). Discovery goes through `request_job`
+    (`request_company_discovery`): a pending discovery job is kept and runs after this
+    commit, a processing one is flagged for a rerun, so a regenerated profile always gets a
+    discovery run that sees it. Every insert joins this transaction, so a run that fails
+    later queues none."""
+    from src.services.company_discovery import request_company_discovery
     from src.services.grant_enrichment import enqueue_enrichment_jobs
     await enqueue_enrichment_jobs(
         run.db, run.user.id, run.orcid_id, priority=BULK_PRIORITY,
         not_before=run.followon_not_before,
     )
-    discovery = await enqueue_first_company_discovery(
+    await request_company_discovery(
         run.db, run.user.id, priority=BULK_PRIORITY, not_before=run.followon_not_before
     )
-    await run.progress(
-        "step10",
-        "Enqueued grant + industry enrichment jobs"
-        + (" and company discovery" if discovery else ""),
-    )
+    await run.progress("step10", "Enqueued grant + industry enrichment jobs and requested company discovery")
 
 
 async def _export_profile(run: PipelineRun) -> None:

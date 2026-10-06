@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import uuid
 from collections import Counter
+from collections.abc import Sequence
 from typing import Any
 
 from sqlalchemy import String, Text, and_, case, cast, func, literal_column, or_, select, union_all
@@ -54,6 +55,7 @@ from src.services.blackbird_rubric import (
     load_rubric,
 )
 from src.services.grant_sections import load_grant_sections
+from src.services.industry_score import SCORER_VERSION, IndustryView, cohort_raw, industry_view
 from src.services.rubric_revisions import RubricRevisionView, resolve_revision
 from src.services.runs import runs_ordered
 from src.services.tenure_scope import (
@@ -271,14 +273,7 @@ async def list_pi_directory(
     agent_ids_by_user = {u.id: (u.agent.agent_id if u.agent else None) for u in users}
     pub_scope_by_user = await scoped_counts(db, [u.id for u in users], agent_ids_by_user)
 
-    # Latest industry-interest score per listed user (Postgres DISTINCT ON).
-    industry_result = await db.execute(
-        select(PiIndustryScore)
-        .where(PiIndustryScore.user_id.in_([u.id for u in users]))
-        .distinct(PiIndustryScore.user_id)
-        .order_by(PiIndustryScore.user_id, PiIndustryScore.computed_at.desc())
-    )
-    industry_by_user = {row.user_id: row for row in industry_result.scalars().all()}
+    views = await industry_views(db, [u.id for u in users])
 
     user_data = []
     for user in users:
@@ -292,7 +287,6 @@ async def list_pi_directory(
             agent_status = "awaiting_token"
         else:
             agent_status = user.agent.status  # "active" or "suspended"
-        industry_row = industry_by_user.get(user.id)
         user_data.append({
             "user": user,
             "profile": user.profile,
@@ -300,10 +294,43 @@ async def list_pi_directory(
             "pub_count": pub_count,
             "pub_scope": pub_scope,
             "agent_status": agent_status,
-            "industry_score": industry_row.score if industry_row else None,
-            "industry_reason": industry_row.reason if industry_row else None,
+            "industry": views[user.id],
         })
     return user_data
+
+
+async def industry_views(
+    db: AsyncSession, user_ids: Sequence[uuid.UUID],
+) -> dict[uuid.UUID, IndustryView]:
+    """Each listed PI's industry score as a page shows it, computed now (spec 2026-10-05
+    §6.2, D13): the reason and percentile of the PI's latest row at the current
+    SCORER_VERSION, ranked against every PI's latest current-version row
+    (`industry_score.industry_view`). A PI whose rows are all older versions is
+    "rescoring"; one with none, "not_computed". Two queries, whatever the page size."""
+    latest_rows = (await db.execute(
+        select(PiIndustryScore)
+        .where(PiIndustryScore.scorer_version == SCORER_VERSION)
+        .distinct(PiIndustryScore.user_id)
+        .order_by(
+            PiIndustryScore.user_id, PiIndustryScore.computed_at.desc(),
+            PiIndustryScore.id.desc(),
+        )
+    )).scalars().all()
+    latest = {row.user_id: row for row in latest_rows}
+    cohort = [raw for raw in (cohort_raw(row) for row in latest_rows) if raw is not None]
+    wanted = list(user_ids)
+    older: set[uuid.UUID] = set()
+    if wanted:
+        older = set((await db.execute(
+            select(PiIndustryScore.user_id).where(
+                PiIndustryScore.user_id.in_(wanted),
+                PiIndustryScore.scorer_version != SCORER_VERSION,
+            ).distinct()
+        )).scalars())
+    return {
+        uid: industry_view(latest.get(uid), cohort, has_older_row=uid in older)
+        for uid in wanted
+    }
 
 
 async def load_user_detail(db: AsyncSession, user_id: uuid.UUID) -> dict[str, Any] | None:
@@ -358,10 +385,7 @@ async def load_user_detail(db: AsyncSession, user_id: uuid.UUID) -> dict[str, An
     # so the manager card's counts and D57 note match the file.
     grant_sections = await load_grant_sections(db, user_id)
 
-    industry_score = (await db.execute(
-        select(PiIndustryScore).where(PiIndustryScore.user_id == user_id)
-        .order_by(PiIndustryScore.computed_at.desc()).limit(1)
-    )).scalar_one_or_none()
+    industry = (await industry_views(db, [user_id]))[user_id]
     industry_evidence = (await db.execute(
         select(PiIndustryEvidence).where(PiIndustryEvidence.user_id == user_id)
         .order_by(PiIndustryEvidence.vetoed_at.is_(None).desc(), PiIndustryEvidence.year.desc().nullslast())
@@ -381,7 +405,7 @@ async def load_user_detail(db: AsyncSession, user_id: uuid.UUID) -> dict[str, An
         "grant_identity": grant_identity,
         "orcid_fundings": orcid_fundings,
         "grant_sections": grant_sections,
-        "industry_score": industry_score,
+        "industry": industry,
         "industry_evidence": industry_evidence,
     }
 

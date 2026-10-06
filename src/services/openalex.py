@@ -15,6 +15,7 @@ import httpx
 
 from src.config import get_settings
 from src.services.http_pacing import TRANSIENT_STATUSES, with_retries
+from src.services.query_escaping import openalex_filter_value
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,7 @@ async def fetch_works_by_orcid(orcid: str) -> list[dict]:
     async with _make_client() as client:
         for _ in range(_MAX_PAGES):
             params = {
-                "filter": f"author.orcid:https://orcid.org/{orcid}",
+                "filter": f"author.orcid:https://orcid.org/{openalex_filter_value(orcid)}",
                 "per-page": str(_PER_PAGE),
                 "cursor": cursor,
                 "select": "ids,publication_year",

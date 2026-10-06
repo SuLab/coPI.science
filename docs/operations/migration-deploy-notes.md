@@ -447,12 +447,14 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > key outside `ALLOWED_CRITERIA` and aborts when `meta.total` exceeds a cap
 > instead of paging through it blind. A PI with no recorded tenure start gets
 > grants labelled `org_only` (JHU affiliation cannot be tenure-scoped) and an
-> industry score of **Unscored** (`reason: no_tenure_start`); a field
-> percentile additionally needs at least three other scored PIs in the same
-> `primary_field` or it stays `reason: cohort_too_small`. Enum values cannot be
-> dropped in Postgres; a downgrade drops the three tables and leaves the two
-> `job_type_enum` values in place, exactly as `0039` does for
-> `review_feedback_analysis`.
+> industry score of **Unscored** (`reason: no_tenure_start`); the score
+> additionally needed at least three OTHER PIs with live evidence scored at the
+> current `scorer_version` (a global cohort, not a per-field one) or it stayed
+> `reason: cohort_too_small`; `field_percentile` was never computed. Since
+> `0061` the percentile and the reason are computed at read time (the `0061`
+> box). Enum values cannot be dropped in Postgres; a downgrade drops the three
+> tables and leaves the two `job_type_enum` values in place, exactly as `0039`
+> does for `review_feedback_analysis`.
 
 > **Deploy order for `0048_assessment_score_rationale` — migrate BEFORE the new
 > code serves, and rebuild the AGENT image in the same deploy.** `0048` is one
@@ -1124,3 +1126,53 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > old code re-exports from `grant_titles` and brings the misattribution back, so this is a
 > last resort. `alembic downgrade 0059`, if wanted, runs from a one-off container off the
 > NEW image before the images are restored, and drops both tables and the four columns.
+
+> **Deploy order for `0061_industry_coverage_discovery_budget` — migrate BEFORE the new
+> code serves, with the WORKER STOPPED; then web and worker; then the agent (no live
+> run); then the industry repair.** `0061` adds `pi_industry_scores.coverage` (per
+> evidence source: `ok`, `truncated` or `unavailable:<reason>`), `company_discovery_usage`
+> (one row per COI extraction call, reserved before it and settled after it; the
+> `COMPANY_DISCOVERY_DAILY_USD_LIMIT` ceiling, $20 per rolling 24 h by default, sums it)
+> and `company_discovery_coi_ledger` (one row per PI, PMID, statement and way of naming
+> the PI, so a statement is paid for once). Design:
+> `docs/specs/2026-10-05-pi-profile-remediation-design.md` §6.2.
+>
+> *Old code on the new schema* is safe: it reads none of it. *New code on the old schema*
+> is not: `PiIndustryScore` maps `coverage` (the manager PI list and detail pages raise
+> `UndefinedColumn`) and company discovery writes the two new tables. **Agent image:**
+> rebuild — the engine imports `src.models`.
+>
+> **Stop the worker** for `--apply` (`$DC stop worker`, after no row is `processing`): the
+> chain's 10 s `lock_timeout` otherwise collides with the worker's job-long transaction
+> and its idle-loop sweeps. Commit before building.
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     for s in blackbird-app worker agent; do
+>       docker image tag copi-blackbird-$s:latest copi-blackbird-$s:rollback-pre-0061
+>     done
+>     $DC build blackbird-app worker
+>     $DC --profile agent build agent
+>     $DC stop worker
+>     ./scripts/migrate/run_migration.sh              # rehearse (writes nothing)
+>     ./scripts/migrate/run_migration.sh --apply      # dump → preflight → apply → postflight
+>     $DC run --rm blackbird-app alembic current      # must equal `alembic heads` (0061)
+>     $DC up -d blackbird-app worker
+>     $DC up -d agent                                 # ONLY when /admin/simulation shows no live run
+>
+> Then check one canary PI: `scripts/_bulk_enqueue.py --type industry_evidence --orcid <iD>
+> --apply --wait`, then `scripts/verify_industry_remediation.py --orcid <iD> --deploy-ts <deploy>`.
+> **The full `industry_evidence` re-run is folded into the final regeneration** (decisions
+> 2026-10-06, D66 and D68): after the last remediation phase deploys, every PI is
+> regenerated and each generation's step 10 queues `industry_evidence` at `SCORER_VERSION`
+> `2.0.0`. A detached follow-up then runs `scripts/_bulk_enqueue.py --type
+> industry_evidence --missing-scorer-version 2.0.0 --apply` (no `--wait`), `--partial
+> 2.0.0` for rows a transient failure left partial, and the full verification. Until then
+> the manager pages show every PI but the canary as "rescoring"; the old score rows stay
+> as history. Nothing here starts a run.
+>
+> Rollback: `$DC stop worker`, run
+> `DELETE FROM pi_industry_scores WHERE scorer_version = '2.0.0'` (old code shows each PI's
+> latest row, and a 2.0.0 row has no score), redeploy the `rollback-pre-0061` images, then
+> `$DC up -d blackbird-app worker` (and `agent` with no live run). `alembic downgrade 0060`, if wanted, runs from
+> a one-off container off the NEW image before the images are restored, and drops both
+> tables and the column.

@@ -278,9 +278,9 @@ def test_supported_start_revisions_are_exactly_the_documented_set():
         "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038",
         "0039", "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048",
         "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058",
-        "0059",
+        "0059", "0060",
     )
-    assert pf.DEFAULT_TARGET == "0060"
+    assert pf.DEFAULT_TARGET == "0061"
 
 
 def test_every_post_branch_revision_is_a_supported_start():
@@ -1931,6 +1931,30 @@ def test_0060_plans_its_new_objects():
         ("table", "pi_orcid_fundings"),
         ("constraint", "uq_pi_orcid_fundings_user_group"),
         ("index", "ix_pi_orcid_fundings_vetoed_by_user_id"),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# 0061: industry score coverage, company discovery COI usage and ledger
+# --------------------------------------------------------------------------- #
+
+
+def test_0061_sizes_pi_industry_scores_and_takes_no_agent_messages_lock():
+    assert pf.tables_sized_between("0060", "0061") == ["pi_industry_scores"]
+    assert pf.agent_messages_ddl_pending("0060", "0061") is False
+
+
+def test_0061_plans_its_new_objects():
+    planned = {(o.kind, o.name) for o in pf.planned_objects_between("0060", "0061")}
+    assert planned == {
+        ("column", "coverage"),
+        ("table", "company_discovery_usage"),
+        ("constraint", "ck_company_discovery_usage_status"),
+        ("index", "ix_company_discovery_usage_created"),
+        ("index", "ix_company_discovery_usage_user_id"),
+        ("table", "company_discovery_coi_ledger"),
+        ("constraint", "uq_company_discovery_coi_ledger_key"),
+        ("constraint", "ck_company_discovery_coi_ledger_outcome"),
     }
 
 

@@ -1,7 +1,7 @@
 import pytest
 from sqlalchemy import select
 
-from src.models import Job, PiIndustryEvidence, User
+from src.models import Job, PiIndustryEvidence, PiIndustryScore, User
 from src.services import industry_evidence, industry_score
 from src.services.industry_sources import registry
 from src.services.industry_sources.registry import SOURCES, SourceUnavailable
@@ -73,6 +73,8 @@ async def test_a_failing_source_keeps_its_rows_and_others_refresh(db_session, mo
     assert rows == ["ctgov"]
     detail = [p for p in (job.payload or {}).get("progress", []) if p["step"] == "industry_done"]
     assert "unavailable=ctgov" in str(detail)
+    s = (await db_session.execute(select(PiIndustryScore).where(PiIndustryScore.user_id == user.id))).scalar_one()
+    assert s.coverage["ctgov"] == "unavailable:error" and s.coverage["openalex"] == "ok"
 
 
 @pytest.mark.integration

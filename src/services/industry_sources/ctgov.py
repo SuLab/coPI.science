@@ -1,7 +1,10 @@
 import httpx
 
-from src.services.industry_sources import EvidenceItem
+from src.services.industry_sources import EvidenceItem, Paged
 from src.services.industry_sources.companies import classify_company
+from src.services.industry_sources.registry import SourceUnavailable
+from src.services.person_names import parse_person_name
+from src.services.query_escaping import phrase_term
 
 BASE = "https://clinicaltrials.gov/api/v2/studies"
 # The v2 legacy flat field names (NCTId, BriefTitle, ...) do NOT return the
@@ -12,12 +15,47 @@ _FIELDS = ("protocolSection.identificationModule,protocolSection.sponsorCollabor
 _JHU_SPONSOR_MARKERS = ("johns hopkins", "sidney kimmel")
 
 
-async def fetch_jhu_industry_trials(pi_name: str) -> list[dict]:
-    term = f'AREA[OverallOfficialName]"{pi_name}" AND AREA[CollaboratorClass]INDUSTRY'
+#: Studies per request, and the most requests one PI's search makes (spec 2026-10-05
+#: §6.2, D12).
+PAGE_SIZE = 100
+MAX_PAGES = 10
+
+
+def official_term(full_name: str | None) -> str | None:
+    """The ClinicalTrials.gov term for studies with the PI as an overall official and an
+    industry collaborator, the name parsed and escaped for the Essie phrase (P29). None
+    for an ORCID-iD name or one that leaves nothing to search on."""
+    parsed = parse_person_name(full_name)
+    name = "" if parsed.is_orcid_id else phrase_term(parsed.full)
+    if not name:
+        return None
+    return f'AREA[OverallOfficialName]"{name}" AND AREA[CollaboratorClass]INDUSTRY'
+
+
+async def fetch_jhu_industry_trials(pi_name: str | None) -> Paged:
+    """Every matching study, PAGE_SIZE a request, following `nextPageToken` (API v2; checked
+    live 2026-10-06: the token comes back with `fields=` restricted, and a search with no
+    more results returns none); `truncated` after MAX_PAGES pages with a token left. Raises
+    SourceUnavailable without a usable name."""
+    term = official_term(pi_name)
+    if term is None:
+        raise SourceUnavailable("ctgov: no usable official name", reason="no_usable_name")
+    studies: list[dict] = []
+    token: str | None = None
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(BASE, params={"query.term": term, "fields": _FIELDS, "pageSize": 100})
-        resp.raise_for_status()
-        return resp.json().get("studies") or []
+        for _ in range(MAX_PAGES):
+            params: dict[str, str | int] = {"query.term": term, "fields": _FIELDS,
+                                            "pageSize": PAGE_SIZE}
+            if token:
+                params["pageToken"] = token
+            resp = await client.get(BASE, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            studies.extend(data.get("studies") or [])
+            token = data.get("nextPageToken")
+            if not token:
+                return Paged(studies)
+    return Paged(studies, truncated=True)
 
 
 def evidence_from_study(study: dict, tenure_start: int | None, pi_conditions: set[str]) -> list[EvidenceItem]:

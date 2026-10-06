@@ -1,9 +1,12 @@
 import re
 
 from src.config import get_settings
-from src.services.industry_sources import EvidenceItem
+from src.services.industry_sources import EvidenceItem, Paged
 from src.services.industry_sources.companies import classify_company
+from src.services.industry_sources.registry import SourceUnavailable
 from src.services.odp import ODP_PACER, ODP_SEARCH_URL, odp_client, odp_headers
+from src.services.person_names import parse_person_name
+from src.services.query_escaping import phrase_term
 
 SEARCH_URL = ODP_SEARCH_URL
 _FIELDS = ["applicationNumberText", "applicationMetaData.inventionTitle", "applicationMetaData.filingDate",
@@ -36,24 +39,62 @@ def _is_industry_company(name: str) -> bool:
     return classify_company(name, "company") in ("pharma_biotech", "device_dx")
 
 
-async def fetch_jhu_applications(inventor_full_name: str) -> list[dict]:
+#: Applications per ODP request, and the most requests one PI's search makes (spec
+#: 2026-10-05 §6.2, D12). A PI past 1,000 JHU applications is recorded as truncated.
+ODP_PAGE_LIMIT = 100
+MAX_PAGES = 10
+
+
+def inventor_query(full_name: str | None) -> str | None:
+    """The ODP query for applications whose first inventor is the PI and whose applicant
+    is Johns Hopkins, the name parsed (`person_names.parse_person_name`: honorifics, comma
+    degrees and suffixes dropped) and escaped for the phrase (`query_escaping.phrase_term`,
+    P29). None for an ORCID-iD name or one that leaves nothing to search on."""
+    parsed = parse_person_name(full_name)
+    name = "" if parsed.is_orcid_id else phrase_term(parsed.full)
+    if not name:
+        return None
+    return (f'applicationMetaData.firstInventorName:"{name}" AND '
+            'applicationMetaData.applicantBag.applicantNameText:"Johns Hopkins"')
+
+
+async def fetch_jhu_applications(inventor_full_name: str | None) -> Paged:
+    """Every JHU application whose first inventor is the PI, ODP_PAGE_LIMIT a request by
+    `offset` (newest filing first, deduplicated by application number), until a short
+    page, the reported `count`, or a 404 (ODP's answer for "no matches", on any page);
+    `truncated` after MAX_PAGES full pages with more reported. Raises SourceUnavailable
+    without a key or a usable name: an empty answer would read as "no patents" and the
+    job would delete the PI's stored patent rows. Every other error status raises, so the
+    source is unavailable for the run."""
     key = get_settings().uspto_api_key
     if not key:
-        return []
-    q = f'applicationMetaData.firstInventorName:"{inventor_full_name}" AND applicationMetaData.applicantBag.applicantNameText:"Johns Hopkins"'
+        raise SourceUnavailable("uspto: USPTO_API_KEY is not set", reason="no_api_key")
+    q = inventor_query(inventor_full_name)
+    if q is None:
+        raise SourceUnavailable("uspto: no usable inventor name", reason="no_usable_name")
+    items: dict[str, dict] = {}
     async with odp_client(timeout=30, follow_redirects=False) as client:
-        await ODP_PACER.wait()
-        resp = await client.post(
-            SEARCH_URL, headers=odp_headers(key),
-            json={"q": q, "pagination": {"offset": 0, "limit": 100}, "fields": _FIELDS},
-        )
-        if resp.status_code == 404:
-            # ODP answers 404 for a search with no matching applications — an
-            # empty result, not an outage. Every other error status still
-            # raises, so the job retries a real failure.
-            return []
-        resp.raise_for_status()
-        return resp.json().get("patentFileWrapperDataBag") or []
+        for page in range(MAX_PAGES):
+            await ODP_PACER.wait()
+            resp = await client.post(
+                SEARCH_URL, headers=odp_headers(key),
+                json={"q": q,
+                      "pagination": {"offset": page * ODP_PAGE_LIMIT, "limit": ODP_PAGE_LIMIT},
+                      "sort": [{"field": "applicationMetaData.filingDate", "order": "desc"}],
+                      "fields": _FIELDS},
+            )
+            if resp.status_code == 404:
+                return Paged(list(items.values()))
+            resp.raise_for_status()
+            data = resp.json()
+            bag = data.get("patentFileWrapperDataBag") or []
+            for app in bag:
+                items.setdefault(app.get("applicationNumberText") or f"#{len(items)}", app)
+            total = data.get("count")
+            reached = isinstance(total, int) and (page + 1) * ODP_PAGE_LIMIT >= total
+            if len(bag) < ODP_PAGE_LIMIT or reached:
+                return Paged(list(items.values()))
+    return Paged(list(items.values()), truncated=True)
 
 
 def evidence_from_application(app: dict, tenure_start: int | None, pi_keywords: set[str]) -> list[EvidenceItem]:

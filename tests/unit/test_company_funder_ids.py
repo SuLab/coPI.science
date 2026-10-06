@@ -43,6 +43,6 @@ async def test_a_429_is_retried_with_backoff_instead_of_failing_the_job(monkeypa
     works = respx.get(f"{oa.OA}/works").mock(side_effect=[
         httpx.Response(429), httpx.Response(200, json={"results": [{"id": "https://openalex.org/W1"}]}),
     ])
-    assert await oa.fetch_works_for_pmids(["31980915"]) == [{"id": "https://openalex.org/W1"}]
+    assert (await oa.fetch_works_for_pmids(["31980915"])).items == [{"id": "https://openalex.org/W1"}]
     assert works.call_count == 2
     assert slept == [2.0]

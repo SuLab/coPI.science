@@ -77,7 +77,7 @@ async def test_the_file_goes_with_the_last_confirmed_row(db_session, _companies_
     row = await add_company(db_session, user_id=pi.id, created_by_user_id=manager.id, **_GOOD)
     path = _companies_dir / f"{agent.agent_id}.md"
     assert path.exists()
-    await delete_company(db_session, user_id=pi.id, company_id=row.id)
+    await delete_company(db_session, user_id=pi.id, company_id=row.id, reviewer_id=manager.id)
     assert not path.exists()
 
 

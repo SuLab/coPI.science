@@ -3,12 +3,15 @@ delete, confirm, reject and discover, each staff-only, each flashing on a refuse
 returning to the card. Review Focus #5: two Find companies presses, or a press behind a
 pending bulk job, leave exactly one job row, at interactive priority."""
 
+import asyncio
 import re
 import uuid
 from datetime import UTC, date, datetime
+from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.models import (
     USER_ROLE_ADMIN,
@@ -19,6 +22,7 @@ from src.models import (
     PiCompany,
 )
 from src.models.job import BULK_PRIORITY, INTERACTIVE_PRIORITY
+from src.routers import manager as manager_routes
 from src.services.company_discovery import DISCOVERY_DONE_STEP
 from tests import factories
 from tests.flash_support import session_flashes
@@ -118,7 +122,9 @@ async def test_a_name_already_suggested_is_refused_by_name(client, db_session):
     assert "Delfi Diagnostics, Inc. is already suggested" in session_flashes(r)[-1]["text"]
 
 
-async def test_delete_asks_first_then_removes_the_row_and_the_file(client, db_session, _companies_dir):
+async def test_delete_asks_first_then_rejects_the_row_and_removes_the_file(
+    client, db_session, _companies_dir
+):
     pi, agent, manager = await _pi_agent_manager(db_session)
     await client.post(f"/manager/pis/{pi.id}/companies", data=_ADD,
                       headers=auth_headers(manager.id), follow_redirects=False)
@@ -130,8 +136,91 @@ async def test_delete_asks_first_then_removes_the_row_and_the_file(client, db_se
     r = await client.post(f"/manager/pis/{pi.id}/companies/{row.id}/delete",
                           headers=auth_headers(manager.id), follow_redirects=False)
     _back_to_the_card(r, pi)
-    assert await db_session.get(PiCompany, row.id) is None
+    assert "discovery will not suggest it again" in session_flashes(r)[-1]["text"]
+    row = await db_session.get(PiCompany, row.id, populate_existing=True)
+    assert row.status == "rejected" and row.reviewed_by_user_id == manager.id
     assert not (_companies_dir / f"{agent.agent_id}.md").exists()
+    card = _card((await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))).text)
+    assert f"/companies/{row.id}/" not in card and "Belay Diagnostics" not in card
+
+
+async def test_find_companies_refuses_on_a_lock_timeout(engine, monkeypatch):
+    """A generation's step 10 holding the pending discovery job (request_job): Find
+    companies gives up after DISCOVERY_ENQUEUE_LOCK_TIMEOUT and queues nothing."""
+    monkeypatch.setattr(manager_routes, "DISCOVERY_ENQUEUE_LOCK_TIMEOUT", "200ms")
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as s:
+        pi = await factories.make_user(s, user_role=USER_ROLE_PI)
+        mgr = await factories.make_user(s, user_role=USER_ROLE_MANAGER)
+        job = Job(type="company_discovery", user_id=pi.id, status="pending", priority=-10,
+                  payload={"user_id": str(pi.id), "orcid": pi.orcid})
+        s.add(job)
+        await s.commit()
+    try:
+        async with factory() as holder:
+            await holder.execute(text("SELECT 1 FROM jobs WHERE id = :i FOR UPDATE"), {"i": job.id})
+            session = {}
+            async with factory() as s2:
+                resp = await asyncio.wait_for(manager_routes.manager_discover_companies(
+                    pi.id, request=SimpleNamespace(session=session), db=s2, current_user=mgr,
+                ), timeout=10)
+            assert resp.status_code == 302 and "try again" in session["_flashes"][-1]["text"]
+            await holder.rollback()
+        async with factory() as s:
+            priority = (await s.execute(select(Job.priority).where(Job.id == job.id))).scalar_one()
+            assert priority == -10
+    finally:
+        async with factory() as s:
+            await s.execute(text("DELETE FROM users WHERE id IN (:a, :b)"),
+                            {"a": pi.id, "b": mgr.id})
+            await s.commit()
+
+
+async def test_a_deleted_company_can_be_added_back(client, db_session, _companies_dir):
+    pi, agent, manager = await _pi_agent_manager(db_session)
+    await client.post(f"/manager/pis/{pi.id}/companies", data=_ADD,
+                      headers=auth_headers(manager.id), follow_redirects=False)
+    row = (await db_session.execute(select(PiCompany).where(PiCompany.user_id == pi.id))).scalar_one()
+    await client.post(f"/manager/pis/{pi.id}/companies/{row.id}/delete",
+                      headers=auth_headers(manager.id), follow_redirects=False)
+    r = await client.post(f"/manager/pis/{pi.id}/companies", data=_ADD,
+                          headers=auth_headers(manager.id), follow_redirects=False)
+    _back_to_the_card(r, pi)
+    again = (await db_session.execute(
+        select(PiCompany).where(PiCompany.user_id == pi.id)
+        .execution_options(populate_existing=True)
+    )).scalar_one()
+    assert again.id == row.id and (again.status, again.origin) == ("confirmed", "manual")
+    assert (_companies_dir / f"{agent.agent_id}.md").exists()
+
+
+async def test_a_delete_under_impersonation_logs_the_real_session_holder(
+    client, db_session, caplog
+):
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+    pi, _agent, manager = await _pi_agent_manager(db_session)
+    await client.post(f"/manager/pis/{pi.id}/companies", data=_ADD,
+                      headers=auth_headers(manager.id), follow_redirects=False)
+    row = (await db_session.execute(select(PiCompany).where(PiCompany.user_id == pi.id))).scalar_one()
+    with caplog.at_level("WARNING"):
+        await client.post(f"/manager/pis/{pi.id}/companies/{row.id}/delete",
+                          headers=impersonation_headers(admin.id, manager.id),
+                          follow_redirects=False)
+    row = await db_session.get(PiCompany, row.id, populate_existing=True)
+    assert row.reviewed_by_user_id == manager.id
+    assert "Company delete" in caplog.text and str(admin.id) in caplog.text
+
+
+async def test_a_deferred_discovery_says_until_when(client, db_session):
+    pi, _agent, manager = await _pi_agent_manager(db_session)
+    db_session.add(Job(type="company_discovery", user_id=pi.id, status="pending",
+                       not_before=datetime(2026, 10, 7, 9, 30, tzinfo=UTC),
+                       last_error="deferred until 2026-10-07T09:30:00+00:00: company discovery: "
+                                  "the daily COI extraction budget is spent",
+                       payload={"user_id": str(pi.id)}))
+    await db_session.flush()
+    card = _card((await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))).text)
+    assert "waiting for the daily COI extraction budget until 2026-10-07 09:30 UTC" in card
 
 
 async def test_confirm_takes_the_corrections_from_the_form(client, db_session, _companies_dir):

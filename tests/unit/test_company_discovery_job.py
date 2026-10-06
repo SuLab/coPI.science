@@ -5,24 +5,39 @@ outcomes per PMID (`_coi` fixture), so no test calls the Anthropic API.
 Each source can fail alone and the job still completes with a per-source note; a re-run
 never re-suggests a name the PI already has in any status; nothing is ever confirmed.
 Only gated records are sent, at most 60, 4 at a time, with no transaction open; at most
-20 new names are looked up; the outcome line reports the extraction's token spend."""
+20 new names are looked up; the outcome line reports the extraction's token spend.
+Every send is reserved and settled against the COI budget, with a ledger row per
+statement: a statement is paid for once, a re-run merges its stored claims, and at the
+ceiling the job defers itself."""
 import asyncio
 import json
 import re
-from datetime import date
+import uuid
+from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 
-from src.models import Job, PiCompany, Publication, User
+from src.models import (
+    CompanyDiscoveryCoiLedger,
+    CompanyDiscoveryUsage,
+    Job,
+    PiCompany,
+    Publication,
+    User,
+)
 from src.services import company_discovery as cd
+from src.services import company_discovery_budget as budget_mod
 from src.services import pubmed
 from src.services.company_sources import coi_llm, pi_name, sec_form_d, wikidata
 from src.services.company_sources.coi_founders import FounderClaim
+from src.services.job_queue import JobDeferred
+from src.services.llm_pricing import cost_for_tokens
 from src.services.pi_companies import normalize_company_name
 from src.worker.main import JobContext
 
@@ -238,7 +253,7 @@ async def test_a_rerun_skips_names_in_any_status(db_session, monkeypatch, respx_
     assert routes.efts.call_count == 0  # no funding lookup for a name already listed
 
 
-async def test_a_second_run_suggests_nothing_new(db_session, monkeypatch, respx_mock):
+async def test_a_second_run_suggests_nothing_new(db_session, monkeypatch, respx_mock, _coi):
     _settings(monkeypatch)
     _routes(respx_mock, sparql=[_wikidata_answer(), _wikidata_answer()])
     user, job = await _velculescu(db_session)
@@ -250,8 +265,10 @@ async def test_a_second_run_suggests_nothing_new(db_session, monkeypatch, respx_
     second = Job(type="company_discovery", user_id=user.id, payload=dict(job.payload))
     db_session.add(second)
     await db_session.flush()
-    assert await _run(db_session, second) == f"0 suggested (2 already listed); {_spend(2)}"
+    # Both statements are in the ledger as "ok": nothing is sent, so no spend note.
+    assert await _run(db_session, second) == "0 suggested (2 already listed)"
     assert len(await _rows(db_session, user.id)) == 2
+    assert _coi.calls == ["39433569", "34290408"]
 
 
 async def test_ncbi_failure_alone_is_a_note(db_session, monkeypatch, respx_mock):
@@ -575,6 +592,25 @@ async def test_no_cap_note_when_every_gated_record_was_sent(db_session, monkeypa
     assert sorted(_coi.calls) == ["1", "2", "3"]
 
 
+class _OpenBudget:
+    """A budget that never refuses and stores nothing (the unit tests of the send loop)."""
+
+    priced = True
+    model = "claude-opus-5-5"
+
+    async def terminal(self, keys):
+        return {}
+
+    async def reserve(self, key, *, prompt_chars=None):
+        return key
+
+    async def settle(self, reservation, outcome):
+        return None
+
+    async def wake_time(self):
+        raise AssertionError("an open budget never refuses")
+
+
 async def test_extraction_runs_four_at_a_time_and_keeps_the_newest_first_order(monkeypatch):
     """Ten gated records whose calls finish oldest first: never more than four in
     flight, and the claims still come back newest first."""
@@ -593,7 +629,7 @@ async def test_extraction_runs_four_at_a_time_and_keeps_the_newest_first_order(m
     monkeypatch.setattr(coi_llm, "extract_founder_claims", slow)
     notes: list[str] = []
     records = [_record(n) for n in range(1, 11)]
-    claims = await cd._extract_claims(None, records, pi_name("Victor Velculescu"), {}, notes)
+    claims = await cd._extract_claims(None, records, pi_name("Victor Velculescu"), {}, notes, _OpenBudget())
     assert [c.pmid for c in claims] == [str(n) for n in range(10, 0, -1)]
     assert state.peak == cd.COI_CONCURRENCY == 4
     assert notes == [_spend(10)]
@@ -656,3 +692,316 @@ async def test_unavailable_disclosures_are_a_note(db_session, monkeypatch, respx
     rows = await _rows(db_session, user.id)
     assert set(rows) == {"DELFI Diagnostics"}
     assert rows["DELFI Diagnostics"].status == "suggested"
+
+
+@pytest.fixture(autouse=True)
+def _budget_settings(monkeypatch):
+    """The budget reads its own settings (not `cd.get_settings`, which `_settings` replaces);
+    pin them so the host's .env cannot change the model or the ceiling under a test."""
+    monkeypatch.setattr(budget_mod, "get_settings", lambda: SimpleNamespace(
+        llm_coi_model="claude-opus-5-5", company_discovery_daily_usd_limit=20.0))
+
+
+async def _seed_spend(db_session, user, amount: Decimal, hours_ago: float):
+    """A settled usage row (pmid "0") `hours_ago` old; returns its created_at."""
+    return (await db_session.execute(text(
+        "INSERT INTO company_discovery_usage (id, user_id, pmid, model, status, reserved_usd, cost_usd, created_at) "
+        "VALUES (:i, :u, '0', 'claude-opus-5-5', 'settled', :a, :a, clock_timestamp() - make_interval(secs => :s)) "
+        "RETURNING created_at"), {"i": uuid.uuid4(), "u": user.id, "a": amount, "s": hours_ago * 3600})).scalar_one()
+
+
+async def _ledger_pmids(db_session, user_id) -> set[str]:
+    return set((await db_session.execute(select(CompanyDiscoveryCoiLedger.pmid).where(
+        CompanyDiscoveryCoiLedger.user_id == user_id))).scalars())
+
+
+async def test_a_settled_call_records_its_priced_cost_and_ledger_row(db_session, monkeypatch, respx_mock, _coi):
+    _settings(monkeypatch)
+    _routes(respx_mock)
+    user, job = await _velculescu(db_session)
+    assert await _run(db_session, job) == f"2 suggested; {_spend(2)}"
+    usage = (await db_session.execute(select(CompanyDiscoveryUsage).where(
+        CompanyDiscoveryUsage.user_id == user.id))).scalars().all()
+    expected = cost_for_tokens("claude-opus-5-5", input_tokens=900, output_tokens=100, cache_read=60, cache_creation=40)
+    assert sorted(u.pmid for u in usage) == ["34290408", "39433569"]
+    assert {u.status for u in usage} == {"settled"} and {u.cost_usd for u in usage} == {round(expected, 4)}
+    assert all(u.input_tokens == 900 and u.output_tokens == 100 and u.reserved_usd == budget_mod.COI_RESERVE_USD for u in usage)
+    rows = (await db_session.execute(select(CompanyDiscoveryCoiLedger).where(
+        CompanyDiscoveryCoiLedger.user_id == user.id))).scalars().all()
+    assert {(r.pmid, r.outcome) for r in rows} == {("39433569", "ok"), ("34290408", "ok")}
+    delfi = next(r for r in rows if r.pmid == "39433569")
+    assert [c["company_name"] for c in delfi.claims] == ["DELFI Diagnostics"]
+
+
+async def test_the_ceiling_defers_the_job_and_sends_nothing(db_session, monkeypatch, respx_mock, _coi):
+    _settings(monkeypatch)
+    _routes(respx_mock)
+    user, job = await _velculescu(db_session)
+    created = await _seed_spend(db_session, user, Decimal("19.90"), hours_ago=2)
+    with pytest.raises(JobDeferred) as raised:
+        await cd.execute_company_discovery(_ctx(job), db_session)
+    assert _coi.calls == []
+    expected = created + budget_mod.WINDOW + budget_mod.DEFER_MARGIN
+    assert abs((raised.value.not_before - expected).total_seconds()) < 1
+    assert await _rows(db_session, user.id) == {} and await _ledger_pmids(db_session, user.id) == set()
+
+
+async def test_paid_results_survive_a_deferral_and_the_wakeup_sends_only_the_rest(
+    db_session, monkeypatch, respx_mock, _coi,
+):
+    _settings(monkeypatch)
+    _routes(respx_mock)
+    user, job = await _pi_with_records(db_session, monkeypatch, [_record(n) for n in range(1, 9)])
+    _coi.script = {str(n): coi_llm.CoiOutcome("ok", [], usage=USAGE) for n in range(1, 9)}
+    seeded = await _seed_spend(db_session, user, Decimal("20") - 2 * budget_mod.COI_RESERVE_USD, hours_ago=1)
+    with pytest.raises(JobDeferred) as raised:
+        await cd.execute_company_discovery(_ctx(job), db_session)
+    first = list(_coi.calls)
+    # Read after the settles: the sent calls cost cents, so the seeded row is what must leave.
+    expected = seeded + budget_mod.WINDOW + budget_mod.DEFER_MARGIN
+    assert abs((raised.value.not_before - expected).total_seconds()) < 1
+    assert 1 <= len(first) < 8
+    assert await _ledger_pmids(db_session, user.id) == set(first)          # every paid call kept
+    settled = (await db_session.execute(select(CompanyDiscoveryUsage.status).where(
+        CompanyDiscoveryUsage.user_id == user.id, CompanyDiscoveryUsage.pmid != "0"))).scalars().all()
+    assert settled == ["settled"] * len(first)
+    # The seeded spend leaves the window: the wake-up sends the statements not yet sent, only.
+    await db_session.execute(text("DELETE FROM company_discovery_usage WHERE pmid = '0'"))
+    assert await _run(db_session, job) == f"0 suggested; {_spend(8 - len(first))}"
+    assert sorted(_coi.calls, key=int) == [str(n) for n in range(1, 9)]
+
+
+async def test_an_unpriced_model_sends_nothing(db_session, monkeypatch, respx_mock, _coi):
+    _settings(monkeypatch)
+    _routes(respx_mock)
+    monkeypatch.setattr(budget_mod, "get_settings", lambda: SimpleNamespace(
+        llm_coi_model="claude-unpriced-1", company_discovery_daily_usd_limit=20.0))
+    _user, job = await _velculescu(db_session)
+    line = await _run(db_session, job)
+    assert "coi: model claude-unpriced-1 is not priced; nothing sent" in line
+    assert _coi.calls == []
+
+
+async def test_a_name_change_resends_and_a_plain_rerun_does_not(db_session, monkeypatch, respx_mock, _coi):
+    _settings(monkeypatch)
+    _routes(respx_mock, sparql=[_wikidata_answer()] * 3)
+    user, job = await _velculescu(db_session)
+    await _run(db_session, job)
+    job.status = "completed"
+    await db_session.flush()
+    for expected_calls in (2, 4):
+        if expected_calls == 4:
+            user.name = "Victor E. Velculescu"            # the PI block changes: new name-forms hash
+            await db_session.flush()
+        again = Job(type="company_discovery", user_id=user.id, payload=dict(job.payload))
+        db_session.add(again)
+        await db_session.flush()
+        await _run(db_session, again)
+        again.status = "completed"
+        await db_session.flush()
+        assert len(_coi.calls) == expected_calls
+
+
+async def test_candidates_cut_by_the_cap_come_back_from_the_ledger(db_session, monkeypatch, respx_mock, _coi):
+    _settings(monkeypatch)
+    _routes(respx_mock, sparql=[_wikidata_answer(), _wikidata_answer()])
+    monkeypatch.setattr(cd, "MAX_NEW_CANDIDATES", 1)
+    user, job = await _velculescu(db_session)
+    assert "candidates: capped at 1" in await _run(db_session, job)
+    assert len(await _rows(db_session, user.id)) == 1
+    job.status = "completed"
+    await db_session.flush()
+    second = Job(type="company_discovery", user_id=user.id, payload=dict(job.payload))
+    db_session.add(second)
+    await db_session.flush()
+    assert (await _run(db_session, second)).startswith("1 suggested (1 already listed)")
+    assert len(await _rows(db_session, user.id)) == 2 and len(_coi.calls) == 2
+
+
+async def test_an_unavailable_statement_is_sent_again(db_session, monkeypatch, respx_mock, _coi):
+    _settings(monkeypatch)
+    _routes(respx_mock, sparql=[_wikidata_answer(), _wikidata_answer()])
+    user, job = await _velculescu(db_session)
+    _coi.script["34290408"] = coi_llm.CoiOutcome("unavailable", [], reason="refusal")
+    await _run(db_session, job)
+    job.status = "completed"
+    await db_session.flush()
+    second = Job(type="company_discovery", user_id=user.id, payload=dict(job.payload))
+    db_session.add(second)
+    await db_session.flush()
+    await _run(db_session, second)
+    assert _coi.calls == ["39433569", "34290408", "34290408"]
+
+
+BILLED = [{"model": "claude-opus-5-5", "billed": True, "input_tokens": 900, "output_tokens": 40}]
+
+
+@pytest.mark.parametrize(("reason", "entries", "third_run_sends"), [
+    ("refusal", BILLED, False),        # a paid refusal counts: two in all
+    ("api_status_529", [], True),      # an API error status is never billed: it never counts
+    ("api_timeout", None, True),       # no reply at all: no count
+])
+async def test_an_unavailable_statement_stops_being_paid_for_after_two_billed_failures(
+    db_session, monkeypatch, respx_mock, _coi, reason, entries, third_run_sends,
+):
+    _settings(monkeypatch)
+    _routes(respx_mock, sparql=[_wikidata_answer()] * 3)
+    user, job = await _velculescu(db_session)
+    _coi.script["34290408"] = coi_llm.CoiOutcome("unavailable", [], reason=reason, entries=entries)
+    await _run(db_session, job)
+    for _ in range(2):
+        job.status = "completed"
+        await db_session.flush()
+        job = Job(type="company_discovery", user_id=user.id, payload=dict(job.payload))
+        db_session.add(job)
+        await db_session.flush()
+        await _run(db_session, job)
+    sends = ["39433569", "34290408", "34290408"] + (["34290408"] if third_run_sends else [])
+    assert _coi.calls == sends
+    attempts = (await db_session.execute(select(CompanyDiscoveryCoiLedger.attempts).where(
+        CompanyDiscoveryCoiLedger.user_id == user.id, CompanyDiscoveryCoiLedger.pmid == "34290408"))).scalar_one()
+    assert attempts == (0 if third_run_sends else budget_mod.COI_MAX_ATTEMPTS)
+
+
+class _RecordingBudget(_OpenBudget):
+    """An open budget that keeps every settle."""
+
+    def __init__(self):
+        self.settled = []
+
+    async def settle(self, reservation, outcome):
+        self.settled.append((reservation, outcome.status, outcome.reason))
+
+
+async def test_a_cancelled_call_still_settles_its_reservation(monkeypatch):
+    budget = _RecordingBudget()
+    started = asyncio.Event()
+
+    async def hang(record, pi, *, client=None):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(coi_llm, "extract_founder_claims", hang)
+    key = budget_mod.LedgerKey("1", "s", "n")
+    task = asyncio.create_task(cd._extract_one(
+        None, _record(1), key, pi_name("Victor Velculescu"), asyncio.Semaphore(1), budget, cd._Stop()))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert budget.settled == [(key, "unavailable", "cancelled")]
+
+
+async def test_a_ceiling_below_four_reservations_still_wakes_for_one_call(db_session, monkeypatch):
+    monkeypatch.setattr(budget_mod, "get_settings", lambda: SimpleNamespace(
+        llm_coi_model="claude-opus-5-5", company_discovery_daily_usd_limit=0.5))
+    user, _job = await _velculescu(db_session)
+    budget = budget_mod.budget_for(db_session, user.id, slots=cd.COI_CONCURRENCY)
+    now = (await db_session.execute(text("SELECT clock_timestamp()"))).scalar_one()
+    assert await budget.wake_time() - now <= budget_mod.DEFER_MARGIN + timedelta(seconds=5)
+
+
+async def test_a_cancel_while_waiting_to_settle_still_settles_the_real_outcome(monkeypatch):
+    gate = asyncio.Event()
+    settled = []
+
+    class _SlowBudget(_OpenBudget):
+        async def settle(self, reservation, outcome):
+            await gate.wait()
+            settled.append(outcome.status)
+
+    async def answer(record, pi, *, client=None):
+        return coi_llm.CoiOutcome("ok", [], usage=USAGE)
+
+    monkeypatch.setattr(coi_llm, "extract_founder_claims", answer)
+    task = asyncio.create_task(cd._extract_one(
+        None, _record(1), budget_mod.LedgerKey("1", "s", "n"), pi_name("Victor Velculescu"),
+        asyncio.Semaphore(1), _SlowBudget(), cd._Stop()))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert settled == ["ok"]
+
+
+async def test_a_record_too_large_for_the_whole_ceiling_is_not_sent(db_session, monkeypatch):
+    monkeypatch.setattr(budget_mod, "get_settings", lambda: SimpleNamespace(
+        llm_coi_model="claude-opus-5-5", company_discovery_daily_usd_limit=0.5))
+    monkeypatch.setattr(coi_llm, "prompt_chars", lambda record, pi: 3_000_000)
+    called = []
+
+    async def never(record, pi, *, client=None):
+        called.append(record["pmid"])
+
+    monkeypatch.setattr(coi_llm, "extract_founder_claims", never)
+    user, _job = await _velculescu(db_session)
+    budget = budget_mod.budget_for(db_session, user.id, slots=cd.COI_CONCURRENCY)
+    outcome = await cd._extract_one(user.id, _record(1), budget_mod.LedgerKey("1", "s", "n"),
+                                    pi_name("Victor Velculescu"), asyncio.Semaphore(1), budget, cd._Stop())
+    assert (outcome.status, outcome.reason, called) == ("unavailable", "too_large", [])
+    assert (await db_session.execute(select(CompanyDiscoveryUsage).where(
+        CompanyDiscoveryUsage.user_id == user.id))).scalars().all() == []
+
+
+async def test_a_one_dollar_ceiling_waits_for_the_reservations_it_can_hold(db_session, monkeypatch):
+    """$1 holds three $0.30 reservations, not four: an empty window wakes now, and $0.40
+    spent an hour ago keeps it waiting until that row leaves the window."""
+    monkeypatch.setattr(budget_mod, "get_settings", lambda: SimpleNamespace(
+        llm_coi_model="claude-opus-5-5", company_discovery_daily_usd_limit=1.0))
+    user, _job = await _velculescu(db_session)
+    budget = budget_mod.budget_for(db_session, user.id, slots=cd.COI_CONCURRENCY)
+    now = (await db_session.execute(text("SELECT clock_timestamp()"))).scalar_one()
+    assert await budget.wake_time() - now <= budget_mod.DEFER_MARGIN + timedelta(seconds=5)
+    created = await _seed_spend(db_session, user, Decimal("0.40"), hours_ago=1)
+    expected = created + budget_mod.WINDOW + budget_mod.DEFER_MARGIN
+    assert abs((await budget.wake_time() - expected).total_seconds()) < 1
+
+
+
+async def test_a_cancel_during_the_reservation_settles_it_at_no_cost(monkeypatch):
+    gate = asyncio.Event()
+    settled = []
+
+    class _SlowReserve(_OpenBudget):
+        async def reserve(self, key, *, prompt_chars=None):
+            await gate.wait()
+            return key
+
+        async def settle(self, reservation, outcome):
+            settled.append((reservation, outcome.reason, outcome.entries))
+
+    key = budget_mod.LedgerKey("1", "s", "n")
+    task = asyncio.create_task(cd._extract_one(
+        None, _record(1), key, pi_name("Victor Velculescu"), asyncio.Semaphore(1), _SlowReserve(), cd._Stop()))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert settled == [(key, "cancelled", [])]
+
+
+async def test_billed_failures_are_told_apart_from_unbilled_ones(db_session):
+    """Only a failure a model answered counts toward COI_MAX_ATTEMPTS (settle's rule)."""
+    user, _job = await _velculescu(db_session)
+    budget = budget_mod.budget_for(db_session, user.id, slots=1)
+    cases = {
+        "a": coi_llm.CoiOutcome("unavailable", [], reason="refusal", entries=BILLED),
+        "b": coi_llm.CoiOutcome("unavailable", [], reason="schema_mismatch"),        # reply, no usage
+        "c": coi_llm.CoiOutcome("unavailable", [], reason="api_status_529", entries=[]),
+        "d": coi_llm.CoiOutcome("unavailable", [], reason="api_timeout"),
+        "e": coi_llm.CoiOutcome("unavailable", [], reason="cancelled"),
+        "f": coi_llm.CoiOutcome("unavailable", [], reason="error"),
+    }
+    for pmid, outcome in cases.items():
+        reservation = await budget.reserve(budget_mod.LedgerKey(pmid, "s", "n"))
+        await budget.settle(reservation, outcome)
+    rows = dict((await db_session.execute(select(
+        CompanyDiscoveryCoiLedger.pmid, CompanyDiscoveryCoiLedger.attempts).where(
+        CompanyDiscoveryCoiLedger.user_id == user.id))).all())
+    assert rows == {"a": 1, "b": 1, "c": 0, "d": 0, "e": 0, "f": 0}

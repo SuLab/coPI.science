@@ -1,6 +1,7 @@
 """Company discovery enqueue (spec §7.5 Job, §8, Review Focus #5): one active job per PI,
 a Find companies press raises a pending bulk row to interactive, the profile pipeline
-queues discovery only on a PI's first generation, and the worker dispatches the type."""
+requests discovery after every successful generation (spec 2026-10-05 D37), and the
+worker dispatches the type."""
 import asyncio
 import uuid
 from datetime import UTC, datetime
@@ -109,17 +110,8 @@ async def test_latest_discovery_job_is_the_newest_in_any_status(db_session):
     assert latest is not None and latest.id == newest
 
 
-@pytest.mark.parametrize("status", ["pending", "processing", "completed", "failed", "dead"])
-async def test_first_only_enqueue_skips_a_pi_with_any_discovery_row(db_session, status):
-    user = await factories.make_user(db_session)
-    db_session.add(Job(type="company_discovery", user_id=user.id, status=status, payload={}))
-    await db_session.flush()
-    assert await cd.enqueue_first_company_discovery(db_session, user.id, priority=BULK_PRIORITY) is None
-    assert len(await _discovery_jobs(db_session, user.id)) == 1
-
-
 @pytest.mark.usefixtures("progress_on_test_connection")
-async def test_first_generation_enqueues_discovery_once(db_session, wired):  # noqa: F811
+async def test_every_generation_requests_discovery(db_session, wired):  # noqa: F811
     wired.corpus = _uncapped([_rec(1, 2020, "Paper A", hopkins_pi=True)])
     user, _agent, job = await _make_pi(db_session)
 
@@ -130,12 +122,23 @@ async def test_first_generation_enqueues_discovery_once(db_session, wired):  # n
     types = {j.type for j in (await db_session.execute(select(Job).where(Job.user_id == user.id))).scalars()}
     assert {"enrich_grants", "industry_evidence", "company_discovery"} <= types
 
-    # A regeneration or refresh runs step 10 again; a finished discovery run stays the only one.
+    # A regeneration after that run finished queues a new one (D37).
     discovery.status = "completed"
     await db_session.flush()
     run = profile_pipeline.PipelineRun(
         user_id=user.id, db=db_session, job_id=None, user=user, orcid_id=user.orcid)
     await profile_pipeline._enqueue_enrichment(run)
+    assert len(await _discovery_jobs(db_session, user.id)) == 2
+
+
+async def test_a_generation_flags_a_processing_discovery_for_a_rerun(db_session):
+    user = await factories.make_user(db_session)
+    running = Job(type="company_discovery", user_id=user.id, status="processing", payload={})
+    db_session.add(running)
+    await db_session.flush()
+    assert await cd.request_company_discovery(db_session, user.id, priority=BULK_PRIORITY) is None
+    await db_session.refresh(running)
+    assert running.rerun_requested_at is not None
     assert len(await _discovery_jobs(db_session, user.id)) == 1
 
 

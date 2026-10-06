@@ -23,6 +23,7 @@ import pytest
 
 from src.config import get_settings
 from src.services import llm
+from src.services.coi_attribution import sentence_spans
 from src.services.company_sources import coi_llm, pi_name
 from src.services.company_sources.coi_founders import FounderClaim, locate_pi, mentions_founding
 from src.services.pi_companies import normalize_company_name
@@ -567,13 +568,13 @@ def test_a_payload_without_claims_verifies_to_nothing():
     'V.E.V. is a founder of Acme Inc. "Acme" and owns stock.',
 ])
 def test_protected_periods_and_semicolons_do_not_end_a_sentence(text):
-    assert coi_llm._sentence_spans(text) == [(0, len(text))]
+    assert sentence_spans(text) == [(0, len(text))]
 
 
 def test_a_sentence_ends_at_a_stop_before_a_capital_or_digit():
     text = ("A.L. is an employee of Novo Nordisk A/S. V.E.V. is a founder of DELFI. "
             "2 authors own stock! Why? none. Acme, Inc. All authors agree.")
-    assert [text[s:e] for s, e in coi_llm._sentence_spans(text)] == [
+    assert [text[s:e] for s, e in sentence_spans(text)] == [
         "A.L. is an employee of Novo Nordisk A/S.", "V.E.V. is a founder of DELFI.",
         "2 authors own stock!", "Why? none.", "Acme, Inc.", "All authors agree.",
     ]
@@ -581,11 +582,11 @@ def test_a_sentence_ends_at_a_stop_before_a_capital_or_digit():
 
 def test_a_corporate_abbreviation_before_a_bracket_looks_past_it():
     text = "A.L. works at Acme Inc. (Baltimore). V.E.V. is a founder of Beta Bio."
-    assert [text[s:e] for s, e in coi_llm._sentence_spans(text)] == [
+    assert [text[s:e] for s, e in sentence_spans(text)] == [
         "A.L. works at Acme Inc. (Baltimore).", "V.E.V. is a founder of Beta Bio.",
     ]
     text = "A.L. works at Acme Inc. (Baltimore) The rest follows."
-    assert [text[s:e] for s, e in coi_llm._sentence_spans(text)] == [
+    assert [text[s:e] for s, e in sentence_spans(text)] == [
         "A.L. works at Acme Inc.", "(Baltimore) The rest follows.",
     ]
 
@@ -628,7 +629,7 @@ REAL_FOUNDER_SENTENCES = {
 def test_real_founder_sentences_are_not_split(pmid):
     root = ET.parse(FIXTURES / f"pubmed_{pmid}.xml").getroot()
     statement = "".join(root.find(".//CoiStatement").itertext())
-    sentences = [statement[s:e] for s, e in coi_llm._sentence_spans(statement)]
+    sentences = [statement[s:e] for s, e in sentence_spans(statement)]
     for sentence in REAL_FOUNDER_SENTENCES[pmid]:
         assert sentence in sentences
 
@@ -738,3 +739,44 @@ def test_recorded_replies_replay_with_zero_false_positives():
     print(recall)
     assert fps == {}, recall
     assert kept_n > 0, recall
+
+
+async def test_a_reply_records_its_billed_entries(calls):
+    calls.reply = _reply({"claims": []}, usage={
+        "input_tokens": 900, "output_tokens": 100,
+        "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+    })
+    out = await _extract()
+    assert out.entries == [{
+        "model": "claude-opus-5-5", "billed": True, "input_tokens": 900, "output_tokens": 100,
+        "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+    }]
+
+
+async def test_entries_tell_known_unbilled_from_unknown(calls):
+    assert (await _extract(_record(authors=(LEAL,)))).entries == []      # skipped: no call
+    calls.error = api_status_error(anthropic.RateLimitError, 429)
+    assert (await _extract()).entries == []                              # an error status: never billed
+    calls.error = connection_error()
+    assert (await _extract()).entries is None                            # cost unknown
+
+
+async def test_a_consortium_author_list_is_cut_to_a_window_around_the_pi(calls):
+    filler = [{"last": f"Author{n}", "fore": "Pat", "initials": "P", "collective": None} for n in range(1, 2000)]
+    authors = filler[:1500] + [VELCULESCU] + filler[1500:]  # the PI is author 1501
+    await _extract(_record(authors=authors))
+    (kw,) = calls.kwargs
+    listed = kw["messages"][0]["content"].split("<authors>\n", 1)[1].split("\n</authors>", 1)[0].splitlines()
+    numbered = [line for line in listed if not line.startswith("(")]
+    assert len(numbered) == coi_llm.MAX_AUTHOR_LINES
+    assert "1501. surname: Velculescu; forenames: Victor E; initials: VE" in numbered
+    assert listed[0] == "(authors 1-1450 omitted)" and listed[-1] == "(authors 1551-2000 omitted)"
+
+
+def test_the_window_stays_inside_the_list_at_either_end():
+    authors = [{"last": f"A{n}", "fore": "", "initials": "", "collective": None} for n in range(1, 151)]
+    head = coi_llm._author_lines(authors, 1)
+    tail = coi_llm._author_lines(authors, 150)
+    assert head[0].startswith("1. ") and head[-1] == "(authors 101-150 omitted)"
+    assert tail[0] == "(authors 1-50 omitted)" and tail[-1].startswith("150. ")
+    assert len(coi_llm._author_lines(authors[:100], 1)) == 100

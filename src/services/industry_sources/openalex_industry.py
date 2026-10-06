@@ -6,20 +6,24 @@ import httpx
 
 from src.config import get_settings
 from src.services.http_pacing import TRANSIENT_STATUSES, Pacer, with_retries
-from src.services.industry_sources import JHU_OPENALEX_IDS, EvidenceItem
+from src.services.industry_sources import JHU_OPENALEX_IDS, EvidenceItem, Paged
 from src.services.industry_sources.companies import classify_company
 from src.services.jhu_rules import is_hopkins_affiliation
+from src.services.query_escaping import openalex_filter_value
 
 logger = logging.getLogger(__name__)
 OA = "https://api.openalex.org"
-_SELECT = "id,ids,title,publication_year,authorships,funders,primary_topic"
+_SELECT = "id,ids,title,publication_year,authorships,funders"
 
 # Every request here once went out unpaced and unretried, so one 429 failed the job
 # outright; 52 jobs died that way on 2026-09-22/25. OpenAlex answers 429 above 100
-# requests/second or once the day's budget is spent (keyless: 1000 credits/day per
-# IP, x-ratelimit-limit); help.openalex.org asks for exponential backoff. The pacer
-# keeps one worker far below the per-second limit; the backoff rides out a burst. A
-# spent daily budget still fails the job, which the worker retries later.
+# requests/second or once the day's budget is spent (keyless: 1000 credits/day per IP,
+# x-ratelimit-limit); help.openalex.org asks for exponential backoff. The pacer keeps one
+# worker far below the per-second limit; the backoff rides out a burst. A spent daily
+# budget still answers 429 after the retries: the source is then unavailable for that run
+# (`registry.OpenAlexSource` raises SourceUnavailable), so industry_evidence keeps the PI's
+# stored OpenAlex rows, records `unavailable:http_429` in the score row's coverage and
+# refreshes the other sources (spec 2026-10-05 §6.2).
 _PACER = Pacer(0.2)
 
 
@@ -97,18 +101,36 @@ def evidence_from_work(work: dict, pi_orcid: str, tenure_start: int | None, *, c
     return items
 
 
-async def fetch_works_for_pmids(pmids: list[str]) -> list[dict]:
+#: PMIDs per /works request: OpenAlex accepts 100 OR'd values in one filter, and a list
+#: request costs one credit whatever its size (measured 2026-10-06, spec D67).
+_PMID_CHUNK = 100
+#: Works per page: a PMID can map to more than one work, so a chunk's page holds
+#: twice the chunk (OpenAlex's per-page maximum).
+_PMID_PAGE = 200
+
+
+async def fetch_works_for_pmids(pmids: list[str]) -> Paged:
+    """The OpenAlex works of `pmids`, `_PMID_CHUNK` PMIDs a request, each escaped for the
+    filter (`query_escaping.openalex_filter_value`, P29). A PMID can map to more than one
+    work, so a chunk can match more than the `_PMID_PAGE` a page holds: when a chunk's
+    `meta.count` exceeds the works it returned, the result is `truncated` (spec 2026-10-05
+    §6.2), so the job keeps the OpenAlex rows it could not see instead of deleting them."""
     out: list[dict] = []
+    truncated = False
     contact = getattr(get_settings(), "ncbi_contact_email", None)
+    clean = [v for v in (openalex_filter_value(p) for p in pmids) if v]
     async with httpx.AsyncClient(timeout=30) as client:
-        for i in range(0, len(pmids), 50):
-            chunk = "|".join(pmids[i:i + 50])
-            params = {"filter": f"pmid:{chunk}", "select": _SELECT, "per-page": 50}
+        for i in range(0, len(clean), _PMID_CHUNK):
+            params = {"filter": f"pmid:{'|'.join(clean[i:i + _PMID_CHUNK])}", "select": _SELECT,
+                      "per-page": _PMID_PAGE}
             if contact:
                 params["mailto"] = contact
-            resp = await _get(client, f"{OA}/works", params)
-            out.extend(resp.json().get("results") or [])
-    return out
+            data = (await _get(client, f"{OA}/works", params)).json()
+            results = data.get("results") or []
+            out.extend(results)
+            count = (data.get("meta") or {}).get("count")
+            truncated = truncated or (isinstance(count, int) and count > len(results))
+    return Paged(out, truncated)
 
 
 async def company_funder_ids(funder_ids: set[str]) -> set[str]:
@@ -121,7 +143,7 @@ async def company_funder_ids(funder_ids: set[str]) -> set[str]:
     hits: set[str] = set()
     contact = getattr(get_settings(), "ncbi_contact_email", None)
     mailto = {"mailto": contact} if contact else {}
-    ordered = sorted(funder_ids)
+    ordered = sorted(v for v in (openalex_filter_value(f) for f in funder_ids) if v)
     async with httpx.AsyncClient(timeout=30) as client:
         for i in range(0, len(ordered), 50):
             chunk = "|".join(ordered[i:i + 50])
@@ -133,7 +155,9 @@ async def company_funder_ids(funder_ids: set[str]) -> set[str]:
                 inst_ids = [_oaid(r.get("id")) for r in f.get("roles") or [] if r.get("role") == "institution"]
                 if inst_ids:
                     inst_by_funder[_oaid(f.get("id"))] = inst_ids
-            all_insts = sorted({i for ids in inst_by_funder.values() for i in ids})
+            all_insts = sorted(
+                {openalex_filter_value(i) for ids in inst_by_funder.values() for i in ids} - {""}
+            )
             if not all_insts:
                 continue
             companies: set[str] = set()
