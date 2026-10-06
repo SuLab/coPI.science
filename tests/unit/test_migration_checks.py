@@ -278,9 +278,9 @@ def test_supported_start_revisions_are_exactly_the_documented_set():
         "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038",
         "0039", "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048",
         "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058",
-        "0059", "0060",
+        "0059", "0060", "0061",
     )
-    assert pf.DEFAULT_TARGET == "0061"
+    assert pf.DEFAULT_TARGET == "0062"
 
 
 def test_every_post_branch_revision_is_a_supported_start():
@@ -1981,3 +1981,32 @@ def test_planned_recreates_are_rebuilds_of_earlier_objects():
             pf.REVISION_ORDER.index(o.revision) < pf.REVISION_ORDER.index(obj.revision)
             for o in earlier
         ), obj
+
+
+# --------------------------------------------------------------------------- #
+# 0062: corpus provenance and review, profile drafts, persona export flag
+# --------------------------------------------------------------------------- #
+
+
+def test_0062_sizes_the_three_altered_tables_and_takes_no_agent_messages_lock():
+    assert pf.tables_sized_between("0061", "0062") == [
+        "agents", "publications", "researcher_profiles",
+    ]
+    assert pf.agent_messages_ddl_pending("0061", "0062") is False
+
+
+def test_0062_plans_its_new_objects():
+    planned = {(o.kind, o.name) for o in pf.planned_objects_between("0061", "0062")}
+    assert planned == {
+        ("column", "provenance"), ("column", "excluded_at"),
+        ("column", "excluded_by_user_id"), ("column", "doi_verified"),
+        ("constraint", "fk_publications_excluded_by_user_id_users"),
+        ("index", "ix_publications_excluded_by_user_id"),
+        ("constraint", "ck_publications_provenance"),
+        ("table", "publication_candidates"),
+        ("constraint", "uq_publication_candidates_user_pmid"),
+        ("constraint", "ck_publication_candidates_status"),
+        ("index", "ix_publication_candidates_decided_by_user_id"),
+        ("column", "human_edited_at"), ("column", "evidence_flagged_count"),
+        ("column", "persona_export_failed_at"),
+    }

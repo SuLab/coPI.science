@@ -1,11 +1,14 @@
-"""What the engine loaded at start: the prompt set, the specialist personas,
-each role's manifest and ``load_role`` result, and the rubric (spec §8.6, B16).
+"""What the engine loaded at start: the prompt set (including the hub's brief for
+labs that ``retrieve_profile`` serves, spec 2026-10-05 D26), the specialist
+personas, each role's manifest and ``load_role`` result, and the rubric (spec
+§8.6, B16). Lab persona files under ``profiles/public/`` are not part of it: the
+roster reloads them on mtime.
 
 Loaded once per engine start and installed process-wide; the prompt readers
 (``Agent._load_prompt``, the consult persona read, ``tools_for_role``, the
 tool gate, the phase-5 menu and the engine's ``deps.load_role``) read from it,
-so a mid-run edit of a role prompt, persona or ``role.toml`` cannot change the
-next turn — it raises the drift flag instead (the heartbeat calls
+so a mid-run edit of a role prompt, the brief, a specialist persona or
+``role.toml`` cannot change the next turn — it raises the drift flag instead (the heartbeat calls
 ``disk_drift`` every 60 s). The rubric is NOT re-read: the snapshot holds the
 import-time ``load_rubric()`` object that scoring already uses, so prompts,
 stage bars, ``weighted_score``, bands and stamps keep sharing one rubric.

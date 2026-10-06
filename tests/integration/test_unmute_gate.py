@@ -4,6 +4,7 @@ import pytest
 from src.models import USER_ROLE_MANAGER
 from src.services.agent_mute import set_agent_mute_state
 from tests import factories
+from tests.persona_support import write_persona
 
 pytestmark = pytest.mark.integration
 
@@ -38,6 +39,7 @@ async def test_unmute_succeeds_through_the_gate(db_session):
     pi = await factories.make_user(db_session)
     await factories.make_profile(db_session, user=pi, evidence_pub_count=3, evidence_pmid_count=3)
     agent = await factories.make_agent(db_session, user=pi, status="inactive", slack_bot_token="xoxb-1")
+    write_persona(agent.agent_id)  # R2: the persona-file gate (spec 2026-10-05 §6.4)
     assert await set_agent_mute_state(db_session, agent=agent, muted=False, actor=manager) is None
     await db_session.refresh(agent)
     assert (agent.status, agent.muted_at, agent.muted_by) == ("active", None, None)

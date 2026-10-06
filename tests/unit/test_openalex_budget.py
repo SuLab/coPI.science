@@ -19,10 +19,11 @@ def test_parse_meter_reads_the_three_fields_and_refuses_partial_or_garbled_ones(
     assert ob.parse_meter({**HEADERS, "x-ratelimit-remaining": "lots"}) is None
 
 
-def test_wake_time_keeps_a_tenth_of_the_limit_in_reserve():
+def test_wake_time_uses_the_whole_free_daily_budget_without_a_shared_reserve():
+    assert ob.RESERVE_FRACTION == 0
     assert ob.wake_time(ob.Meter(1000, 996, 38541), 5, NOW) is None
-    assert ob.wake_time(ob.Meter(1000, 105, 38541), 5, NOW) is None  # leaves exactly 100
-    wake = ob.wake_time(ob.Meter(1000, 104, 38541), 5, NOW)
+    assert ob.wake_time(ob.Meter(1000, 5, 38541), 5, NOW) is None  # uses the last free credit
+    wake = ob.wake_time(ob.Meter(1000, 4, 38541), 5, NOW)
     assert wake == NOW + timedelta(seconds=38541) + ob.WAKE_MARGIN
     assert wake.replace(microsecond=0) == datetime(2026, 10, 7, 0, 2, tzinfo=UTC)
 
@@ -64,13 +65,13 @@ async def test_read_meter_is_none_when_openalex_is_unreachable_or_sends_no_meter
 
 async def test_defer_if_low_defers_to_the_reset_and_skips_types_that_spend_nothing(monkeypatch):
     async def low():
-        return ob.Meter(1000, 100, 600)
+        return ob.Meter(1000, 7, 600)
 
     monkeypatch.setattr(ob, "read_meter", low)
     with pytest.raises(JobDeferred) as exc:
         await ob.defer_if_low("industry_evidence")
     assert exc.value.not_before > datetime.now(UTC) + timedelta(seconds=600)
-    assert "100 of 1000" in exc.value.reason
+    assert "7 of 1000" in exc.value.reason
 
     async def never():
         raise AssertionError("a zero-credit job type must not read the meter")
@@ -115,4 +116,3 @@ async def test_a_bare_429_probe_backs_off_half_an_hour(monkeypatch):
 
 def test_seconds_to_utc_midnight():
     assert ob._seconds_to_utc_midnight(NOW) == 38541  # 13:17:39 -> 00:00:00
-

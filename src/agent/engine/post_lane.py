@@ -15,8 +15,9 @@ from src.agent.engine.constants import PROPOSAL_DRAIN_SETTLE_TICKS
 from src.agent.engine.context import EngineContext, via
 from src.agent.engine.helpers import _was_truncated
 from src.agent.engine.sidecar import _strip_assessment_sidecar
+from src.agent.persona_sections import match_channels
 from src.agent.post_types import PostTypeSpec, available_for, eligible_targets, render_menu
-from src.agent.role_capabilities import capabilities_for
+from src.agent.role_capabilities import capabilities_for, hub_role_names
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE
 
 if TYPE_CHECKING:
@@ -29,6 +30,18 @@ if TYPE_CHECKING:
     from src.agent.engine.threads import Threads
 
 logger = logging.getLogger("src.agent.simulation")
+
+
+def desired_channels(agent: Agent) -> set[str]:
+    """The channels ``agent`` should be subscribed to now (spec 2026-10-05 §6.5, D28): every
+    ``SEEDED_CHANNELS`` entry for a hub role; otherwise ``_UNIVERSAL_CHANNELS`` plus each
+    ``_CHANNEL_KEYWORDS`` channel matched against the persona's tag sections
+    (``persona_sections.match_channels``). Reads all three as ``constants.X``."""
+    if agent.role in hub_role_names():
+        return set(constants.SEEDED_CHANNELS)
+    return set(constants._UNIVERSAL_CHANNELS) | match_channels(
+        agent.public_profile, constants._CHANNEL_KEYWORDS
+    )
 
 
 class PostLane:
@@ -162,24 +175,32 @@ class PostLane:
             agent.state.in_flight = False
 
     async def _phase1_channel_discovery(self, agent: Agent) -> None:
-        """Join new channels based on profile keyword matching."""
-        profile_text = agent.public_profile.lower()
-        channels_to_join = set(constants._UNIVERSAL_CHANNELS)
-
-        for channel_name, keywords in constants._CHANNEL_KEYWORDS.items():
-            if any(kw in profile_text for kw in keywords):
-                channels_to_join.add(channel_name)
-
-        new_channels = channels_to_join - agent.state.subscribed_channels
+        """Recompute the agent's channels from its current persona and apply the change:
+        join each new channel in Slack and, only on success, add it to
+        ``subscribed_channels``; drop each no-longer-matched channel from
+        ``subscribed_channels`` only. Slack membership is kept (D50), but a dropped
+        channel no longer feeds activation, which reads ``subscribed_channels``."""
+        desired = desired_channels(agent)
+        subscribed = agent.state.subscribed_channels
+        new_channels = desired - subscribed
+        dropped = subscribed - desired
         if new_channels:
+            joined = set()
             for ch_name in new_channels:
                 ch_id = self._channel_id_map.get(ch_name)
                 if ch_id:
                     client = self.slack_clients.get(agent.agent_id)
-                    if client:
-                        await client.ajoin_channel(ch_id)
-            agent.state.subscribed_channels.update(new_channels)
-            logger.info("[%s] Phase 1: Joined channels: %s", agent.agent_id, new_channels)
+                    if client and await client.ajoin_channel(ch_id):
+                        subscribed.add(ch_name)
+                        joined.add(ch_name)
+            if joined:
+                logger.info("[%s] Phase 1: Joined channels: %s", agent.agent_id, joined)
+        if dropped:
+            subscribed.difference_update(dropped)
+            logger.info(
+                "[%s] Phase 1: no longer matched, unsubscribed (Slack membership kept): %s",
+                agent.agent_id, dropped,
+            )
 
     def _phase3_activate_threads(self, agent: Agent) -> None:
         """

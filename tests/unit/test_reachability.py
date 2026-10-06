@@ -974,10 +974,11 @@ def test_static_link_resolution_coverage_is_reported():
     # The manager PI page's Companies card (hub 1.10.0, spec 2026-10-02 §7.2) added
     # five external links: a confirmed row's source and funding source, and a
     # suggestion's PubMed record, Wikidata item and Form D filing.
+    # The corpus review cards add two explicit PubMed links (candidate and unanchored).
     unresolvable = len(values) - len(resolvable)
-    assert unresolvable <= 53, (
+    assert unresolvable <= 55, (
         f"{unresolvable} of {len(values)} href/action values do not resolve to a "
-        "checkable local path (was 53) — the matcher probably regressed, or a new "
+        "checkable local path (was 55) — the matcher probably regressed, or a new "
         "link is built from a variable"
     )
 

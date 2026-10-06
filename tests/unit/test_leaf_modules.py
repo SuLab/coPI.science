@@ -43,5 +43,6 @@ def test_the_moved_names_are_the_same_objects():
     from src.services import build_info
 
     assert tools.TOOL_DEFINITIONS is tool_definitions.TOOL_DEFINITIONS
-    assert agent._extract_dois is dois.extract_dois is tools._extract_dois
+    assert agent._extract_dois is dois.extract_dois
+    assert tools.paper_ids_in is dois.paper_ids_in
     assert agent_main.API_CALL_UNITS_NOTE is build_info.API_CALL_UNITS_NOTE

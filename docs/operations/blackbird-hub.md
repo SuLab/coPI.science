@@ -238,6 +238,10 @@ rubric but no `## Your Private Instructions` header, and nothing reads
 `profiles/private/{agent_id}.md` per-agent. (The staff company record in
 `profiles/private/companies/`, added with scout_hub 1.10.0, is a different file, read
 only by `retrieve_profile` for the hub; see the scout_hub 1.10.0 section at the end.)
+Since scout_hub 1.11.0 the hub's system prompt has no "Your Lab Profile" section at all:
+`profiles/public/blackbird.md` was archived to `profiles/private/blackbird.archived-<date>.md`
+after the 1.11.0 agent came up, and a lab that calls `retrieve_profile` on the hub gets
+`prompts/roles/scout_hub/lab-brief.md` instead (see the scout_hub 1.11.0 section at the end).
 The stale hub copy has now been diffed against
 the extracted rubric and archived as
 `profiles/private/blackbird.archived-2026-08-20.md` (untracked, git-ignored, unread — no
@@ -526,3 +530,40 @@ appendix below (owner decisions O1 and O5, recorded there as B25 and D20).
   the lab bots share it, so the hub learns of the record from its own prompts instead.
 - A run after this release starts FRESH (a prompt-set version bump), on a rebuilt agent
   image (`tools.py` and `engine/` changed).
+
+**scout_hub 1.11.0 and pi_lab 1.1.0 (2026-10, PI-profile remediation Phase 5).** Spec:
+`docs/specs/2026-10-05-pi-profile-remediation-design.md` §6.5. Verified offline only (D52):
+`scripts/verify_simulation_prompts.py` composes the prompts against the production personas.
+
+- **Fences.** `prompt_safety.delimit` strips every tag in `FENCE_TAGS` (all tags `src/`
+  fences with, plus `lab_message`) and the caller's own tag, attributes included, until
+  nothing changes, with at most 16 changing passes. At pathological nesting depth the
+  remaining `<` characters are escaped, keeping data inside its fence without quadratic
+  rescanning. A new `delimit` call with a new literal tag must add it to `FENCE_TAGS`
+  (`tests/unit/test_prompt_safety.py` fails otherwise).
+- **The hub's prompt** has no "Your Lab Profile" section. In its interview transcript every
+  message it did not write is fenced as `<lab_message>`, and the thread state names the
+  lab's `agent_id` (for `retrieve_profile` and `subject_agent_id`).
+- **The brief for labs** is `prompts/roles/scout_hub/lab-brief.md`: part of the scout_hub
+  prompt set (snapshotted at start, hashed into the stamp, a version bump on every edit),
+  never composed into the hub's prompt. `retrieve_profile` on a hub agent id returns it,
+  fenced as `<agent_profile>`; it states the grant band and what every idea is screened on,
+  consistent with the rubric and without its weights (the Phase 5 plan's Appendix A records
+  how each contradiction of the old `blackbird.md` was resolved).
+- **Cohort gate on `retrieve_profile`.** A lab may read only itself and its cohort gate;
+  any other id gets the not-found text. The hub is unrestricted; with isolation off,
+  so is everyone.
+- **Channels.** A lab subscribes to `general` plus each seeded channel one of whose
+  keywords starts a word in its persona's tag sections (Key Methods, Model Systems,
+  Disease Areas, Key Molecular Targets, Keywords), recomputed at each post turn, so a
+  profile change takes effect at the lab's next turn. A channel no longer matched leaves
+  `subscribed_channels` (no more activation from it) but the bot stays in the Slack
+  channel. The hub subscribes to every seeded channel.
+- **Removed:** the "Other Labs' Recent Publications" lab directory (dormant under cohort
+  isolation). Every lab prompt is byte-identical to before.
+- **Own papers.** The persona's Recent Publications lines end with `(PMID n)`; a lab's own
+  paper ids are the persona's DOIs plus those PMIDs, and own-paper `retrieve_abstract`
+  lookups (DOI or PMID) do not count against the per-thread cap. A Research Summary line
+  starting with `#` is exported as `\#`.
+- The owner's first run after this release starts FRESH (both prompt sets were bumped);
+  the agent image was rebuilt (`src/agent/` changed).

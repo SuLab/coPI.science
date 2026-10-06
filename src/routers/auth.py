@@ -13,13 +13,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.routing import Match
 
-
 from src.config import get_settings
 from src.database import get_db
 from src.models import AccessAllowlist, User
 from src.models.job import INTERACTIVE_PRIORITY
 from src.services.orcid import fetch_orcid_profile
-from src.services.person_names import name_from_machine_source
+from src.services.person_names import is_orcid_like, name_from_machine_source
 from src.services.profile_jobs import enqueue_profile_job_if_absent
 from src.services.session_epoch import (
     SESSION_EPOCH_KEY,
@@ -175,8 +174,10 @@ async def _create_new_user(
     savepoint so the caller re-selects the winner's row."""
     is_allowlisted = allowlist_entry is not None
     # Create new user — pending unless allowlisted. A name cut to the D60 allowlist is
-    # stamped for the manager PI page.
-    name, cut = name_from_machine_source(profile_data.get("name") or orcid_name)
+    # stamped for the manager PI page. ORCID's public name, else the OAuth token's; with
+    # neither the name is "" (users.name is NOT NULL), never the iD (spec 2026-10-05
+    # §6.3), and a later login with a real name replaces it.
+    name, cut = name_from_machine_source(profile_data.get("name") or orcid_name or "")
     user = User(
         orcid=orcid_id,
         name=name,
@@ -233,9 +234,13 @@ async def _find_or_create_user(
         # A concurrent first login created the row: continue as an existing user.
         user = (await db.execute(select(User).where(User.orcid == orcid_id))).scalar_one()
 
-    # Existing user — update name/institution/department/email if empty
-    if not user.name and profile_data.get("name"):
-        user.name, cut = name_from_machine_source(profile_data["name"])
+    # Existing user — update name/institution/department/email if empty. An empty or
+    # ORCID-iD name is replaced by a real one when this login has it (spec 2026-10-05
+    # §6.3): ORCID's public name, else the OAuth token's.
+    real = next((n for n in (profile_data.get("name"), orcid_name)
+                 if n and not is_orcid_like(n)), None)
+    if real and (not user.name or is_orcid_like(user.name)):
+        user.name, cut = name_from_machine_source(real)
         if cut:
             user.name_sanitized_at = datetime.now(UTC)
     if not user.institution and profile_data.get("institution"):

@@ -59,11 +59,11 @@ class Transport(Protocol):
     # falls back to treating the response as a single message.
     def post_message(self, channel: str, text: str, thread_ts: str | None = None) -> dict | None: ...
     def create_channel(self, name: str) -> dict | None: ...
-    def join_channel(self, channel_id: str) -> None: ...
+    def join_channel(self, channel_id: str) -> bool: ...
     # The engine awaits this form (``_phase1_channel_discovery``); the real
     # client runs ``join_channel`` off the loop thread. Part of the contract:
     # a transport without it crashes every Slack-off post turn in Phase 1.
-    async def ajoin_channel(self, channel_id: str) -> None: ...
+    async def ajoin_channel(self, channel_id: str) -> bool: ...
     # Must be complete or raise: a backend that returns a *subset* of the workspace
     # as if it were the whole makes the engine re-create channels that already
     # exist. ``AgentSlackClient`` raises ``SlackListingIncomplete``; callers that
@@ -132,11 +132,12 @@ class NullTransport:
     def create_channel(self, name: str) -> dict | None:
         return {"id": f"local:{name}", "name": name}
 
-    def join_channel(self, channel_id: str) -> None:
-        return None
+    def join_channel(self, channel_id: str) -> bool:
+        # Membership in this local-only workspace has no external side effect.
+        return True
 
-    async def ajoin_channel(self, channel_id: str) -> None:
-        return None
+    async def ajoin_channel(self, channel_id: str) -> bool:
+        return self.join_channel(channel_id)
 
     def list_channels(self, *, exclude_archived: bool = False) -> dict[str, str]:
         # Always complete by construction: the cache *is* the workspace here.

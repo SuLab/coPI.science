@@ -306,13 +306,12 @@ def test_seed_profile_no_pipeline_skips_the_job_but_still_creates_the_user(
     assert len(db(lambda s: _jobs_for(s, loud_user.id))) == 1
 
 
-def test_seed_profile_falls_back_to_the_bare_orcid_when_the_lookup_fails(
-    db, runner, orcid_stub
-):
-    """T6.1: an ORCID outage still yields a user row (name == the ORCID itself).
+def test_seed_profile_refuses_when_the_lookup_fails(db, runner, orcid_stub):
+    """spec 2026-10-05 §6.3: an ORCID outage creates no user rather than one named by its
+    iD.
 
-    Control in the same test: a working lookup in the same run keeps the real name, so
-    "name == orcid" cannot be what the command always does.
+    Control in the same test: a working lookup in the same run creates the user with the
+    real name, so the refusal is not what the command always does.
     """
     broken = _orcid("broken")
     working = _orcid("working")
@@ -321,17 +320,26 @@ def test_seed_profile_falls_back_to_the_bare_orcid_when_the_lookup_fails(
 
     result = _ok(runner.invoke(cli_app, ["seed-profile", "--orcid", broken]))
     assert "Failed to fetch ORCID profile" in result.output
+    assert "not creating a user" in result.output
 
     _ok(runner.invoke(cli_app, ["seed-profile", "--orcid", working]))
 
-    fallback = db(lambda s: _user_by_orcid(s, broken))
-    assert fallback is not None, "an ORCID outage must not lose the user entirely"
-    assert fallback.name == broken
-    assert fallback.institution is None
-    assert len(db(lambda s: _jobs_for(s, fallback.id))) == 1
+    assert db(lambda s: _user_by_orcid(s, broken)) is None
 
     good = db(lambda s: _user_by_orcid(s, working))
     assert good.name == "Reachable PI" and good.institution == "Somewhere"
+    assert len(db(lambda s: _jobs_for(s, good.id))) == 1
+
+
+def test_seed_profile_refuses_a_record_with_no_public_name(db, runner, orcid_stub):
+    """spec 2026-10-05 §6.3 Names: ORCID has no public name, so the CLI refuses and points
+    at Add-PI, which asks for one; nothing is written."""
+    nameless = _orcid("nameless")
+    orcid_stub.set(nameless, name=None)
+
+    result = _ok(runner.invoke(cli_app, ["seed-profile", "--orcid", nameless]))
+    assert "no public name" in result.output
+    assert db(lambda s: _user_by_orcid(s, nameless)) is None
 
 
 def test_seed_profiles_reads_the_file_and_ignores_comments_and_blanks(
@@ -587,6 +595,24 @@ def test_role_set_is_scoped_to_the_named_orcid(db, runner):
     _ok(runner.invoke(cli_app, ["role:set", "--orcid", target_orcid, "--role", "admin"]))
     assert db(lambda s: _user_by_orcid(s, target_orcid)).user_role == USER_ROLE_ADMIN
     assert db(lambda s: _user_by_orcid(s, bystander_orcid)).user_role == USER_ROLE_PI
+
+
+def test_role_set_refuses_to_strand_a_lab(db, runner):
+    """spec 2026-10-05 D25: role:set applies the same rule as the admin route."""
+    target_orcid = _orcid("role-strand")
+
+    async def _seed(session):
+        user = await factories.make_user(
+            session, orcid=target_orcid, name="Strand Target", user_role=USER_ROLE_PI
+        )
+        await factories.make_agent(session, user=user, agent_id=f"{AGENT_PREFIX}strand",
+                                   status="active")
+
+    db(_seed)
+    result = runner.invoke(cli_app, ["role:set", "--orcid", target_orcid, "--role", "manager"])
+    assert result.exit_code == 1
+    assert "owns the lab agent" in result.output
+    assert db(lambda s: _user_by_orcid(s, target_orcid)).user_role == USER_ROLE_PI
 
 
 # ===========================================================================

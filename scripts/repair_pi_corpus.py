@@ -38,11 +38,13 @@ Review set (``--review``, NEVER applied automatically):
     (``unrefetchable`` — a retracted/merged/mis-keyed PMID is not evidence of
     mis-attribution, so it is never auto-removed on that basis alone).
 
-Addition set: ``resolve_corpus``'s kept set (ranked year-DESC/PMID-DESC,
-capped), excluding PMIDs already stored, by the profile pipeline's own rule
-(``select_corpus_additions``): only ORCID-anchored finds are stored; records
-found by OpenAlex or name+affiliation search alone go to review as
-``unanchored_addition``. Each PI is applied under the corpus advisory lock.
+Addition set: ``resolve_corpus``'s uncapped ``ranked`` list (year-DESC/PMID-DESC),
+excluding PMIDs already stored, by the profile pipeline's own rule
+(``select_corpus_additions``): only ORCID-anchored finds are stored, with their
+provenance and a DOI reconciled against PubMed (``doi_verified``); records found by
+OpenAlex or name+affiliation search alone go to review as ``unanchored_addition``.
+Each PI is applied under the persona and corpus locks, and its persona is re-exported
+after the commit (spec 2026-10-05 §4.3).
 
 Usage (run via ``docker compose -f docker-compose.prod.yml run --rm --no-deps -T
 blackbird-app``, never ``exec`` — the running container may still hold the
@@ -89,9 +91,7 @@ from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from src.database import get_session_factory  # noqa: E402
 from src.models import AgentRegistry, Publication, User  # noqa: E402
-from src.services.corpus import (  # noqa: E402
-    DEFAULT_CAP as CORPUS_CAP,
-)
+from src.services import openalex_budget  # noqa: E402
 from src.services.corpus import (  # noqa: E402
     EXCLUDED_TYPES,
     CorpusStageError,
@@ -101,8 +101,19 @@ from src.services.corpus import (  # noqa: E402
     match_pi_author,
     resolve_corpus,
 )
-from src.services.corpus_additions import lock_corpus, select_corpus_additions  # noqa: E402
-from src.services.profile_publish import lock_persona_writer  # noqa: E402
+from src.services.corpus_additions import (  # noqa: E402
+    lock_corpus,
+    provenance_for,
+    reconcile_record_doi,
+    select_corpus_additions,
+)
+from src.services.job_queue import JobDeferred  # noqa: E402
+from src.services.person_names import is_orcid_like, surname_candidates  # noqa: E402
+from src.services.profile_publish import (  # noqa: E402
+    lock_persona_writer,
+    reexport_persona,
+    write_persona_files,
+)
 from src.services.pubmed import fetch_pubmed_records  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -157,9 +168,9 @@ class PiRepairPlan:
     removals: list[RemovalCandidate] = field(default_factory=list)
     review: list[ReviewCandidate] = field(default_factory=list)
     additions: list[dict[str, Any]] = field(default_factory=list)
-    # Ranked additions the CORPUS_CAP budget had no room for. Reported, never
-    # stored — see `select_corpus_additions`.
-    over_cap: list[dict[str, Any]] = field(default_factory=list)
+    # pmid -> the ORCID-curated DOI from the resolve (CorpusResult.orcid_dois): the
+    # candidate reconcile_record_doi checks against the PubMed record's DOI.
+    orcid_dois: dict[str, str] = field(default_factory=dict)
     additions_error: str | None = None
 
 
@@ -234,23 +245,27 @@ def _record_has_surname(record: dict[str, Any], pi_name: str) -> bool:
     particle-splice handling) so this agrees with `match_pi_author` about
     what a surname match is — the difference between the two is purely the
     forename leg, which is what makes "surname present, forename disagrees"
-    a reviewable case rather than a removable one.
+    a reviewable case rather than a removable one. The surname forms are the shared
+    parser's (``person_names.surname_candidates``), as the gate reads them: "Jane Doe,
+    PhD" is a Doe, "John Smith Jr." a Smith; an ORCID-iD name has none.
     """
-    parts = pi_name.strip().split()
-    if not parts:
+    if is_orcid_like(pi_name):
         return False
-    last = parts[-1].lower()
+    parts = pi_name.strip().split()
+    surnames = surname_candidates(pi_name) or ((parts[-1],) if parts else ())
+    if not surnames:
+        return False
     for author in record.get("authors") or []:
         if author.get("collective"):
             continue
         candidate = (author.get("last") or "").strip()
         if not candidate:
             continue
-        if _surname_matches(candidate, last):
+        if any(_surname_matches(candidate, s) for s in surnames):
             return True
         fore = (author.get("fore") or "").strip()
         splice = _split_particle_splice(fore) if fore else None
-        if splice and _surname_matches(f"{splice[0]}{candidate}", last):
+        if splice and any(_surname_matches(f"{splice[0]}{candidate}", s) for s in surnames):
             return True
     return False
 
@@ -520,20 +535,19 @@ async def build_plan_for_pi(
 
     if only in (None, "additions"):
         try:
-            resolved = await resolve_corpus(user.orcid, user.name, user.institution)
-        except CorpusStageError as exc:
+            with openalex_budget.bulk_requests():
+                await openalex_budget.check_inline_corpus_budget()
+                resolved = await resolve_corpus(user.orcid, user.name, user.institution)
+        except (CorpusStageError, JobDeferred) as exc:
             plan.additions_error = str(exc)
             logger.error("[%s] resolve_corpus failed: %s", user.orcid, exc)
         else:
             stored_pmids = {p.pmid for p in stored if p.pmid}
-            # Survivors of THIS run's removals — computed after the removal
-            # pass above, so the budget reflects the post-repair corpus.
-            removed_ids = {r.publication_id for r in plan.removals}
-            survivors = sum(1 for p in stored if p.id not in removed_ids)
-            adds = select_corpus_additions(
-                resolved.kept, stored_pmids, survivors, CORPUS_CAP
-            )
-            plan.additions, plan.over_cap = adds.to_store, adds.over_cap
+            # getattr: tests pass a SimpleNamespace carrying only ``kept``.
+            ranked = getattr(resolved, "ranked", None) or resolved.kept
+            adds = select_corpus_additions(ranked, stored_pmids)
+            plan.additions = adds.to_store
+            plan.orcid_dois = dict(getattr(resolved, "orcid_dois", None) or {})
             plan.review.extend(
                 ReviewCandidate(
                     publication_id="",
@@ -548,7 +562,7 @@ async def build_plan_for_pi(
     return plan
 
 
-async def _apply_plan(db: AsyncSession, plan: PiRepairPlan) -> None:
+async def _apply_plan(db: AsyncSession, plan: PiRepairPlan) -> bool:
     """One transaction per PI (a per-PI failure must not abort the run —
     callers catch around this).
 
@@ -563,6 +577,11 @@ async def _apply_plan(db: AsyncSession, plan: PiRepairPlan) -> None:
     concurrent profile-pipeline run cannot interleave its publication writes.
     The stored PMIDs are re-read under that lock: an addition that landed since
     planning is skipped rather than inserted twice.
+
+    When the plan changed a row, the persona revision is recorded in the same
+    transaction (``reexport_persona``, mechanism ``reexport``); the caller writes the
+    file after the commit (``write_persona_files``, spec 2026-10-05 §4.3). Returns True
+    when that revision was rendered (a file write is owed), False otherwise.
     """
     try:
         # Persona writer locks first (profile_publish lock order), then the corpus lock.
@@ -578,29 +597,43 @@ async def _apply_plan(db: AsyncSession, plan: PiRepairPlan) -> None:
                 )
             ).scalars()
         )
+        changed = False
         if plan.removals:
             ids = [uuid.UUID(r.publication_id) for r in plan.removals]
             await db.execute(delete(Publication).where(Publication.id.in_(ids)))
+            changed = True
         for rec in plan.additions:
             if rec.get("pmid") in stored_now:
                 print(f"    already stored since planning: pmid={rec.get('pmid')}")
                 continue
+            doi, verified = reconcile_record_doi(rec, plan.orcid_dois)
             db.add(
                 Publication(
                     user_id=plan.user_id,
                     pmid=rec.get("pmid"),
                     pmcid=rec.get("pmcid"),
-                    doi=rec.get("doi"),
+                    doi=doi,
+                    doi_verified=verified,
                     title=rec.get("title") or "",
                     abstract=rec.get("abstract") or "",
                     journal=rec.get("journal"),
                     year=rec.get("year"),
+                    provenance=provenance_for(rec),
                 )
+            )
+            changed = True
+        rendered = None
+        if changed:
+            await db.flush()
+            rendered = await reexport_persona(
+                db, plan.user_id, mechanism="reexport",
+                change_summary="Corpus repaired (repair_pi_corpus)",
             )
         await db.commit()
     except Exception:
         await db.rollback()
         raise
+    return rendered is not None
 
 
 # ---------------------------------------------------------------------------
@@ -639,11 +672,6 @@ def _print_plan(plan: PiRepairPlan, *, show_review: bool) -> None:
             print(f"    ... and {len(plan.additions) - 20} more")
     else:
         print("  Additions: none")
-    if plan.over_cap:
-        print(
-            f"  Over cap ({len(plan.over_cap)}): NOT stored — the corpus is at "
-            f"the {CORPUS_CAP}-publication cap."
-        )
 
 
 def _write_report(plan: PiRepairPlan, *, applied: bool) -> Path:
@@ -675,12 +703,6 @@ def _write_report(plan: PiRepairPlan, *, applied: bool) -> Path:
     else:
         lines.append("None.")
     lines += ["", f"## Additions ({len(plan.additions)})", ""]
-    if plan.over_cap:
-        lines += [
-            f"{len(plan.over_cap)} further resolved record(s) were NOT stored: "
-            f"the post-repair corpus is at the {CORPUS_CAP}-publication cap.",
-            "",
-        ]
     if plan.additions_error:
         lines.append(f"Corpus resolution FAILED: {plan.additions_error}")
     elif plan.additions:
@@ -727,10 +749,12 @@ async def _run(
             print(f"  report: {report_path}")
 
             total_review += len(plan.review)
+            if plan.additions_error:
+                failures += 1  # A partial repair must not report complete resolution.
 
             if apply:
                 try:
-                    await _apply_plan(db, plan)
+                    owes_write = await _apply_plan(db, plan)
                 except Exception:
                     failures += 1
                     logger.exception(
@@ -742,6 +766,12 @@ async def _run(
                     # nothing must not print totals that look like it did.
                     total_removals += len(plan.removals)
                     total_additions += len(plan.additions)
+                    if owes_write:
+                        path = await write_persona_files(db, plan.user_id)
+                        print(
+                            f"  persona: {path.name}" if path is not None
+                            else "  persona write FAILED (see the ERROR log)"
+                        )
             else:
                 total_removals += len(plan.removals)
                 total_additions += len(plan.additions)

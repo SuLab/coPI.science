@@ -215,3 +215,41 @@ async def test_search_pmids_raises_on_a_bad_response_instead_of_returning_empty(
     monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
     with pytest.raises(pubmed.PubMedParseError):
         await pubmed.search_pmids("x[auid]")
+
+
+# ---------------------------------------------------------------------------
+# MedlineDate years (G-12) and the surviving methods tier (D46)
+# ---------------------------------------------------------------------------
+
+
+def _article(pubdate: str) -> str:
+    return (
+        '<?xml version="1.0"?><PubmedArticleSet><PubmedArticle><MedlineCitation>'
+        "<PMID>1</PMID><Article><Journal><Title>J</Title><JournalIssue>"
+        f"<PubDate>{pubdate}</PubDate></JournalIssue></Journal><ArticleTitle>T</ArticleTitle>"
+        "</Article></MedlineCitation><PubmedData><ArticleIdList>"
+        '<ArticleId IdType="pubmed">1</ArticleId></ArticleIdList></PubmedData>'
+        "</PubmedArticle></PubmedArticleSet>"
+    )
+
+
+def test_a_medline_date_gives_its_leading_year():
+    [rec] = pubmed._parse_pubmed_xml(_article("<MedlineDate>1998 Dec-1999 Jan</MedlineDate>"))
+    assert rec["year"] == 1998
+
+
+def test_a_year_element_wins_over_a_medline_date_and_junk_gives_none():
+    [rec] = pubmed._parse_pubmed_xml(
+        _article("<Year>2004</Year><MedlineDate>1998 Dec-1999 Jan</MedlineDate>")
+    )
+    assert rec["year"] == 2004
+    [rec] = pubmed._parse_pubmed_xml(_article("<MedlineDate>Spring</MedlineDate>"))
+    assert rec.get("year") is None
+
+
+def test_methods_are_found_in_unnamespaced_pmc_xml_only():
+    plain = "<article><body><sec><title>2 METHODS</title><p>We did it.</p></sec></body></article>"
+    assert pubmed._extract_methods_section(plain) == "2 METHODS We did it."
+    namespaced = ('<article xmlns="http://jats.nlm.nih.gov"><body><sec><title>Methods</title>'
+                  "<p>x</p></sec></body></article>")
+    assert pubmed._extract_methods_section(namespaced) is None

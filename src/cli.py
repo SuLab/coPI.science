@@ -27,11 +27,18 @@ async def _get_db():
 
 
 async def _seed_one_orcid(orcid: str, run_pipeline: bool = True) -> None:
-    """Create user record and optionally enqueue profile generation for one ORCID."""
+    """Create user record and optionally enqueue profile generation for one ORCID.
+
+    Refuses (creates nothing) when the ORCID fetch fails or the record has no public
+    name: a user is never named by its iD (spec 2026-10-05 §6.3). Add-PI on
+    ``/manager/pis`` asks for the name of such a record."""
+    from datetime import UTC, datetime
+
     from sqlalchemy import select
 
     from src.models import User
     from src.services.orcid import fetch_orcid_profile
+    from src.services.person_names import name_from_machine_source
     from src.services.pi_onboarding import record_employment_tenure, validate_orcid
 
     try:
@@ -41,48 +48,63 @@ async def _seed_one_orcid(orcid: str, run_pipeline: bool = True) -> None:
         return
 
     engine, factory = await _get_db()
-    async with factory() as db:
-        # Check if user already exists
-        result = await db.execute(select(User).where(User.orcid == orcid))
-        user = result.scalar_one_or_none()
+    try:
+        async with factory() as db:
+            # Check if user already exists
+            result = await db.execute(select(User).where(User.orcid == orcid))
+            user = result.scalar_one_or_none()
 
-        if user:
-            console.print(f"[yellow]User with ORCID {orcid} already exists: {user.name}[/yellow]")
-        else:
-            # Fetch ORCID profile
-            console.print(f"Fetching ORCID profile for {orcid}...")
-            try:
-                profile_data = await fetch_orcid_profile(orcid)
-            except Exception as exc:
-                console.print(f"[red]Failed to fetch ORCID profile: {exc}[/red]")
-                profile_data = {"name": orcid, "orcid": orcid}
-
-            user = User(
-                orcid=orcid,
-                name=profile_data.get("name", orcid),
-                institution=profile_data.get("institution"),
-                department=profile_data.get("department"),
-            )
-            db.add(user)
-            await db.flush()
-            if profile_data.get("email"):
-                from src.services.user_email import assign_user_email
-
-                await assign_user_email(db, user, profile_data["email"])
-            await record_employment_tenure(db, user, profile_data)
-            console.print(f"[green]Created user: {user.name} ({orcid})[/green]")
-
-        if run_pipeline:
-            from src.services.profile_jobs import enqueue_profile_job_if_absent
-
-            job = await enqueue_profile_job_if_absent(db, user)
-            if job is None:
-                console.print(f"[yellow]{user.name} is a manager, reviewer or denied account — no profile job[/yellow]")
+            if user:
+                console.print(f"[yellow]User with ORCID {orcid} already exists: {user.name}[/yellow]")
             else:
-                console.print(f"[green]Profile generation job queued for {user.name}[/green]")
+                # Fetch ORCID profile
+                console.print(f"Fetching ORCID profile for {orcid}...")
+                try:
+                    profile_data = await fetch_orcid_profile(orcid)
+                except Exception as exc:
+                    console.print(
+                        f"[red]Failed to fetch ORCID profile: {exc}; "
+                        f"not creating a user without a name[/red]"
+                    )
+                    return
+                if not profile_data.get("name"):
+                    console.print(
+                        f"[red]ORCID {orcid} has no public name; add the PI on "
+                        f"/manager/pis, which asks for the name[/red]"
+                    )
+                    return
 
-        await db.commit()
-    await engine.dispose()
+                # An ORCID-sourced name is cut to the D60 allowlist; a cut is stamped
+                # for the manager PI page, as pi_onboarding does.
+                name, cut = name_from_machine_source(profile_data["name"])
+                user = User(
+                    orcid=orcid,
+                    name=name,
+                    name_sanitized_at=datetime.now(UTC) if cut else None,
+                    institution=profile_data.get("institution"),
+                    department=profile_data.get("department"),
+                )
+                db.add(user)
+                await db.flush()
+                if profile_data.get("email"):
+                    from src.services.user_email import assign_user_email
+
+                    await assign_user_email(db, user, profile_data["email"])
+                await record_employment_tenure(db, user, profile_data)
+                console.print(f"[green]Created user: {user.name} ({orcid})[/green]")
+
+            if run_pipeline:
+                from src.services.profile_jobs import enqueue_profile_job_if_absent
+
+                job = await enqueue_profile_job_if_absent(db, user)
+                if job is None:
+                    console.print(f"[yellow]{user.name} is a manager, reviewer or denied account — no profile job[/yellow]")
+                else:
+                    console.print(f"[green]Profile generation job queued for {user.name}[/green]")
+
+            await db.commit()
+    finally:
+        await engine.dispose()
 
 
 @app.command(name="seed-profile")
@@ -197,12 +219,14 @@ def role_set(
     orcid: str = typer.Option(..., "--orcid", help="ORCID ID of the account"),
     role: str = typer.Option(..., "--role", help="pi | manager | admin | reviewer"),
 ):
-    """Set a user's account type. The escape hatch when no admin can log in."""
+    """Set a user's account type. The escape hatch when no admin can log in. Refused while
+    the account owns a lab agent and the new role may not use the PI surfaces (spec
+    2026-10-05 D25)."""
     async def _set() -> bool:
         from sqlalchemy import select
 
         from src.models import VALID_USER_ROLES, User
-        from src.services.session_epoch import bump_session_epoch
+        from src.services.user_roles import RoleChangeRefused, change_user_role
         if role not in VALID_USER_ROLES:
             console.print(f"[red]Invalid role {role!r}; expected one of {VALID_USER_ROLES}[/red]")
             return False
@@ -214,10 +238,11 @@ def role_set(
                 if not user:
                     console.print(f"[red]User with ORCID {orcid} not found[/red]")
                     return False
-                changed = user.user_role != role
-                user.user_role = role
-                if changed:
-                    await bump_session_epoch(db, user.id)
+                try:
+                    await change_user_role(db, user, role)
+                except RoleChangeRefused as exc:
+                    console.print(f"[red]{exc}[/red]")
+                    return False
                 await db.commit()
                 console.print(f"[green]Set {user.name} ({orcid}) to {role}[/green]")
                 return True

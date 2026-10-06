@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_profile_errors.html" import profile_error_text %}
 {% from "_tag_field.html" import profile_tag_fields %}
 {% block title %}Public Profile — {{ agent.bot_name }} — CoPI{% endblock %}
 
@@ -32,6 +33,13 @@
     {% if request.query_params.get('error') == 'profile_generating' %}
     <div class="bg-red-50 border border-red-200 rounded-lg p-3 mb-6 text-sm text-red-800">
         Profile is being generated — try again shortly.
+    </div>
+    {% endif %}
+
+    {% set perr = profile_error_text(request.query_params.get('error')) %}
+    {% if perr %}
+    <div class="bg-red-50 border border-red-200 rounded-lg p-3 mb-6 text-sm text-red-800">
+        {{ perr }}
     </div>
     {% endif %}
 

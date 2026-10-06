@@ -101,12 +101,16 @@ def derive_start_from_papers(records: list[dict]) -> int | None:
     the author the corpus resolver matched as the PI herself. A paper whose
     only Hopkins author is a co-author has no Hopkins string there and cannot
     date tenure (H2). Undated papers cannot either.
+
+    Only ORCID-anchored records (stage s1 or s3) count: a name+affiliation or
+    OpenAlex find may be a namesake (spec 2026-10-05 §6.3, G-7).
     """
     years = [
         r["year"]
         for r in records
         if r.get("year")
         and any(is_hopkins_affiliation(a) for a in r.get("pi_affiliations") or [])
+        and set(r.get("stages") or []) & {"s1", "s3"}
     ]
     return min(years) if years else None
 

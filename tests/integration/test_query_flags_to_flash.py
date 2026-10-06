@@ -22,7 +22,8 @@ async def test_profile_save_flashes_instead_of_a_query_flag(client, db_session):
     r = await client.post(
         "/profile/save",
         data={"name": pi.name, "email": pi.email, "institution": "", "department": "",
-              "research_summary": "Saved words"},
+              "research_summary": "Saved words",
+              "profile_version": "1"},  # R1-a: make_profile's default version is current
         headers=auth_headers(pi.id), follow_redirects=False,
     )
     assert r.headers["location"] == "/profile"
@@ -57,7 +58,8 @@ async def test_manager_profile_save_flashes(client, db_session):
     await factories.make_profile(db_session, user=pi)
     r = await client.post(
         f"/manager/pis/{pi.id}/profile",
-        data={"name": pi.name, "email": pi.email, "research_summary": "Manager words"},
+        data={"name": pi.name, "email": pi.email, "research_summary": "Manager words",
+              "profile_version": "1"},  # R1-a: make_profile's default version is current
         headers=auth_headers(manager.id), follow_redirects=False,
     )
     assert r.headers["location"] == f"/manager/pis/{pi.id}"
@@ -71,7 +73,8 @@ async def test_an_admin_profile_save_flash_is_shown_once(client, db_session):
     r = await client.post(
         "/profile/save",
         data={"name": admin.name, "email": admin.email, "institution": "", "department": "",
-              "research_summary": "Admin words"},
+              "research_summary": "Admin words",
+              "profile_version": "1"},  # R1-a: make_profile's default version is current
         headers=auth_headers(admin.id), follow_redirects=False,
     )
     first = await follow(client, r)

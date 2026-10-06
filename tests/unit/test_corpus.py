@@ -9,16 +9,22 @@ S1-only corpus that was defect D1/D2.
 """
 
 import ast
+import contextlib
 import inspect
+from datetime import UTC, datetime
 
 import pytest
 
 from src.services import corpus, profile_pipeline, pubmed
 from src.services.corpus import (
+    OPENALEX_WORKS_CAP,
+    SEARCH_RETMAX,
+    CorpusResult,
     CorpusStageError,
     match_pi_author,
     resolve_corpus,
 )
+from src.services.job_queue import JobDeferred
 
 
 def _author(last=None, fore=None, initials=None, collective=None, affs=()):
@@ -295,6 +301,19 @@ async def test_a_stage_failure_raises_instead_of_shipping_a_thin_corpus(monkeypa
         )
 
 
+async def test_budget_deferral_propagates_without_becoming_a_retryable_stage_failure(monkeypatch):
+    _wire(monkeypatch)
+    deferred = JobDeferred(datetime(2031, 1, 1, tzinfo=UTC), "OpenAlex free budget exhausted")
+
+    async def exhausted(orcid):
+        raise deferred
+
+    monkeypatch.setattr(corpus, "fetch_works_by_orcid", exhausted)
+    with pytest.raises(JobDeferred) as exc:
+        await resolve_corpus("0000-0001-2345-6789", "Rachel Green", "Johns Hopkins University")
+    assert exc.value is deferred
+
+
 async def test_a_mapping_key_the_pool_never_held_is_skipped_not_a_crash(
     monkeypatch, caplog
 ):
@@ -478,3 +497,99 @@ def test_a_book_article_is_counted_and_logged_not_silently_dropped(caplog):
     # The book record produces no entry — but its omission is now visible.
     assert "1 PubmedBookArticle" in caplog.text
     assert "29262124" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 (spec 2026-10-05 §6.3): the shared name parser in the gate, truncation,
+# ``ranked`` defaulting to ``kept``, and ``_aff_match`` with gaps (G-8)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name, last, fore", [
+    ("Jane Doe, PhD", "Doe", "Jane"),
+    ("Dr. John Smith Jr.", "Smith", "John"),
+    ("Iris van 't Erve", "van 't Erve", "Iris"),
+])
+def test_the_gate_reads_the_name_through_the_shared_parser(name, last, fore):
+    kind, _affs, _bare = corpus._match_pi_author_detail({"authors": [_author(last, fore)]}, name)
+    assert kind == "individual"
+
+
+def test_a_suffix_is_not_taken_for_the_surname():
+    # Before the shared parser "John Smith Jr." searched for an author surnamed "Jr.".
+    record = {"authors": [_author("Jr", "John")]}
+    assert corpus._match_pi_author_detail(record, "John Smith Jr.")[0] == "no_match"
+
+
+def test_an_orcid_id_name_matches_nobody():
+    record = {"authors": [_author("0097", "0000-0002-1825")]}
+    assert corpus._match_pi_author_detail(record, "0000-0002-1825-0097")[0] == "no_match"
+
+
+def test_a_result_built_without_ranked_reads_kept_as_ranked():
+    kept = [{"pmid": "1"}]
+    assert CorpusResult(kept=kept, flagged=[]).ranked == kept
+    assert CorpusResult(kept=[], flagged=[]).ranked == []
+
+
+async def test_a_capped_search_marks_its_stage_truncated(monkeypatch):
+    async def works(orcid, *, strict=False):
+        return []
+
+    async def openalex(orcid):
+        return [{"pmid": None, "doi": None, "year": None}] * OPENALEX_WORKS_CAP
+
+    async def search(term, retmax=200):
+        return [str(i) for i in range(SEARCH_RETMAX)] if "[auid]" in term else []
+
+    async def efetch(pmids, *, strict=False, permanently_dropped=None):
+        return []
+
+    @contextlib.asynccontextmanager
+    async def session():
+        yield None
+
+    monkeypatch.setattr(corpus, "fetch_orcid_works", works)
+    monkeypatch.setattr(corpus, "fetch_works_by_orcid", openalex)
+    monkeypatch.setattr(corpus, "search_pmids", search)
+    monkeypatch.setattr(corpus, "fetch_pubmed_records", efetch)
+    monkeypatch.setattr(corpus, "ncbi_session", session)
+    result = await corpus.resolve_corpus("0000-0002-1825-0097", "Ada Lovelace", None)
+    assert result.truncated_stages == ["s2", "s3"]
+
+
+async def test_an_uncapped_resolve_reports_nothing_truncated(monkeypatch):
+    async def none(*a, **k):
+        return []
+
+    @contextlib.asynccontextmanager
+    async def session():
+        yield None
+
+    for attr in ("fetch_orcid_works", "fetch_works_by_orcid", "search_pmids",
+                 "fetch_pubmed_records"):
+        monkeypatch.setattr(corpus, attr, none)
+    monkeypatch.setattr(corpus, "ncbi_session", session)
+    result = await corpus.resolve_corpus("0000-0002-1825-0097", "Ada Lovelace", "JHU")
+    assert result.truncated_stages == []
+
+
+@pytest.mark.parametrize("institution, paper_aff", [
+    ("University of Maryland Baltimore", "University of Maryland School of Medicine, Baltimore, MD"),
+    ("Johns Hopkins University", "Bloomberg School of Public Health, Baltimore, MD"),
+    ("Johns Hopkins University", "JHMI, Department of Oncology, Baltimore"),
+])
+def test_aff_match_accepts_in_order_tokens_with_gaps_or_a_hopkins_affiliation(
+    institution, paper_aff
+):
+    assert corpus._aff_match(institution, paper_aff)
+
+
+@pytest.mark.parametrize("institution, paper_aff", [
+    ("Johns Hopkins University", "Robert Wood Johnson Medical School"),
+    ("Johns Hopkins University", "Hopkins Marine Station, Stanford University"),
+    ("Johns Hopkins University", "Johnson & Johnson"),
+    ("University of Maryland Baltimore", "Johns Hopkins Hospital, Baltimore, Maryland"),  # out of order
+])
+def test_aff_match_still_rejects_mismatches(institution, paper_aff):
+    assert not corpus._aff_match(institution, paper_aff)

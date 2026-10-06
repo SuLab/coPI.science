@@ -5,6 +5,7 @@ import pytest
 
 from src.services.agent_mute import set_agent_mute_state
 from tests import factories
+from tests.persona_support import write_persona
 
 pytestmark = pytest.mark.integration
 
@@ -41,6 +42,7 @@ async def test_unmuting_clears_attribution_and_reactivates(db_session):
         db_session, user=pi, status="inactive", slack_bot_token="xoxb-1",
         muted_at=datetime.now(UTC), muted_by=manager.id,
     )
+    write_persona(agent.agent_id)  # R2: the persona-file gate (spec 2026-10-05 §6.4)
 
     ok = await set_agent_mute_state(
         db_session, agent=agent, muted=False, actor=manager,

@@ -2,11 +2,12 @@
 
 Jobs go in at BULK priority through job_queue.insert_job_if_absent (idempotent: a user
 with a pending or processing job of the type gets none). OpenAlex use must stay inside
-the keyless budget: 1000 credits a day per IP, shared with org1.
+the keyless budget: 1000 credits a day per IP. No share is reserved for org1.
 
 By default (adaptive pacing, D67) jobs are not staggered: the worker reads OpenAlex's
 free daily meter before each BULK job that spends credits and defers the job to the
-meter's reset once it would eat into the 10% reserve (src/services/openalex_budget.py).
+meter's reset once it exceeds the available free credits (src/services/openalex_budget.py).
+Charged requests and retries also check the meter, including uncapped industry lookups.
 
 `--fixed-schedule` restores the D53 stagger: each job's `not_before` is a slot sized for
 the parent job's credits plus its step-10 follow-ons (OPENALEX_CREDITS_PER_JOB), times

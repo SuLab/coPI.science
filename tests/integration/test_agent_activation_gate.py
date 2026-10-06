@@ -17,6 +17,7 @@ from src.models import USER_ROLE_ADMIN, Job
 from src.services.agent_form import agent_form_version
 from tests import factories
 from tests.integration.test_manager_access import auth_headers
+from tests.persona_support import write_persona
 
 pytestmark = pytest.mark.integration
 
@@ -109,6 +110,7 @@ async def test_a_grounded_agent_with_a_healthy_job_activates(client, db_session)
         profile={"evidence_pmid_count": 10, "evidence_pub_count": 8},
         job_status="completed",
     )
+    write_persona(agent.agent_id)  # R2: the persona-file gate (spec 2026-10-05 §6.4)
     r = await client.post(
         f"/admin/agents/{agent.id}/approve", data=_approve_form(agent),
         headers=auth_headers(admin.id), follow_redirects=False,
@@ -126,6 +128,7 @@ async def test_the_logged_override_activates_despite_blockers(client, db_session
     user, agent = await _pending_pi_agent(
         db_session, orcid="0000-0020-0000-0005", agent_id="overridden",
     )
+    write_persona(agent.agent_id)  # R2: the override does not waive the persona file (D31)
     r = await client.post(
         f"/admin/agents/{agent.id}/approve",
         data=_approve_form(agent, activation_override="1"),

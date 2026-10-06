@@ -57,6 +57,7 @@ async def test_a_comma_inside_a_tag_survives_the_save(client, db_session):
     r = await client.post(
         "/profile/save",
         data={
+            "profile_version": "1",  # R1-a: make_profile's default version is current
             "name": user.name, "email": user.email, "research_summary": "s",
             "tag_fields": _ALL,
             "techniques": ["1,2-dichloroethane", " cryo-EM ", ""],
@@ -77,7 +78,8 @@ async def test_a_form_without_the_widget_leaves_the_tags_alone(client, db_sessio
     await factories.make_profile(db_session, user=user, techniques=["kept, intact"])
     await client.post(
         "/profile/save",
-        data={"name": user.name, "email": user.email, "research_summary": "s",
+        data={"profile_version": "1",  # R1-a: make_profile's default version is current
+              "name": user.name, "email": user.email, "research_summary": "s",
               "techniques": "a, b"},
         headers=auth_headers(user.id),
     )
@@ -92,7 +94,8 @@ async def test_the_manager_form_saves_tags_whole(client, db_session):
     await factories.make_profile(db_session, user=pi)
     r = await client.post(
         f"/manager/pis/{pi.id}/profile",
-        data={"name": pi.name, "email": pi.email, "research_summary": "s",
+        data={"profile_version": "1",  # R1-a: make_profile's default version is current
+              "name": pi.name, "email": pi.email, "research_summary": "s",
               "tag_fields": ["key_targets"], "key_targets": ["PD-1, PD-L1 axis"]},
         headers=auth_headers(manager.id), follow_redirects=False,
     )

@@ -27,9 +27,11 @@ from src.services.agent_activation import (
     activate_agent,
     activation_blockers,
     ensure_activation_allowed,
+    persona_blockers,
 )
 from src.services.agent_form import agent_form_version
 from src.services.jhu_rules import get_tenure_start
+from src.services.persona_lifecycle import export_after_lifecycle, rename_persona_files
 from src.services.pi_companies import move_companies_file
 from src.services.star_topology import ensure_lab_spoke
 from src.web.flash import flash
@@ -137,6 +139,7 @@ async def admin_agent_detail(
             db, agent.user_id, agent_id=agent.agent_id
         )
     blockers = await activation_blockers(db, agent)
+    hard_blockers = await persona_blockers(db, agent)
 
     # Star-spoke state for the evidence panel: "missing" means a run started
     # with this agent active would fail _validate_star_topology at startup.
@@ -171,6 +174,7 @@ async def admin_agent_detail(
             latest_gen_job=latest_gen_job,
             tenure_start=tenure_start,
             blockers=blockers,
+            hard_blockers=hard_blockers,
             activation_blocked=request.query_params.get("activation_blocked"),
             valid_statuses=VALID_AGENT_STATUSES,
             available_roles=available_roles(),
@@ -247,18 +251,24 @@ async def admin_approve_agent(
 
     ACTIVATION IS GATED (audit H4 / coverage plan P3): flipping any pi_lab
     agent to ``active`` — through either branch — is refused when its profile
-    is missing or ungrounded or its newest generation job is dead, unless the
-    explicit (logged) override checkbox was posted. Auto-created pending rows
-    (the manager Add-PI flow) made "pending" stop implying "profile exists",
+    is missing, ungrounded or summary-less or its newest generation job is dead,
+    unless the explicit (logged) override checkbox was posted; and, override or not,
+    when its persona file ``profiles/public/<slug>.md`` is missing or has no Research
+    Summary, or its owner may not use the PI surfaces
+    (``agent_activation.persona_blockers``, spec 2026-10-05 §6.4). Auto-created pending
+    rows (the manager Add-PI flow) made "pending" stop implying "profile exists",
     and an active agent with no exported profile is the Kavran-class failure.
-    A refusal applies NO edits at all — the form's slug/name/token changes
-    roll back with it, so what the admin sees stays what the DB holds.
+    Without a rename, a refusal applies NO edits at all — the form's name/token
+    changes roll back with it, so what the admin sees stays what the DB holds; a
+    pending agent's rename is committed first and survives a refused activation
+    (``_rename_then_activate``). After an activation commits, the persona is
+    re-exported (``persona_lifecycle.export_after_lifecycle``).
 
     The form is guarded against staleness (RA-02): the row is locked, and a
     ``form_version`` that no longer matches ``agent_form_version`` means another
     writer changed it after the page rendered, so nothing is written. The slug is
-    editable only while the agent is pending (RA-14; a rename moves the PI's companies
-    file, ``pi_companies.move_companies_file``), and the Slack bot token is
+    editable only while the agent is pending (RA-14; a rename moves the PI's persona and
+    companies files, ``persona_lifecycle.rename_persona_files``), and the Slack bot token is
     write-only: a blank ``replace_slack_bot_token`` keeps the stored one (RA-03).
 
     ``agent_status=pending`` is refused for an agent that is no longer pending
@@ -274,6 +284,8 @@ async def admin_approve_agent(
     agent = result.scalar_one_or_none()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
+    actor_id = current_user.id
+    override = bool(activation_override.strip())
 
     if form_version != agent_form_version(agent):
         return RedirectResponse(url=f"/admin/agents/{agent_id}?error=stale_form", status_code=302)
@@ -301,15 +313,16 @@ async def admin_approve_agent(
             return RedirectResponse(
                 url=f"/admin/agents/{agent_id}?error=slug_taken", status_code=302
             )
+        return await _rename_then_activate(
+            request, db, agent, current_user, actor_id=actor_id, new_slug=new_slug,
+            bot_name=bot_name, replace_token=replace_slack_bot_token, override=override,
+        )
 
     activating = agent.status == "pending" or (
         agent.status != "active" and agent_status == "active"
     )
     if activating:
-        blockers = await activate_agent(
-            db, agent, actor=current_user,
-            override=bool(activation_override.strip()),
-        )
+        blockers = await activate_agent(db, agent, actor=current_user, override=override)
         if blockers:
             flash(request, "Activation refused: " + "; ".join(blockers), "error")
             return RedirectResponse(
@@ -317,10 +330,8 @@ async def admin_approve_agent(
                 status_code=302,
             )
 
-    renamed_from = agent.agent_id if new_slug and new_slug != agent.agent_id else None
     owner_id = agent.user_id
-    if new_slug:
-        agent.agent_id = new_slug  # pending only, by the check above
+    agent_role = agent.role
     agent.bot_name = bot_name.strip()
     # No path clears the token from this form; user_deletion and provisioning own that.
     if replace_slack_bot_token.strip():
@@ -330,9 +341,9 @@ async def admin_approve_agent(
         agent.status = agent_status
 
     try:
-        # The lab's hub spoke goes in the same commit as the activation, AFTER the
-        # rename above so it is the final slug's (ensure_lab_spoke). Its flush is
-        # where a concurrent rename's IntegrityError then surfaces.
+        # The lab's hub spoke goes in the same commit as the activation (ensure_lab_spoke).
+        # A rename never reaches here (_rename_then_activate); the IntegrityError guard
+        # stays for any unique conflict its flush surfaces.
         spoke_problems = (
             await ensure_lab_spoke(
                 db, agent_id=agent.agent_id, role=agent.role, actor=current_user
@@ -356,11 +367,62 @@ async def admin_approve_agent(
             url=f"/admin/agents/{agent_id}?activation_blocked=1", status_code=302
         )
 
-    if renamed_from is not None and owner_id is not None:
-        # The hub reads profiles/private/companies/<agent_id>.md: move the file to the
-        # new id. Best effort, after the commit, like every companies export.
-        await move_companies_file(db, user_id=owner_id, old_agent_id=renamed_from)
+    if activating and owner_id is not None and requires_linked_user(agent_role):
+        await export_after_lifecycle(db, owner_id, event="Agent activated", actor_id=actor_id)
 
+    return RedirectResponse(url="/admin/agents", status_code=302)
+
+
+async def _rename_then_activate(
+    request: Request, db: AsyncSession, agent: AgentRegistry, current_user: User, *,
+    actor_id: uuid.UUID, new_slug: str, bot_name: str, replace_token: str, override: bool,
+) -> RedirectResponse:
+    """A pending agent's rename and activation from one POST, as two transactions (spec
+    2026-10-05 §6.4, D31). The rename, with the bot-name and token edits, commits first; the
+    persona and companies files then move to the new slug (``rename_persona_files``), so
+    the activation gate reads the new-slug file. A refused activation keeps the rename."""
+    # Every value used after a rollback is read here first: a rollback expires the
+    # session's objects, and an expired attribute read is sync IO.
+    agent_pk, old_slug, owner_id, role = agent.id, agent.agent_id, agent.user_id, agent.role
+    agent.agent_id = new_slug
+    agent.bot_name = bot_name.strip()
+    # No path clears the token from this form; user_deletion and provisioning own that.
+    if replace_token.strip():
+        agent.slack_bot_token = replace_token.strip()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()  # a concurrent rename took the slug
+        return RedirectResponse(url=f"/admin/agents/{agent_pk}?error=slug_taken", status_code=302)
+    if owner_id is not None and requires_linked_user(role):
+        await rename_persona_files(db, owner_id, old_agent_id=old_slug, actor_id=actor_id)
+    elif owner_id is not None:
+        # The hub reads profiles/private/companies/<agent_id>.md: move it to the new id.
+        await move_companies_file(db, user_id=owner_id, old_agent_id=old_slug)
+    agent = (await db.execute(
+        select(AgentRegistry).where(AgentRegistry.id == agent_pk).with_for_update()
+        .execution_options(populate_existing=True)
+    )).scalar_one_or_none()
+    if agent is None or agent.status != "pending":
+        flash(request, f"Renamed to {new_slug} (saved). The agent changed meanwhile; "
+                       "it was not activated.", "error")
+        return RedirectResponse(url=f"/admin/agents/{agent_pk}", status_code=302)
+    blockers = await activate_agent(db, agent, actor=current_user, override=override)
+    spoke = [] if blockers else await ensure_lab_spoke(
+        db, agent_id=new_slug, role=role, actor=current_user,
+    )
+    if blockers or spoke:
+        await db.rollback()
+        reason = ("; ".join(blockers) if blockers
+                  else "this lab could not be connected to the hub: " + "; ".join(spoke))
+        flash(request, f"Renamed to {new_slug} (saved). Activation refused: {reason}"[:300],
+              "error")
+        return RedirectResponse(
+            url=f"/admin/agents/{agent_pk}?activation_blocked=1", status_code=302,
+        )
+    await db.commit()
+    if owner_id is not None and requires_linked_user(role):
+        await export_after_lifecycle(db, owner_id, event="Agent activated", actor_id=actor_id)
     return RedirectResponse(url="/admin/agents", status_code=302)
 
 
@@ -518,7 +580,11 @@ async def admin_link_agent(
     Refused with a flash and nothing written unless ``user_id`` names an existing
     account whose role may own a lab and that no other agent is linked to; see
     ``_link_target``. A malformed or unknown id used to surface as a 500.
+
+    After the commit the new owner's persona is published and a file left at the slug
+    archived (``persona_lifecycle.export_after_lifecycle``).
     """
+    actor_id = current_user.id
     result = await db.execute(
         select(AgentRegistry).where(AgentRegistry.id == agent_id)
     )
@@ -537,6 +603,13 @@ async def admin_link_agent(
         # agents.user_id is unique: a concurrent link of the same user won.
         await db.rollback()
         flash(request, "That user is already linked to another agent.", "error")
+    else:
+        if requires_linked_user(agent.role):
+            # The file at this slug was written for the agent's previous owner, if anyone
+            # (spec 2026-10-05 §6.4, D31): archive it and publish the new owner's persona.
+            await export_after_lifecycle(
+                db, user.id, event="Agent linked", actor_id=actor_id, replace_leftover=True,
+            )
     return RedirectResponse(url="/admin/agents", status_code=302)
 
 

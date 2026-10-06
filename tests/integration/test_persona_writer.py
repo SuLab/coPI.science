@@ -314,3 +314,81 @@ async def test_a_post_commit_write_refuses_while_the_caller_holds_the_persona_lo
             assert await asyncio.wait_for(write_persona_files(caller, user_id), timeout=30)
     finally:
         await _drop(factory, user_id, slug)
+
+
+async def test_a_failed_post_commit_write_sets_the_flag_and_a_good_one_clears_it(
+    db_session, tmp_path, monkeypatch
+):
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x")
+    monkeypatch.setattr(profile_export, "PROFILES_DIR", blocker / "public")
+    user = await factories.make_user(db_session)
+    await factories.make_profile(db_session, user=user)
+    agent = await factories.make_agent(db_session, user=user, agent_id="eflag1")
+    assert await write_persona_files(db_session, user.id) is None
+    await db_session.refresh(agent)
+    assert agent.persona_export_failed_at is not None
+
+    monkeypatch.setattr(profile_export, "PROFILES_DIR", tmp_path / "public")
+    assert await write_persona_files(db_session, user.id) is not None
+    await db_session.refresh(agent)
+    assert agent.persona_export_failed_at is None
+
+
+async def test_persona_out_of_date_reads_the_flag_and_the_file(db_session, public):
+    from datetime import UTC, datetime
+
+    from src.services.profile_publish import persona_out_of_date
+
+    user = await factories.make_user(db_session)
+    await factories.make_profile(db_session, user=user)
+    agent = await factories.make_agent(db_session, user=user, agent_id="eflag2")
+    assert await persona_out_of_date(db_session, user.id) is True  # no file yet
+    await write_persona_files(db_session, user.id, commit=False)
+    assert await persona_out_of_date(db_session, user.id) is False
+    agent.persona_export_failed_at = datetime.now(UTC)
+    await db_session.flush()
+    assert await persona_out_of_date(db_session, user.id) is True
+    stranger = await factories.make_user(db_session)
+    assert await persona_out_of_date(db_session, stranger.id) is None
+
+
+async def _delete_in_new_session(factory, user_id) -> bool:
+    async with factory() as d:
+        await delete_user_account(d, await d.get(User, user_id))
+    return True
+
+
+async def test_the_flag_write_does_not_deadlock_with_a_deletion(
+    factory, public, tmp_path, monkeypatch,
+):
+    """Deletion holds the agents row FOR UPDATE and then waits for the advisory lock; the
+    writer's failed write releases that lock with its transaction and only then UPDATEs
+    the agents row to set the flag, so it waits on the deletion holding nothing the
+    deletion needs, and both finish. A holder session orders them: the writer queues on
+    the advisory lock first, then the deletion takes the row and queues behind it."""
+    user_id, slug = await _seed(factory)
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x")
+    monkeypatch.setattr(profile_export, "PROFILES_DIR", blocker / "public")
+    try:
+        async with factory() as holder:
+            await lock_agent_persona(holder, user_id)
+            async with factory() as w:
+                writer = asyncio.create_task(write_persona_files(w, user_id))
+                await asyncio.sleep(0.5)
+                assert not writer.done(), "the writer must wait for the per-PI lock"
+                deletion = asyncio.create_task(_delete_in_new_session(factory, user_id))
+                await asyncio.sleep(0.5)
+                assert not deletion.done(), "deletion waits for the per-PI lock"
+                await holder.commit()
+                path, deleted = await asyncio.wait_for(
+                    asyncio.gather(writer, deletion), timeout=30)
+        assert path is None and deleted is True
+        async with factory() as s:
+            assert await s.get(User, user_id) is None
+            flags = (await s.execute(select(AgentRegistry.persona_export_failed_at).where(
+                AgentRegistry.agent_id == slug))).scalars().all()
+            assert all(flag is None for flag in flags)
+    finally:
+        await _drop(factory, user_id, slug)

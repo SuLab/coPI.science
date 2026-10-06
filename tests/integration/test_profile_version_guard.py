@@ -85,17 +85,16 @@ async def test_a_current_form_saves_and_bumps_the_version(client, db_session, ex
     assert (profile.research_summary, profile.profile_version) == ("Edited summary.", 4)
 
 
-async def test_the_guarded_save_exports_the_same_bytes_as_the_legacy_save(
+async def test_a_save_without_a_version_over_an_existing_profile_is_refused(
     client, db_session, export_dir,
 ):
-    """The forms now always carry the field, so the guarded write path IS the
-    normal path: it must export exactly what the unguarded one does."""
-    a_user, a_agent = await _pi(db_session, "parity-a")
-    b_user, b_agent = await _pi(db_session, "parity-b")
-    for user, agent, extra in ((a_user, a_agent, {}), (b_user, b_agent, {"profile_version": "3"})):
-        path, data, actor = _routes(user, agent)["profile_save"]
-        data = {**data, "name": "Same Name", **extra}
-        await client.post(path, data=data, headers=auth_headers(actor))
-    a = (export_dir / f"{a_agent.agent_id}.md").read_text(encoding="utf-8")
-    b = (export_dir / f"{b_agent.agent_id}.md").read_text(encoding="utf-8")
-    assert a == b
+    """R1-c (spec §6.4 Version bypass): the legacy unguarded save is gone. A post with no
+    profile_version over an existing profile is refused and nothing changes."""
+    user, agent = await _pi(db_session, "noversion")
+    user_id = user.id  # the refused save's rollback expires the shared session's objects
+    path, data, actor = _routes(user, agent)["profile_save"]
+    resp = await client.post(path, data=data, headers=auth_headers(actor))
+    assert resp.status_code == 302 and "error=profile_version_missing" in resp.headers["location"]
+    profile = await _profile(db_session, user_id)
+    assert (profile.research_summary, profile.profile_version) == ("Stored.", 3)
+    assert not (export_dir / f"{agent.agent_id}.md").exists()

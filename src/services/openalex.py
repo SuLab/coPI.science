@@ -14,6 +14,7 @@ import logging
 import httpx
 
 from src.config import get_settings
+from src.services import openalex_budget
 from src.services.http_pacing import TRANSIENT_STATUSES, with_retries
 from src.services.query_escaping import openalex_filter_value
 
@@ -63,8 +64,12 @@ async def fetch_works_by_orcid(orcid: str) -> list[dict]:
             contact = getattr(settings, "ncbi_contact_email", None)
             if contact:
                 params["mailto"] = contact
+            async def attempt(page_params=params):
+                await openalex_budget.check_request_budget()
+                return await client.get(OPENALEX_WORKS_URL, params=page_params)
+
             resp = await with_retries(
-                lambda p=params: client.get(OPENALEX_WORKS_URL, params=p),
+                attempt,
                 attempts=3, backoff=lambda a: 1.0 * (2 ** a),
                 retry_statuses=TRANSIENT_STATUSES, retry_exceptions=(httpx.TransportError,),
             )

@@ -620,6 +620,9 @@ async def test_saving_the_public_profile_updates_the_pis_profile_not_the_editors
     r = await client.post(
         f"/agent/{OWNER_AGENT}/public-profile/save",
         data={
+            # R1-a (spec §6.4 Version bypass): the PI's profile exists, so the save carries
+            # its current version (factories.make_profile defaults to 1).
+            "profile_version": "1",
             "research_summary": "Chemical biology of proteostasis.",
             "techniques": ["cryo-EM", "mass spec"],
             "keywords": ["proteostasis"],

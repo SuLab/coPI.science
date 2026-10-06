@@ -21,9 +21,10 @@ an individual match nor a collective are withheld AND flagged, never silently
 added or removed.
 
 Ranking is year DESC / PMID DESC; ``EXCLUDED_TYPES`` are skipped pre-cap (R3);
-the cap is applied LAST. A stage failure RAISES (``CorpusStageError``) so the
-job retries instead of storing a thin S1-only corpus as if it were the answer
-(audit M5).
+the cap is applied LAST. The cap bounds only the reported ``kept`` set; every
+anchored record of ``ranked`` is stored (src/services/corpus_additions.py). A stage
+failure RAISES (``CorpusStageError``) so the job retries instead of storing a thin
+S1-only corpus as if it were the answer (audit M5).
 """
 
 import logging
@@ -32,9 +33,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.services.jhu_rules import is_hopkins_affiliation
+from src.services.job_queue import JobDeferred
+from src.services.openalex import _MAX_PAGES as _OPENALEX_MAX_PAGES
+from src.services.openalex import _PER_PAGE as _OPENALEX_PER_PAGE
 from src.services.openalex import fetch_works_by_orcid
 from src.services.orcid import fetch_orcid_works
 from src.services.patents import _to_ascii
+from src.services.person_names import is_orcid_like, parse_person_name, surname_candidates
 from src.services.pubmed import (
     _doi_fold,
     convert_dois_to_pmids,
@@ -55,6 +61,10 @@ DEFAULT_CAP = 50
 # Pardoll and Denis Wirtz (i.e. clipped, true count unknown) and 197 for
 # Andrew Pekosz. The widened query takes Rothstein from 175 to 235.
 SEARCH_RETMAX = 500
+
+#: Works fetch_works_by_orcid returns at most (its page cap); a stage-S2 count at this value
+#: is read as truncated (spec 2026-10-05 §6.3 Tenure).
+OPENALEX_WORKS_CAP = _OPENALEX_MAX_PAGES * _OPENALEX_PER_PAGE
 
 # Non-research article types that cannot take cap slots (R3, motivating case
 # `dang`). Single source of truth — profile_pipeline imports it from here.
@@ -85,7 +95,7 @@ INSTITUTION_STOPWORDS: frozenset[str] = frozenset({
 def _distinctive_aff_tokens(affiliation: str) -> list[str]:
     """Institution-distinctive tokens (generic words like "university" drop),
     in the order they appear in ``affiliation`` — order is load-bearing for
-    ``_aff_match``, which requires them adjacent, not merely each present."""
+    ``_aff_match``, which requires them in that order, not merely each present."""
     tokens = re.findall(r"[a-z]+", affiliation.lower())
     distinctive = [
         t for t in tokens if t not in INSTITUTION_STOPWORDS and len(t) >= 4
@@ -96,8 +106,11 @@ def _distinctive_aff_tokens(affiliation: str) -> list[str]:
 
 
 def _aff_match(input_aff: str, paper_aff: str) -> bool:
-    """Whether the institution's distinctive words appear TOGETHER, in order,
-    as a word-bounded phrase in the paper affiliation string (D12 fix).
+    """Whether the institution's distinctive words appear in the paper affiliation
+    string in order, each word-bounded, with other words allowed between them (G-8;
+    D12 fix). When the institution itself is Hopkins
+    (``jhu_rules.is_hopkins_affiliation``), any paper affiliation that function
+    accepts also matches ("JHMI", "Bloomberg School of Public Health").
 
     The previous implementation ORed each distinctive token independently, so
     ``_distinctive_aff_tokens("Johns Hopkins University")`` (``["johns",
@@ -105,10 +118,11 @@ def _aff_match(input_aff: str, paper_aff: str) -> bool:
     "Robert Wood Johnson Medical School" (via "johns"/"johnson" substring),
     "Hopkins Marine Station, Stanford University" (via "hopkins" with no
     "johns" anywhere nearby), and "Johnson & Johnson" all read as Hopkins
-    affiliations. Requiring the tokens ADJACENT, in the institution's own
-    order, and word-bounded — the same phrase/word-bounded style as
-    ``jhu_rules.is_hopkins_affiliation`` — rejects all three while still
-    matching "Johns Hopkins University School of Medicine, Baltimore, MD".
+    affiliations. Requiring every token, in the institution's own order and
+    word-bounded, rejects all three while still matching "Johns Hopkins
+    University School of Medicine, Baltimore, MD" and, with gaps allowed,
+    "University of Maryland School of Medicine, Baltimore" for "University of
+    Maryland Baltimore".
 
     Still asymmetric on purpose: paper affiliations are long (dept, address,
     city) and the input is just the institution name — needle-in-haystack
@@ -116,10 +130,12 @@ def _aff_match(input_aff: str, paper_aff: str) -> bool:
     """
     if not paper_aff:
         return False
+    if is_hopkins_affiliation(input_aff) and is_hopkins_affiliation(paper_aff):
+        return True
     tokens = _distinctive_aff_tokens(input_aff)
     if not tokens:
         return False
-    pattern = r"\b" + r"[\s,.\-]+".join(re.escape(t) for t in tokens) + r"\b"
+    pattern = r"\b" + r"\b.*?\b".join(re.escape(t) for t in tokens) + r"\b"
     return re.search(pattern, paper_aff, re.IGNORECASE) is not None
 
 
@@ -334,11 +350,20 @@ def _match_pi_author_detail(record: dict, name: str) -> tuple[str, list[str], bo
     that distinction (``resolve_corpus``) use this function directly;
     ``match_pi_author`` is the stable 2-tuple form everything else keeps
     using.
+
+    The name is parsed with ``person_names.parse_person_name``; an ORCID-iD name
+    matches nobody.
     """
-    parts = name.strip().split()
-    last_name = parts[-1].lower() if parts else ""
-    first_name = parts[0] if len(parts) > 1 else ""
-    middle_name = parts[1] if len(parts) > 2 else None
+    tokens = parse_person_name(name).full.split()
+    if is_orcid_like(name):
+        surnames: tuple[str, ...] = ()
+    else:
+        # The shared parser's surname candidates (spec 2026-10-05 §4.1, §6.3): "Jane Doe,
+        # PhD" is a Doe, "John Smith Jr." a Smith, "Iris van 't Erve" also "van 't Erve".
+        # A one-word name keeps today's surname-only match.
+        surnames = surname_candidates(name) or ((tokens[-1],) if tokens else ())
+    first_name = tokens[0] if len(tokens) > 1 else ""
+    middle_name = tokens[1] if len(tokens) > 2 else None
 
     saw_collective = False
     for author in record.get("authors") or []:
@@ -358,10 +383,10 @@ def _match_pi_author_detail(record: dict, name: str) -> tuple[str, list[str], bo
             # Item 4b: only adopt the splice if it actually turns into a
             # surname match — a ForeName that merely ends in a particle-like
             # token for an unrelated reason must change nothing.
-            if _surname_matches(spliced_last, last_name):
+            if any(_surname_matches(spliced_last, s) for s in surnames):
                 candidate_last, candidate_fore = spliced_last, remainder
 
-        if not _surname_matches(candidate_last, last_name):
+        if not any(_surname_matches(candidate_last, s) for s in surnames):
             continue
 
         bare_initial = False
@@ -406,9 +431,9 @@ class CorpusResult:
     orcid_dois: dict[str, str] = field(default_factory=dict)
     # Every identity-gated, deduped record BEFORE the cap, in the same
     # newest-first order as ``kept`` (``kept == ranked[:cap]``; the dicts are
-    # the same objects). Tenure derivation reads this, not ``kept``: a PI's
-    # earliest Hopkins-affiliated paper can sit outside the newest ``cap``.
-    # Defaults to empty so constructors that predate the field still work.
+    # the same objects). Storage and tenure derivation read this, not ``kept``:
+    # every anchored record is stored (D14), and a PI's earliest
+    # Hopkins-affiliated paper can sit outside the newest ``cap``.
     ranked: list[dict[str, Any]] = field(default_factory=list)
     # PMIDs and DOIs the strict NCBI lookups dropped as a permanent per-item
     # failure (a 4xx, an unreadable body) — records a job retry would not
@@ -417,6 +442,16 @@ class CorpusResult:
     # tenure start from this corpus must not be persisted (profile_pipeline,
     # scripts/rederive_tenure_starts.py). Empty means nothing was dropped.
     permanently_dropped: list[str] = field(default_factory=list)
+    # Stages whose search stopped at its cap ("s2": OPENALEX_WORKS_CAP works; "s3"/"s4":
+    # SEARCH_RETMAX PMIDs), so the corpus may be missing older records. A paper-derived
+    # tenure start from such a corpus is kept provisionally, never recorded (spec §6.3).
+    truncated_stages: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # Constructors that predate ``ranked`` pass only ``kept``; storage and tenure read
+        # ``ranked``, so an omitted one is the kept set (a real resolve sets both).
+        if not self.ranked and self.kept:
+            self.ranked = list(self.kept)
 
 
 def _normalize_title(title: str) -> str:
@@ -612,6 +647,10 @@ async def resolve_corpus(
     drops only that PMID/DOI and is reported in
     ``CorpusResult.permanently_dropped`` rather than hidden (a run of
     ``_SYSTEMIC_RUN`` identical ones raises instead).
+
+    ``kept`` is the newest ``cap`` records for reporting; storage reads ``ranked``
+    (spec 2026-10-05 §6.3, D14). A stage whose search stopped at its cap is listed in
+    ``truncated_stages``.
     """
 
     stages: dict[str, set[str]] = {}
@@ -624,6 +663,8 @@ async def resolve_corpus(
     async def _stage(stage_name: str, coro):
         try:
             return await coro
+        except JobDeferred:
+            raise  # Budget deferral must not consume a job's retry attempt.
         except Exception as exc:
             raise CorpusStageError(
                 f"corpus stage {stage_name} failed: {exc}"
@@ -631,6 +672,7 @@ async def resolve_corpus(
 
     stage_counts: dict[str, int] = {}
     permanently_dropped: list[str] = []
+    truncated: list[str] = []
 
     orcid_dois: dict[str, str] = {}
     orcid_doi_only: dict[str, str] = {}  # doi -> "" until resolved to a pmid
@@ -656,6 +698,8 @@ async def resolve_corpus(
             elif w.get("doi"):
                 doi_pool.setdefault(w["doi"], "s2")
         stage_counts["s2"] = len(openalex_works)
+        if len(openalex_works) >= OPENALEX_WORKS_CAP:
+            truncated.append("s2")
 
         s3_pmids = await _stage(
             "s3_pubmed_auid", search_pmids(f"{orcid}[auid]", retmax=SEARCH_RETMAX)
@@ -663,9 +707,11 @@ async def resolve_corpus(
         for pmid in s3_pmids:
             _add(pmid, "s3")
         stage_counts["s3"] = len(s3_pmids)
+        if len(s3_pmids) >= SEARCH_RETMAX:
+            truncated.append("s3")
 
         if institution and institution.strip():
-            term = build_pubmed_query(name, [institution])
+            term = build_pubmed_query(parse_person_name(name).full, [institution])
             s4_pmids = await _stage(
                 "s4_pubmed_name_affiliation",
                 search_pmids(term, retmax=SEARCH_RETMAX),
@@ -673,6 +719,8 @@ async def resolve_corpus(
             for pmid in s4_pmids:
                 _add(pmid, "s4")
             stage_counts["s4"] = len(s4_pmids)
+            if len(s4_pmids) >= SEARCH_RETMAX:
+                truncated.append("s4")
         else:
             # R4: a missing institution silently disables S4 — say so loudly.
             logger.warning(
@@ -723,9 +771,9 @@ async def resolve_corpus(
 
     logger.info(
         "resolve_corpus(%s): stages=%s kept=%d flagged=%d dropped=%s "
-        "permanently_dropped=%d",
+        "permanently_dropped=%d truncated=%s",
         orcid, stage_counts, len(kept), len(flagged), dropped,
-        len(permanently_dropped),
+        len(permanently_dropped), truncated,
     )
     return CorpusResult(
         kept=kept,
@@ -735,4 +783,5 @@ async def resolve_corpus(
         orcid_dois=orcid_dois,
         ranked=ranked,
         permanently_dropped=permanently_dropped,
+        truncated_stages=truncated,
     )

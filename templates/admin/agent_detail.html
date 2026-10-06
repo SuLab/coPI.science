@@ -160,8 +160,16 @@
                 {% endif %}
                 {% if activation_blocked %}
                 <div class="bg-red-50 border border-red-200 rounded-lg p-3 mt-3">
-                    <p class="text-red-800 text-xs font-medium">Activation refused — nothing was saved.</p>
+                    <p class="text-red-800 text-xs font-medium">Activation refused — nothing was saved, except a pending agent's rename.</p>
                 </div>
+                {% endif %}
+                {% if hard_blockers %}
+                <p class="mt-3 text-xs font-medium text-red-700">Cannot be activated (no override):</p>
+                <ul class="mt-1 space-y-1">
+                    {% for b in hard_blockers %}
+                    <li class="text-xs text-red-600">⚠ {{ b }}</li>
+                    {% endfor %}
+                </ul>
                 {% endif %}
                 {% if blockers %}
                 <ul class="mt-3 space-y-1">
@@ -178,10 +186,10 @@
                         class="px-5 py-2 bg-green-700 text-white text-sm font-medium rounded-lg hover:bg-green-800">
                     {% if agent.status == 'pending' %}Approve & Activate{% else %}Save Changes{% endif %}
                 </button>
-                {% if blockers %}
+                {% if blockers or hard_blockers %}
                 <label class="flex items-center gap-2 text-xs text-red-700">
                     <input type="checkbox" name="activation_override" value="1">
-                    Activate anyway (logged override — the warnings above stand)
+                    Activate anyway (logged override — the warnings above stand){% if hard_blockers %} — it does not waive the persona-file or owner checks{% endif %}
                 </label>
                 {% endif %}
             </div>

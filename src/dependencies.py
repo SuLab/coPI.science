@@ -207,11 +207,14 @@ async def get_agent_with_access(
     agent_id: str,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    *,
+    write: bool = False,
 ) -> tuple["AgentRegistry", bool]:
     """
     Load agent by agent_id slug. Verify user is PI or active delegate.
     Returns (agent, is_owner) tuple. is_owner=True means PI, False means delegate.
-    Raises 403 if neither.
+    Raises 403 if neither. With ``write`` (every POST that changes the lab), the caller
+    must also be allowed the PI surfaces (``User.may_use_pi_surfaces``), else 403.
     """
     from src.models import AgentDelegate, AgentRegistry
 
@@ -221,6 +224,11 @@ async def get_agent_with_access(
     agent = result.scalar_one_or_none()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
+
+    if write and not current_user.may_use_pi_surfaces:
+        # A role change away from PI must not leave the lab editable (spec 2026-10-05 §6.4,
+        # D25); the delegate rule is the same (invite.py admits only such accounts).
+        raise HTTPException(status_code=403, detail="Access denied")
 
     # Check if PI
     if agent.user_id == current_user.id:

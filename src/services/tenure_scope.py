@@ -20,6 +20,9 @@ misses, so this module owns the rule instead:
   accident. That type is the whole point: the old signature took
   ``list[Publication]``, and six callers passed one straight out of a
   ``select(Publication)``.
+* :func:`publication_in_use` — the filter for rows staff have not excluded
+  (D45). The loads here apply it; callers that load rows themselves add
+  ``publication_in_use()`` to their own ``where``.
 * :func:`publication_order_by` / :func:`publication_sort_key` — the one
   publication order (spec 2026-10-05 §6.1), in SQL and in Python.
 
@@ -47,6 +50,7 @@ from typing import Any
 
 from sqlalchemy import BigInteger, case, cast, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from src.models import AppSetting, Publication
 from src.services.jhu_rules import LEGACY_TENURE_KEY, TENURE_KEY_PREFIX, export_tenure_start
@@ -58,6 +62,13 @@ _PMID_NUMERIC = case(
     (Publication.pmid.op("~")(r"^[0-9]{1,18}$"), cast(Publication.pmid, BigInteger)),
     else_=None,
 )
+
+
+def publication_in_use() -> ColumnElement[bool]:
+    """The filter every publication read that feeds synthesis, export, RePORTER linking,
+    discovery, industry scans or a page listing uses: rows staff have not excluded
+    (publications.excluded_at IS NULL; spec 2026-10-05 §6.3, D45)."""
+    return Publication.excluded_at.is_(None)
 
 
 def publication_order_by() -> tuple:
@@ -281,7 +292,7 @@ async def scoped_counts(
     rows = (
         await db.execute(
             select(Publication.user_id, Publication.year).where(
-                Publication.user_id.in_(list(user_ids))
+                Publication.user_id.in_(list(user_ids)), publication_in_use()
             )
         )
     ).all()
@@ -319,12 +330,13 @@ async def scoped_publications_for(
     *,
     publications: Iterable[Publication] | None = None,
 ) -> ScopedPublications:
-    """The in-tenure rows for one PI, newest first.
+    """The in-tenure rows for one PI that staff have not excluded, newest first.
 
     Pass ``publications`` when the caller already holds the rows (the detail
     pages load them for rendering anyway) to avoid a second SELECT; the
     tenure lookup still happens here so the rule and its fallback stay in one
-    place.
+    place. Passed rows are not re-filtered: load them with
+    ``publication_in_use()``.
     """
     starts = await tenure_start_map(db, [user_id], {user_id: agent_id})
     tenure_start = starts.get(user_id)
@@ -333,7 +345,7 @@ async def scoped_publications_for(
             (
                 await db.execute(
                     select(Publication)
-                    .where(Publication.user_id == user_id)
+                    .where(Publication.user_id == user_id, publication_in_use())
                     .order_by(*publication_order_by())
                 )
             )

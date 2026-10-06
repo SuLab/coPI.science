@@ -1,4 +1,4 @@
-"""The running roster: profiles from disk, the DB roster sync, cohort gates, star-topology validation, lab directories and the outbound tag filter (spec §7.1)."""
+"""The running roster: profiles from disk, the DB roster sync, cohort gates, star-topology validation and the outbound tag filter (spec §7.1)."""
 
 from __future__ import annotations
 
@@ -145,7 +145,8 @@ class Roster:
         removes agents that have been inactivated/suspended — all without a
         process restart. Tokens are read from the DB row (falling back to .env),
         so a freshly provisioned or changed token is picked up on the next tick
-        too (a client is rebuilt only when its resolved token differs).
+        too (a client is rebuilt only when its resolved token differs), and
+        refreshes a surviving agent's ``pi_name`` from its row.
 
         Mutates self.agents / self.slack_clients IN PLACE — never reassigned —
         in case anything else in the engine has taken a reference to either dict.
@@ -167,9 +168,16 @@ class Roster:
 
             desired = {r.agent_id: r for r in rows}
 
+            # A name edit reaches a running agent (spec 2026-10-05 §6.4, D23): the lab prompt
+            # and the headline label read Agent.pi_name.
+            for aid, live in self.agents.items():
+                row = desired.get(aid)
+                if row is not None and row.pi_name and live.pi_name != row.pi_name:
+                    live.pi_name = row.pi_name
+
             # One manifest read per role per poll (spec §8.5).
             problems: dict[str, str | None] = {}
-            role_changed, role_unavailable = self._apply_role_changes(desired, problems)
+            role_unavailable = self._apply_role_changes(desired, problems)
 
             # Token-diff for surviving agents. `main.py` admits every active
             # agent to self.agents regardless of token, so an agent provisioned
@@ -220,14 +228,8 @@ class Roster:
                 if _role_available(aid, desired[aid].role, problems)
             }
             if not to_remove and not to_add:
-                # Recompute the gate FIRST: _recompute_allowed_sender_ids ends by
-                # refreshing the directory (step 4), so after this line the
-                # directory already agrees with the gate. The role branch stays
-                # because a role change alters the directory's *contents*
-                # (pi_name headings) without moving the gate at all.
+                # Nothing joined or left: recompute the gate only.
                 await self._recompute_allowed_sender_ids()
-                if role_changed:
-                    self.refresh_lab_directories()
                 return
 
             # --- Removals: agent no longer active ---------------------------
@@ -282,16 +284,14 @@ class Roster:
 
     def _apply_role_changes(
         self, desired: dict, problems: dict[str, str | None],
-    ) -> tuple[bool, set[str]]:
+    ) -> set[str]:
         """Role-diff for surviving agents (on the roster and still desired).
         Must run even when nothing is added or removed, or a role reassignment
         on a running agent is invisible until the next add/remove.
 
-        Returns ``(role_changed, role_unavailable)``: an agent reassigned to a
-        valid role takes it; one reassigned to a role that is not available is
-        returned for removal (spec §8.5: logged and skipped), never left running
-        under its old role."""
-        role_changed = False
+        Returns the agents reassigned to a role that is not available, for
+        removal (spec §8.5: logged and skipped), never left running under their
+        old role; an agent reassigned to a valid role takes it."""
         role_unavailable: set[str] = set()
         for aid, agent in self.agents.items():
             r = desired.get(aid)
@@ -302,48 +302,7 @@ class Roster:
                 continue
             logger.info("[roster] %s role %s -> %s", aid, agent.role, r.role)
             agent.role = r.role
-            role_changed = True
-        return role_changed, role_unavailable
-
-    def _build_lab_directories(self) -> None:
-        """Build a condensed publications directory for each agent (excluding their own lab)."""
-        lab_pubs: dict[str, list[str]] = {}
-        for agent in self.agents.values():
-            profile_text = agent.public_profile
-            match = re.search(
-                r"## Recent Publications\n(.*?)(?=\n## |\Z)",
-                profile_text,
-                re.DOTALL,
-            )
-            if match:
-                pubs = [
-                    line.strip()
-                    for line in match.group(1).strip().split("\n")
-                    if line.strip().startswith("- ")
-                ]
-                if pubs:
-                    lab_pubs[agent.agent_id] = pubs[:5]
-
-        for agent in self.agents.values():
-            allowed = agent.allowed_sender_ids  # None == gate off
-            sections = []
-            for other_id, pubs in sorted(lab_pubs.items()):
-                if other_id == agent.agent_id:
-                    continue
-                if allowed is not None and other_id not in allowed:
-                    continue  # cohort gate: don't prime this agent with a non-mate's work
-                other_agent = self.agents[other_id]
-                sections.append(f"### {other_agent.pi_name} Lab")
-                sections.extend(pubs)
-                sections.append("")
-            agent._lab_directory = "\n".join(sections) if sections else None
-
-    # Public alias. `_build_lab_directories` is called from several places whose
-    # ordering relative to the cohort gate is the whole bug this name documents:
-    # it must run AFTER _recompute_allowed_sender_ids, never before.
-    def refresh_lab_directories(self) -> None:
-        """Rebuild every agent's lab directory against its CURRENT gate."""
-        self._build_lab_directories()
+        return role_unavailable
 
     def _infer_agent_id(self, name: str) -> str | None:
         """Try to infer agent_id from a bot name or display name."""
@@ -435,7 +394,6 @@ class Roster:
         if not settings.cohort_isolation_enabled:
             self._cohort_preflight_error = None
             self._disable_all_gates()
-            self.refresh_lab_directories()
             self._cohort_gate_active = False
             self._cohort_log_signature = None
             # Reconcile state even on the disabled path: turning isolation off must
@@ -462,17 +420,8 @@ class Roster:
                     )).scalar() or 0
             except Exception as exc:
                 logger.warning("[cohort] membership sync failed: %s", exc)
-                # The gates themselves are left in place deliberately (flapping
-                # open on every blip is worse than a briefly stale topology —
-                # see the docstring). But the directory is DERIVED from those
-                # gates, so a gate that is correct-but-stale makes a directory
-                # rebuilt from it correct-but-stale too — which is strictly
-                # better than leaving it absent. Without this, a newly-added
-                # agent whose gate isn't reflected in any directory yet gets
-                # _lab_directory = None for the rest of this failed tick, and
-                # existing agents' directories omit it until the next
-                # successful sync.
-                self.refresh_lab_directories()
+                # The gates are left in place deliberately: flapping open on every
+                # blip is worse than a briefly stale topology (see the docstring).
                 return
 
         gates, reason = compute_gates(
@@ -489,7 +438,6 @@ class Roster:
                 logger.error("[cohort] isolation forced OFF: %s", reason)
             self._cohort_preflight_error = reason
             self._disable_all_gates()
-            self.refresh_lab_directories()
             self._cohort_gate_active = False
             self._apply_cohort_gate_to_state()
             return
@@ -527,9 +475,6 @@ class Roster:
             topology_changed = False
 
         self._apply_cohort_gate_to_state()
-        # The directory is derived from the gate, so it is refreshed on the same
-        # cadence. Cheap: it re-reads in-memory profiles, no I/O.
-        self.refresh_lab_directories()
         if topology_changed:
             # The topology moved mid-run — snapshot the new one so the run stays
             # attributable to every configuration it actually ran under (v2 §13.1).

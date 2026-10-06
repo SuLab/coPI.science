@@ -163,5 +163,52 @@ async def test_fetch_orcid_profile_survives_a_null_person(monkeypatch):
 
     monkeypatch.setattr(orcid, "fetch_orcid_record", _record)
     profile = await orcid.fetch_orcid_profile("0000-0002-1825-0097")
-    assert profile["name"] == "0000-0002-1825-0097"
+    assert profile["name"] is None
     assert profile["employments"] == []
+
+
+def _serve(monkeypatch, payload):
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return payload
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None):
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: _Client())
+
+
+async def test_fetch_orcid_works_survives_null_groups_types_and_bad_years(monkeypatch):
+    """G-20 (spec 2026-10-05): a null work-summary list or entry, a null external-id entry
+    or type, a null title value and a non-numeric year never raise."""
+    data = {"group": [
+        {"work-summary": None},
+        {"work-summary": [None, {
+            "title": {"title": {"value": None}},
+            "publication-date": {"year": {"value": "n.d."}},
+            "external-ids": {"external-id": [None, {"external-id-type": None,
+                                                    "external-id-value": "x"},
+                                             {"external-id-type": "PMID",
+                                              "external-id-value": "123"}]},
+        }]},
+    ]}
+    _serve(monkeypatch, data)
+    works = await orcid.fetch_orcid_works("0000-0002-1825-0097", strict=True)
+    assert works == [{"title": "", "year": None, "pmid": "123", "doi": None, "type": None}]
+
+
+async def test_fetch_orcid_works_reads_a_null_group_list_as_no_works(monkeypatch):
+    _serve(monkeypatch, {"group": None})
+    assert await orcid.fetch_orcid_works("0000-0002-1825-0097", strict=True) == []

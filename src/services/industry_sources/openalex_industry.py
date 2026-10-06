@@ -5,6 +5,7 @@ import re
 import httpx
 
 from src.config import get_settings
+from src.services import openalex_budget
 from src.services.http_pacing import TRANSIENT_STATUSES, Pacer, with_retries
 from src.services.industry_sources import JHU_OPENALEX_IDS, EvidenceItem, Paged
 from src.services.industry_sources.companies import classify_company
@@ -28,8 +29,12 @@ _PACER = Pacer(0.2)
 
 
 async def _get(client: httpx.AsyncClient, url: str, params: dict) -> httpx.Response:
+    async def attempt():
+        await openalex_budget.check_request_budget()
+        return await client.get(url, params=params)
+
     resp = await with_retries(
-        lambda: client.get(url, params=params),
+        attempt,
         attempts=4, backoff=lambda a: 2.0 * (2 ** a),
         retry_statuses=TRANSIENT_STATUSES, retry_exceptions=(httpx.TransportError,),
         pacer=_PACER,

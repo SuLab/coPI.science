@@ -184,6 +184,18 @@ def _clip_at_sentence(value: object, max_len: int) -> str | None:
     return window[: match.start()] + " …"
 
 
+#: Slack's three control characters in message text (api.slack.com "Formatting text for app
+#: surfaces": escape &, < and >). A name that passed the D60 allowlist holds none of them;
+#: the escape covers names stored before validation existed (spec 2026-10-05 §6.4).
+_SLACK_ESCAPES = str.maketrans({"&": "&amp;", "<": "&lt;", ">": "&gt;"})
+
+
+def slack_escape(text: str) -> str:
+    """``text`` with Slack's control characters escaped (``&`` first by construction:
+    ``str.translate`` maps each character once)."""
+    return text.translate(_SLACK_ESCAPES)
+
+
 def render_assessment_headline(
     *,
     pi_label: str,
@@ -206,6 +218,9 @@ def render_assessment_headline(
     this function would go on to compute, which is worse than not
     overriding at all. See the module docstring for why a caller — the
     repair script — would want this.
+
+    ``pi_label`` is Slack-escaped (``slack_escape``): both headline posts in
+    ``src/agent/engine/headlines.py`` pass the agent's ``pi_name`` here.
 
     The band/score segment is omitted entirely — rather than printing `None`
     or a `weighted_score({})` 0.00 that bands as a decline nobody made — in
@@ -269,6 +284,6 @@ def render_assessment_headline(
     pitch_text = _clip_at_sentence(elevator_pitch, PITCH_DISPLAY_CHARS)
     pitch_part = f"\n{pitch_text}" if pitch_text else ""
     return (
-        f":mag: {pi_label} — {project_text} → *{display}*{score_part}{link_part}"
+        f":mag: {slack_escape(pi_label)} — {project_text} → *{display}*{score_part}{link_part}"
         f"{pitch_part}"
     )

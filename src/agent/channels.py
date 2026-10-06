@@ -20,13 +20,14 @@ SEEDED_CHANNELS = [
 ]
 
 # The hub's one-way announcement channel (design D11): deliberately NOT in
-# SEEDED_CHANNELS, _CHANNEL_KEYWORDS, or _UNIVERSAL_CHANNELS
-# (src/agent/simulation.py) — those three drive Phase-1 topical
-# discovery/auto-join for PI-lab agents, and channel polling scope
-# (_poll_slack_for_bot_messages) is keyed off
-# SEEDED_CHANNELS membership too. Keeping this name out of all three means
-# no PI-lab bot ever joins it, scans it, or treats the hub's headline posts
-# as something to reply to.
+# SEEDED_CHANNELS, _CHANNEL_KEYWORDS or _UNIVERSAL_CHANNELS
+# (src/agent/engine/constants.py). Those three decide Phase-1 subscription — a
+# hub role subscribes to every SEEDED_CHANNELS entry, a lab to
+# _UNIVERSAL_CHANNELS plus the channels its persona's tag sections match
+# (spec 2026-10-05 §6.5, D28) — and channel polling scope
+# (_poll_slack_for_bot_messages) is keyed off SEEDED_CHANNELS membership too.
+# Keeping this name out of all three means no bot ever subscribes to it, scans
+# it, or treats the hub's headline posts as something to reply to.
 ASSESSMENTS_SUMMARY_CHANNEL = "assessments-summary"
 
 

@@ -241,7 +241,7 @@ def _onboarding_form(u):
 
 def _profile_form(u):
     return {
-        "name": f"renamed-{u.orcid}",
+        "name": "Renamed Scientist",
         "email": u.email or "",
         "research_summary": f"SWEEP-{u.orcid}",
     }
@@ -266,7 +266,14 @@ ENDPOINTS: list[Ep] = [
 _ID = {e: e.label for e in ENDPOINTS}
 
 
-async def _send(client, ep: Ep, actor, headers: dict):
+async def _versioned_form(db, user_id, fields):
+    profile = await _prof(db, user_id)
+    if profile is not None:
+        return {**fields, "profile_version": str(profile["profile_version"])}
+    return fields
+
+
+async def _send(client, ep: Ep, actor, headers: dict, db_session):
     """Fire ``ep`` as ``actor`` would. Empty headers means genuinely logged out."""
     if "Cookie" not in headers:
         # httpx keeps a cookie jar; a Set-Cookie from an earlier authenticated
@@ -275,6 +282,8 @@ async def _send(client, ep: Ep, actor, headers: dict):
     if ep.method == "GET":
         return await client.get(ep.path, headers=headers)
     data = ep.build_data(actor) if ep.build_data else None
+    if ep.path in ("/profile/save", "/onboarding/save-profile"):
+        data = await _versioned_form(db_session, actor.id, data)
     return await client.post(ep.path, data=data, headers=headers)
 
 
@@ -371,7 +380,7 @@ async def test_the_onboarding_walk_completes_only_at_the_final_step(
     r = await client.post(
         "/onboarding/save-profile",
         headers=h,
-        data={
+        data=await _versioned_form(db_session, newcomer.id, {
             "email": "nadia@example.org",
             "research_summary": "Edited by the PI during onboarding.",
             "techniques": ["cryo-EM", "mass spec"],
@@ -380,7 +389,7 @@ async def test_the_onboarding_walk_completes_only_at_the_final_step(
             "key_targets": ["KRAS"],
             "keywords": ["kinase", "structure"],
             "tag_fields": ["techniques", "experimental_models", "disease_areas", "key_targets", "keywords"],
-        },
+        }),
     )
     assert r.status_code == 302
     assert r.headers["location"] == "/profile?onboarding_complete=1"
@@ -433,7 +442,7 @@ async def test_skipping_to_a_step_does_not_complete_onboarding(
     r = await client.post(
         "/onboarding/save-profile",
         headers=h,
-        data={"email": "nadia@example.org", "research_summary": "done"},
+        data=await _versioned_form(db_session, newcomer.id, {"email": "nadia@example.org", "research_summary": "done"}),
     )
     assert r.status_code == 302
     assert await _flag(db_session, newcomer.id) is True, "the terminal step no longer completes it"
@@ -503,7 +512,7 @@ async def test_onboarding_save_profile_requires_a_valid_unused_email(client, db_
         r = await client.post(
             "/onboarding/save-profile",
             headers=h,
-            data={"email": value, "research_summary": "should not be stored"},
+            data=await _versioned_form(db_session, u.id, {"email": value, "research_summary": "should not be stored"}),
         )
         assert r.status_code == 302
         assert expected in r.headers["location"], f"{value!r} -> {r.headers['location']}"
@@ -518,7 +527,7 @@ async def test_onboarding_save_profile_requires_a_valid_unused_email(client, db_
     r = await client.post(
         "/onboarding/save-profile",
         headers=h,
-        data={"email": "Fresh@Example.ORG", "research_summary": "stored"},
+        data=await _versioned_form(db_session, u.id, {"email": "Fresh@Example.ORG", "research_summary": "stored"}),
     )
     assert r.headers["location"] == "/profile?onboarding_complete=1"
     assert (await _user_row(db_session, u.id))["email"] == "fresh@example.org"
@@ -540,14 +549,14 @@ async def test_the_terminal_step_flips_the_flag_and_welcomes_exactly_once(
     """
     h = _auth(newcomer.id)
     data = {"email": "nadia@example.org", "research_summary": "# Mine"}
-    r = await client.post("/onboarding/save-profile", headers=h, data=data)
+    r = await client.post("/onboarding/save-profile", headers=h, data=await _versioned_form(db_session, newcomer.id, data))
     assert r.status_code == 302
     assert r.headers["location"] == "/profile?onboarding_complete=1"
     assert await _flag(db_session, newcomer.id) is True
     assert [e["to"] for e in welcome_emails] == ["nadia@example.org"]
 
     # control on the was_complete guard: a replay must not send a second welcome.
-    r = await client.post("/onboarding/save-profile", headers=h, data=data)
+    r = await client.post("/onboarding/save-profile", headers=h, data=await _versioned_form(db_session, newcomer.id, data))
     assert r.status_code == 302
     assert len(welcome_emails) == 1, "the welcome email is sent again on every replay"
 
@@ -563,7 +572,7 @@ async def test_the_terminal_step_resumes_a_pending_invite_before_the_default_red
     """
     h = _auth(newcomer.id)
     data = {"email": "nadia@example.org", "research_summary": "# Mine"}
-    r = await client.post("/onboarding/save-profile", headers=h, data=data)
+    r = await client.post("/onboarding/save-profile", headers=h, data=await _versioned_form(db_session, newcomer.id, data))
     assert r.headers["location"] == "/profile?onboarding_complete=1"
 
     signer = TimestampSigner(get_settings().secret_key)
@@ -572,7 +581,7 @@ async def test_the_terminal_step_resumes_a_pending_invite_before_the_default_red
     r = await client.post(
         "/onboarding/save-profile",
         headers={"Cookie": f"{session_cookie_name()}={cookie}"},
-        data=data,
+        data=await _versioned_form(db_session, newcomer.id, data),
     )
     assert r.headers["location"] == "/invite/tok-123"
 
@@ -613,7 +622,7 @@ async def test_finishing_onboarding_resumes_only_a_safe_post_login_destination(
         r = await client.post(
             endpoint,
             headers=_session_cookie(u.id, post_login_redirect=stashed),
-            data=data,
+            data=await _versioned_form(db_session, u.id, data),
         )
         assert r.status_code == 302
         assert r.headers["location"] == expected, f"{endpoint} with next={stashed!r}"
@@ -697,7 +706,7 @@ async def test_profile_save_persists_user_and_profile_fields_and_bumps_the_versi
     r = await client.post(
         "/profile/save",
         headers=_auth(u.id),
-        data={
+        data=await _versioned_form(db_session, u.id, {
             "name": "After Name",
             "email": "after@example.org",
             "institution": "New Institute",
@@ -709,7 +718,7 @@ async def test_profile_save_persists_user_and_profile_fields_and_bumps_the_versi
             "key_targets": ["k1"],
             "keywords": ["kw1", "kw2"],
             "tag_fields": ["techniques", "experimental_models", "disease_areas", "key_targets", "keywords"],
-        },
+        }),
     )
     assert r.status_code == 302 and r.headers["location"] == "/profile"
 
@@ -744,7 +753,7 @@ async def test_profile_save_rejects_a_bad_or_taken_email_and_persists_nothing(
         r = await client.post(
             "/profile/save",
             headers=h,
-            data={"name": "Hijacked", "email": value, "research_summary": "hijacked"},
+            data=await _versioned_form(db_session, u.id, {"name": "Hijacked", "email": value, "research_summary": "hijacked"}),
         )
         assert r.status_code == 302
         assert expected in r.headers["location"]
@@ -760,7 +769,7 @@ async def test_profile_save_rejects_a_bad_or_taken_email_and_persists_nothing(
     r = await client.post(
         "/profile/save",
         headers=h,
-        data={"name": "Renamed", "email": "keep@example.org", "research_summary": "written"},
+        data=await _versioned_form(db_session, u.id, {"name": "Renamed", "email": "keep@example.org", "research_summary": "written"}),
     )
     assert r.headers["location"] == "/profile"
     assert (await _user_row(db_session, u.id))["name"] == "Renamed"
@@ -849,6 +858,7 @@ async def test_the_public_export_never_carries_the_private_profile(
             journal="Cell",
             year=2020,
             doi="10.1016/j.cell.2020.01.001",
+            doi_verified=True,
         )
     ]
 
@@ -909,7 +919,8 @@ async def test_the_public_export_is_gated_on_an_agent_registry_id(db_session, ex
 
 async def test_the_export_drops_a_doi_that_contradicts_the_journal(db_session):
     """_validate_doi_journal, through the export. A DOI attributed to the wrong
-    journal is a paper attributed to the wrong lab."""
+    journal is a paper attributed to the wrong lab, and a DOI is linked only when
+    verified (spec 2026-10-05 §6.3). Each line ends with ``(PMID n)`` (D49)."""
     user = await factories.make_user(db_session)
     prof = await factories.make_profile(db_session, user=user)
 
@@ -925,7 +936,7 @@ async def test_the_export_drops_a_doi_that_contradicts_the_journal(db_session):
         user, prof, "doipi", publications=scope_for_export([mismatch], None),
         grants=EMPTY_GRANT_SECTIONS,
     ).read_text(encoding="utf-8")
-    assert "https://pubmed.ncbi.nlm.nih.gov/31111111/" in text
+    assert "https://pubmed.ncbi.nlm.nih.gov/31111111/ (PMID 31111111)" in text
     assert "10.1126/science.aaa1234" not in text
 
     # control: the same DOI on the journal it belongs to is kept.
@@ -935,13 +946,14 @@ async def test_the_export_drops_a_doi_that_contradicts_the_journal(db_session):
         journal="Science",
         year=2019,
         doi="10.1126/science.aaa1234",
+        doi_verified=True,
         pmid="31111111",
     )
     text = profile_export.export_profile_to_markdown(
         user, prof, "doipi", publications=scope_for_export([match], None),
         grants=EMPTY_GRANT_SECTIONS,
     ).read_text(encoding="utf-8")
-    assert "https://doi.org/10.1126/science.aaa1234" in text
+    assert "https://doi.org/10.1126/science.aaa1234 (PMID 31111111)" in text
 
 
 async def test_the_export_keeps_the_twenty_most_recent_publications(db_session):
@@ -975,13 +987,13 @@ async def test_saving_the_profile_writes_the_export_and_records_a_public_revisio
     r = await client.post(
         "/profile/save",
         headers=_auth(user.id),
-        data={
+        data=await _versioned_form(db_session, user.id, {
             "name": "Route Pi",
             "email": user.email,
             "research_summary": "EXPORTED-VIA-ROUTE",
             "techniques": ["route-technique"],
             "tag_fields": ["techniques"],
-        },
+        }),
     )
     assert r.status_code == 302
 
@@ -1007,7 +1019,7 @@ async def test_saving_the_profile_writes_the_export_and_records_a_public_revisio
     r = await client.post(
         "/profile/save",
         headers=_auth(plain.id),
-        data={"name": "No Agent", "email": plain.email, "research_summary": "no export"},
+        data=await _versioned_form(db_session, plain.id, {"name": "No Agent", "email": plain.email, "research_summary": "no export"}),
     )
     assert r.status_code == 302
     assert sorted(p.name for p in export_dirs.public.iterdir()) == ["routepi.md"]
@@ -1044,14 +1056,14 @@ async def test_every_endpoint_that_needs_a_session_redirects_a_logged_out_caller
     await db_session.flush()
 
     before = await _snapshot(db_session, u.id)
-    logged_out = await _send(client, ep, u, {})
+    logged_out = await _send(client, ep, u, {}, db_session)
     after_anonymous = await _snapshot(db_session, u.id)
 
     assert logged_out.status_code == 302, f"{ep.label} served a logged-out caller"
     assert logged_out.headers["location"].startswith("/login"), ep.label
     assert after_anonymous == before, f"{ep.label} acted on behalf of a logged-out caller"
 
-    logged_in = await _send(client, ep, u, _auth(u.id))
+    logged_in = await _send(client, ep, u, _auth(u.id), db_session)
     after_session = await _snapshot(db_session, u.id)
     if ep.method == "POST":
         assert after_session != before, (
@@ -1122,7 +1134,7 @@ async def test_no_logged_in_user_can_read_or_write_another_users_data(client, db
     victim_before = await _snapshot(db_session, victim.id)
     attacker_before = await _snapshot(db_session, attacker.id)
 
-    r = await _send(client, ep, attacker, _auth_as(attacker.id, victim.id))
+    r = await _send(client, ep, attacker, _auth_as(attacker.id, victim.id), db_session)
     assert r.status_code in (200, 302), f"{ep.label} errored for the attacker: {r.status_code}"
 
     victim_after = await _snapshot(db_session, victim.id)
@@ -1150,7 +1162,7 @@ async def test_no_logged_in_user_can_read_or_write_another_users_data(client, db
     )
     await db_session.flush()
     control_before = await _snapshot(db_session, victim.id)
-    r2 = await _send(client, ep, victim, _auth_as(admin.id, victim.id))
+    r2 = await _send(client, ep, victim, _auth_as(admin.id, victim.id), db_session)
     control_after = await _snapshot(db_session, victim.id)
 
     if ep.method == "GET":

@@ -2,15 +2,17 @@
 
 import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Set as AbstractSet
 from pathlib import Path
 from typing import Any
 
-from src.agent.dois import extract_dois as _extract_dois
+from src.agent.dois import paper_ids_in
 from src.agent.prompt_safety import delimit
 from src.agent.prompt_snapshot import active as active_snapshot
 from src.agent.prompt_snapshot import role_spec
-from src.agent.role_capabilities import hub_role_names
+from src.agent.role_capabilities import LAB_BRIEF_FILE, hub_role_names
+from src.agent.roles import resolve_prompt_path
 from src.agent.specialists import (
     DEFAULTED_TALLY_LABEL,
     SPECIALIST_DOMAINS,
@@ -131,7 +133,9 @@ async def execute_tool(
     on_consult: Callable[[str, str], None] | None = None,
     on_consult_record: Callable[..., Awaitable[None]] | None = None,
     on_api_call: Callable[[], None] | None = None,
-    own_dois: set[str] | None = None,
+    own_paper_ids: AbstractSet[str] | None = None,
+    hub_agent_ids: Mapping[str, str] | None = None,
+    allowed_sender_ids: AbstractSet[str] | None = None,
 ) -> str:
     """
     Execute a tool call and return the result as a string.
@@ -154,13 +158,16 @@ async def execute_tool(
     happened at all — and the record carries ``truncated=True`` so the row can
     say which it was. See ``_execute_consult_specialist``.
 
-    ``own_dois``: the calling agent's own-lab publication DOIs (see
-    ``Agent.own_publication_dois``, GitHub issue #7). A ``retrieve_abstract``
-    lookup whose ``pmid_or_doi`` contains one of these DOIs is exempt from
-    BOTH the per-thread cap check and its increment — citing your own paper
-    isn't "using up" the budget meant to limit how much of another lab's work
-    you pull in. Only recognizes DOI form: a bare PMID has no DOI substring to
-    match, so it always counts against the cap (documented limit, design §10).
+    ``own_paper_ids``: the calling agent's own paper ids (``Agent.own_paper_ids``:
+    DOIs and listed PMIDs, spec 2026-10-05 D49). A ``retrieve_abstract`` whose
+    ``pmid_or_doi`` names one of them — a DOI, a labelled PMID or a bare PMID — is
+    exempt from BOTH the per-thread cap check and its increment; the decision uses
+    the argument alone, before any fetch.
+
+    ``hub_agent_ids`` maps each hub agent on the roster to its role;
+    ``retrieve_profile`` on one of them returns that role's brief for labs.
+    ``allowed_sender_ids`` is the caller's cohort gate (None: gate off); a non-hub
+    caller cannot ``retrieve_profile`` outside it (D30).
     """
     if tool_name not in role_spec(role).tools:
         logger.warning("[tools] %s: role %r may not call %s", agent_id, role, tool_name)
@@ -168,12 +175,15 @@ async def execute_tool(
     try:
         if tool_name == "retrieve_profile":
             return await _execute_retrieve_profile(
-                _require_arg(tool_input, "agent_id", tool_name), role
+                _require_arg(tool_input, "agent_id", tool_name), role,
+                caller_id=agent_id,
+                hub_agent_ids=hub_agent_ids,
+                allowed_sender_ids=allowed_sender_ids,
             )
 
         elif tool_name == "retrieve_abstract":
             ref = _require_arg(tool_input, "pmid_or_doi", tool_name)
-            is_own = bool(own_dois) and bool(_extract_dois(ref) & own_dois)
+            is_own = bool(own_paper_ids) and bool(_requested_paper_ids(ref) & own_paper_ids)
             if thread_state and not is_own:
                 from src.config import get_settings
                 settings = get_settings()
@@ -299,7 +309,53 @@ def _staff_company_record(agent_id: str) -> str | None:
     return text if text.strip() else None
 
 
-async def _execute_retrieve_profile(agent_id: str, role: str) -> str:
+def _not_found(agent_id: str) -> str:
+    """The one refusal text ``retrieve_profile`` returns, for a malformed id, a missing
+    file, a missing hub brief and an out-of-gate id alike, so a refusal reveals nothing."""
+    return f"No public profile found for agent '{agent_id}'."
+
+
+def _outside_gate(agent_id: str, role: str, caller_id: str | None,
+                  allowed_sender_ids: AbstractSet[str] | None) -> bool:
+    """True when a non-hub caller asks for an id outside its cohort gate (spec 2026-10-05
+    D30). A hub role, a gate of None and the caller's own id are never outside."""
+    if role in hub_role_names() or allowed_sender_ids is None:
+        return False
+    return agent_id != caller_id and agent_id not in allowed_sender_ids
+
+
+def _lab_brief(hub_role: str) -> str | None:
+    """The hub role's brief for labs (``role_capabilities.LAB_BRIEF_FILE``): from the
+    start-time snapshot when one is installed and knows the file, else from disk via
+    ``roles.resolve_prompt_path``. None when missing, unreadable or blank."""
+    snapshot = active_snapshot()
+    if snapshot is not None:
+        known, text = snapshot.prompt_text(hub_role, LAB_BRIEF_FILE)
+        if known:
+            return text if text and text.strip() else None
+    try:
+        text = resolve_prompt_path(hub_role, LAB_BRIEF_FILE).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    return text if text.strip() else None
+
+
+def _requested_paper_ids(ref: str) -> set[str]:
+    """The paper ids a ``pmid_or_doi`` argument names: its DOIs and labelled PMIDs
+    (``dois.paper_ids_in``), plus the argument itself when it is a bare PMID."""
+    ids = paper_ids_in(ref)
+    bare = ref.strip() if isinstance(ref, str) else ""
+    if bare.isdigit():
+        ids.add(str(int(bare)))
+    return ids
+
+
+async def _execute_retrieve_profile(
+    agent_id: str, role: str, *,
+    caller_id: str | None = None,
+    hub_agent_ids: Mapping[str, str] | None = None,
+    allowed_sender_ids: AbstractSet[str] | None = None,
+) -> str:
     """Read a public profile from disk; for the hub, append the PI's staff
     company record when there is one.
 
@@ -307,8 +363,7 @@ async def _execute_retrieve_profile(agent_id: str, role: str) -> str:
     reaches the filesystem. Unvalidated, it escaped ``profiles/public/``
     entirely: ``../private/blackbird`` returned the hub's private screening
     rubric and ``../memory/<id>/public`` returned another lab's working memory
-    — a confidentiality hole one tool call wide, in a topology whose whole
-    point is that spokes cannot read each other. Real agent ids are lowercase
+    — a confidentiality hole one tool call wide. Real agent ids are lowercase
     identifiers (``wu``, ``pwu``, ``hamacherbrady``), so anything with a
     separator or a dot is not a lookup, it is an escape attempt.
 
@@ -320,12 +375,35 @@ async def _execute_retrieve_profile(agent_id: str, role: str) -> str:
     first (``_RECORD_ESCAPES``). A lab bot, and the hub asking about a PI with no record, get the
     same bytes as before the record existed. The file is the export of the
     PI's confirmed company rows; this function never reads the table.
+
+    A caller whose role is not a hub role may read only its own id and the ids in
+    ``allowed_sender_ids`` (D30); any other id gets the same text as a missing file,
+    before any file is read. A hub id (``hub_agent_ids``) returns that hub role's
+    brief for labs from the start-time snapshot (D26), never a file under
+    ``profiles/public/``; a missing brief is reported as not found.
     """
     if not isinstance(agent_id, str) or not _SAFE_AGENT_ID.fullmatch(agent_id):
         logger.warning(
             "[tools] retrieve_profile refused a malformed agent_id: %r", agent_id
         )
-        return f"No public profile found for agent '{agent_id}'."
+        return _not_found(agent_id)
+
+    if _outside_gate(agent_id, role, caller_id, allowed_sender_ids):
+        logger.info(
+            "[tools] retrieve_profile refused %r for %r: outside its cohort gate",
+            agent_id, caller_id,
+        )
+        return _not_found(agent_id)
+
+    if hub_agent_ids and agent_id in hub_agent_ids:
+        brief = _lab_brief(hub_agent_ids[agent_id])
+        if brief is None:
+            logger.warning(
+                "[tools] retrieve_profile: no brief for labs for hub %r (role %r)",
+                agent_id, hub_agent_ids[agent_id],
+            )
+            return _not_found(agent_id)
+        return delimit(brief, "agent_profile")
 
     base = (PROFILES_DIR / "public").resolve()
     profile_path = (base / f"{agent_id}.md").resolve()
@@ -335,13 +413,13 @@ async def _execute_retrieve_profile(agent_id: str, role: str) -> str:
         logger.warning(
             "[tools] retrieve_profile refused an out-of-tree path for %r", agent_id
         )
-        return f"No public profile found for agent '{agent_id}'."
+        return _not_found(agent_id)
 
     try:
         # Profiles are user-editable text — fence as untrusted data (SEC-14).
         result = delimit(profile_path.read_text(encoding="utf-8"), "agent_profile")
     except FileNotFoundError:
-        result = f"No public profile found for agent '{agent_id}'."
+        result = _not_found(agent_id)
     # The hub role comes from the capability registry, never a role literal (§8.5).
     if role not in hub_role_names():
         return result

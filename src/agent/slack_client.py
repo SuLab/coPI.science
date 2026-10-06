@@ -973,16 +973,18 @@ class AgentSlackClient:
             self._channel_name_to_id[ch["name"]] = ch["id"]
         return ch
 
-    def join_channel(self, channel_id: str) -> None:
-        """Join a Slack channel by ID."""
+    def join_channel(self, channel_id: str) -> bool:
+        """Join by ID; return whether Slack acknowledged the membership."""
         if not self._client:
-            return
+            return False
         try:
             self._api("conversations_join", channel=channel_id)
             with self._cache_lock:
                 self._joined_channels.add(channel_id)
+            return True
         except SlackApiError as exc:
             logger.warning("[%s] Failed to join channel %s: %s", self.agent_id, channel_id, exc)
+            return False
 
     def list_channels(
         self,
@@ -1127,7 +1129,7 @@ class AgentSlackClient:
     async def ais_bot_user(self, *args, **kwargs) -> bool:
         return await asyncio.to_thread(self.is_bot_user, *args, **kwargs)
 
-    async def ajoin_channel(self, *args, **kwargs) -> None:
+    async def ajoin_channel(self, *args, **kwargs) -> bool:
         return await asyncio.to_thread(self.join_channel, *args, **kwargs)
 
     async def aget_permalink(self, *args, **kwargs) -> str | None:

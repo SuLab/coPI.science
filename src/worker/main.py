@@ -12,8 +12,8 @@ and runs the daily persona re-export sweep when it is due
 (`src.services.persona_sweep.run_persona_sweep`, spec 2026-10-05 D54).
 
 A BULK-priority job that spends OpenAlex credits first reads OpenAlex's free daily
-meter and defers itself to the meter's reset when it would eat into the reserve kept
-for org1 (`src.services.openalex_budget`, spec 2026-10-05 D67).
+meter and defers itself to the meter's reset when it exceeds the available free credits
+(`src.services.openalex_budget`). Bulk requests and retries check the meter as well.
 
 A handler may raise `job_queue.NonRetryableJobError` (dead at once) or
 `job_queue.JobDeferred` (back to pending, attempt not counted), and may append
@@ -448,15 +448,16 @@ async def process_job(job_id: uuid.UUID, job_type: str, job_attempts: int, job_m
         await db.commit()
 
         try:
-            if bulk:
-                await openalex_budget.defer_if_low(ctx.type)
-            if ctx.type == "monthly_refresh":
-                await execute_monthly_refresh(ctx, db)
-            handler = JOB_HANDLERS.get(ctx.type)
-            if handler is None:
-                raise ValueError(f"Unknown job type: {ctx.type}")
-            await handler(ctx, db)
-            await db.commit()
+            with openalex_budget.bulk_requests(bulk):
+                if bulk:
+                    await openalex_budget.defer_if_low(ctx.type)
+                if ctx.type == "monthly_refresh":
+                    await execute_monthly_refresh(ctx, db)
+                handler = JOB_HANDLERS.get(ctx.type)
+                if handler is None:
+                    raise ValueError(f"Unknown job type: {ctx.type}")
+                await handler(ctx, db)
+                await db.commit()
         except JobDeferred as exc:
             await db.rollback()
             await _mark_deferred(session_factory, job_id, exc)

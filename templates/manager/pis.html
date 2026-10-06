@@ -9,11 +9,16 @@
 
 <!-- Add PI -->
 {% if effective_user.is_staff %}
-<form method="post" action="/manager/pis" class="mb-6 flex items-end gap-2">
+<form method="post" action="/manager/pis" class="mb-6 flex flex-wrap items-end gap-2">
     <div>
         <label class="block text-xs text-gray-500 mb-1" for="orcid">Add a PI by ORCID iD</label>
         <input type="text" id="orcid" name="orcid" placeholder="0000-0000-0000-0000"
+               value="{{ request.query_params.get('orcid', '') }}"
                class="border rounded px-2 py-1 text-sm" required>
+    </div>
+    <div>
+        <label class="block text-xs text-gray-500 mb-1" for="pi-name">Name (only if ORCID shows none)</label>
+        <input type="text" id="pi-name" name="name" maxlength="100" class="border rounded px-2 py-1 text-sm">
     </div>
     <button type="submit" class="bg-indigo-600 text-white text-sm px-3 py-1 rounded hover:bg-indigo-700">
         Add PI
@@ -31,6 +36,10 @@
                 Another PI was added at the same moment — please try again.
             {%- elif _err == 'create_failed' -%}
                 Could not create the PI — see the server log.
+            {%- elif _err == 'name_required' -%}
+                This ORCID record shows no public name — enter the PI's name and add again.
+            {%- elif _err == 'invalid_name' -%}
+                Names may contain letters, spaces, hyphens, apostrophes, periods and commas (at most 100 characters).
             {%- else -%}
                 {{ _err }}
             {%- endif -%}

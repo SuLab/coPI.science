@@ -885,10 +885,18 @@ def _log_empty_reply(
         logger.error("Empty reply from the model; stop_reason unavailable")
 
 
+class SynthesisRefused(ValueError):
+    """The model refused the profile synthesis (stop_reason "refusal"). A refusal repeats
+    on retry, so the job is marked dead at once (spec 2026-10-05 §7)."""
+
+
 async def synthesize_profile(context_text: str, researcher_name: str) -> dict[str, Any]:
     """
     Call Claude Opus to synthesize a researcher profile from assembled context.
     Returns structured profile dict.
+
+    Raises ``SynthesisRefused`` on a model refusal, ``ValueError`` on an empty or
+    unparseable reply, and the SDK's exception on a transport failure.
     """
     settings = get_settings()
     prompt_path = "prompts/profile-synthesis.md"
@@ -913,6 +921,8 @@ Return your response as valid JSON matching the specified schema."""
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}],
         )
+        if getattr(message, "stop_reason", None) == "refusal":
+            raise SynthesisRefused(f"profile synthesis for {researcher_name} was refused")
         response_text = all_text(message)
 
         try:
@@ -1521,11 +1531,11 @@ async def generate_with_tools(
 
 
 def _default_synthesis_prompt() -> str:
-    return """You are a scientific profile synthesizer. Given information about a researcher's publications, grants, and submitted texts, generate a structured JSON profile.
+    return """You are a scientific profile synthesizer. Given information about a researcher's publications and grants, generate a structured JSON profile.
 
 Output ONLY valid JSON with this schema:
 {
-  "research_summary": "150-250 word narrative connecting research themes",
+  "research_summary": "100–350 word narrative (aim for 150–250) connecting research themes",
   "techniques": ["array of specific techniques"],
   "experimental_models": ["array of model systems, organisms, cell lines, databases"],
   "disease_areas": ["array of disease areas or biological processes"],
@@ -1534,8 +1544,8 @@ Output ONLY valid JSON with this schema:
 }
 
 Guidelines:
-- Research summary: 150-250 word narrative, not a list. Connect themes. Weight recent publications more heavily.
+- Research summary: 100–350 word (aim for 150–250) narrative, not a list. Connect themes. Weight recent publications more heavily.
 - Be specific: "CRISPR-Cas9 screening in K562 cells" not "CRISPR"
 - For computational labs, include databases and computational resources as experimental models
 - Extract specific molecular targets, not just pathways
-- Do NOT quote or reference user-submitted text directly in any output"""
+- Every list: at most 30 items, each at most 200 characters, on one line, not starting with #"""

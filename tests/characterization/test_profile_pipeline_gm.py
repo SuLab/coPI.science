@@ -12,7 +12,7 @@ external dependency faked deterministically:
     run makes exactly one).
 
 A future change to how the pipeline assembles/stores a profile (field mapping,
-version bump, DOI handling, abstract hashing) breaks this snapshot loudly.
+version bump, DOI handling, evidence counts) breaks this snapshot loudly.
 """
 
 import json
@@ -247,17 +247,12 @@ async def test_profile_pipeline_golden_master(db_session, monkeypatch, snapshot)
 
 
 async def test_profile_pipeline_llm_failure_leaves_fields_unset(db_session, monkeypatch, snapshot):
-    """Pin the resilience path: when the public-synthesis LLM call raises, the
-    pipeline swallows it, stores no synthesized fields, and leaves version at 0 —
-    but still stores its ORCID fundings and the abstracts hash.
-
-    The provenance columns stay NULL here, which is the third state they need: no
-    synthesis was stored, so there is nothing to say about its validation or its
-    evidence. `evidence_state` reads "unknown" rather than claiming the profile
-    had no evidence — it had no profile."""
+    """A synthesis that raises fails the job (spec 2026-10-05 §6.3, D18): the exception
+    propagates to process_job, which retries and then marks the job dead, and the job's
+    transaction rolls back, so no profile row and no publication survive. Step 2's ORCID
+    fundings committed before the main work and are kept."""
     _install_fakes(monkeypatch)
 
-    # Replace the LLM with one that always raises on create().
     class _BoomMessages:
         def create(self, **kwargs):
             raise RuntimeError("synthesis boom")
@@ -267,28 +262,23 @@ async def test_profile_pipeline_llm_failure_leaves_fields_unset(db_session, monk
             self.messages = _BoomMessages()
 
     monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: _BoomClient())
-
-    user = await factories.make_user(
-        db_session, name="Ada Lovelace", orcid="0000-0002-1825-0098",
-    )
-    profile = await profile_pipeline.run_profile_pipeline(user.id, db_session)
+    user = await factories.make_user(db_session, name="Ada Lovelace", orcid="0000-0002-1825-0098")
+    user_id = user.id
+    with pytest.raises(Exception, match="synthesis boom"):
+        await profile_pipeline.run_profile_pipeline(user.id, db_session)
+    await db_session.rollback()
 
     result = {
-        "research_summary": profile.research_summary,
-        "techniques": profile.techniques,
-        "disease_areas": profile.disease_areas,
+        "profile_rows": len((await db_session.execute(
+            select(ResearcherProfile).where(ResearcherProfile.user_id == user_id))).scalars().all()),
+        "publications": len((await db_session.execute(
+            select(Publication).where(Publication.user_id == user_id))).scalars().all()),
         "orcid_funding_titles": sorted((await db_session.execute(
-            select(PiOrcidFunding.title).where(PiOrcidFunding.user_id == user.id)
+            select(PiOrcidFunding.title).where(PiOrcidFunding.user_id == user_id)
         )).scalars().all()),
-        "profile_version": profile.profile_version,
-        "private_profile_seed": profile.private_profile_seed,
-        "raw_abstracts_hash_is_set": profile.raw_abstracts_hash is not None,
-        "synthesis_validated": profile.synthesis_validated,
-        "evidence_pmid_count": profile.evidence_pmid_count,
-        "evidence_pub_count": profile.evidence_pub_count,
-        "evidence_state": profile.evidence_state,
     }
     assert result == snapshot
+    assert result["profile_rows"] == 0 and result["publications"] == 0
 
 
 async def test_profile_pipeline_doi_correction_stores_authoritative(

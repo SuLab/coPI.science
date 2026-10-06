@@ -68,7 +68,9 @@ _CALLS_PER_LOG_ROW = func.coalesce(
     func.jsonb_array_length(LlmCallLog.call_stats), 1
 )
 
-# Keywords for channel-profile matching
+# Channel keywords, matched as ``\b<keyword>`` (word start) against the persona's tag sections
+# only (``persona_sections.match_channels``; spec 2026-10-05 §6.5, D28). A hub role subscribes
+# to every SEEDED_CHANNELS entry instead (``post_lane.desired_channels``).
 _CHANNEL_KEYWORDS: dict[str, list[str]] = {
     "drug-repurposing": [
         "drug", "repurpos", "pharmacolog", "therapeutic", "compound",

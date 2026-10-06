@@ -124,10 +124,11 @@ async def test_fetch_orcid_profile_extracts_every_employment_with_start_years():
 
 
 @respx.mock
-async def test_fetch_orcid_profile_falls_back_to_orcid_when_no_name():
+async def test_fetch_orcid_profile_returns_no_name_when_orcid_has_none():
+    """No public name means no name (spec 2026-10-05 §6.3): never the iD."""
     respx.get(f"{BASE}/{OID}/record").mock(return_value=httpx.Response(200, json={"person": {}}))
     prof = await orcid.fetch_orcid_profile(OID)
-    assert prof["name"] == OID
+    assert prof["name"] is None
     assert "institution" not in prof
 
 

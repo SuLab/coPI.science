@@ -89,7 +89,10 @@ async def test_container_is_migrated(engine):
         #      columns, users.name_sanitized_at (grants remediation)
         # 0061 pi_industry_scores.coverage, company_discovery_usage /
         #      company_discovery_coi_ledger (industry remediation)
-        assert v == "0061"
+        # 0062 publications provenance/exclusion/doi_verified, publication_candidates,
+        #      researcher_profiles human_edited_at / evidence_flagged_count,
+        #      agents.persona_export_failed_at (corpus remediation)
+        assert v == "0062"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

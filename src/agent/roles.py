@@ -176,9 +176,10 @@ def role_problem(name: str) -> str | None:
     return None
 
 
-#: The prompt files each role composes — derived from the capability registry
+#: The prompt-set files of each role — derived from the capability registry
 #: (spec §8.5), where the tuples moved verbatim; kept under this name for its
-#: readers. ``prompt_set_stamp`` hashes the same files in the same order.
+#: readers. ``prompt_set_stamp`` hashes the same files in the same order; not every
+#: file is composed (``role_capabilities.LAB_BRIEF_FILE``).
 ROLE_PROMPT_FILES: dict[str, tuple[str, ...]] = {
     name: caps.prompt_files for name, caps in ROLE_CAPABILITIES.items()
 }

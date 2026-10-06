@@ -62,6 +62,12 @@ class AgentRegistry(Base):
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
+    #: When the post-commit persona write last failed (migration 0062, spec 2026-10-05 §4.3);
+    #: cleared by the next successful write (src/services/profile_publish.py). The manager PI
+    #: page then offers Re-export.
+    persona_export_failed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # Relationships
     user: Mapped["User | None"] = relationship(

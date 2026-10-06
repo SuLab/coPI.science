@@ -15,7 +15,8 @@ pytestmark = pytest.mark.integration
 
 def _form(pi, **overrides):
     data = {"name": pi.name, "email": pi.email, "institution": "", "department": "",
-            "research_summary": "Studies the thing."}
+            "research_summary": "Studies the thing.",
+            "profile_version": "1"}  # R1-a: make_profile's default version, current for every case below
     data.update(overrides)
     return data
 
@@ -52,7 +53,8 @@ async def test_the_manager_form_reports_the_same_error(client, db_session):
     pi = await factories.make_user(db_session)
     await factories.make_profile(db_session, user=pi)
     r = await client.post(
-        f"/manager/pis/{pi.id}/profile", data={"name": "M" * 300, "research_summary": "x"},
+        f"/manager/pis/{pi.id}/profile", data={"name": "M" * 300, "research_summary": "x",
+                    "profile_version": "1"},  # R1-a: current version of the seeded profile
         headers=auth_headers(manager.id), follow_redirects=False,
     )
     assert r.status_code == 302
@@ -62,12 +64,13 @@ async def test_the_manager_form_reports_the_same_error(client, db_session):
 
 
 @pytest.mark.parametrize("field", ["name", "institution", "department"])
-async def test_both_forms_cap_the_inputs_at_255(client, db_session, field):
+async def test_both_forms_cap_the_inputs_at_their_field_limit(client, db_session, field):
     manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     pi = await factories.make_user(db_session)
     await factories.make_profile(db_session, user=pi)
+    limit = 100 if field == "name" else 255
     pattern = re.compile(
-        rf'<input(?=[^>]*\bname="{field}")(?=[^>]*\bmaxlength="255")[^>]*>'
+        rf'<input(?=[^>]*\bname="{field}")(?=[^>]*\bmaxlength="{limit}")[^>]*>'
     )
     own = await client.get("/profile/edit", headers=auth_headers(pi.id))
     managed = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))

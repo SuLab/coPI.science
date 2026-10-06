@@ -44,7 +44,8 @@ _HOPKINS_EMPLOYMENT = {
 
 
 def _paper(year: int, affiliation: str = "Johns Hopkins University School of Medicine") -> dict:
-    return {"year": year, "pi_affiliations": [affiliation]}
+    # Paper-derived years need an ORCID anchor (stage s1 or s3; spec 2026-10-05 §6.3).
+    return {"year": year, "pi_affiliations": [affiliation], "stages": ["s1"]}
 
 
 def _corpus(*papers: dict, cap: int | None = None) -> CorpusResult:
@@ -95,6 +96,12 @@ class _Fakes:
 
 @pytest.fixture
 def fakes(monkeypatch):
+    from src.services import openalex_budget as ob
+
+    async def meter():
+        return ob.Meter(1000, 1000, 600)
+
+    monkeypatch.setattr(ob, "read_meter", meter)
     return _Fakes(monkeypatch)
 
 
@@ -161,6 +168,40 @@ async def test_preview_writes_nothing_and_queues_nothing(db_session, fakes, tmp_
     out = capsys.readouterr().out
     assert f"{a.orcid}  2018 -> 2009 (earliest_hopkins_paper) CHANGE" in out
     assert b.orcid in out  # every paper-sourced row is listed
+
+
+@pytest.mark.parametrize("apply,mixed", [(False, False), (True, False), (True, True)])
+async def test_budget_deferred_tenure_coverage_returns_nonzero(
+    db_session, fakes, tmp_path, capsys, monkeypatch, apply, mixed,
+):
+    deferred = await _pi(db_session, 2018)
+    before = await _raw(db_session, deferred)
+    orcids = [deferred.orcid]
+    healthy = None
+    if mixed:
+        healthy = await _pi(db_session, 2018)
+        fakes.profiles[healthy.orcid] = {"employments": [_HOPKINS_EMPLOYMENT]}
+        orcids.append(healthy.orcid)
+
+    async def unreadable():
+        return None
+
+    monkeypatch.setattr(rt.openalex_budget, "read_meter", unreadable)
+    code = await rt.run(
+        db_session, orcids=orcids, apply=apply, backup_dir=tmp_path,
+        allow_unmounted_backup_dir=True,
+    )
+
+    assert code == 1
+    assert "openalex_budget_deferred:" in capsys.readouterr().out
+    assert fakes.corpus_calls == []
+    assert await _raw(db_session, deferred) == before
+    assert await _profile_jobs(db_session, deferred) == 0
+    if healthy is not None:
+        assert (await _stored(db_session, healthy))["year"] == 2011
+        assert await _profile_jobs(db_session, healthy) == 1
+    else:
+        assert list(tmp_path.iterdir()) == []
 
 
 async def test_a_disagreeing_paper_row_is_overwritten_and_its_profile_queued(
@@ -690,3 +731,22 @@ async def test_a_later_year_is_applied_with_allow_later(db_session, fakes, tmp_p
     stored = await _stored(db_session, user)
     assert (stored["year"], stored["source"]) == (2015, "earliest_hopkins_paper")
     assert await _profile_jobs(db_session, user) == 1
+
+
+async def test_a_capped_search_is_an_incomplete_corpus(db_session, fakes, tmp_path, capsys):
+    # A search that stopped at its cap drops the oldest hits, where the earliest
+    # Hopkins paper would be (spec 2026-10-05 §6.3 Tenure).
+    user = await _pi(db_session, 2018)
+    corpus = _corpus(_paper(2009))
+    corpus.truncated_stages = ["s4"]
+    fakes.corpora[user.orcid] = corpus
+    before = await _raw(db_session, user)
+
+    code = await _apply(db_session, [user.orcid], tmp_path)
+
+    assert code == 0
+    assert await _raw(db_session, user) == before, (
+        "a corpus whose search stopped at its cap must not re-derive a recorded year"
+    )
+    assert (await _stored(db_session, user))["year"] == 2018
+    assert "SKIP incomplete_corpus: search capped at s4" in capsys.readouterr().out

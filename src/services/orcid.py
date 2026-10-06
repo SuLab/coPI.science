@@ -27,7 +27,10 @@ async def fetch_orcid_record(orcid_id: str) -> dict[str, Any]:
 
 
 async def fetch_orcid_profile(orcid_id: str) -> dict[str, Any]:
-    """Extract name, affiliation, and email from ORCID record."""
+    """Extract name, affiliation, and email from ORCID record.
+
+    ``name`` is None when the record has no public name (spec 2026-10-05 §6.3): callers
+    fall back to the OAuth name or ask for one, never to the iD."""
     record = await fetch_orcid_record(orcid_id)
     result: dict[str, Any] = {"orcid": orcid_id}
 
@@ -41,11 +44,13 @@ async def fetch_orcid_profile(orcid_id: str) -> dict[str, Any]:
     name_block = person.get("name") or {}
     given = (name_block.get("given-names") or {}).get("value") or ""
     family = (name_block.get("family-name") or {}).get("value") or ""
-    result["name"] = f"{given} {family}".strip() or orcid_id
+    result["name"] = f"{given} {family}".strip() or None
 
     # Email (first public email)
     emails = (person.get("emails") or {}).get("email") or []
     for e in emails:
+        if not isinstance(e, dict):
+            continue
         if e.get("primary") or not result.get("email"):
             result["email"] = e.get("email")
 
@@ -83,7 +88,7 @@ async def fetch_orcid_profile(orcid_id: str) -> dict[str, Any]:
                 break  # one per group
     # Sort by display-index ascending: 0 = primary/preferred position
     current_employments.sort(
-        key=lambda e: 999 if e.get("display-index") is None else int(e["display-index"])
+        key=lambda e: _display_index(e.get("display-index"))
     )
     if current_employments:
         emp = current_employments[0]
@@ -101,6 +106,15 @@ async def fetch_orcid_profile(orcid_id: str) -> dict[str, Any]:
         break
 
     return result
+
+
+def _display_index(value: Any) -> int:
+    """An employment's ORCID display-index for sorting; 999 (last) when absent or
+    non-numeric."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 999
 
 
 # Statuses the public API returns about the state of a RECORD, which a retry
@@ -158,8 +172,14 @@ async def fetch_orcid_works(
             raise
 
     works = []
-    for grp in data.get("group", []):
-        for summary in grp.get("work-summary", []):
+    if not isinstance(data, dict):
+        return works
+    for grp in data.get("group") or []:
+        if not isinstance(grp, dict):
+            continue
+        for summary in grp.get("work-summary") or []:
+            if not isinstance(summary, dict):
+                continue
             # D11/item 6: ORCID emits ``"external-ids": null`` (and the same
             # for "title"/"publication-date") for some work-summaries — 15 of
             # 155 for 0000-0003-3474-019X. ``dict.get(k, {})`` only supplies
@@ -169,10 +189,12 @@ async def fetch_orcid_works(
             # the HTTP call), and turned into a CorpusStageError that killed
             # the whole `generate_profile` job after 3 retries. `(X.get(k) or
             # {})` treats absent and null identically, which is what every
-            # chain below now does.
+            # chain below now does; the same holds for a null group list,
+            # summary, external-id entry, id type or title value, and a
+            # non-numeric year is skipped (G-20, spec 2026-10-05).
             title_block = summary.get("title") or {}
             work: dict[str, Any] = {
-                "title": (title_block.get("title") or {}).get("value", ""),
+                "title": (title_block.get("title") or {}).get("value") or "",
                 "year": None,
                 "pmid": None,
                 "doi": None,
@@ -182,13 +204,18 @@ async def fetch_orcid_works(
             pub_date = summary.get("publication-date") or {}
             year_block = pub_date.get("year") or {}
             if year_block.get("value"):
-                work["year"] = int(year_block["value"])
+                try:
+                    work["year"] = int(year_block["value"])
+                except (TypeError, ValueError):
+                    pass
 
             # External IDs
             ext_ids = (summary.get("external-ids") or {}).get("external-id") or []
             for eid in ext_ids:
-                id_type = eid.get("external-id-type", "").lower()
-                id_value = eid.get("external-id-value", "")
+                if not isinstance(eid, dict):
+                    continue
+                id_type = (eid.get("external-id-type") or "").lower()
+                id_value = eid.get("external-id-value") or ""
                 if id_type == "pmid":
                     work["pmid"] = id_value
                 elif id_type == "doi":

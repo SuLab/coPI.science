@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_profile_errors.html" import profile_error_text %}
 {% from "_tag_field.html" import profile_tag_fields %}
 {% block title %}Edit Profile — CoPI{% endblock %}
 
@@ -17,6 +18,7 @@
             {% elif error == 'profile_changed' %}This profile changed while you were editing it (a regeneration or another edit saved first). Reload the page to see the current version, then re-apply your changes.
             {% elif error == 'profile_generating' %}Profile is being generated — try again shortly.
             {% elif error == 'field_too_long' %}Name, institution and department are limited to 255 characters each.
+            {% elif profile_error_text(error) %}{{ profile_error_text(error) }}
             {% else %}Something went wrong saving your changes. Please try again.{% endif %}
         </p>
     </div>
@@ -30,7 +32,7 @@
             <div class="grid grid-cols-1 gap-4">
                 <div>
                     <label for="profile-name" class="block text-sm font-medium text-gray-700 mb-1">Display Name</label>
-                    <input type="text" name="name" maxlength="255" id="profile-name" value="{{ user.name }}"
+                    <input type="text" name="name" maxlength="100" id="profile-name" value="{{ user.name }}"
                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500">
                 </div>
                 <div>

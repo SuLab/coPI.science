@@ -84,7 +84,7 @@ async def test_a_bulk_openalex_job_defers_to_the_meter_reset_before_its_handler_
     ran = []
 
     async def low():
-        return openalex_budget.Meter(1000, 50, 3600)
+        return openalex_budget.Meter(1000, 4, 3600)
 
     async def handler(ctx, db):
         ran.append(ctx.id)
@@ -96,6 +96,37 @@ async def test_a_bulk_openalex_job_defers_to_the_meter_reset_before_its_handler_
         job = await _job(factory, job_id)
         assert ran == [] and (job.status, job.attempts) == ("pending", 0)
         assert job.not_before > datetime.now(UTC) and "OpenAlex free budget" in job.last_error
+    finally:
+        await _drop(factory, user_id)
+
+
+async def test_exhaustion_inside_a_bulk_handler_rolls_back_without_consuming_an_attempt(
+    factory, monkeypatch,
+):
+    user_id, job_id = await _seed(factory, type="generate_profile", priority=BULK_PRIORITY)
+    reads = 0
+
+    async def meter():
+        nonlocal reads
+        reads += 1
+        return openalex_budget.Meter(1000, 5 if reads == 1 else 0, 3600)
+
+    async def handler(ctx, db):
+        await db.execute(text("UPDATE users SET name = 'ROLLED BACK' WHERE id = :u"),
+                         {"u": ctx.user_id})
+        await openalex_budget.check_request_budget()
+        raise AssertionError("An exhausted request must be deferred")
+
+    monkeypatch.setattr(openalex_budget, "read_meter", meter)
+    monkeypatch.setitem(worker.JOB_HANDLERS, "generate_profile", handler)
+    try:
+        await worker.process_job(job_id, "generate_profile", 1, 3, factory)
+        job = await _job(factory, job_id)
+        assert (job.status, job.attempts) == ("pending", 0) and reads == 2
+        async with factory() as db:
+            assert (await db.get(User, user_id)).name == "Infra PI"
+        await openalex_budget.check_request_budget()
+        assert reads == 2  # Worker scope was restored, so an interactive call skips it.
     finally:
         await _drop(factory, user_id)
 

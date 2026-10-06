@@ -69,8 +69,12 @@ async def create_revision(
             impersonating the PI; the change_summary names the admin), "agent",
             "pipeline", "grant_veto" (a staff veto of a RePORTER award),
             "orcid_veto" (a staff veto of an ORCID funding), "grant_pin" (a staff
-            pin, unpin or "no RePORTER profile"), "reexport" (a repair script's
-            re-export) or "persona_sweep" (the daily persona sweep). At most 20
+            pin, unpin or "no RePORTER profile"), "paper_review" (a staff candidate
+            accept, publication exclude or restore), "draft_accept" (staff accepted a
+            regenerated draft), "reexport" (a repair script's re-export, or staff
+            Re-export), "persona_sweep" (the daily persona sweep) or
+            "lifecycle_export" (the persona published after an agent is created,
+            requested, linked, renamed or activated; spec 2026-10-05 §6.4). At most 20
             characters (the column is String(20)). ("slack_dm" is historical: only
             rows written before 2026-08-13 carry it. "monthly_refresh" has never
             been written: the monthly_refresh job runs the profile pipeline, which

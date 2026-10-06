@@ -2,14 +2,14 @@
 
 ``execute_tool``'s ``retrieve_abstract`` branch enforces a per-thread cap
 (``ThreadState.abstracts_other`` vs ``settings.max_abstracts_other_per_thread``)
-on abstract lookups of OTHER labs' papers. An agent citing its OWN paper (a DOI
-present in ``Agent.own_publication_dois``) must be exempt from BOTH the cap
+on abstract lookups of OTHER labs' papers. An agent citing its OWN paper (an id
+in ``Agent.own_paper_ids``) must be exempt from BOTH the cap
 check and the increment — retrieving your own paper's abstract isn't "using up"
 budget meant to limit how much of someone else's work you pull in.
 
-The exemption only recognizes DOI form: a bare PMID has nothing to match
-against ``own_dois``, so it always counts against the cap even if the paper
-happens to be the agent's own (documented limit, design §10).
+The exemption recognises a DOI, a labelled PMID or a bare PMID that is one of the
+agent's own paper ids (``Agent.own_paper_ids``: DOIs and the PMIDs its Recent
+Publications list, spec 2026-10-05 D49); any other id counts against the cap.
 """
 
 import pytest
@@ -48,7 +48,7 @@ async def test_own_doi_lookup_at_cap_still_succeeds_and_does_not_increment():
         "schultz",
         thread,
         role="pi_lab",
-        own_dois={SCOPE_DOI},
+        own_paper_ids={SCOPE_DOI},
     )
     assert "Rate limit" not in out
     assert thread.abstracts_other == 10  # unchanged — own-paper lookups don't count
@@ -65,7 +65,7 @@ async def test_foreign_doi_lookup_increments_and_rate_limits_at_cap():
         "schultz",
         thread,
         role="pi_lab",
-        own_dois={SCOPE_DOI},
+        own_paper_ids={SCOPE_DOI},
     )
     assert "Rate limit" not in out
     assert thread.abstracts_other == 10  # incremented
@@ -76,19 +76,14 @@ async def test_foreign_doi_lookup_increments_and_rate_limits_at_cap():
         "schultz",
         thread,
         role="pi_lab",
-        own_dois={SCOPE_DOI},
+        own_paper_ids={SCOPE_DOI},
     )
     assert "Rate limit" in out2
     assert thread.abstracts_other == 10  # not incremented past the cap
 
 
-async def test_bare_pmid_lookup_counts_against_the_cap_even_with_own_dois_set():
-    """(c) A bare-PMID lookup counts — documented limit, design §10.
-
-    ``own_dois`` is a set of DOIs; a bare PMID has no DOI substring for
-    ``_extract_dois`` to find, so the own-paper exemption can never match it,
-    regardless of whether the paper is in fact the agent's own.
-    """
+async def test_a_pmid_that_is_not_an_own_id_counts_against_the_cap():
+    """A PMID outside ``own_paper_ids`` counts, even when the set holds DOIs."""
     thread = ThreadState(
         thread_id="t3", channel="c", other_agent_id="x", abstracts_other=0
     )
@@ -98,14 +93,14 @@ async def test_bare_pmid_lookup_counts_against_the_cap_even_with_own_dois_set():
         "schultz",
         thread,
         role="pi_lab",
-        own_dois={SCOPE_DOI},
+        own_paper_ids={SCOPE_DOI},
     )
     assert "Rate limit" not in out
     assert thread.abstracts_other == 1  # counted, not exempted
 
 
-async def test_own_dois_none_behaves_exactly_as_before():
-    """No ``own_dois`` passed (the pre-Task-11 default) — cap behaves as today."""
+async def test_no_own_ids_behaves_exactly_as_before():
+    """No ``own_paper_ids`` passed (the pre-Task-11 default) — cap behaves as today."""
     thread = ThreadState(
         thread_id="t4", channel="c", other_agent_id="x", abstracts_other=10
     )
@@ -159,3 +154,31 @@ def test_own_doi_root_gets_the_reworded_speak_as_author_injection(agent_with_pub
     # collaboration...") must be gone, not just the exact phrase.
     warning = body.split("⚠️", 1)[1].split("\n\n", 1)[0]
     assert "collaboration" not in warning.lower()
+
+
+async def test_an_own_pmid_lookup_at_cap_succeeds_without_incrementing():
+    thread = ThreadState(thread_id="t5", channel="c", other_agent_id="x", abstracts_other=10)
+    for ref in ("38980071", "PMID: 38980071", "https://pubmed.ncbi.nlm.nih.gov/38980071/"):
+        out = await tools_mod.execute_tool(
+            "retrieve_abstract", {"pmid_or_doi": ref}, "schultz", thread,
+            role="pi_lab", own_paper_ids={"38980071"},
+        )
+        assert "Rate limit" not in out, ref
+    assert thread.abstracts_other == 10
+
+
+async def test_a_foreign_pmid_over_the_cap_is_refused_without_fetching(monkeypatch):
+    fetched = []
+
+    async def spy(ref):
+        fetched.append(ref)
+        return {"pmid": ref, "title": "T", "abstract": "A"}
+
+    monkeypatch.setattr(tools_mod, "fetch_abstract", spy)
+    thread = ThreadState(thread_id="t6", channel="c", other_agent_id="x", abstracts_other=10)
+    out = await tools_mod.execute_tool(
+        "retrieve_abstract", {"pmid_or_doi": "11111111"}, "schultz", thread,
+        role="pi_lab", own_paper_ids={"38980071", SCOPE_DOI},
+    )
+    assert "Rate limit" in out
+    assert fetched == []

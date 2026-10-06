@@ -22,6 +22,7 @@ from tests import factories
 from tests.flash_support import session_cookie_header, session_flashes
 from tests.integration._webui_helpers import follow
 from tests.integration.test_manager_access import auth_headers
+from tests.persona_support import write_persona
 
 pytestmark = pytest.mark.integration
 
@@ -242,6 +243,7 @@ async def test_manager_activate_is_gated_and_has_no_override(client, db_session)
     await factories.make_profile(
         db_session, user=pi, evidence_pmid_count=10, evidence_pub_count=8,
     )
+    write_persona(agent.agent_id)  # R2: the persona-file gate (spec 2026-10-05 §6.4)
     await db_session.flush()
     r = await client.post(
         f"/manager/pis/{pi.id}/activate",
@@ -471,6 +473,7 @@ async def test_activate_does_not_overwrite_a_concurrent_suspend(client, db_sessi
     manager = await _manager(db_session)
     pi, agent = await _pending_pi(db_session, agent_id="raced", slack_bot_token="xoxb-raced")
     await _grounded(db_session, pi)
+    write_persona(agent.agent_id)  # R2: the persona-file gate (spec 2026-10-05 §6.4)
     # Committed (a savepoint release under conftest's create_savepoint mode), so the
     # route's rollback on a lost race cannot undo the fixtures (plan audit Q2-02).
     await db_session.commit()
@@ -508,6 +511,7 @@ async def test_activate_accepts_an_env_only_bot_token(client, db_session, monkey
     manager = await _manager(db_session)
     pi, agent = await _pending_pi(db_session, agent_id="envonly")
     await _grounded(db_session, pi)
+    write_persona(agent.agent_id)  # R2: the persona-file gate (spec 2026-10-05 §6.4)
     r = await client.post(
         f"/manager/pis/{pi.id}/activate", headers=auth_headers(manager.id), follow_redirects=False,
     )
@@ -537,6 +541,7 @@ async def test_unmute_accepts_an_env_only_bot_token(client, db_session, monkeypa
     pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)
     agent = await factories.make_agent(db_session, user=pi, agent_id="envmute", status="inactive")
     await _grounded(db_session, pi)
+    write_persona(agent.agent_id)  # R2: the persona-file gate (spec 2026-10-05 §6.4)
     r = await client.post(
         f"/manager/pis/{pi.id}/unmute", headers=auth_headers(manager.id), follow_redirects=False,
     )

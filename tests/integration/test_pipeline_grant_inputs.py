@@ -138,9 +138,10 @@ async def test_after_commit_defers_the_write_and_none_writes_inline(
     callbacks = []
     await run_profile_pipeline(user.id, db_session, job.id, after_commit=callbacks)
     path = wired.export_dir / f"{agent.agent_id}.md"
-    assert len(callbacks) == 1 and not path.exists()
+    assert len(callbacks) == 2 and not path.exists()
     await db_session.commit()
-    await callbacks[0](db_session)
+    for callback in callbacks:
+        await callback(db_session)
     assert path.exists()
     path.unlink()
     job.status = "completed"

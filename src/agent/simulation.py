@@ -351,9 +351,6 @@ class SimulationEngine:
             raise RuntimeError(
                 "Star-topology validation failed: " + "; ".join(violations)
             )
-        # AFTER the gate, never before: the filter inside reads
-        # agent.allowed_sender_ids, which is None until the line above runs.
-        self.refresh_lab_directories()
         # Record which topology this run actually started with, so the run's output
         # stays attributable to its configuration (v2 §13.1).
         await self._record_topology_snapshot()

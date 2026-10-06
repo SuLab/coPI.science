@@ -6,6 +6,8 @@ that unit tests exercise the removal/review partition, the duplicate-title
 selection, and the persona-year parser as pure functions.
 """
 
+import pytest
+
 from scripts.audit_tenure_scope import (
     find_persona_tenure_leaks,
     parse_persona_publication_years,
@@ -383,3 +385,15 @@ def test_find_persona_tenure_leaks_is_empty_when_tenure_start_is_unset():
 
 def test_find_persona_tenure_leaks_is_empty_when_all_years_are_in_window():
     assert find_persona_tenure_leaks([2021, 2022], tenure_start=2020) == []
+
+
+@pytest.mark.parametrize("pi_name", ["John Smith Jr.", "John Smith, PhD"])
+def test_a_suffix_or_degree_is_not_taken_for_the_surname_of_a_forename_mismatch(pi_name):
+    # The surname comes from person_names.surname_candidates (spec 2026-10-05 §6.3): a
+    # Smith with another forename is a judgement call, not a "no author shares the
+    # surname" removal, which is what reading "Jr." or "PhD" as the surname produced.
+    stored = [_pub("a", "1")]
+    refetched = {"1": _record(1, authors=[_author("Smith", "Robert", "R")])}
+    removals, review, _survivors = classify_stored_publications(stored, refetched, pi_name)
+    assert removals == []
+    assert [r.reason for r in review] == ["forename_mismatch"]

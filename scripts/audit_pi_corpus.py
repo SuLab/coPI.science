@@ -10,6 +10,8 @@ the over-match alarm for any matcher change (stored, resolved, overlap,
 resolved-not-stored, stored-not-resolved, ``dropped["identity"]``).
 
 Never writes anything — no DB write, no file write, no re-export.
+Live resolve uses the free-budget admission/request guards; unresolved coverage
+is recorded in resolve_error and exits nonzero (not for explicit --skip-resolve).
 
 Output: one JSON object per PI, stable key order, one per line, to stdout —
 easy to diff between runs. A human-readable summary goes to stderr so stdout
@@ -39,13 +41,18 @@ from sqlalchemy import select  # noqa: E402
 from scripts.repair_pi_corpus import (  # noqa: E402
     classify_excluded_type,
     load_stored_publications,
-    matched_used_bare_initial,
     normalize_title,
     refetch_pmids,
 )
 from src.database import get_session_factory  # noqa: E402
 from src.models import User  # noqa: E402
-from src.services.corpus import CorpusStageError, match_pi_author, resolve_corpus  # noqa: E402
+from src.services import openalex_budget  # noqa: E402
+from src.services.corpus import (  # noqa: E402
+    CorpusStageError,
+    _match_pi_author_detail,
+    resolve_corpus,
+)
+from src.services.job_queue import JobDeferred  # noqa: E402
 
 
 async def _classify_pi(db, user: User, *, skip_resolve: bool = False) -> dict:
@@ -67,10 +74,10 @@ async def _classify_pi(db, user: User, *, skip_resolve: bool = False) -> dict:
             unrefetchable += 1
             continue
 
-        kind, _ = match_pi_author(record, user.name)
+        kind, _, bare_initial = _match_pi_author_detail(record, user.name)
         if kind in ("no_match", "consortium"):
             identity_counts["no_surname_author"] += 1
-        elif matched_used_bare_initial(record, user.name):
+        elif bare_initial:
             identity_counts["bare_initial_only"] += 1
         else:
             identity_counts["strong"] += 1
@@ -91,8 +98,10 @@ async def _classify_pi(db, user: User, *, skip_resolve: bool = False) -> dict:
         resolve_error = "skipped (--skip-resolve)"
     else:
         try:
-            resolved = await resolve_corpus(user.orcid, user.name, user.institution)
-        except CorpusStageError as exc:
+            with openalex_budget.bulk_requests():
+                await openalex_budget.check_inline_corpus_budget()
+                resolved = await resolve_corpus(user.orcid, user.name, user.institution)
+        except (CorpusStageError, JobDeferred) as exc:
             resolve_error = str(exc)
         else:
             stored_pmids = {p.pmid for p in stored if p.pmid}
@@ -135,9 +144,11 @@ async def _run(orcids: list[str], skip_resolve: bool) -> int:
         users = (await db.execute(q)).scalars().all()
 
         totals: Counter[str] = Counter()
+        incomplete = False
         for user in users:
             report = await _classify_pi(db, user, skip_resolve=skip_resolve)
             print(json.dumps(report, sort_keys=True))
+            incomplete = incomplete or bool(report["resolve_error"] and not skip_resolve)
 
             totals["pis"] += 1
             totals["stored"] += report["stored_count"]
@@ -166,7 +177,7 @@ async def _run(orcids: list[str], skip_resolve: bool) -> int:
             f"# duplicate-title groups: {totals['duplicate_title_groups']}",
             file=sys.stderr,
         )
-        return 0
+        return int(incomplete)
 
 
 def main() -> None:

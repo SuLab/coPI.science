@@ -53,7 +53,7 @@ from src.models.profile import ResearcherProfile
 from src.models.profile_revision import ProfileRevision
 from src.models.proposal_vote import VOTE_DOWN, VOTE_UP, ProposalVote
 from src.models.provisioning import AppSetting, SlackAppProvision
-from src.models.publication import Publication
+from src.models.publication import Publication, PublicationCandidate
 from src.models.review import (
     AssessmentReview,
     AssessmentReviewAssignment,
@@ -80,6 +80,7 @@ __all__ = [
     "User",
     "ResearcherProfile",
     "Publication",
+    "PublicationCandidate",
     "Job",
     "AssessmentDrop",
     "OpportunityAssessment",

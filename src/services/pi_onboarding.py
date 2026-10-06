@@ -3,8 +3,9 @@ fetch->create->enqueue logic that was once duplicated inline in
 src/routers/admin/impersonation.py's impersonate_user — see design decision D7;
 impersonation now only looks an account up and never creates one (A-16). `cli seed-profile` shares `validate_orcid` and
 `record_employment_tenure` with this module (MD-14) but keeps its own
-reuse-existing-user and stub-on-fetch-failure behaviour, both of which
-`find_or_create_pi_by_orcid` refuses by design (D6)."""
+reuse-existing-user behaviour, which `find_or_create_pi_by_orcid` refuses by
+design (D6). Neither creates a user named by its ORCID iD (spec 2026-10-05 §6.3):
+Add-PI asks for the name, the CLI refuses."""
 
 import logging
 import re
@@ -18,7 +19,11 @@ from src.models.job import INTERACTIVE_PRIORITY
 from src.services.agent_identity import derive_agent_identity
 from src.services.jhu_rules import derive_employment_start, get_tenure_start, set_tenure_start
 from src.services.orcid import fetch_orcid_profile
-from src.services.person_names import name_from_machine_source
+from src.services.person_names import (
+    is_orcid_like,
+    name_from_machine_source,
+    validate_person_name,
+)
 from src.services.profile_jobs import enqueue_profile_job_if_absent
 from src.services.user_email import assign_user_email
 
@@ -64,7 +69,17 @@ async def record_employment_tenure(db: AsyncSession, user: User, profile_data: d
     return tenure_year
 
 
-async def find_or_create_pi_by_orcid(db: AsyncSession, orcid: str) -> User:
+class OrcidNameRequired(ValueError):
+    """Add-PI for an ORCID record with no public name and no name entered (spec §6.3)."""
+
+    def __init__(self, orcid: str) -> None:
+        super().__init__(f"ORCID record {orcid} has no public name; enter the PI's name")
+        self.orcid = orcid
+
+
+async def find_or_create_pi_by_orcid(
+    db: AsyncSession, orcid: str, *, name: str | None = None,
+) -> User:
     """Create a PI User + enqueue its generate_profile job (src/services/profile_jobs.py) for one ORCID iD.
 
     This is an explicit creation action (D6): it raises if
@@ -78,6 +93,11 @@ async def find_or_create_pi_by_orcid(db: AsyncSession, orcid: str) -> User:
     and correct it on the PI page before the profile job even runs (audit
     H1/H2: the paper-derived fallback lives in the pipeline and only
     persists from a fully resolved corpus).
+
+    ``name`` is the manager's entry for a record with no public name: validated with
+    ``person_names.validate_person_name`` (``InvalidPersonName`` propagates) and used
+    only when ORCID has none; without it such a record raises ``OrcidNameRequired``
+    (spec 2026-10-05 §6.3: never the iD). When ORCID has a name, ``name`` is ignored.
     """
     orcid = validate_orcid(orcid)
     existing = (
@@ -92,8 +112,13 @@ async def find_or_create_pi_by_orcid(db: AsyncSession, orcid: str) -> User:
         raise ValueError(f"Could not fetch ORCID profile for {orcid}: {exc}") from exc
 
     # An ORCID-sourced name is cut to the D60 allowlist; a cut is stamped for the
-    # manager PI page. An iD or letter-less name is stored as is.
-    name, cut = name_from_machine_source(profile_data.get("name", orcid))
+    # manager PI page. A typed name is validated, never cut, so nothing is stamped.
+    if profile_data.get("name"):
+        name, cut = name_from_machine_source(profile_data["name"])
+    elif name is not None and name.strip():
+        name, cut = validate_person_name(name), False
+    else:
+        raise OrcidNameRequired(orcid)
     user = User(
         orcid=orcid,
         name=name,
@@ -113,7 +138,9 @@ async def find_or_create_pi_by_orcid(db: AsyncSession, orcid: str) -> User:
     return user
 
 
-async def adopt_agentless_pi(db: AsyncSession, orcid: str) -> User | None:
+async def adopt_agentless_pi(
+    db: AsyncSession, orcid: str, *, name: str | None = None,
+) -> User | None:
     """The PI account that already holds ``orcid`` but has no lab agent, readied for
     the Add-PI flow; None when no account holds the iD.
 
@@ -128,6 +155,10 @@ async def adopt_agentless_pi(db: AsyncSession, orcid: str) -> User | None:
     Raises ValueError ("already exists") for any other holder of the iD: a staff
     account, a denied account, or a PI who already has an agent (D6). Validates the
     iD like ``find_or_create_pi_by_orcid``. Does not commit.
+
+    A validated ``name`` (``person_names.validate_person_name``; ``InvalidPersonName``
+    propagates) replaces the adopted account's name only when that name is empty, an
+    ORCID iD or letter-less (``person_names.is_orcid_like``).
     """
     orcid = validate_orcid(orcid)
     user = (
@@ -140,6 +171,11 @@ async def adopt_agentless_pi(db: AsyncSession, orcid: str) -> User | None:
     )
     if user.user_role != USER_ROLE_PI or user.access_status == "denied" or has_agent:
         raise ValueError(f"A user with ORCID {orcid} already exists")
+
+    if name is not None and name.strip() and (
+        not (user.name or "").strip() or is_orcid_like(user.name)
+    ):
+        user.name = validate_person_name(name)
 
     if await get_tenure_start(db, user.id) is None:
         try:

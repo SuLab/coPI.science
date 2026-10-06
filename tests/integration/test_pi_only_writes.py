@@ -35,12 +35,17 @@ from tests.integration.test_manager_access import auth_headers
 pytestmark = pytest.mark.integration
 
 
-def _save_profile_form(u: User) -> dict:
-    return {
+def _save_profile_form(u: User, version: int | None = 1) -> dict:
+    # R1-a (spec §6.4 Version bypass): a save over an existing profile carries its current
+    # version (make_profile defaults to 1); pass version=None where no profile exists.
+    form = {
         "email": u.email or "",
         "research_summary": f"WRITE-SWEEP-{u.orcid}",
         "techniques": "cryo-EM",
     }
+    if version is not None:
+        form["profile_version"] = str(version)
+    return form
 
 
 # (path, form builder). The audit found exactly these four still on
@@ -158,7 +163,7 @@ async def test_a_manager_with_a_completed_profile_still_gets_no_agent(client, db
 
     # Step 1: the onboarding write that mints onboarding_complete + a profile.
     r1 = await client.post(
-        "/onboarding/save-profile", data=_save_profile_form(mgr), headers=auth_headers(mgr.id)
+        "/onboarding/save-profile", data=_save_profile_form(mgr, None), headers=auth_headers(mgr.id)
     )
     assert r1.status_code == 403
     assert await db_session.scalar(
@@ -215,7 +220,7 @@ async def test_a_manager_cannot_save_a_pi_profile(client, db_session):
     original_email = mgr.email
     await db_session.flush()
 
-    form = {**_save_profile_form(mgr), "email": "manager-rewrote-this@example.edu"}
+    form = {**_save_profile_form(mgr, None), "email": "manager-rewrote-this@example.edu"}
     r = await client.post("/profile/save", data=form, headers=auth_headers(mgr.id))
     assert r.status_code == 403, "POST /profile/save served a manager"
 
@@ -230,7 +235,7 @@ async def test_a_manager_cannot_save_a_pi_profile(client, db_session):
     # denial above would be indistinguishable from a broken endpoint.
     pi = await factories.make_user(db_session, user_role=USER_ROLE_PI, name="Percy Pi")
     await db_session.flush()
-    pi_form = {**_save_profile_form(pi), "email": "pi-rewrote-this@example.edu"}
+    pi_form = {**_save_profile_form(pi, None), "email": "pi-rewrote-this@example.edu"}
     r2 = await client.post("/profile/save", data=pi_form, headers=auth_headers(pi.id))
     assert r2.status_code == 302, "POST /profile/save refused a PI"
     assert await db_session.scalar(

@@ -90,6 +90,7 @@ from src.services.pi_companies import (
     _clean_name,
     normalize_company_name,
 )
+from src.services.tenure_scope import publication_in_use
 
 if TYPE_CHECKING:
     from src.worker.main import JobContext
@@ -215,10 +216,12 @@ def merge_candidates(
 
 
 async def _publication_years(db: AsyncSession, user_id: uuid.UUID) -> dict[str, int | None]:
-    """PMID -> publication year of the PI's publications that have a PMID."""
+    """PMID -> publication year of the PI's publications that have a PMID and that staff
+    have not excluded."""
     rows = (await db.execute(
         select(Publication.pmid, Publication.year)
-        .where(Publication.user_id == user_id, Publication.pmid.isnot(None))
+        .where(Publication.user_id == user_id, Publication.pmid.isnot(None),
+               publication_in_use())
         .order_by(Publication.pmid)
     )).all()
     return {str(pmid): year for pmid, year in rows}

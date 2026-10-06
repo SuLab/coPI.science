@@ -2,7 +2,9 @@
 # prompts/{agent-system,identity,phase4-thread-reply,phase5-new-post}.md —
 # pi_lab is the absence of overrides, see src/agent/roles.py). Bump on ANY
 # edit to those files; see the matching note in scout_hub/role.toml.
-version = "1.0.0"
+# 1.1.0 records the lab-visible behavior changes: persona PMIDs, channels by tag
+# section, cohort-gated retrieve_profile and removal of the lab directory.
+version = "1.1.0"
 
 label = "PI Lab"
 tools = ["retrieve_profile", "retrieve_abstract", "retrieve_full_text"]

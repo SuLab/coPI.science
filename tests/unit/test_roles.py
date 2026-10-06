@@ -106,7 +106,7 @@ def test_scout_hub_phase4_override_renders_and_drops_the_tool_it_lacks():
 
     tokens = (
         "{channel_name}", "{other_agent_name}", "{other_agent_lab}",
-        "{message_count}", "{thread_phase}", "{thread_history}",
+        "{other_agent_id}", "{message_count}", "{thread_phase}", "{thread_history}",
         "{phase_guidance}", "{instructions}",
     )
 

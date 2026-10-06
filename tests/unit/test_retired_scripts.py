@@ -29,7 +29,9 @@ def test_nothing_in_src_scripts_templates_static_or_the_runbook_names_them():
     assert hits == [], "\n".join(hits)
 
 
-def test_the_orphaned_prompt_files_stay_on_disk():
-    """The prompt freeze forbids touching prompts/, deletions included."""
-    assert (ROOT / "prompts/profile-synthesis-sparse.md").exists()
+def test_the_orphaned_prompt_file_stays_on_disk():
+    """email-reply-classify.md has no reader but stays (the prompt freeze forbids deleting
+    it); profile-synthesis-sparse.md was deleted with the dead features (spec 2026-10-05
+    §6.3, P33)."""
     assert (ROOT / "prompts/email-reply-classify.md").exists()
+    assert not (ROOT / "prompts/profile-synthesis-sparse.md").exists()

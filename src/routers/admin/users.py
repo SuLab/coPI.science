@@ -21,8 +21,8 @@ from src.services.directory import (
     load_user_detail,
 )
 from src.services.email_verification import mark_email_verified
-from src.services.session_epoch import bump_session_epoch
 from src.services.user_deletion import delete_user_account
+from src.services.user_roles import RoleChangeRefused, change_user_role
 
 logger = logging.getLogger("src.routers.admin")
 
@@ -156,6 +156,9 @@ async def admin_set_user_role(
 
     Named for users, not agents: POST /agents/{agent_id}/role already exists
     and sets a BOT role (pi_lab / scout_hub), which is a different thing.
+
+    Refused (400) when the new role may not use the PI surfaces while the user owns an
+    active, pending or inactive agent (``user_roles.change_user_role``).
     """
     # Under impersonation `current_user` is the impersonated user, so the
     # own-role guard below would compare against the wrong identity.
@@ -200,10 +203,13 @@ async def admin_set_user_role(
             ) from None
 
     previous = user.user_role
-    user.user_role = user_role
-    if previous != user_role:
-        # A role change signs the account out everywhere (spec 2026-10-01 §6.7).
-        await bump_session_epoch(db, user.id)
+    try:
+        # D25 (spec 2026-10-05 §6.4): a role that may not use the PI surfaces is refused
+        # while the account still owns a lab agent; a change signs the account out
+        # everywhere (spec 2026-10-01 §6.7).
+        await change_user_role(db, user, user_role)
+    except RoleChangeRefused as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     await db.commit()
     logger.info(
         "Admin %s changed role of %s (%s) from %s to %s",

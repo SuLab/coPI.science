@@ -1,0 +1,23 @@
+{# Read-only revision history (spec 2026-10-05 §6.4, D61); staff only: the router passes
+   `revisions` as None for reviewers. #}
+<section id="revisions" class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+  <h2 class="font-semibold text-gray-800 mb-1">Persona revisions</h2>
+  {% if not target_user.agent %}
+  <p class="text-sm text-gray-500">No revisions (the PI has no lab agent).</p>
+  {% elif not revisions %}
+  <p class="text-sm text-gray-500">No revisions recorded yet.</p>
+  {% else %}
+  <p class="text-xs text-gray-500 mb-2">Newest {{ revisions | length }}, newest first.</p>
+  <ul class="divide-y divide-gray-100">
+    {% for r in revisions %}
+    <li class="py-2 text-sm">
+      <div>{{ r.created_at | ts }} · <span class="font-mono text-xs">{{ r.mechanism }}</span>
+        · {{ r.actor_name or 'system' }}{% if r.change_summary %} · <span class="text-gray-600">{{ r.change_summary }}</span>{% endif %}</div>
+      <details class="mt-1"><summary class="text-xs text-indigo-600 cursor-pointer">view text</summary>
+        <pre class="mt-2 p-2 bg-gray-50 rounded text-xs font-mono whitespace-pre-wrap max-h-96 overflow-y-auto">{{ r.content }}</pre>
+      </details>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>

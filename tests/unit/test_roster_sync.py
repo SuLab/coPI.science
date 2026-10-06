@@ -103,8 +103,6 @@ def _make_engine(active_rows, existing_agents=()):
         slack_clients={a: _FakeSlackClient(a, "xoxb-real") for a in existing_agents},
         session_factory=_factory_for(active_rows),
     )
-    # Isolate the unit under test from cross-agent rebuild side effects.
-    engine._build_lab_directories = lambda: None
     return engine
 
 
@@ -278,7 +276,6 @@ async def test_pending_and_inactive_rows_are_excluded_by_the_real_query(
         agents=[], slack_clients={},
         session_factory=lambda: _RealSessionCtx(db_session),
     )
-    engine._build_lab_directories = lambda: None
     await engine._sync_roster_from_db()
 
     assert set(engine.agents) == {"liveone"}, (

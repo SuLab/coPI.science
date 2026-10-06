@@ -468,9 +468,60 @@ async def journey_companies_card(h) -> dict:
     return {"ok": ok, "checks": checks, "steps": steps, "dialogs": log["dialogs"], "log": clean}
 
 
+async def journey_corpus_and_draft_review(h) -> dict:
+    """Staff can resolve all seeded review cards, while a reviewer sees none of them."""
+    pi = h.ids["p3_pi"]
+    path = f"/manager/pis/{pi}"
+    steps: dict[str, str] = {}
+    ctx, page, log, csp = await _open(h, "manager")
+    try:
+        await _goto(h, page, path, csp)
+        steps["initial"] = await page.locator("body").inner_text()
+        await _submit(h, page, page.locator(
+            f'form[action="/manager/pis/{pi}/persona/reexport"] button'), csp)
+        steps["reexported"] = await page.locator("body").inner_text()
+        await _submit(h, page, page.locator(
+            f'form[action="/manager/pis/{pi}/candidates/{h.ids["p3_candidate"]}/accept"] button'), csp)
+        steps["accepted"] = await page.locator("body").inner_text()
+        await _submit(h, page, page.locator(
+            f'form[action="/manager/pis/{pi}/publications/{h.ids["p3_unanchored"]}/exclude"] button'), csp)
+        steps["excluded"] = await page.locator("body").inner_text()
+        await _submit(h, page, page.locator(
+            f'form[action="/manager/pis/{pi}/draft/discard"] button'), csp)
+        steps["discarded"] = await page.locator("body").inner_text()
+        manager_clean = _clean(log, csp)
+    finally:
+        await ctx.close()
+    ctx, page, log, csp = await _open(h, "reviewer")
+    try:
+        await _goto(h, page, path, csp)
+        reviewer_text = await page.locator("body").inner_text()
+        reviewer_clean = _clean(log, csp)
+    finally:
+        await ctx.close()
+    checks = {
+        "initial_cards": all(text in steps["initial"] for text in (
+            "P3 candidate paper", "P3 unanchored paper", "P3 draft summary.",
+            "Persona file out of date")),
+        "candidate_accepted": "Paper added to the corpus." in steps["accepted"]
+        and "P3 candidate paper" not in steps["accepted"],
+        "unanchored_excluded": "Paper excluded." in steps["excluded"]
+        and "P3 unanchored paper" not in steps["excluded"],
+        "draft_discarded": "Draft discarded." in steps["discarded"]
+        and "Pending draft" not in steps["discarded"],
+        "reexported": "Persona file out of date" not in steps["reexported"],
+        "reviewer_isolated": all(text not in reviewer_text for text in (
+            "Corpus and profile review", "P3 candidate paper", "P3 unanchored paper", "Pending draft")),
+    }
+    ok = all(checks.values()) and manager_clean["clean"] and reviewer_clean["clean"]
+    return {"ok": ok, "checks": checks, "manager_log": manager_clean,
+            "reviewer_log": reviewer_clean}
+
+
 JOURNEYS = [
     journey_admin_nav_round_trip,
     journey_gate_lines,
     journey_key_point_labels_and_companies,
     journey_companies_card,
+    journey_corpus_and_draft_review,
 ]

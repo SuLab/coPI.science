@@ -43,6 +43,7 @@ from src.services.industry_score import NOT_REFRESHED, SCORER_VERSION, score_evi
 from src.services.industry_sources import EvidenceItem
 from src.services.industry_sources.registry import SOURCES, SourceContext, SourceUnavailable
 from src.services.jhu_rules import get_tenure_start
+from src.services.tenure_scope import publication_in_use
 
 if TYPE_CHECKING:
     from src.worker.main import JobContext
@@ -219,7 +220,9 @@ async def execute_industry_evidence(ctx: JobContext, db: AsyncSession) -> None:
     profile = (await db.execute(select(ResearcherProfile).where(ResearcherProfile.user_id == user_id))).scalar_one_or_none()
     keywords = set((profile.keywords or []) + (profile.key_targets or []) + (profile.disease_areas or [])) if profile else set()
     conditions = set(profile.disease_areas or []) if profile else set()
-    pubs = (await db.execute(select(Publication).where(Publication.user_id == user_id, Publication.pmid.isnot(None)))).scalars().all()
+    pubs = (await db.execute(select(Publication).where(
+        Publication.user_id == user_id, Publication.pmid.isnot(None), publication_in_use(),
+    ))).scalars().all()
     sctx = SourceContext(user=user, tenure_start=tenure_start, keywords=keywords, conditions=conditions,
                          pmids=[p.pmid for p in pubs], year_by_pmid={p.pmid: p.year for p in pubs})
 

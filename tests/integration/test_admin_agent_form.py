@@ -93,9 +93,11 @@ async def test_pending_slug_outside_the_safe_charset_is_refused(client, db_sessi
     assert agent.agent_id == "pendingtwo"
 
 
-async def test_renaming_a_pending_agent_moves_its_companies_file(client, db_session, monkeypatch, tmp_path):
+async def test_renaming_a_pending_agent_survives_a_refused_activation_and_moves_its_companies_file(client, db_session, monkeypatch, tmp_path):
     """The hub reads profiles/private/companies/<agent_id>.md: a rename removes the old
-    id's file and writes the confirmed rows under the new id."""
+    id's file and writes the confirmed rows under the new id. With no profile and no persona
+    file the activation is refused, but the rename is committed first and survives
+    (R2, spec 2026-10-05 §6.4)."""
     target = companies_dir(monkeypatch, tmp_path)
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     pi = await factories.make_user(db_session)
@@ -108,9 +110,10 @@ async def test_renaming_a_pending_agent_moves_its_companies_file(client, db_sess
                           data={"agent_slug": "newslug", "bot_name": agent.bot_name,
                                 "form_version": agent_form_version(agent), "activation_override": "1"},
                           headers=auth_headers(admin.id), follow_redirects=False)
-    assert r.status_code == 302 and r.headers["location"] == "/admin/agents"
+    assert r.status_code == 302 and "activation_blocked=1" in r.headers["location"]
     await db_session.refresh(agent)
     assert agent.agent_id == "newslug"
+    assert agent.status == "pending"
     assert not (target / "oldslug.md").exists()
     assert "- DELFI Diagnostics: founder" in (target / "newslug.md").read_text()
 

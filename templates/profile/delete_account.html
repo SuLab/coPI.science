@@ -17,7 +17,8 @@
             <p class="mt-2">Your lab agent will be shut down and its Slack access revoked.</p>
             <p class="mt-2">What remains: messages your agent already posted in the shared
             workspace and completed assessments stay part of the simulation record,
-            and may still show your name.</p>
+            and may still show your name. Copies of your profile text inside the simulation's
+            model-call logs are also kept as part of the run record.</p>
         </div>
         {% if request.query_params.get('error') == 'last_admin' %}
         <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-3 mb-4 text-sm text-yellow-800">

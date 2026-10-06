@@ -3,13 +3,17 @@
 Implements the pipeline from profile-ingestion.md:
 1. Fetch ORCID profile
 2. Fetch ORCID fundings into pi_orcid_fundings (soft)
-3. Resolve the publication corpus (ORCID works + OpenAlex + PubMed; corpus.py)
+3. Resolve the publication corpus (ORCID works + OpenAlex + PubMed; corpus.py) and store it
+   (corpus_additions.apply_corpus_result)
 4. Fetch PubMed abstracts
 5. Deep mining: PMC methods sections
 6. Prepare profile record
-7. LLM synthesis (public profile)
+7. LLM synthesis (a failure fails the job)
 8. Validation
-9. Store, gated on validation and recorded on the profile row (migration 0023)
+9. Store, gated on validation; a profile edited by a person since its last generation gets
+   a draft instead (profile_drafts)
+10. Enrichment and company discovery jobs
+11. Export: the persona is written and "complete" recorded after the job's commit
 
 Locking: steps 1-2 commit before the corpus is resolved, and the run then takes the
 persona writer locks (``profile_publish.lock_persona_writer``) BEFORE its first write
@@ -19,7 +23,7 @@ for this PI wait for the run meanwhile (lock order: ``profile_publish`` module
 docstring).
 """
 
-import hashlib
+import functools
 import logging
 import uuid
 from collections import Counter
@@ -39,7 +43,7 @@ from src.services.corpus import (
     EXCLUDED_TYPES,  # noqa: F401 — re-exported; tests and callers import it from here
     resolve_corpus,
 )
-from src.services.corpus_additions import lock_corpus, select_corpus_additions
+from src.services.corpus_additions import apply_corpus_result, lock_corpus
 from src.services.grant_sections import GrantSections, grant_blocks, load_grant_sections
 from src.services.jhu_rules import (
     clear_provisional_tenure_start,
@@ -50,22 +54,52 @@ from src.services.jhu_rules import (
     set_tenure_start,
     tenure_filter,
 )
-from src.services.job_queue import AfterCommit
-from src.services.llm import synthesize_profile
+from src.services.job_queue import AfterCommit, NonRetryableJobError
+from src.services.llm import SynthesisRefused, synthesize_profile
 from src.services.orcid import fetch_orcid_profile
 from src.services.orcid_fundings import fetch_orcid_fundings, store_orcid_fundings
-from src.services.person_names import name_from_machine_source
+from src.services.person_names import is_orcid_like, name_from_machine_source
+from src.services.profile_drafts import build_draft_payload, edited_since_generation
+from src.services.profile_limits import (
+    SUMMARY_MAX_CHARS,
+    SUMMARY_MAX_WORDS,
+    SUMMARY_MIN_WORDS,
+    SUMMARY_RULE,
+    TAG_RULE,
+    cap_tags,
+)
 from src.services.pubmed import (
     convert_pmids_to_pmcids,
     fetch_pmc_methods,
-    reconcile_pub_doi,
 )
-from src.services.tenure_scope import publication_order_by, publication_sort_key
+from src.services.tenure_scope import (
+    publication_in_use,
+    publication_order_by,
+    publication_sort_key,
+)
 
 logger = logging.getLogger(__name__)
 
-# The stored-corpus cap (coverage design §4.1; applied LAST, after ranking).
+# The resolver's reporting cap (coverage design §4.1): bounds `CorpusResult.kept` only;
+# storage is uncapped (corpus_additions.apply_corpus_result, spec 2026-10-05 D14).
 CORPUS_CAP = DEFAULT_CAP
+
+#: Newest in-tenure stored rows a synthesis reads (spec D14 "rolling newest-50").
+SYNTHESIS_WINDOW = 50
+ORCID_ID_NAME_REFUSAL = "name is an ORCID iD; enter the PI's name"
+EMPTY_NAME_REFUSAL = "the PI has no name; enter the PI's name"
+#: Appended to the context for the one retry after a failed validation.
+RETRY_INSTRUCTION = (
+    f"\n\nIMPORTANT: the research_summary must be {SUMMARY_RULE}. Tag lists: {TAG_RULE}."
+)
+#: The synthesized list fields, each cut to the D24 limits before storing.
+_LIST_FIELDS = ("techniques", "experimental_models", "disease_areas", "key_targets", "keywords")
+
+
+class SynthesisOutputError(ValueError):
+    """The model's JSON is not a profile: research_summary is not a non-empty string, or a
+    list field is not a list of strings (spec 2026-10-05 §6.3, G-15). Retried like any
+    synthesis failure."""
 
 # Progress-text label for each ``CorpusResult.flagged`` reason code that
 # ``resolve_corpus`` emits. A code missing here shows raw rather than being
@@ -108,7 +142,7 @@ class PipelineRun:
     profile: ResearcherProfile | None = None
     loaded_version: int = 0
     context_text: str = ""
-    abstracts_hash: str = ""
+    flagged_count: int = 0
     synthesized: dict = field(default_factory=dict)
     validated: bool = False
     after_commit: list[AfterCommit] | None = None
@@ -167,6 +201,8 @@ async def _start(
         raise ValueError(f"User {user_id} not found")
 
     orcid_id = user.orcid
+    if not orcid_id:
+        raise NonRetryableJobError(f"User {user_id} has no ORCID iD")
     run = PipelineRun(
         user_id=user_id, db=db, job_id=job_id, user=user, orcid_id=orcid_id
     )
@@ -182,9 +218,10 @@ async def _step1_orcid_profile(run: PipelineRun) -> None:
     try:
         orcid_profile = await fetch_orcid_profile(orcid_id)
         # Update user record with fresh data
-        if orcid_profile.get("name") and not user.name:
-            # Cut to the D60 allowlist (spec 2026-10-05 §4.1); an iD-like name is
-            # stored unchanged.
+        if orcid_profile.get("name") and (not user.name or is_orcid_like(user.name)):
+            # An empty or ORCID-iD name is replaced by ORCID's real one (spec §6.3), cut
+            # to the D60 allowlist (§4.1); an iD-like ORCID name is stored unchanged and
+            # refused below.
             user.name, cut = name_from_machine_source(orcid_profile["name"])
             if cut:
                 user.name_sanitized_at = datetime.now(UTC)
@@ -200,6 +237,13 @@ async def _step1_orcid_profile(run: PipelineRun) -> None:
         # not treat "no Hopkins employment found" as an answer (D8).
         run.step1_failed = True
     run.orcid_profile = orcid_profile
+    # Deterministic refusals (spec §6.3 Names): after step 1, which is what repairs the
+    # name, and before step 2's commit, the corpus and any LLM call.
+    refusal = (EMPTY_NAME_REFUSAL if not (user.name or "").strip()
+               else ORCID_ID_NAME_REFUSAL if is_orcid_like(user.name) else None)
+    if refusal:
+        await run.progress("refused", refusal)
+        raise NonRetryableJobError(refusal)
 
 
 async def _step2_grants(run: PipelineRun) -> None:
@@ -243,8 +287,8 @@ async def _step2_grants(run: PipelineRun) -> None:
 async def _steps3_4_resolve_corpus(run: PipelineRun) -> None:
     user = run.user
     # Steps 3+4: resolve the corpus — S1 ORCID works, S2 OpenAlex, S3 PubMed
-    # {orcid}[auid], S4 name+affiliation, identity-gated, ranked year-DESC,
-    # capped LAST (coverage design §4.1). A stage failure RAISES so the job
+    # {orcid}[auid], S4 name+affiliation, identity-gated, ranked year-DESC; the 50-cap
+    # bounds only the reported kept set (coverage design §4.1). A stage failure RAISES so the job
     # retries rather than storing a thin ORCID-only corpus (defect D1/D2).
     await run.progress(
         "step3",
@@ -267,6 +311,13 @@ async def _steps3_4_resolve_corpus(run: PipelineRun) -> None:
             "corpus_flagged",
             f"{len(corpus_result.flagged)} records withheld for review "
             f"({_flag_reason_summary(corpus_result.flagged)}): {sample}",
+        )
+    if corpus_result.truncated_stages:
+        await run.progress(
+            "corpus_truncated",
+            f"Search stopped at its cap for {', '.join(corpus_result.truncated_stages)}: "
+            "older papers may be missing, so a paper-derived tenure year is kept "
+            "provisionally.",
         )
     if len(corpus_result.kept) < 5:
         await run.progress(
@@ -292,6 +343,12 @@ async def _lock_persona(run: PipelineRun) -> None:
         raise ValueError(
             f"User {run.user_id} was deleted mid-pipeline; aborting before any write"
         )
+    # Agent creation/link/rename can commit during the network-only corpus
+    # resolution. Use its authoritative current row for tenure and export.
+    run.agent_reg = (await run.db.execute(
+        select(AgentRegistry).where(AgentRegistry.user_id == run.user_id)
+        .execution_options(populate_existing=True)
+    )).scalar_one_or_none()
 
 
 async def _derive_tenure_start(run: PipelineRun) -> None:
@@ -314,7 +371,10 @@ async def _derive_tenure_start(run: PipelineRun) -> None:
     # * step 1 failed, so ORCID employment was never consulted and would
     #   outlive ORCID's recovery (D8);
     # * the corpus has ``permanently_dropped`` records (a per-item 4xx or an
-    #   unreadable body), any of which could be the earliest Hopkins paper.
+    #   unreadable body), any of which could be the earliest Hopkins paper;
+    # * a search stopped at its cap (``truncated_stages``), so older papers may be
+    #   missing.
+    # Only ORCID-anchored papers date tenure (derive_start_from_papers filters them).
     provisional_written = False
     tenure_start = await get_tenure_start(
         db, user_id, agent_id=agent_reg.agent_id if agent_reg else None
@@ -341,6 +401,11 @@ async def _derive_tenure_start(run: PipelineRun) -> None:
             unrecorded_because = (
                 f"corpus incomplete: {len(corpus_result.permanently_dropped)} "
                 "records could not be fetched"
+            )
+        elif corpus_result.truncated_stages:
+            unrecorded_because = (
+                "corpus incomplete: search capped at "
+                f"{', '.join(corpus_result.truncated_stages)}"
             )
         else:
             unrecorded_because = None
@@ -382,114 +447,50 @@ async def _derive_tenure_start(run: PipelineRun) -> None:
 
 
 async def _store_corpus_publications(run: PipelineRun) -> None:
-    db = run.db
-    user_id = run.user_id
-    corpus_result = run.corpus_result
-    # Store publications. Storage is FULL-CAREER (the tenure filter applies at
-    # synthesis and export, not storage — R2: "the full verified corpus stays
-    # stored"), so both cohorts' rows mean the same thing and a tenure-year
-    # correction is recoverable without a re-fetch.
-    await lock_corpus(db, user_id)
-    existing_result = await db.execute(
-        select(Publication).where(Publication.user_id == user_id)
-    )
-    existing_pubs = {p.pmid: p for p in existing_result.scalars().all() if p.pmid}
-
-    new_publications: list[Publication] = []
-
-    def _reconcile(rec: dict[str, Any]) -> str | None:
-        # The ORCID-curated DOI is preferred as the candidate, but it must
-        # agree with the DOI PubMed has on file for this exact PMID
-        # (reconcile_pub_doi treats the PubMed record's DOI as authoritative).
-        pmid = rec.get("pmid")
-        assigned_doi = corpus_result.orcid_dois.get(pmid) or rec.get("doi")
-        doi, doi_action = reconcile_pub_doi(assigned_doi, rec.get("doi"))
-        if doi_action == "corrected":
-            logger.warning(
-                "[doi-gate] pmid=%s: candidate DOI %r disagrees with PubMed "
-                "record DOI %r; using authoritative",
-                pmid, assigned_doi, doi,
-            )
-        return doi
-
-    stored_pmids: set[str | None] = set()
-
-    def _store(rec: dict[str, Any]) -> None:
-        # One row per pmid: a second one would violate uq_publications_user_pmid
-        # (0056) and fail the job, so a duplicate keeps its first occurrence.
-        if rec.get("pmid") in stored_pmids:
-            return
-        stored_pmids.add(rec.get("pmid"))
-        pub = Publication(
-            user_id=user_id,
-            pmid=rec.get("pmid"),
-            pmcid=rec.get("pmcid"),
-            doi=_reconcile(rec),
-            title=rec.get("title", ""),
-            abstract=rec.get("abstract", ""),
-            journal=rec.get("journal"),
-            year=rec.get("year"),
+    """Store the resolve through the shared rule (corpus_additions.apply_corpus_result:
+    anchored records of the uncapped ranked list, candidates for the rest, metadata and
+    provenance refresh; never deletes). Storage is full-career (R2): the tenure filter
+    applies at synthesis and export."""
+    await lock_corpus(run.db, run.user_id)
+    run.flagged_count = len(run.corpus_result.flagged)
+    outcome = await apply_corpus_result(run.db, run.user_id, run.corpus_result)
+    if outcome.stored and not outcome.first_ingest:
+        await run.progress(
+            "corpus_additions",
+            f"Added {len(outcome.stored)} ORCID-anchored publications: "
+            + ", ".join(outcome.stored[:10]),
         )
-        db.add(pub)
-        new_publications.append(pub)
-
-    if not existing_pubs:
-        # New PI: the resolved corpus IS the stored corpus.
-        for rec in corpus_result.kept:
-            if rec.get("pmid"):
-                _store(rec)
-    else:
-        # A PI with a pre-existing corpus — for the 62 audited ones the rows
-        # carry per-paper human verification this run cannot reproduce, so:
-        # never delete; add only ORCID-anchored finds (S1/S3); flag S2/S4-only
-        # candidates for review instead of storing them; respect the cap
-        # (audit M4 — the "leung at 53" defect class must not return).
-        for rec in corpus_result.kept:
-            pmid = rec.get("pmid")
-            if pmid in existing_pubs:
-                doi = _reconcile(rec)
-                if doi and existing_pubs[pmid].doi != doi:
-                    existing_pubs[pmid].doi = doi
-        adds = select_corpus_additions(
-            corpus_result.kept, existing_pubs, len(existing_pubs), CORPUS_CAP
+    if outcome.candidates_new:
+        await run.progress(
+            "corpus_addition_review",
+            f"{len(outcome.candidates_new)} candidates without an ORCID anchor (found by "
+            "OpenAlex or name+affiliation search only) were NOT stored; review them on the "
+            "manager PI page: " + ", ".join(outcome.candidates_new[:10]),
         )
-        to_store, over_cap, review_only = adds.to_store, adds.over_cap, adds.review_only
-        for rec in to_store:
-            _store(rec)
-        if to_store:
-            await run.progress(
-                "corpus_additions",
-                f"Added {len(to_store)} ORCID-anchored publications: "
-                + ", ".join(str(r.get("pmid")) for r in to_store[:10]),
-            )
-        if over_cap:
-            await run.progress(
-                "corpus_cap_reached",
-                f"{len(over_cap)} newly found publications NOT stored: the "
-                f"corpus is at the {CORPUS_CAP}-publication cap.",
-            )
-        if review_only:
-            await run.progress(
-                "corpus_addition_review",
-                f"{len(review_only)} candidates without an ORCID anchor "
-                "(found by OpenAlex or name+affiliation search only) were NOT "
-                "stored; review: "
-                + ", ".join(str(r.get("pmid")) for r in review_only[:10]),
-            )
-
-    await db.flush()
+    if outcome.candidates_accepted:
+        await run.progress(
+            "corpus_candidates_accepted",
+            f"Stored {len(outcome.candidates_accepted)} pending candidates now found with an "
+            "ORCID anchor: " + ", ".join(outcome.candidates_accepted[:10]),
+        )
+    if outcome.refreshed:
+        await run.progress(
+            "corpus_metadata_refreshed",
+            f"Refreshed {len(outcome.refreshed)} stored publications from PubMed "
+            f"({len(outcome.year_changes)} year changes)",
+        )
 
 
 async def _load_synthesis_inputs(run: PipelineRun) -> None:
     db = run.db
     user_id = run.user_id
     # Synthesis basis: the STORED corpus (both cohorts — additions included,
-    # audited rows the resolver missed included too), tenure-filtered (R2).
-    # Ordered newest-first (the shared publication order) so the abstracts hash is
-    # deterministic across runs.
+    # audited rows the resolver missed included too), rows staff excluded left out,
+    # tenure-filtered (R2). Newest first (the shared publication order); the newest
+    # SYNTHESIS_WINDOW in-tenure rows are offered (D14).
     stored_result = await db.execute(
         select(Publication)
-        .where(Publication.user_id == user_id)
+        .where(Publication.user_id == user_id, publication_in_use())
         .order_by(*publication_order_by())
     )
     corpus_records: list[dict[str, Any]] = [
@@ -506,7 +507,9 @@ async def _load_synthesis_inputs(run: PipelineRun) -> None:
         for p in stored_result.scalars().all()
     ]
     run.in_tenure = tenure_filter(corpus_records, run.tenure_start)
-    run.pubs_for_synthesis = [r for r in run.in_tenure if r.get("abstract")]
+    run.pubs_for_synthesis = [
+        r for r in run.in_tenure[:SYNTHESIS_WINDOW] if r.get("abstract")
+    ]
 
 
 async def _step5_methods(run: PipelineRun) -> None:
@@ -529,10 +532,18 @@ async def _step5_methods(run: PipelineRun) -> None:
         except Exception as exc:
             logger.warning("Step 5 PMCID conversion failed: %s", exc)
 
-    # Fill in PMCIDs from conversion
+    # Fill in PMCIDs from conversion, and save each on the PI's row when it has none
+    # (spec 2026-10-05 G-16).
     for rec in pubs_for_synthesis:
         if rec.get("pmid") and not rec.get("pmcid") and rec["pmid"] in pmcid_map:
             rec["pmcid"] = pmcid_map[rec["pmid"]]
+    for pmid, pmcid in pmcid_map.items():
+        await db.execute(
+            update(Publication)
+            .where(Publication.user_id == user_id, Publication.pmid == pmid,
+                   Publication.pmcid.is_(None))
+            .values(pmcid=pmcid)
+        )
 
     # Fetch methods for papers with PMCIDs (limit to 10 to avoid too many API calls)
     papers_with_pmcid = [r for r in pubs_for_synthesis if r.get("pmcid")][:10]
@@ -581,55 +592,80 @@ async def _step6_profile_record(run: PipelineRun) -> None:
     run.loaded_version = profile.profile_version or 0
 
 
+def _researcher_info(user: User, orcid_profile: dict[str, Any]) -> dict[str, Any]:
+    """The Researcher Information block's inputs: name, institution and department from
+    the user record (staff-correctable; G-9), the lab website from ORCID."""
+    info = {"name": user.name, "institution": user.institution, "department": user.department,
+            "lab_website": orcid_profile.get("lab_website")}
+    return {k: v for k, v in info.items() if v}
+
+
+def checked_synthesis(raw: Any) -> dict[str, Any]:
+    """The model's reply as a storable profile: research_summary stripped, each list field
+    cut to the D24 limits (an absent list field reads as []). Raises SynthesisOutputError
+    unless research_summary is a non-empty string within SUMMARY_MAX_CHARS and every
+    list field present is a list of strings. The character cap is a hard storage/staging
+    boundary, unlike the soft quality validation. Pure."""
+    if not isinstance(raw, dict):
+        raise SynthesisOutputError(f"synthesis reply is a {type(raw).__name__}, not an object")
+    summary = raw.get("research_summary")
+    if not isinstance(summary, str) or not summary.strip():
+        raise SynthesisOutputError("research_summary is not a non-empty string")
+    if len(summary.strip()) > SUMMARY_MAX_CHARS:
+        raise SynthesisOutputError(f"research_summary exceeds {SUMMARY_MAX_CHARS} characters")
+    checked: dict[str, Any] = {"research_summary": summary.strip()}
+    for name in _LIST_FIELDS:
+        values = raw.get(name)
+        if values is None:
+            values = []
+        if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+            raise SynthesisOutputError(f"{name} is not a list of strings")
+        checked[name] = cap_tags(values)
+    return checked
+
+
+async def _synthesize(run: PipelineRun, context: str) -> dict[str, Any]:
+    """One synthesis call, checked. Every failure propagates and fails the job (D18): a
+    model refusal as NonRetryableJobError (dead at once), anything else as raised (retried
+    by process_job). Each records its progress entry first."""
+    try:
+        return checked_synthesis(await synthesize_profile(context, run.user.name))
+    except SynthesisRefused as exc:
+        # A model refusal repeats on every attempt: dead at once (spec §7, DECISION).
+        await run.progress("synthesis_refused", str(exc)[:500])
+        raise NonRetryableJobError(f"synthesis refused by the model: {exc}") from exc
+    except Exception as exc:
+        await run.progress("synthesis_failed", f"{type(exc).__name__}: {exc}"[:500])
+        raise
+
+
 async def _steps7_8_synthesize(run: PipelineRun) -> None:
     user = run.user
     # Step 7: LLM Synthesis
     await run.progress("step7", "Synthesizing profile with AI...")
     grants = await load_grant_sections(run.db, run.user_id)
     run.context_text = _build_synthesis_context(
-        orcid_profile=run.orcid_profile,
+        orcid_profile=_researcher_info(user, run.orcid_profile),
         grants=grants,
         publications=run.pubs_for_synthesis,
         methods_by_pmid=run.methods_by_pmid,
     )
-
-    # Compute hash of source abstracts
-    abstracts_str = "\n".join(p.get("abstract", "") for p in run.pubs_for_synthesis)
-    run.abstracts_hash = hashlib.sha256(abstracts_str.encode()).hexdigest()
-
-    run.synthesized = {}
-    try:
-        run.synthesized = await synthesize_profile(run.context_text, user.name)
-    except Exception as exc:
-        logger.error("LLM synthesis failed for %s: %s", user.name, exc)
-        await run.progress("synthesis_failed", str(exc))
+    run.synthesized = await _synthesize(run, run.context_text)
 
     # Step 8: Validation
     await run.progress("step8", "Validating synthesized profile...")
     run.validated = _validate_profile(run.synthesized)
 
-    if not run.validated and run.synthesized:
-        # Re-try with stricter prompt (simplified: use same call again)
+    if not run.validated:
+        # One retry with the limits restated.
         logger.warning("Profile validation failed for %s, retrying...", user.name)
-        try:
-            run.synthesized = await synthesize_profile(
-                run.context_text + "\n\nIMPORTANT: Ensure research_summary is 150-250 words.",
-                user.name,
-            )
-            run.validated = _validate_profile(run.synthesized)
-        except Exception as exc:
-            logger.error("Retry synthesis failed: %s", exc)
+        run.synthesized = await _synthesize(run, run.context_text + RETRY_INSTRUCTION)
+        run.validated = _validate_profile(run.synthesized)
 
 
 async def _step9_store(run: PipelineRun) -> None:
     db = run.db
-    user = run.user
     profile = run.profile
-    synthesized = run.synthesized
-    validated = run.validated
-    loaded_version = run.loaded_version
-    in_tenure = run.in_tenure
-    pubs_for_synthesis = run.pubs_for_synthesis
     # Step 9: Store.
     #
     # `validated` is READ here. It used to gate only the retry above: step 9 stored
@@ -643,15 +679,8 @@ async def _step9_store(run: PipelineRun) -> None:
     #
     # The failure mode on a double validation failure is deliberate: store the
     # draft and MARK it, rather than raise or store nothing.
-    #   * Raising is loud in the log and silent in the UI. execute_generate_profile
-    #     lets the exception reach process_job, which retries up to
-    #     Job.max_attempts (default 3) — three more full LLM+NCBI runs for a
-    #     formatting miss the retry above already tried to fix — and then sets
-    #     status='dead'. templates/onboarding/profile_review.html now offers
-    #     "Try Again" for a dead job, but three full re-runs for a formatting
-    #     miss are still waste. Raising would also
-    #     skip the markdown export and create_revision below, costing the
-    #     audit trail.
+    #   * A synthesis that raises fails the job (D18, step 7); a reply that parses
+    #     but fails validation twice is stored and marked, as below.
     #   * Storing nothing is indistinguishable from "the pipeline never ran" and
     #     throws away the only draft the PI has to edit. (It would not cause the
     #     /onboarding re-enqueue loop: that self-heal is gated on `job is None and
@@ -663,133 +692,183 @@ async def _step9_store(run: PipelineRun) -> None:
     #
     # What it will NOT do is let a worse synthesis overwrite a better stored one.
     # A monthly refresh that fails validation, or one that runs while PubMed is
-    # down, keeps the profile that is already there.
+    # down, keeps the profile that is already there. Nor does it overwrite a
+    # person's edit: a profile edited since its last generation gets a draft (D19).
     await run.progress("step9", "Saving profile to database...")
     # The persona writer locks are already held (_lock_persona, before tenure
     # derivation) and stay held until the job commits.
-    # Records this run's INPUT (change detection), so it is written even when the
-    # synthesized fields below are not. The evidence counts are the ones that
-    # describe the stored profile.
-    profile.raw_abstracts_hash = run.abstracts_hash
 
     # What the pipeline had in scope, and what actually reached the prompt.
     # Both zero means there was nothing in the tenure window to synthesize
     # from; the first non-zero with the second zero means the in-scope papers
-    # had no abstracts and whatever the model wrote is ungrounded. (The old
-    # None-when-lookup-failed case is gone: a corpus stage failure now RAISES
-    # and the job retries, so this line is only reached with a complete
-    # corpus.) See ResearcherProfile.evidence_state.
-    evidence_pmid_count = len(in_tenure)
-    evidence_pub_count = len(pubs_for_synthesis)
+    # had no abstracts and whatever the model wrote is ungrounded. (A corpus
+    # stage failure RAISES and the job retries, so this line is only reached
+    # with a complete corpus.) See ResearcherProfile.evidence_state.
+    evidence_pmid_count = len(run.in_tenure)
+    evidence_pub_count = len(run.pubs_for_synthesis)
 
-    if synthesized:
-        stored_is_worth_keeping = (
-            (profile.profile_version or 0) > 0
-            and bool(profile.research_summary)
-            # A stored profile already known to have failed validation is not
-            # worth protecting. NULL (legacy/unknown) is.
-            and profile.synthesis_validated is not False
+    if edited_since_generation(profile):
+        await _stage_draft(run, evidence_pmid_count, evidence_pub_count)
+        await db.flush()
+        return
+
+    keep_reason = _keep_stored_reason(run, evidence_pub_count)
+    if keep_reason is not None:
+        logger.error(
+            "Discarding synthesized profile for %s (%s); keeping stored version %d",
+            run.user.name, keep_reason, profile.profile_version,
         )
-        lost_evidence = evidence_pub_count == 0 and (profile.evidence_pub_count or 0) > 0
-        if stored_is_worth_keeping and (not validated or lost_evidence):
-            reason = (
-                "failed validation twice"
-                if not validated
-                else f"grounded in 0 publications, down from {profile.evidence_pub_count}"
-            )
-            logger.error(
-                "Discarding synthesized profile for %s (%s); keeping stored version %d",
-                user.name, reason, profile.profile_version,
-            )
-            await run.progress(
-                "validation_rejected",
-                f"Kept the existing profile (version {profile.profile_version}): "
-                f"the new synthesis {reason}.",
-            )
-        else:
-            # This run's other writes (abstracts hash, publications, methods text)
-            # are stored whatever happens to the text below.
-            await db.flush()
-            # SQL-side increment (the Python read-modify-write lost updates when
-            # two writers raced), and conditional on the version step 6 read: an
-            # edit committed since by a writer that bypasses the persona lock wins,
-            # and the run keeps that text.
-            result = await db.execute(
-                update(ResearcherProfile)
-                .where(
-                    ResearcherProfile.id == profile.id,
-                    ResearcherProfile.profile_version == loaded_version,
-                )
-                .values(
-                    research_summary=synthesized.get("research_summary", ""),
-                    techniques=synthesized.get("techniques", []),
-                    experimental_models=synthesized.get("experimental_models", []),
-                    disease_areas=synthesized.get("disease_areas", []),
-                    key_targets=synthesized.get("key_targets", []),
-                    keywords=synthesized.get("keywords", []),
-                    synthesis_validated=validated,
-                    evidence_pmid_count=evidence_pmid_count,
-                    evidence_pub_count=evidence_pub_count,
-                    profile_version=func.coalesce(ResearcherProfile.profile_version, 0) + 1,
-                    profile_generated_at=datetime.now(UTC),
-                )
-                .execution_options(synchronize_session=False)
-            )
-            # Load the row as it now stands (the UPDATE bypassed the session, and
-            # the log lines below read profile_version: a lazy re-load would
-            # raise MissingGreenlet in an async session).
-            await db.refresh(profile)
-            if not result.rowcount:
-                logger.warning(
-                    "Kept the edit made to %s's profile while this run synthesized "
-                    "(version %d at step 6, %d now); stored publications only",
-                    user.name, loaded_version, profile.profile_version,
-                )
-                await run.progress(
-                    "concurrent_edit_kept",
-                    f"Kept the profile edit saved while this ran (version "
-                    f"{profile.profile_version}); publications were updated.",
-                )
-
-            if result.rowcount:
-                if not validated:
-                    logger.error(
-                        "Stored an UNVALIDATED profile for %s (version %d): failed "
-                        "_validate_profile on both attempts. Marked "
-                        "synthesis_validated=False for regeneration.",
-                        user.name, profile.profile_version,
-                    )
-                    await run.progress(
-                        "unvalidated",
-                        "The generated profile did not meet the quality checks "
-                        "(150-250 word summary, 3+ techniques, 1+ disease area). "
-                        "It was saved as a draft for you to edit.",
-                    )
-                if evidence_pub_count == 0:
-                    # Nothing the researcher wrote reached the prompt, so whatever the
-                    # model produced came from its own priors plus a name and a
-                    # department. It is stored (a PubMed outage must not stop a PI
-                    # being onboarded, and some researchers really have no indexed
-                    # papers) but it is no longer indistinguishable from a real one.
-                    found = (
-                        "an unknown number of"
-                        if evidence_pmid_count is None
-                        else str(evidence_pmid_count)
-                    )
-                    logger.error(
-                        "Stored an UNGROUNDED profile for %s: 0 publication abstracts "
-                        "reached the synthesis prompt (%s publication IDs in hand, "
-                        "evidence_state=%s)",
-                        user.name, found, profile.evidence_state,
-                    )
-                    await run.progress(
-                        "ungrounded",
-                        f"No publication abstracts reached the profile synthesis "
-                        f"({found} publication IDs were found): "
-                        f"{profile.evidence_state}.",
-                    )
+        await run.progress(
+            "validation_rejected",
+            f"Kept the existing profile (version {profile.profile_version}): "
+            f"the new synthesis {keep_reason}.",
+        )
+    elif await _store_synthesis(run, evidence_pmid_count, evidence_pub_count):
+        await _report_stored(run, evidence_pmid_count, evidence_pub_count)
 
     await db.flush()
+
+
+async def _stage_draft(run: PipelineRun, evidence_pmid_count: int, evidence_pub_count: int) -> None:
+    """Stage this run's synthesis as a draft for staff review (spec 2026-10-05 §6.3, D19):
+    the text fields, profile_version and profile_generated_at stay as they are, and a
+    newer draft replaces an older one."""
+    profile = run.profile
+    profile.pending_profile = build_draft_payload(
+        fields=run.synthesized,
+        synthesis_validated=run.validated,
+        evidence_pmid_count=evidence_pmid_count,
+        evidence_pub_count=evidence_pub_count,
+        evidence_flagged_count=run.flagged_count,
+        base_profile_version=run.loaded_version,
+        job_id=run.job_id,
+    )
+    profile.pending_profile_created_at = datetime.now(UTC)
+    await run.progress(
+        "draft_staged",
+        "The profile was edited by a person since its last generation, so this synthesis "
+        "waits as a draft for staff review on the manager PI page; the stored profile is "
+        "unchanged.",
+    )
+
+
+def _keep_stored_reason(run: PipelineRun, evidence_pub_count: int) -> str | None:
+    """Why the stored profile is kept over this synthesis, or None to store it."""
+    profile = run.profile
+    stored_is_worth_keeping = (
+        (profile.profile_version or 0) > 0
+        and bool(profile.research_summary)
+        # A stored profile already known to have failed validation is not
+        # worth protecting. NULL (legacy/unknown) is.
+        and profile.synthesis_validated is not False
+    )
+    if not stored_is_worth_keeping:
+        return None
+    if not run.validated:
+        return "failed validation twice"
+    if evidence_pub_count == 0 and (profile.evidence_pub_count or 0) > 0:
+        return f"grounded in 0 publications, down from {profile.evidence_pub_count}"
+    return None
+
+
+async def _store_synthesis(
+    run: PipelineRun, evidence_pmid_count: int, evidence_pub_count: int
+) -> bool:
+    """Write the synthesis over the stored text if the version step 6 read still holds.
+    True when it was written."""
+    db = run.db
+    profile = run.profile
+    synthesized = run.synthesized
+    # This run's other writes (publications, methods text) are stored whatever
+    # happens to the text below.
+    await db.flush()
+    # SQL-side increment (the Python read-modify-write lost updates when
+    # two writers raced), and conditional on the version step 6 read: an
+    # edit committed since by a writer that bypasses the persona lock wins,
+    # and the run keeps that text.
+    result = await db.execute(
+        update(ResearcherProfile)
+        .where(
+            ResearcherProfile.id == profile.id,
+            ResearcherProfile.profile_version == run.loaded_version,
+        )
+        .values(
+            research_summary=synthesized.get("research_summary", ""),
+            techniques=synthesized.get("techniques", []),
+            experimental_models=synthesized.get("experimental_models", []),
+            disease_areas=synthesized.get("disease_areas", []),
+            key_targets=synthesized.get("key_targets", []),
+            keywords=synthesized.get("keywords", []),
+            synthesis_validated=run.validated,
+            evidence_pmid_count=evidence_pmid_count,
+            evidence_pub_count=evidence_pub_count,
+            evidence_flagged_count=run.flagged_count,
+            # A direct store supersedes an older draft.
+            pending_profile=None,
+            pending_profile_created_at=None,
+            profile_version=func.coalesce(ResearcherProfile.profile_version, 0) + 1,
+            profile_generated_at=datetime.now(UTC),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    # Load the row as it now stands (the UPDATE bypassed the session, and
+    # the log lines below read profile_version: a lazy re-load would
+    # raise MissingGreenlet in an async session).
+    await db.refresh(profile)
+    if not result.rowcount:
+        logger.warning(
+            "Kept the edit made to %s's profile while this run synthesized "
+            "(version %d at step 6, %d now); stored publications only",
+            run.user.name, run.loaded_version, profile.profile_version,
+        )
+        await run.progress(
+            "concurrent_edit_kept",
+            f"Kept the profile edit saved while this ran (version "
+            f"{profile.profile_version}); publications were updated.",
+        )
+        return False
+    return True
+
+
+async def _report_stored(
+    run: PipelineRun, evidence_pmid_count: int, evidence_pub_count: int
+) -> None:
+    """Mark a stored profile that failed validation or is ungrounded, in the log and
+    the job progress."""
+    user = run.user
+    profile = run.profile
+    if not run.validated:
+        logger.error(
+            "Stored an UNVALIDATED profile for %s (version %d): failed "
+            "_validate_profile on both attempts. Marked "
+            "synthesis_validated=False for regeneration.",
+            user.name, profile.profile_version,
+        )
+        await run.progress(
+            "unvalidated",
+            "The generated profile did not meet the quality checks "
+            f"({SUMMARY_RULE} summary, 3+ techniques, 1+ disease area). "
+            "It was saved as a draft for you to edit.",
+        )
+    if evidence_pub_count == 0:
+        # Nothing the researcher wrote reached the prompt, so whatever the
+        # model produced came from its own priors plus a name and a
+        # department. It is stored (a PubMed outage must not stop a PI
+        # being onboarded, and some researchers really have no indexed
+        # papers) but it is no longer indistinguishable from a real one.
+        found = str(evidence_pmid_count)
+        logger.error(
+            "Stored an UNGROUNDED profile for %s: 0 publication abstracts "
+            "reached the synthesis prompt (%s publication IDs in hand, "
+            "evidence_state=%s)",
+            user.name, found, profile.evidence_state,
+        )
+        await run.progress(
+            "ungrounded",
+            f"No publication abstracts reached the profile synthesis "
+            f"({found} publication IDs were found): "
+            f"{profile.evidence_state}.",
+        )
 
 
 async def _enqueue_enrichment(run: PipelineRun) -> None:
@@ -847,7 +926,7 @@ async def _export_profile(run: PipelineRun) -> None:
     from src.services.tenure_scope import scope_for_export
     pub_result = await db.execute(
         select(Publication)
-        .where(Publication.user_id == user.id)
+        .where(Publication.user_id == user.id, publication_in_use())
         .order_by(*publication_order_by())
     )
     user_pubs = scope_for_export(pub_result.scalars().all(), run.tenure_start)
@@ -864,6 +943,15 @@ async def _export_profile(run: PipelineRun) -> None:
     if text is not None:
         await schedule_persona_write(db, user.id, run.after_commit)
 
+    if run.after_commit is None:
+        await run.progress("complete", "Profile generation complete.")
+    else:
+        # After the job's commit (spec 2026-10-05 §4.3, G-14): "complete" must not be
+        # visible while the transaction that stores the profile can still roll back.
+        run.after_commit.append(functools.partial(_record_complete, run))
+
+
+async def _record_complete(run: PipelineRun, _db: AsyncSession) -> None:
     await run.progress("complete", "Profile generation complete.")
 
 
@@ -873,9 +961,11 @@ def _build_synthesis_context(
     publications: list[dict[str, Any]],
     methods_by_pmid: dict[str, str],
 ) -> str:
-    """Build the text context to pass to the LLM. Grants are the persona's own sections
-    (Active, Past since tenure; spec 2026-10-05 D41), stored ones only: a PI's first run
-    sees only ORCID items because enrich_grants runs after it (D63)."""
+    """Build the text context to pass to the LLM. ``orcid_profile`` is the Researcher
+    Information block: name, institution and department from the user record, lab website
+    from ORCID (`_researcher_info`). Grants are the persona's own sections (Active, Past
+    since tenure; spec 2026-10-05 D41), stored ones only: a PI's first run sees only ORCID
+    items because enrich_grants runs after it (D63)."""
     parts = []
 
     # Researcher info
@@ -926,10 +1016,12 @@ def _validate_profile(profile: dict[str, Any]) -> bool:
 
     research_summary = profile.get("research_summary", "")
     word_count = len(research_summary.split())
-    if word_count < 100 or word_count > 350:
-        logger.warning(
-            "Research summary word count %d outside 150-250 range", word_count
-        )
+    if len(research_summary) > SUMMARY_MAX_CHARS:
+        logger.warning("Research summary character count %d exceeds %d",
+                       len(research_summary), SUMMARY_MAX_CHARS)
+        return False
+    if word_count < SUMMARY_MIN_WORDS or word_count > SUMMARY_MAX_WORDS:
+        logger.warning("Research summary word count %d outside %s", word_count, SUMMARY_RULE)
         return False
 
     techniques = profile.get("techniques", [])

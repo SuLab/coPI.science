@@ -33,8 +33,9 @@ class ProfileRevision(Base):
     mechanism: Mapped[str] = mapped_column(
         String(20), nullable=False
     )  # web, web_impersonated, agent, pipeline, grant_veto, orcid_veto, grant_pin,
-    # reexport, persona_sweep; all <= 20 characters. "slack_dm" only on pre-2026-08-13
-    # rows. "monthly_refresh" is never written: that job records "pipeline".
+    # paper_review, draft_accept, reexport, persona_sweep, lifecycle_export; all <= 20
+    # characters. "slack_dm" only on pre-2026-08-13 rows. "monthly_refresh" is never
+    # written: that job records "pipeline".
     change_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

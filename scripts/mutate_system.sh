@@ -98,7 +98,10 @@
 #        test_fetch_orcid_profile_falls_back_to_orcid_when_no_name DOES kill it, so this
 #        is a gap in the new tier rather than in the repo. Measured again 2026-09-25
 #        with LIVE_API_TESTS=1: it SURVIVED (docs/audits/open-findings.md,
-#        2026-09-25/R-mut-M1b), and the contract test still kills it.
+#        2026-09-25/R-mut-M1b), and the contract test still kills it. The offline contract
+#        test that kills M1/M1b is now
+#        test_fetch_orcid_profile_returns_no_name_when_orcid_has_none
+#        (fetch_orcid_profile returns no name rather than the iD since 2026-10-06).
 #
 #   M6   RESOLVED 2026-08-04. _validate_profile hardwired to `return True` is now KILLED
 #        by tests/characterization/test_profile_pipeline_gm.py (3 failed:
@@ -269,12 +272,12 @@ fi
 # that every target occurs exactly once and that every tier has an inert control.
 MUTANTS=(
 # --- ORCID (T1) ------------------------------------------------------------------------
-'orcid~~src/services/orcid.py~~    """Extract name, affiliation, and email from ORCID record."""~~    """Extract the name, affiliation and email from an ORCID record. [INERT EDIT]"""~~M12a INERT docstring — MUST SURVIVE'
-'orcid~~src/services/orcid.py~~    result["name"] = f"{given} {family}".strip() or orcid_id~~    result["name"] = "Ada Lovelace"~~M1 fetch_orcid_profile returns a constant name instead of parsing person.name'
+'orcid~~src/services/orcid.py~~    """Extract name, affiliation, and email from ORCID record.~~    """Extract the name, affiliation and email from an ORCID record. [INERT EDIT]~~M12a INERT docstring — MUST SURVIVE'
+'orcid~~src/services/orcid.py~~    result["name"] = f"{given} {family}".strip() or None~~    result["name"] = "Ada Lovelace"~~M1 fetch_orcid_profile returns a constant name instead of parsing person.name'
 # M1b is the same defect as M1 with the constant chosen to equal today's expected value.
 # It is the difference between "the test reads the record" and "the test restates the
 # answer". SURVIVES the live tier (see M1b in the header above).
-'orcid~~src/services/orcid.py~~    result["name"] = f"{given} {family}".strip() or orcid_id~~    result["name"] = "Josiah Carberry"~~M1b the same hardcode, set to the value the test pins (probes whether the assertion is derived from the live record or merely restated)'
+'orcid~~src/services/orcid.py~~    result["name"] = f"{given} {family}".strip() or None~~    result["name"] = "Josiah Carberry"~~M1b the same hardcode, set to the value the test pins (probes whether the assertion is derived from the live record or merely restated)'
 # --- PubMed / NCBI (T2) ----------------------------------------------------------------
 'pubmed_both~~src/services/pubmed.py~~    """Make a rate-limited, identified GET request to NCBI, with retry.~~    """Make a rate-limited, identified GET request to NCBI E-utilities, with retry. [INERT EDIT]~~M12b INERT docstring — MUST SURVIVE'
 "pubmed_doi~~src/services/pubmed.py~~    if assigned.lower() == auth.lower():~~    if True:~~M2 reconcile_pub_doi always reports a match, so a PMID keeps whatever DOI it arrived with"

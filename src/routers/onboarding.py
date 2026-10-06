@@ -126,7 +126,7 @@ async def onboarding_start(
 async def save_profile(
     request: Request,
     email: str = Form(""),
-    research_summary: str = Form(""),
+    research_summary: str | None = Form(None),
     profile_version: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_pi_user),
@@ -134,8 +134,8 @@ async def save_profile(
     """Save profile edits from onboarding.
 
     get_pi_user, not get_current_user: this is the only writer of
-    `onboarding_complete = True` in src/ and it also creates the
-    ResearcherProfile, which together are the entire gate on
+    `onboarding_complete = True` in src/ and, when the save carries profile content, it
+    also creates the ResearcherProfile, which together are the entire gate on
     POST /agent/request. A manager reaching it would be two POSTs from a lab
     bot of its own (D7).
     """

@@ -86,7 +86,7 @@ def test_the_prompt_set_version_was_bumped():
     the run record. `role.toml` is not embedded in the synced doc, so nothing
     else pins it."""
     toml = (PROMPT.parent / "role.toml").read_text()
-    assert 'version = "1.10.0"' in toml
+    assert 'version = "1.11.0"' in toml
 
 
 def test_item_six_names_modality_and_route_accurately():

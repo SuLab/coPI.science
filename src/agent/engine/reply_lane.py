@@ -15,7 +15,7 @@ from src.agent.engine.constants import TRUNCATION_NOTICE
 from src.agent.engine.context import EngineContext, RunState, via
 from src.agent.engine.helpers import _thread_phase_label, _was_truncated
 from src.agent.engine.sidecar import _extract_slack_message, _reply_closes_thread
-from src.agent.role_capabilities import capabilities_for
+from src.agent.role_capabilities import capabilities_for, hub_role_names
 from src.agent.state import ThreadState
 from src.agent.thread_guidance import phase4_guidance
 from src.agent.tools import execute_tool, tools_for_role
@@ -650,7 +650,7 @@ class ReplyLane:
             return None
 
         thread_history = [
-            {"sender": e.sender_name, "content": e.content}
+            {"sender": e.sender_name, "sender_agent_id": e.sender_agent_id, "content": e.content}
             for e in history_entries
         ]
 
@@ -754,7 +754,12 @@ class ReplyLane:
                 # at its call site as of the Opus 5 / Sonnet 5 migration —
                 # src/agent/tools.py::_execute_consult_specialist.)
                 on_api_call=agent.record_api_call,
-                own_dois=agent.own_publication_dois,
+                own_paper_ids=agent.own_paper_ids,
+                # Read per call: the roster and the cohort gate can change mid-reply.
+                hub_agent_ids={
+                    aid: a.role for aid, a in self.agents.items() if a.role in hub_role_names()
+                },
+                allowed_sender_ids=agent.allowed_sender_ids,
             )
         return tool_executor
 

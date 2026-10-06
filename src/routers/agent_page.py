@@ -34,11 +34,14 @@ from src.services.agent_identity import derive_agent_identity
 from src.services.conversation_feed import own_or_gated, resolve_agent_gate
 from src.services.directory import MAX_PAGE
 from src.services.email import build_delegate_invitation, send_transactional_email
+from src.services.persona_lifecycle import export_after_lifecycle
 from src.services.profile_edit import (
+    NOTHING_TO_SAVE,
     apply_profile_edits,
     list_fields_from_form,
     parse_expected_version,
 )
+from src.services.profile_publish import persona_out_of_date
 from src.services.runs import latest_run_id
 from src.services.validators import is_valid_email
 from src.web.flash import flash
@@ -279,7 +282,8 @@ async def request_agent(
     onboarding_complete/profile test below is a readiness check, not an
     authorization one: a manager who acquired both (by any route, now or
     later) would otherwise walk straight through it and receive an
-    AgentRegistry row — a lab of its own, which D7 forbids.
+    AgentRegistry row — a lab of its own, which D7 forbids. The persona file is
+    written after the commit (``persona_lifecycle.export_after_lifecycle``).
     """
     if not current_user.onboarding_complete or not current_user.profile:
         raise HTTPException(status_code=400, detail="Complete your profile first")
@@ -317,6 +321,11 @@ async def request_agent(
     logger.info(
         "agent %s: requested by %s (%s)",
         agent_id, current_user.id, impersonation_note(current_user) or "direct",
+    )
+    # The lab's persona, after the commit (spec 2026-10-05 §6.4, D31); a file left at this
+    # slug by an earlier agent is archived first.
+    await export_after_lifecycle(
+        db, user_id, event="Agent requested", actor_id=user_id, replace_leftover=True,
     )
 
     return RedirectResponse(url="/agent", status_code=302)
@@ -609,25 +618,17 @@ async def edit_public_profile(
     )
 
 
-def _has_content(value) -> bool:
-    """True for a non-blank string, or a list holding one (the tag fields post
-    one hidden input per tag since Phase 1, D-16)."""
-    if isinstance(value, str):
-        return bool(value.strip())
-    return any(isinstance(v, str) and v.strip() for v in (value or []))
-
-
 @router.post("/{agent_id}/public-profile/save")
 async def save_public_profile(
     agent_id: str,
     request: Request,
-    research_summary: str = Form(""),
+    research_summary: str | None = Form(None),
     profile_version: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Save public profile changes (PI or delegate)."""
-    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user, write=True)
     if agent.status != "active":
         return RedirectResponse(url="/agent", status_code=302)
 
@@ -644,18 +645,11 @@ async def save_public_profile(
         "research_summary": research_summary,
         **list_fields_from_form(await request.form()),
     }
-    profile_exists = await db.scalar(
-        select(ResearcherProfile.id).where(ResearcherProfile.user_id == agent.user_id)
-    )
-    if profile_exists is None and not any(_has_content(v) for v in fields.values()):
-        # D-15: an all-blank first save would mint an empty ResearcherProfile; the
-        # profile job, or a save with content, creates it instead.
-        flash(request, "There is nothing to save yet — fill in at least one field.", "error")
-        return RedirectResponse(
-            url=f"/agent/{agent_id}/public-profile/edit", status_code=302
-        )
     note = impersonation_note(current_user)
-    pi_user = (await db.execute(select(User).where(User.id == agent.user_id))).scalar_one()
+    # Read before the service commits and expires the instances.
+    owner_id = agent.user_id
+    slug = agent.agent_id
+    pi_user = (await db.execute(select(User).where(User.id == owner_id))).scalar_one()
     error = await apply_profile_edits(
         db, target_user=pi_user, changed_by_user_id=current_user.id,
         form=fields,
@@ -664,6 +658,10 @@ async def save_public_profile(
         change_summary=note,
         mechanism="web_impersonated" if note else "web",
     )
+    if error == NOTHING_TO_SAVE:
+        # D-15: an all-blank first save would mint an empty ResearcherProfile.
+        flash(request, "There is nothing to save yet — fill in at least one field.", "error")
+        return RedirectResponse(url=f"/agent/{agent_id}/public-profile/edit", status_code=302)
     if error:
         return RedirectResponse(
             url=f"/agent/{agent_id}/public-profile/edit?error={error}", status_code=302,
@@ -671,10 +669,15 @@ async def save_public_profile(
 
     logger.info(
         "Public profile for agent %s updated by %s (%s)",
-        agent.agent_id, current_user.name, note or "direct",
+        slug, current_user.name, note or "direct",
     )
-
-    flash(request, "Public profile saved and exported.", "success")
+    # The file write's outcome (spec 2026-10-05 §6.4, P24): the post-commit writer records
+    # a failure on the agent row; a fresh render that differs from the file also counts.
+    if await persona_out_of_date(db, owner_id):
+        flash(request, "Public profile saved, but the persona file is out of date — staff can "
+                       "re-export it from the PI's manager page.", "error")
+    else:
+        flash(request, "Public profile saved and exported.", "success")
     return RedirectResponse(url=f"/agent/{agent_id}/public-profile", status_code=302)
 
 
@@ -701,7 +704,7 @@ async def invite_delegate(
     and ``_INVITES_PER_AGENT_PER_DAY`` invitation rows per agent in any 24 hours
     (SN-02).
     """
-    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user, write=True)
     agent = (await db.execute(
         select(AgentRegistry).where(AgentRegistry.id == agent.id)
         .with_for_update().execution_options(populate_existing=True)
@@ -836,7 +839,7 @@ async def revoke_invitation(
     current_user: User = Depends(get_current_user),
 ):
     """Revoke a pending delegate invitation."""
-    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user, write=True)
     note = impersonation_note(current_user)
     logger.info("agent %s: invitation revoke by %s (%s)", agent.agent_id, current_user.id, note or "direct")
     if not is_owner:
@@ -866,7 +869,7 @@ async def remove_delegate(
     current_user: User = Depends(get_current_user),
 ):
     """Remove an active delegate."""
-    agent, is_owner = await get_agent_with_access(agent_id, db, current_user)
+    agent, is_owner = await get_agent_with_access(agent_id, db, current_user, write=True)
     note = impersonation_note(current_user)
     if not is_owner:
         raise HTTPException(status_code=403, detail="Only the PI can manage delegates")

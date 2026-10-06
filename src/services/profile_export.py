@@ -1,6 +1,7 @@
 """Export a ResearcherProfile from the database to a markdown file for agent consumption."""
 
 import logging
+import re
 from pathlib import Path
 
 from src.models import ResearcherProfile, User
@@ -98,7 +99,10 @@ def _bullet_section(lines: list[str], title: str, items) -> None:
 
 
 def _citation(pub) -> str:
-    """One publication's citation text, with its DOI or PubMed link."""
+    """One publication's citation text and link (spec 2026-10-05 §6.3, P28): the DOI only
+    when it is verified against PubMed's record for the PMID (``doi_verified``) and fits
+    the journal; else the PubMed page; a PMID-less row keeps a DOI that fits the journal,
+    and gets no link when the DOI contradicts it."""
     parts = []
     if pub.title:
         parts.append(pub.title.rstrip("."))
@@ -107,20 +111,27 @@ def _citation(pub) -> str:
     if pub.year:
         parts.append(f"({pub.year})")
     citation = ". ".join(parts) + "."
-    # Add link — validate DOI before including
-    doi_ok = pub.doi and _validate_doi_journal(pub.doi, pub.journal)
-    if doi_ok:
+    doi_fits = bool(pub.doi) and _validate_doi_journal(pub.doi, pub.journal)
+    if doi_fits and pub.doi_verified:
         citation += f" https://doi.org/{pub.doi}"
     elif pub.pmid:
         citation += f" https://pubmed.ncbi.nlm.nih.gov/{pub.pmid}/"
-    elif pub.doi:
-        # DOI failed validation but no PMID fallback — include anyway
+    elif doi_fits:
         citation += f" https://doi.org/{pub.doi}"
     return citation
 
 
+def _escape_heading_lines(text: str) -> str:
+    """``text`` with a backslash before the ``#`` of every line whose first non-blank
+    character is ``#`` (indentation kept), so a Research Summary cannot open a persona
+    section for any parser (spec 2026-10-05 D49)."""
+    return re.sub(r"(?m)^([ \t]*)#", r"\1\\#", text)
+
+
 def _publication_lines(publications: TenureScopedPublications | None) -> list[str]:
-    """Recent Publications section (up to 20, publication_sort_key order); empty when none."""
+    """Recent Publications section (up to 20, publication_sort_key order); empty when none.
+    Each line ends with its link (``_citation``) and, where the row has a PMID,
+    ``(PMID n)`` (D49)."""
     if not publications:
         return []
     sorted_pubs = sorted([p for p in publications if p.title], key=publication_sort_key)[:20]
@@ -128,7 +139,11 @@ def _publication_lines(publications: TenureScopedPublications | None) -> list[st
         return []
     lines = ["## Recent Publications\n"]
     for pub in sorted_pubs:
-        lines.append(f"- {_citation(pub)}")
+        line = f"- {_citation(pub)}"
+        pmid = str(pub.pmid or "").strip()
+        if pmid.isdigit():
+            line += f" (PMID {pmid})"
+        lines.append(line)
     lines.append("")
     return lines
 
@@ -142,13 +157,13 @@ def render_profile_markdown(
 ) -> str:
     """Render the exported markdown. Section order is part of the bot-facing contract:
     header, Research Summary, the tag sections, Recent Publications, Active Grants, Past
-    Grants (since <year>)."""
+    Grants (since <year>). A summary line starting with ``#`` is written ``\\#``."""
     _check_inputs(publications, grants)
     lines = _header_lines(user)
 
     if profile.research_summary:
         lines.append("## Research Summary\n")
-        lines.append(profile.research_summary)
+        lines.append(_escape_heading_lines(profile.research_summary))
         lines.append("")
 
     _bullet_section(lines, "Key Methods and Technologies", profile.techniques)
@@ -187,6 +202,7 @@ _DOI_PUBLISHER_PATTERNS: dict[str, list[str]] = {
     "10.1101/gad": ["genes & development", "genes and development", "genes dev"],
     "10.1101/gr.": ["genome research"],
     "10.1101/sqb": ["cold spring harbor symposia"],
+    "10.1101/pdb": ["cold spring harbor protocols"],
     "10.1101/lm": ["learning & memory", "learning and memory"],
     "10.1101/": ["biorxiv", "medrxiv", "preprint"],
     "10.1074/jbc": ["journal of biological chemistry"],

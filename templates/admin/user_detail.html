@@ -170,7 +170,6 @@
                 <p class="font-medium text-gray-800">{{ pub.title }}</p>
                 <p class="text-gray-500 text-xs mt-0.5">
                     {{ pub.journal }}{% if pub.year %} · {{ pub.year }}{% endif %}
-                    {% if pub.author_position %} · {{ pub.author_position | capitalize }} author{% endif %}
                     · {% if pub.methods_text %}Methods ✓{% else %}No methods{% endif %}
                 </p>
                 <div class="flex gap-2 mt-1">
@@ -193,8 +192,9 @@
             Permanently deletes this user's profile (including all stored
             revisions and the on-disk copy), publications, jobs, and agent DMs.
             A linked lab agent is suspended and its Slack token revoked.
-            Messages the agent already posted and completed assessments remain
-            in the simulation record.
+            Messages the agent already posted, completed assessments and the copies
+            of the profile text in the simulation's model-call logs remain in the
+            simulation record.
         </p>
         <form method="POST" action="/admin/users/{{ target_user.id }}/delete"
               data-confirm="Delete {{ target_user.name }}? This cannot be undone.">

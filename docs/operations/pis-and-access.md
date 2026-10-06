@@ -21,19 +21,35 @@ deliberate: the job and the agent row commit together, so the worker can never
 run the pipeline before the row exists — the old seed-then-create-row order
 lost the markdown export and revision every time. The profile job runs the **corpus
 pipeline** (`src/services/corpus.py`: ORCID + OpenAlex + PubMed-by-ORCID +
-name-affiliation search, identity-gated, consortium-excluded, year-ranked,
-50-cap last) and the synthesis/export are tenure-filtered
+name-affiliation search, identity-gated, consortium-excluded, year-ranked; every ORCID-anchored find (ORCID works or PubMed's ORCID field) is stored, uncapped, while finds from OpenAlex or the name+affiliation search alone wait as candidates for staff review) and the synthesis/export are tenure-filtered
 (`src/services/jhu_rules.py`; per-user `app_settings` keys, with the legacy
 agent_id map still read as fallback — its 62 curated entries were migrated in
 2026-08). A wrong or missing tenure year is correctable on the manager
 Edit Profile form ("JHU tenure start"). A corpus-stage failure FAILS the job
 (retry ×3, waiting 4 then 16 minutes between attempts → dead, visible on /admin/jobs, the PI detail page and, with a Try Again button, the PI's onboarding page) instead of
-storing a thin ORCID-only profile. A tenure year derived from papers after an ORCID failure or with an incomplete corpus is kept provisionally (app_settings key `jhu_tenure_provisional:{user_id}`), so later profile edits export with the same scoping as the pipeline; the next healthy run replaces or deletes it. Every enqueue goes through `src/services/profile_jobs.py`, so a double click or Add-PI followed by an approval runs one pipeline, not two. **Activation is gated**: `admin_approve_agent`
+storing a thin ORCID-only profile. A tenure year derived from papers after an ORCID failure or with an incomplete corpus is kept provisionally (app_settings key `jhu_tenure_provisional:{user_id}`), so later profile edits export with the same scoping as the pipeline; the next healthy run replaces or deletes it. A search that hit its page cap counts as incomplete the same way, and only ORCID-anchored papers date tenure. A tenure-year change on the manager form regenerates the profile (`generate_profile`), whose step 10 refreshes grants, industry evidence and companies. A synthesis that fails, is refused or returns something unusable fails the job (retry ×3, then dead) and leaves the stored profile alone; a PI whose name is an ORCID iD is refused at once (fix the name, then Regenerate). Every enqueue goes through `src/services/profile_jobs.py`, so a double click or Add-PI followed by an approval runs one pipeline, not two. **Activation is gated**: `admin_approve_agent`
 refuses to flip a `pi_lab` agent to `active` — through the approve button OR
-the status dropdown — when its profile is missing/ungrounded or its newest
+the status dropdown — when its profile is missing, ungrounded or has no Research Summary, or its newest
 generation job is dead, unless the logged "activate anyway" override is
-checked (`src/services/agent_activation.py`). The CLI `seed-profiles` path
+checked; and, override or not, when the persona file `profiles/public/<slug>.md` is missing or has no Research Summary, or the owner's role may not use the PI surfaces (`src/services/agent_activation.py`, `persona_blockers`). Every activation path applies the same gate (admin approve and status dropdown, manager Activate, manager unmute, an active agent's role change). The CLI `seed-profiles` path
 below still works but creates NO agent row and derives NO tenure entry.
+
+**Paper review, drafts and Regenerate** (manager PI page, staff only; spec 2026-10-05 §6.3).
+*Candidate papers* lists finds without an ORCID anchor: Accept stores the paper (fetched
+from PubMed) as `manual`, Reject keeps it out for good. *Unanchored papers* lists stored
+rows the resolver no longer returns with an anchor (`provenance = 'unanchored'`): Keep marks
+them `manual`, Exclude hides them from synthesis, the persona, RePORTER linking, discovery
+and industry scans (the row is kept; excluded rows are listed collapsed, with a staff Restore).
+A regeneration of a profile a person edited since
+its last generation (`researcher_profiles.human_edited_at`) does not overwrite it: the
+synthesis waits as a *Pending draft* with a field diff; Accept writes it (refused if the
+profile changed since, or while a generation runs), Discard drops it. *Regenerate* queues
+a generation for any profile (not while one runs, nor within an hour of the last one). When
+the post-commit persona write fails (`agents.persona_export_failed_at`) or the file differs
+from a fresh render, the page says "Persona file out of date" and offers Re-export. Stored
+rows' title, abstract, journal, year and PMCID follow PubMed on every run, except `manual`
+rows. The export links a DOI only when it matches PubMed's record for the PMID
+(`publications.doi_verified`), else the PubMed page.
 
 **The manager's whole path, 2026-10-05.** On `/manager/pis/{id}` a manager then
 presses **Install Slack bot** (Slack app + OAuth, token saved on the row) and
@@ -62,6 +78,8 @@ the ORCID iD an ORCID record with a private name yields) falls back to `pi` + th
 iD's last four digits. Slack restricts bot display names to ASCII, and the
 `[a-z0-9_-]` slug checks in `src/agent/tools.py`, `user_deletion` and
 `pi_companies` refused the accented slugs the old derivation produced.
+
+**Editing a profile and the persona file (2026-10-06).** Every profile form posts the profile's version; a post without one over an existing profile is refused ("reload the page"), so a form opened before the first generation finished can no longer blank it. A field the form does not carry is left alone. A human edit is checked only where it changes something: a name must pass the D60 allowlist (letters of any script, spaces, `. , - ' ’`, at most 100 characters) and is copied to `agents.pi_name` (a running engine picks it up at the next roster poll; the Slack app's display name is not renamed); the summary is limited to 350 words and 20,000 characters (including a single whitespace-free token), each tag list to 30 items of at most 200 characters with no line break or leading `#` (`src/services/profile_limits.py`). Saving the same edit twice shows success. The manager's Edit Profile form appears once a profile exists. Creating, requesting, linking, renaming and activating an agent publish its persona after the commit (revision mechanism `lifecycle_export`); a file already at a new or relinked agent's slug is moved to `profiles/private/orphaned/`. `scripts/persona_file_audit.py --check` lists agents whose owner has a profile but whose file is missing or summary-less, and persona files with no agent row; `--archive-orphans --apply` and `--reexport-missing --apply` repair them. The manager PI page lists the persona's revisions (staff only) and labels a provisional tenure year.
 
 The `generate_profile` job now enqueues two follow-on jobs of its own,
 `enrich_grants` and `industry_evidence`, which run on the worker independently
@@ -99,11 +117,19 @@ routes below. OpenAlex is keyless here: 1000 credits/day per IP (`x-ratelimit-li
 reset at 00:00 UTC; a spent budget makes OpenAlex unavailable for that run while the other
 sources still refresh. Re-run every PI through `scripts/_bulk_enqueue.py`: the worker
 reads OpenAlex's free meter (a singleton lookup costs nothing) before each BULK job that
-spends credits and defers it to 00:00 UTC once it would eat into the 10% reserve kept for
-org1 (`src/services/openalex_budget.py`; an unreadable meter falls back to one job per
-fixed slot); `--fixed-schedule` staggers the jobs instead. `scripts/enqueue_enrichment.py` backfills both jobs for PIs who
+spends credits and defers it to 00:00 UTC once its estimate exceeds the available free
+credits. Charged requests and retries check the meter too, because the uncapped corpus
+can exceed a job's admission estimate. The owner removed the shared-budget reservation:
+Blackbird may use the whole free daily budget, never prepaid credits
+(`src/services/openalex_budget.py`; an unreadable meter falls back to one job per fixed
+slot). `--fixed-schedule` staggers the jobs instead. `scripts/enqueue_enrichment.py` backfills both jobs for PIs who
 predate this feature — it previews by default, needs `--apply` to enqueue for real, and
 takes `--only grants` / `--only industry` and `--orcid` to scope a run.
+
+Inline corpus audit/repair and tenure-rederivation scripts require a readable free
+meter and report deferred work as incomplete; they do not persist worker jobs for a
+later slot. The final corpus verifier also fails if any live resolve fails: newly
+indexed unstored papers are warnings, but unavailable coverage is not a passing check.
 
 Company discovery (`company_discovery`) runs after every successful profile generation (a
 request while one runs flags a rerun) and on Find companies. Its Claude extraction of
@@ -330,7 +356,7 @@ refused under impersonation (403), as are account deletions. Writes on the agent
 page (`/agent/*`) made while impersonating are attributed to the impersonated
 user, with `impersonated by admin <uuid>` in the log line; a public-profile save
 records its revision with mechanism `web_impersonated` and that note as the
-change summary.
+change summary. A role change that would take the PI surfaces away (to `manager` or `reviewer`) is refused, on `/admin/users/{id}` and by `role:set`, while the account owns an `active`, `pending` or `inactive` agent: suspend the agent first (`src/services/user_roles.py`). An agent page write also needs the PI surfaces (`get_agent_with_access(..., write=True)`).
 
 **Exclude `manager`, never "non-PI".** An admin is not a `pi` either, and admins keep
 the PI surfaces (`base.html` still offers them My Profile / My Agent), so a `!= 'pi'`
@@ -441,7 +467,7 @@ pasted there by mistake is never revoked. The agent ROW is kept: it is
 the record behind old messages and assessments, and its `agent_id` slug stays
 reserved. Deliberately retained: `agent_messages`, `llm_call_logs`,
 assessments, and everything already posted to Slack — both confirmation pages
-say so.
+say so. The simulation's `llm_call_logs` keep the persona text the bots were sent (D35); both deletion pages say so.
 
 Guards: an impersonating admin cannot trigger the self-service delete (403);
 the last loginable admin cannot self-delete; the admin form has a

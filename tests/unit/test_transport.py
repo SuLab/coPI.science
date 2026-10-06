@@ -36,7 +36,7 @@ class TestNullTransport:
     def test_channel_create_uses_a_local_id(self):
         t = NullTransport("su")
         assert t.create_channel("general") == {"id": "local:general", "name": "general"}
-        assert t.join_channel("local:x") is None
+        assert t.join_channel("local:x") is True
 
     def test_inbound_polls_return_empty(self):
         t = NullTransport("su")
@@ -292,7 +292,7 @@ class TestSlackOffPostTurn:
     NullTransport had no ajoin_channel, and never reached Phase 5."""
 
     def test_null_transport_has_an_async_no_op_join(self):
-        assert asyncio.run(NullTransport("su").ajoin_channel("local:general")) is None
+        assert asyncio.run(NullTransport("su").ajoin_channel("local:general")) is True
 
     def test_a_slack_off_post_turn_reaches_phase5(self, monkeypatch, tmp_path):
         from src.agent.agent import Agent

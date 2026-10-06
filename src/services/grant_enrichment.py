@@ -43,6 +43,7 @@ from src.services.profile_publish import (
     reexport_persona,
     schedule_persona_write,
 )
+from src.services.tenure_scope import publication_in_use
 
 if TYPE_CHECKING:
     from src.worker.main import JobContext
@@ -179,7 +180,8 @@ async def resolve_grants(db: AsyncSession, user: User,
     cores = sorted({core for c in found.values() for core in c.cores})
     links = await publications_for_cores(cores)
     corpus = {p for (p,) in (await db.execute(select(Publication.pmid).where(
-        Publication.user_id == user.id, Publication.pmid.isnot(None)))).all()}
+        Publication.user_id == user.id, Publication.pmid.isnot(None),
+        publication_in_use()))).all()}
     result = resolve_identity(found, links, corpus)
     if result.status != "resolved":
         return GrantOutcome(result.status, result.accepted_profile_ids, result.candidates,

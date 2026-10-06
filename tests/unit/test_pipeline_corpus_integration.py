@@ -2,13 +2,14 @@
 
 Pins the audited behaviors end to end against a real database:
 
-* a NEW PI's corpus is stored full-career (top-50 by recency — matching the 62
-  existing PIs' storage semantics) while synthesis and export are
-  tenure-filtered;
+* a NEW PI's corpus is stored full-career (every ORCID-anchored record of the
+  uncapped resolve) while synthesis and export are tenure-filtered;
 * a corpus-stage failure raises (job retry) and persists NO tenure entry;
 * an EXISTING PI's stored rows are never deleted; additions come only from
   ORCID-anchored stages (S4-only candidates are flagged for review, not
-  stored); the cap is respected; and the EXPORT is tenure-filtered against the
+  stored); anchored additions are uncapped; unanchored ones become candidates;
+  rows staff excluded are neither synthesized nor exported; and the EXPORT is
+  tenure-filtered against the
   full-career store — the exact regression that put pre-tenure papers into 9
   agents' prompts on 2026-08-14 (audit H3);
 * tenure derivation: ORCID employment year first, else earliest paper the PI
@@ -19,6 +20,10 @@ Pins the audited behaviors end to end against a real database:
   Hopkins paper;
 * the paper tier reads ``CorpusResult.ranked`` (pre-cap), so an earliest
   Hopkins paper outside the newest 50 still dates tenure;
+* a truncated resolve keeps a paper-derived tenure year provisional;
+* step-5 PMCIDs are saved and tags are cut to the D24 limits before storing;
+* the synthesis context's institution comes from the user record (G-9), and
+  flagged records with nothing kept read as ``identity_unmatched``;
 * the ``corpus_flagged`` progress text names each flag's actual reason.
 """
 
@@ -183,7 +188,8 @@ async def test_new_pi_stores_full_career_but_synthesizes_and_exports_in_tenure(
 
 async def test_a_duplicate_pmid_in_kept_stores_one_row_not_a_job_failure(db_session, wired):
     """Correction 9: ``uq_publications_user_pmid`` (0056) makes a second row for the
-    same pmid an IntegrityError; ``_store`` keeps the first occurrence instead."""
+    same pmid an IntegrityError; storage (``corpus_additions.apply_corpus_result``)
+    keeps the first occurrence instead."""
     user, _agent, job = await _make_pi(db_session)
     first, second = _rec(1, 2020, "First copy"), _rec(1, 2019, "Second copy")
     wired.corpus = _uncapped([first, second, _rec(2, 2018, "Other paper")])
@@ -437,27 +443,110 @@ async def test_existing_pi_rows_are_never_deleted_and_s4_only_adds_are_flagged(
     )
 
 
-async def test_the_cap_is_respected_for_an_existing_pi(db_session, wired, monkeypatch):
+async def test_anchored_additions_beyond_the_old_cap_are_stored(db_session, wired, monkeypatch):
     monkeypatch.setattr(profile_pipeline, "CORPUS_CAP", 2)
     user, agent, job = await _make_pi(db_session)
     for pmid, year in [(10, 2019), (11, 2020)]:
-        db_session.add(
-            Publication(user_id=user.id, pmid=str(pmid), title=f"P{pmid}",
-                        abstract="A.", year=year)
-        )
+        db_session.add(Publication(user_id=user.id, pmid=str(pmid), title=f"P{pmid}",
+                                   abstract="A.", year=year))
     await db_session.flush()
-
-    wired.corpus = CorpusResult(
-        kept=[_rec(12, 2021, "Would exceed the cap", stages=("s3",))],
-        flagged=[],
-    )
+    wired.corpus = _uncapped([_rec(12, 2021, "Beyond the old cap", stages=("s3",))])
 
     await run_profile_pipeline(user.id, db_session, job.id)
 
     stored = (await db_session.execute(
-        select(Publication).where(Publication.user_id == user.id)
-    )).scalars().all()
-    assert sorted(p.pmid for p in stored) == ["10", "11"]
+        select(Publication).where(Publication.user_id == user.id))).scalars().all()
+    assert sorted(p.pmid for p in stored) == ["10", "11", "12"]
     await db_session.refresh(job)
-    steps = {p["step"] for p in job.payload.get("progress", [])}
-    assert "corpus_cap_reached" in steps
+    assert "corpus_cap_reached" not in {p["step"] for p in job.payload.get("progress", [])}
+
+
+async def test_unanchored_finds_become_pending_candidates(db_session, wired):
+    from src.models import PublicationCandidate
+
+    user, _agent, job = await _make_pi(db_session)
+    wired.corpus = _uncapped([_rec(1, 2020, "Anchored"), _rec(2, 2021, "S4 only", stages=("s4",))])
+    await run_profile_pipeline(user.id, db_session, job.id)
+    [cand] = (await db_session.execute(select(PublicationCandidate).where(
+        PublicationCandidate.user_id == user.id))).scalars().all()
+    assert (cand.pmid, cand.status) == ("2", "pending")
+
+
+async def test_excluded_rows_are_not_synthesized_or_exported(db_session, wired):
+    from datetime import UTC, datetime
+
+    user, _agent, job = await _make_pi(db_session)
+    db_session.add(Publication(user_id=user.id, pmid="50", title="Excluded paper",
+                               abstract="A.", year=2022, excluded_at=datetime.now(UTC)))
+    await db_session.flush()
+    wired.corpus = _uncapped([_rec(1, 2020, "Kept paper")])
+    await run_profile_pipeline(user.id, db_session, job.id)
+    assert "Excluded paper" not in wired.contexts[0]
+    assert "Excluded paper" not in (wired.export_dir / "green.md").read_text()
+
+
+async def test_a_truncated_resolve_keeps_a_paper_year_provisional(db_session, wired):
+    user, _agent, job = await _make_pi(db_session)
+    corpus = _uncapped([_rec(1, 2015, "First Hopkins paper", hopkins_pi=True)])
+    corpus.truncated_stages = ["s4"]
+    wired.corpus = corpus
+    await run_profile_pipeline(user.id, db_session, job.id)
+    assert await get_tenure_start(db_session, user.id) is None, "provisional, not recorded"
+
+
+async def test_step5_pmcids_are_saved(db_session, wired, monkeypatch):
+    user, _agent, job = await _make_pi(db_session)
+
+    async def pmcids(pmids):
+        return {"1": "PMC123"}
+
+    monkeypatch.setattr(profile_pipeline, "convert_pmids_to_pmcids", pmcids)
+    monkeypatch.setattr(profile_pipeline, "fetch_pmc_methods", lambda pmcid: _none())
+    wired.corpus = _uncapped([_rec(1, 2020, "Paper")])
+    await run_profile_pipeline(user.id, db_session, job.id)
+    row = (await db_session.execute(select(Publication).where(
+        Publication.user_id == user.id, Publication.pmid == "1"))).scalar_one()
+    assert row.pmcid == "PMC123"
+
+
+async def _none():
+    return None
+
+
+async def test_tags_are_cut_to_the_limits_before_storing(db_session, wired, monkeypatch):
+    long_synth = dict(_SYNTH, techniques=["#CRISPR\nscreens", "y" * 300, "RNA-seq", "cryo-EM",
+                                          *[f"t{i}" for i in range(40)]])
+
+    async def synth(context, name):
+        return dict(long_synth)
+
+    monkeypatch.setattr(profile_pipeline, "synthesize_profile", synth)
+    user, _agent, job = await _make_pi(db_session)
+    wired.corpus = _uncapped([_rec(1, 2020, "Paper")])
+    profile = await run_profile_pipeline(user.id, db_session, job.id)
+    assert profile.techniques[0] == "CRISPR screens" and len(profile.techniques[1]) == 200
+    assert len(profile.techniques) == 30
+
+
+async def test_the_synthesis_context_takes_the_institution_from_the_user_record(db_session, wired):
+    # G-9: the user record (institution "Johns Hopkins University", staff-correctable)
+    # names the institution, not ORCID's. (Step 1 still fills an EMPTY user department
+    # from ORCID, so the department is not part of this check.)
+    user, _agent, job = await _make_pi(db_session)
+    wired.profile["institution"] = "Elsewhere Institute"
+    wired.corpus = _uncapped([_rec(1, 2020, "Paper")])
+    await run_profile_pipeline(user.id, db_session, job.id)
+    context = wired.contexts[0]
+    assert "- Institution: Johns Hopkins University" in context
+    assert "Elsewhere Institute" not in context
+
+
+async def test_flagged_records_and_none_kept_read_as_identity_unmatched(db_session, wired):
+    user, _agent, job = await _make_pi(db_session)
+    flagged = [{"pmid": "71", "reason": "no_individual_author_match", "title": "A", "stages": ["s2"]},
+               {"pmid": "72", "reason": "bare_initial_unconfirmed", "title": "B", "stages": ["s4"]}]
+    wired.corpus = CorpusResult(kept=[], flagged=flagged)
+    profile = await run_profile_pipeline(user.id, db_session, job.id)
+    assert profile.evidence_flagged_count == len(flagged)
+    assert (profile.evidence_pmid_count, profile.evidence_pub_count) == (0, 0)
+    assert profile.evidence_state == "identity_unmatched"

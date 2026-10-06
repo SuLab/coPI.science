@@ -28,9 +28,11 @@ recorded (``src/services/profile_pipeline.py``, the tenure block):
    identity-gated corpus, not the ``CORPUS_CAP``-capped ``kept``, whose newest
    50 can miss the earliest Hopkins paper — source ``earliest_hopkins_paper``;
    any corpus exception skips the PI, no write, and so does a corpus that
-   returned with ``permanently_dropped`` records (reason ``incomplete_corpus``:
-   any of them could be the earliest Hopkins paper, which is the very error
-   this script corrects);
+   returned with ``permanently_dropped`` records or a search that stopped at its
+   cap (``truncated_stages``; reason ``incomplete_corpus``: any missing record
+   could be the earliest Hopkins paper, which is the very error this script
+   corrects). ``derive_start_from_papers`` counts only ORCID-anchored records
+   (stage s1 or s3), as the pipeline does;
 4. no year at all: reported, left as it is. Nothing is ever deleted.
 
 A row is CHANGED only when the re-derived year differs from the stored one; a
@@ -106,13 +108,14 @@ from sqlalchemy import exists, select, update  # noqa: E402
 
 from src.database import get_session_factory  # noqa: E402
 from src.models import AppSetting, Job, User  # noqa: E402
-from src.services import orcid, pubmed  # noqa: E402
+from src.services import openalex_budget, orcid, pubmed  # noqa: E402
 from src.services.corpus import CorpusStageError, resolve_corpus  # noqa: E402
 from src.services.jhu_rules import (  # noqa: E402
     TENURE_KEY_PREFIX,
     derive_employment_start,
     derive_start_from_papers,
 )
+from src.services.job_queue import JobDeferred  # noqa: E402
 from src.services.orcid import fetch_orcid_profile  # noqa: E402
 from src.services.profile_jobs import enqueue_profile_job_if_absent  # noqa: E402
 from src.services.profile_pipeline import CORPUS_CAP  # noqa: E402
@@ -266,9 +269,14 @@ async def rederive(candidate: Candidate) -> Outcome:
     name = candidate.name or orcid_profile.get("name")
     institution = candidate.institution or orcid_profile.get("institution")
     try:
-        corpus = await resolve_corpus(
-            candidate.orcid, name, institution, cap=CORPUS_CAP
-        )
+        with openalex_budget.bulk_requests():
+            await openalex_budget.check_inline_corpus_budget()
+            corpus = await resolve_corpus(
+                candidate.orcid, name, institution, cap=CORPUS_CAP
+            )
+    except JobDeferred as exc:
+        outcome.skip_reason = f"openalex_budget_deferred: {exc}"
+        return outcome
     except CorpusStageError as exc:
         outcome.skip_reason = f"corpus_stage_failed: {exc}"
         return outcome
@@ -283,6 +291,15 @@ async def rederive(candidate: Candidate) -> Outcome:
         outcome.skip_reason = (
             f"incomplete_corpus: {len(corpus.permanently_dropped)} records "
             f"permanently unavailable ({sample}) (row left as it is)"
+        )
+        return outcome
+
+    if corpus.truncated_stages:
+        # A search that stopped at its cap discards the OLDEST hits, exactly
+        # where the earliest Hopkins paper would be.
+        outcome.skip_reason = (
+            f"incomplete_corpus: search capped at {', '.join(corpus.truncated_stages)} "
+            "(row left as it is)"
         )
         return outcome
 
@@ -393,6 +410,7 @@ async def run(
 
     Under ``apply`` a change to a LATER year is skipped (``later_than_stored``)
     unless ``allow_later``; the preview only marks it ``LATER (suspect)``.
+    Budget-deferred coverage returns nonzero, even if other rows were repaired.
     """
     if apply and not allow_unmounted_backup_dir and not os.path.ismount(backup_dir):
         print(
@@ -418,6 +436,8 @@ async def run(
     for key, reason in unparseable:
         print(f"{key}  SKIP {reason} (row left as it is)")
     changes = [o for o in outcomes if o.changed]
+    incomplete = any((o.skip_reason or "").startswith("openalex_budget_deferred:")
+                     for o in outcomes)
     skipped = sum(1 for o in outcomes if o.skip_reason is not None)
     print(
         f"candidates={len(outcomes)} changes={len(changes)} "
@@ -425,7 +445,7 @@ async def run(
     )
     if not apply:
         print("Preview only: nothing written, nothing queued. Re-run with --apply.")
-        return 0
+        return int(incomplete)
     if len(changes) > max_changes:
         print(
             f"ABORT: {len(changes)} changes exceed --max-changes={max_changes}; "
@@ -434,7 +454,7 @@ async def run(
         return 2
     if not changes:
         print("Nothing to change; no backup written.")
-        return 0
+        return int(incomplete)
 
     # Fix the exact values before the backup, so the backup records what is
     # written and ``--restore`` can tell a row this run wrote from a later edit.
@@ -486,7 +506,7 @@ async def run(
         f"profile_jobs_queued_behind_processing={behind_processing} "
         f"profile_jobs_already_pending={already_pending}"
     )
-    return 0
+    return int(incomplete)
 
 
 def _is_tenure_value(raw: object) -> bool:

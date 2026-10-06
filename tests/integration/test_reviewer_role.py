@@ -176,7 +176,7 @@ async def test_a_reviewer_cannot_save_a_pi_profile(client, db_session):
     # Control: the same request from a PI must still do all of that.
     pi = await factories.make_user(db_session, user_role=USER_ROLE_PI, name="Percy Pi Two")
     await db_session.flush()
-    pi_form = {**_save_profile_form(pi), "email": "pi-rewrote-this-too@example.edu"}
+    pi_form = {**_save_profile_form(pi, None), "email": "pi-rewrote-this-too@example.edu"}
     r2 = await client.post("/profile/save", data=pi_form, headers=auth_headers(pi.id))
     assert r2.status_code == 302, "POST /profile/save refused a PI"
     assert await db_session.scalar(
@@ -258,6 +258,15 @@ REVIEWER_MANAGER_EXPECTATIONS = {
     ("POST", "/manager/pis/{user_id}/companies/{company_id}/delete"): 403,
     ("POST", "/manager/pis/{user_id}/companies/{company_id}/confirm"): 403,
     ("POST", "/manager/pis/{user_id}/companies/{company_id}/reject"): 403,
+    ("POST", "/manager/pis/{user_id}/candidates/{candidate_id}/accept"): 403,
+    ("POST", "/manager/pis/{user_id}/candidates/{candidate_id}/reject"): 403,
+    ("POST", "/manager/pis/{user_id}/publications/{publication_id}/keep"): 403,
+    ("POST", "/manager/pis/{user_id}/publications/{publication_id}/exclude"): 403,
+    ("POST", "/manager/pis/{user_id}/publications/{publication_id}/restore"): 403,
+    ("POST", "/manager/pis/{user_id}/draft/accept"): 403,
+    ("POST", "/manager/pis/{user_id}/draft/discard"): 403,
+    ("POST", "/manager/pis/{user_id}/regenerate"): 403,
+    ("POST", "/manager/pis/{user_id}/persona/reexport"): 403,
 }
 
 # What each write route needs in its POST body to get PAST FastAPI's own
@@ -284,6 +293,15 @@ _REVIEWER_POST_BODIES = {
     "/manager/pis/{user_id}/companies/{company_id}/delete": None,
     "/manager/pis/{user_id}/companies/{company_id}/confirm": None,
     "/manager/pis/{user_id}/companies/{company_id}/reject": None,
+    "/manager/pis/{user_id}/candidates/{candidate_id}/accept": None,
+    "/manager/pis/{user_id}/candidates/{candidate_id}/reject": None,
+    "/manager/pis/{user_id}/publications/{publication_id}/keep": None,
+    "/manager/pis/{user_id}/publications/{publication_id}/exclude": None,
+    "/manager/pis/{user_id}/publications/{publication_id}/restore": None,
+    "/manager/pis/{user_id}/draft/accept": None,
+    "/manager/pis/{user_id}/draft/discard": None,
+    "/manager/pis/{user_id}/regenerate": None,
+    "/manager/pis/{user_id}/persona/reexport": None,
 }
 
 
@@ -314,6 +332,8 @@ async def test_reviewer_manager_surface_is_exactly_the_read_slice(client, db_ses
         "funding_id": str(uuid.uuid4()),
         "evidence_id": str(uuid.uuid4()),
         "company_id": str(uuid.uuid4()),
+        "candidate_id": str(uuid.uuid4()),
+        "publication_id": str(uuid.uuid4()),
     }
 
     live_routes = set()
@@ -388,6 +408,7 @@ async def test_reviewer_pi_detail_is_read_only(client, db_session):
 async def test_manager_still_sees_the_edit_form(client, db_session):
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)
+    await factories.make_profile(db_session, user=pi)
     body = (await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(mgr.id))).text
     assert f'action="/manager/pis/{pi.id}/profile"' in body
     assert 'name="jhu_tenure_start"' in body

@@ -149,6 +149,20 @@ def _companies_files_off_the_live_mount(monkeypatch, tmp_path):
     monkeypatch.setattr(user_deletion, "_COMPANIES_DIR", target)
 
 
+@pytest.fixture(autouse=True)
+def _persona_files_off_the_live_mount(monkeypatch, tmp_path):
+    """No test may write, archive or delete persona files in the checkout's profiles/ (the
+    live mount on the host): agent creation, link and activation now publish the persona
+    (spec 2026-10-05 §6.4). A test that sets PROFILES_DIR itself still wins (it patches
+    after this fixture)."""
+    from src.services import persona_lifecycle, profile_export, user_deletion
+
+    public = tmp_path / "public-autouse"
+    monkeypatch.setattr(profile_export, "PROFILES_DIR", public)
+    monkeypatch.setattr(user_deletion, "_PUBLIC_DIR", public)
+    monkeypatch.setattr(persona_lifecycle, "ORPHANED_DIR", tmp_path / "orphaned-autouse")
+
+
 @pytest_asyncio.fixture
 async def progress_on_test_connection(db_session):
     """Route job_progress.record through a second session on the test's own

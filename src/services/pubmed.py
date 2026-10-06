@@ -555,13 +555,19 @@ def _parse_pubmed_xml(xml_text: str) -> list[dict[str, Any]]:
         journal_el = article.find(".//Journal/Title")
         record["journal"] = journal_el.text if journal_el is not None else None
 
-        # Year
+        # Year: PubDate/Year, else the leading year of a MedlineDate ("1998 Dec-1999 Jan",
+        # G-12), which PubMed uses for seasonal and multi-month issues.
         year_el = article.find(".//PubDate/Year")
+        medline_el = article.find(".//PubDate/MedlineDate")
         if year_el is not None and year_el.text:
             try:
                 record["year"] = int(year_el.text)
             except ValueError:
                 pass
+        elif medline_el is not None and medline_el.text:
+            match = re.match(r"\s*(\d{4})\b", medline_el.text)
+            if match:
+                record["year"] = int(match.group(1))
 
         # Article type
         pub_types = [
@@ -974,37 +980,16 @@ def _extract_methods_section(xml_text: str) -> str | None:
     block entirely. Nothing is asserted, so there is nothing to correct — and
     ``fetch_pmc_methods`` wraps this in ``except Exception -> None`` anyway, so
     raising would change no observable behaviour.
+
+    PMC's efetch XML carries no JATS namespace, so only unnamespaced ``<sec>``
+    titles containing "method" are matched (the namespaced exact-title tiers never
+    fired and were removed, spec 2026-10-05 D46).
     """
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError:
         return None
 
-    methods_keywords = {
-        "methods",
-        "materials and methods",
-        "experimental procedures",
-        "experimental methods",
-        "methods and materials",
-        "star methods",
-        "method details",
-    }
-
-    # Look for sections with methods-like titles
-    for sec in root.findall(".//{http://jats.nlm.nih.gov}sec"):
-        title_el = sec.find("{http://jats.nlm.nih.gov}title")
-        if title_el is not None and title_el.text:
-            if title_el.text.lower().strip() in methods_keywords:
-                return _extract_text(sec)
-
-    # Fallback: any <sec> with title containing "method"
-    for sec in root.findall(".//{http://jats.nlm.nih.gov}sec"):
-        title_el = sec.find("{http://jats.nlm.nih.gov}title")
-        if title_el is not None and title_el.text:
-            if "method" in title_el.text.lower():
-                return _extract_text(sec)
-
-    # Try without namespace
     for sec in root.findall(".//sec"):
         title_el = sec.find("title")
         if title_el is not None and title_el.text:

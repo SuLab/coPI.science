@@ -57,7 +57,7 @@ class TestExtractDois:
 
 class TestCitesOwnPaper:
     def test_detects_own_doi(self, agent_with_pub):
-        assert agent_with_pub.own_publication_dois == {SCOPE_DOI}
+        assert agent_with_pub.own_paper_ids == {SCOPE_DOI}
         assert agent_with_pub.cites_own_paper(
             f"Paper — SCOPE method <https://doi.org/{SCOPE_DOI}>"
         )
@@ -71,7 +71,7 @@ class TestCitesOwnPaper:
         (tmp_path / "public").mkdir()
         (tmp_path / "public" / "schultz.md").write_text("Genetic code expansion lab. No DOIs listed.")
         agent = Agent(agent_id="schultz", bot_name="SchultzBot", pi_name="Peter Schultz")
-        assert agent.own_publication_dois == set()
+        assert agent.own_paper_ids == set()
         assert not agent.cites_own_paper(f"cites {SCOPE_DOI}")
 
 

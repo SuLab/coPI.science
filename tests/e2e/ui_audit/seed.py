@@ -16,6 +16,7 @@ import sys
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from tests.e2e.ui_audit.env import DB_NAME
 
@@ -40,6 +41,46 @@ P3_GATING_RATIONALES = {
 }
 P3_RISK_BODY = "the lab's prior IP was licensed to a partner; the license terms would resolve it."
 P3_COMPANIES_BODY = "a 2021 funding statement names Acme Ventures as a sponsor of one cohort."
+P3_CANDIDATE_PMID = "42424242"
+
+
+async def _seed_phase4(s) -> dict:
+    """Rows dedicated to the phase-4 edit and lifecycle browser journeys."""
+    from src.models import USER_ROLE_PI
+    from src.services.jhu_rules import set_provisional_tenure_start
+    from tests import factories
+
+    a = await factories.make_user(
+        s, user_role=USER_ROLE_PI, name="Jane Wang", orcid="0000-0002-1111-0010",
+        email="jane-wang@uiaudit.test")
+    await factories.make_profile(
+        s, user=a, research_summary="P4 original summary.", techniques=["Microscopy"],
+        keywords=["fibrosis"], profile_version=3, evidence_pub_count=1,
+        evidence_pmid_count=1)
+    a_agent = await factories.make_agent(
+        s, user=a, agent_id="p4-wang", bot_name="WangBot", pi_name="Jane Wang")
+
+    b = await factories.make_user(
+        s, user_role=USER_ROLE_PI, name="Profileless PI", orcid="0000-0002-1111-0011",
+        email="profileless@uiaudit.test")
+    await factories.make_agent(
+        s, user=b, agent_id="p4-profileless", bot_name="ProfilelessBot",
+        pi_name="Profileless PI", status="pending")
+    await set_provisional_tenure_start(s, b.id, 2016)
+
+    c = await factories.make_user(
+        s, user_role=USER_ROLE_PI, name="Activation Refusal", orcid="0000-0002-1111-0012",
+        email="activation-refusal@uiaudit.test")
+    await factories.make_profile(
+        s, user=c, research_summary="P4 activation profile.", profile_version=1,
+        evidence_pub_count=1, evidence_pmid_count=1)
+    c_agent = await factories.make_agent(
+        s, user=c, agent_id="p4-refusal", bot_name="RefusalBot", pi_name="Activation Refusal",
+        status="pending")
+    return {
+        "p4_pi_a": str(a.id), "p4_pi_a_agent": str(a_agent.id), "p4_pi_a_slug": a_agent.agent_id,
+        "p4_pi_b": str(b.id), "p4_pi_c": str(c.id), "p4_pi_c_agent": str(c_agent.id),
+    }
 
 
 async def _seed_phase3(s, *, run, now: datetime) -> dict:
@@ -49,7 +90,7 @@ async def _seed_phase3(s, *, run, now: datetime) -> dict:
     under ``p3_*`` keys."""
     import hashlib
 
-    from src.models import USER_ROLE_PI
+    from src.models import USER_ROLE_PI, Publication, PublicationCandidate
     from src.models.pi_company import PiCompany
     from src.models.review import PromptChangeSuggestion
     from src.services.pi_companies import normalize_company_name
@@ -64,9 +105,26 @@ async def _seed_phase3(s, *, run, now: datetime) -> dict:
     founder = await factories.make_user(
         s, user_role=USER_ROLE_PI, name="Carla Founder", orcid="0000-0002-1111-0008",
         email="founder@uiaudit.test")
-    await factories.make_profile(s, user=founder)
-    await factories.make_agent(s, user=founder, agent_id="founder", bot_name="FounderBot",
-                               pi_name="Carla Founder")
+    await factories.make_profile(
+        s, user=founder, research_summary="P3 stored summary.", profile_version=2,
+        evidence_pub_count=1, evidence_pmid_count=1,
+        pending_profile={
+            "fields": {"research_summary": "P3 draft summary.", "techniques": ["flow cytometry"],
+                       "experimental_models": None, "disease_areas": None, "key_targets": None,
+                       "keywords": None},
+            "synthesis_validated": True, "evidence_pmid_count": 1, "evidence_pub_count": 1,
+            "evidence_flagged_count": 0, "base_profile_version": 2, "job_id": None,
+        }, pending_profile_created_at=now)
+    founder_agent = await factories.make_agent(
+        s, user=founder, agent_id="founder", bot_name="FounderBot", pi_name="Carla Founder",
+        persona_export_failed_at=now)
+    candidate = PublicationCandidate(user_id=founder.id, pmid=P3_CANDIDATE_PMID,
+                                     title="P3 candidate paper", year=2024, stages="s2",
+                                     reason="no_orcid_anchor", status="pending")
+    unanchored = Publication(user_id=founder.id, pmid="42424243", title="P3 unanchored paper",
+                             abstract="Seeded unanchored abstract.", journal="Audit Journal", year=2023,
+                             provenance="unanchored")
+    s.add_all([candidate, unanchored])
     key_points = {
         "indication_audience": ["Idiopathic pulmonary fibrosis patients failing standard care."],
         "lab_background": ["Ten years of fibroblast signalling work.",
@@ -160,6 +218,9 @@ async def _seed_phase3(s, *, run, now: datetime) -> dict:
         "p3_company_suggested": str(suggested.id),
         "p3_company_to_reject": str(to_reject.id),
         "p3_prompt_suggestion": str(suggestion.id),
+        "p3_candidate": str(candidate.id),
+        "p3_unanchored": str(unanchored.id),
+        "p3_agent": str(founder_agent.id),
     }
 
 
@@ -255,7 +316,17 @@ async def main() -> None:
                       payload={"note": XSS},
                       last_error=XSS if status == "failed" else None))
         phase3 = await _seed_phase3(s, run=run, now=now)
+        phase4 = await _seed_phase4(s)
         await s.commit()
+        from src.services.profile_publish import write_persona_files
+        await write_persona_files(s, pi.id)
+        await write_persona_files(s, pi2.id)
+        await write_persona_files(s, uuid.UUID(phase3["p3_pi"]))
+        await write_persona_files(s, uuid.UUID(phase4["p4_pi_a"]))
+        # The Phase-3 card needs an out-of-date *existing* persona; keeping a header lets
+        # the phase-4 scratch persona audit distinguish it from a missing-file failure.
+        p3_file = Path("profiles/public/founder.md")
+        p3_file.write_text(p3_file.read_text() + "\nseeded stale content\n")
         ids = {
             "admin": str(admin.id), "manager": str(manager.id), "reviewer": str(reviewer.id),
             "pi": str(pi.id), "pi2": str(pi2.id), "delegate": str(delegate.id),
@@ -270,6 +341,7 @@ async def main() -> None:
             # Phase 3 (hub 1.10.0) rows, under their own keys: `assessments` stays the
             # three rows crawl.routes unpacks.
             **phase3,
+            **phase4,
         }
     await get_engine().dispose()
     print(json.dumps(ids))

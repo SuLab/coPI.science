@@ -3,10 +3,20 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 pytestmark = pytest.mark.integration
+
+
+@pytest.fixture(autouse=True)
+def healthy_openalex_meter(monkeypatch):
+    from src.services import openalex_budget as ob
+
+    async def meter():
+        return ob.Meter(1000, 1000, 600)
+
+    monkeypatch.setattr(ob, "read_meter", meter)
 
 
 def test_private_matcher_copy_is_gone():
@@ -93,3 +103,40 @@ async def test_only_duplicate_pmids_plans_just_that_partition(db_session, monkey
     monkeypatch.setattr(rp, "resolve_corpus", boom)
     plan = await rp.build_plan_for_pi(db_session, user, None, only="duplicate-pmids")
     assert plan.removals == [] and plan.additions == []
+
+
+async def test_additions_come_from_the_uncapped_list_with_provenance_and_verified_doi(
+    db_session, monkeypatch, tmp_path
+):
+    import scripts.repair_pi_corpus as rp
+    from src.models import Publication
+    from src.services import profile_export
+    from src.services.corpus import CorpusResult
+    from tests import factories
+
+    monkeypatch.setattr(profile_export, "PROFILES_DIR", tmp_path)
+    user = await factories.make_user(db_session)
+    await factories.make_profile(db_session, user=user)
+    agent = await factories.make_agent(db_session, user=user)
+    ranked = [{"pmid": str(100 + i), "title": f"P{i}", "year": 2020, "doi": f"10.1/{i}",
+               "stages": ["s1"]} for i in range(60)]
+
+    async def fake_refetch(pmids):
+        return {}
+
+    async def fake_resolve(orcid, name, institution):
+        return CorpusResult(kept=ranked[:50], flagged=[], ranked=ranked,
+                            orcid_dois={"100": "10.1/0"})
+
+    monkeypatch.setattr(rp, "refetch_pmids", fake_refetch)
+    monkeypatch.setattr(rp, "resolve_corpus", fake_resolve)
+    plan = await rp.build_plan_for_pi(db_session, user, agent.agent_id, only="additions")
+    assert len(plan.additions) == 60 and not hasattr(plan, "over_cap")
+    assert await rp._apply_plan(db_session, plan) is True
+    row = (await db_session.execute(select(Publication).where(
+        Publication.user_id == user.id, Publication.pmid == "100"))).scalar_one()
+    assert (row.provenance, row.doi, row.doi_verified) == ("s1", "10.1/0", True)
+    revisions = (await db_session.execute(text(
+        "SELECT mechanism FROM profile_revisions WHERE agent_registry_id = :a"),
+        {"a": agent.id})).scalars().all()
+    assert revisions == ["reexport"]

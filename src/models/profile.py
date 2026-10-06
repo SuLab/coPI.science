@@ -46,6 +46,7 @@ class ResearcherProfile(Base):
     profile_generated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # No writer since 2026-10-05 (spec D34, P33); kept, never dropped.
     raw_abstracts_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # --- provenance of the stored synthesis (migration 0023) -------------------
     # Did the stored fields pass profile_pipeline._validate_profile?
@@ -56,9 +57,7 @@ class ResearcherProfile(Base):
     #           would fabricate the very provenance these columns exist to pin)
     synthesis_validated: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # How much evidence the STORED profile is grounded in. Written together with
-    # the synthesized fields, so they always describe the same synthesis (unlike
-    # raw_abstracts_hash, which records this run's input even when nothing was
-    # stored). Both None means "no synthesis stored / pre-0023 row".
+    # the synthesized fields, so they always describe the same synthesis. Both None means "no synthesis stored / pre-0023 row".
     #   evidence_pmid_count — in-tenure corpus records (len(in_tenure) in
     #                         profile_pipeline), i.e. what the pipeline had in scope
     #   evidence_pub_count  — PubMed records that were in-tenure AND carried an
@@ -74,18 +73,26 @@ class ResearcherProfile(Base):
     #                         because 30 is a cap and never a floor.
     evidence_pmid_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     evidence_pub_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    # Nullable JSON: stores candidate profile awaiting user review. NULL means
-    # "nothing pending", and `none_as_null=True` is what makes that true in SQL as
-    # well as in Python — without it a cleared draft stored the JSON scalar `null`,
-    # which `WHERE pending_profile IS NULL` does not match, so an operator counting
-    # PIs with a review outstanding would count the cleared ones too. Same
-    # mechanism as `user_submitted_texts` above; see 0031 and 0036.
+    #: Records the identity gates withheld in the run that wrote the counts above
+    #: (len(CorpusResult.flagged); migration 0062). NULL on rows written before 0062.
+    evidence_flagged_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # A regeneration's synthesis staged for staff review because a human edited the profile
+    # since its last generation (spec 2026-10-05 §6.3, D19): src/services/profile_drafts.py
+    # writes it, the manager PI page's Pending draft card accepts or discards it. NULL means
+    # "nothing pending", and `none_as_null=True` is what makes that true in SQL as well as in
+    # Python (a cleared draft must not store the JSON scalar `null`, which `IS NULL` misses).
+    # Same mechanism as `user_submitted_texts` above; see 0031 and 0036.
     pending_profile: Mapped[dict | None] = mapped_column(
         JSON(none_as_null=True), nullable=True
     )
     pending_profile_created_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    #: When a person last changed a profile text field through apply_profile_edits
+    #: (migration 0062). A regeneration finishing after it stages a draft instead of
+    #: overwriting (D19) while human_edited_at > profile_generated_at. Backfilled once by
+    #: 0062 and scripts/backfill_human_edited_at.py from web revisions (D55).
+    human_edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -101,7 +108,7 @@ class ResearcherProfile(Base):
 
     @property
     def evidence_state(self) -> str:
-        """How well founded the stored profile is — the four cases, named once.
+        """How well founded the stored profile is — the five cases, named once.
 
         A profile synthesized while PubMed was unreachable is textually
         indistinguishable from a real one: the model invents a plausible
@@ -122,6 +129,10 @@ class ResearcherProfile(Base):
                                 publication-less or non-PubMed-indexed
                                 researcher). Ungrounded, but nothing was lost and
                                 regenerating will not change it.
+          identity_unmatched    nothing in scope, but the identity gates withheld
+                                records (evidence_flagged_count > 0): the name
+                                matched papers whose author lists did not confirm
+                                the PI. Check the name and ORCID iD, then regenerate.
           unknown               pre-0023 row, or no synthesis was ever stored
 
         Limit of what two counts can tell you: they describe what the synthesis
@@ -154,6 +165,8 @@ class ResearcherProfile(Base):
             return "grounded"
         if self.evidence_pmid_count is None or self.evidence_pmid_count > 0:
             return "evidence_lost"
+        if (self.evidence_flagged_count or 0) > 0:
+            return "identity_unmatched"
         return "no_evidence_available"
 
     def __repr__(self) -> str:

@@ -78,6 +78,7 @@ from tests.characterization.freeze.fixtures import (
     HUB_ID,
     INTERVIEW_CHANNEL,
     LAB_ID,
+    LAB_PROFILE,
     OTHER_ID,
     SEED_BASE,
     apply_frozen_settings,
@@ -726,6 +727,8 @@ _EXPORT_FORM = {
     "disease_areas": ["colorectal cancer"],
     "key_targets": ["KRAS G12D"],
     "keywords": ["organoids", "screening"],
+    # _seed_export_pi's profile_version: an empty version over an existing row is refused (spec 2026-10-05 §6.4)
+    "profile_version": "3",
     # What the rendered tag widgets post (D-16): one marker per widget.
     "tag_fields": ["techniques", "experimental_models", "disease_areas", "key_targets", "keywords"],
 }
@@ -1147,20 +1150,29 @@ def test_chunked_post_payloads_over_4000_chars_gm(snapshot):
 
 
 async def test_channel_joins_and_lab_directories_gm(snapshot, profiles):
+    """Phase-1 subscriptions (spec 2026-10-05 §6.5, D28/D50): the hub takes every seeded
+    channel with a resolved ID and an acknowledged join; each lab matches its persona's
+    tag sections, and a recompute after a reload unsubscribes without leaving Slack.
+    The lab-directory half of this entry was removed
+    with the directory (D29); the name is kept because it is the snapshot key."""
     sim, agents, clients = build_engine()
     for agent in agents.values():
         await sim._phase1_channel_discovery(agent)
-    sim.refresh_lab_directories()
-    gate_off = {aid: a._lab_directory for aid, a in sim.agents.items()}
-    agents["lab"].allowed_sender_ids = {HUB_ID}
-    agents["other"].allowed_sender_ids = {HUB_ID, LAB_ID}
-    agents["hub"].allowed_sender_ids = {LAB_ID}
-    sim.refresh_lab_directories()
-    gate_on = {aid: a._lab_directory for aid, a in sim.agents.items()}
-    assert {
+    first = {
         "subscribed": {aid: sorted(a.state.subscribed_channels) for aid, a in sim.agents.items()},
         "joined": {aid: sorted(c.joined_channels) for aid, c in clients.items()},
-        "lab_directories_gate_off": gate_off,
-        "lab_directories_gate_on": gate_on,
+    }
+    lab = agents["lab"]
+    stripped = LAB_PROFILE.split("## Key Methods and Technologies")[0] + LAB_PROFILE.split(
+        "- CRISPR base editing\n", 1)[1]
+    (profiles / "public" / f"{LAB_ID}.md").write_text(stripped, encoding="utf-8")
+    lab.reload_profiles()
+    await sim._phase1_channel_discovery(lab)
+    assert {
+        **first,
+        "after_reload": {
+            "subscribed": sorted(lab.state.subscribed_channels),
+            "joined": sorted(clients[LAB_ID].joined_channels),
+        },
         "other_agent_id": OTHER_ID,
     } == snapshot

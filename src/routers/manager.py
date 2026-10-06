@@ -15,7 +15,7 @@ regardless of what the router-level dependency alone would allow through.
 Exactly four GETs use ``_REVIEW``: ``manager_pis``, ``manager_pi_detail``,
 ``manager_assessments`` and ``manager_assessment_detail``; ``manager_root``
 takes no per-handler dependency at all (its only job is a redirect to a
-route that is itself reviewer-reachable). Every other handler — the nineteen
+route that is itself reviewer-reachable). Every other handler — the twenty-eight
 POSTs, ``manager_slack_bots``, ``manager_discussions``, ``manager_activity``/
 ``manager_activity_detail`` and the two prompt-suggestion pages — stays on
 ``_STAFF``, so a reviewer reaches none of them. This docstring is not what
@@ -42,6 +42,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypeVar
+from urllib.parse import urlencode
 
 import httpx
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
@@ -69,14 +70,19 @@ from src.models import (
     PiIndustryEvidence,
     PiOrcidFunding,
     PromptChangeSuggestion,
+    PublicationCandidate,
     ResearcherProfile,
     User,
 )
 from src.models.job import INTERACTIVE_PRIORITY
 from src.models.pi_company import PI_COMPANY_ROLES
-from src.services import directory
+from src.services import directory, profile_review
 from src.services.admin_provisioning import ProvisioningError, start_provisioning
-from src.services.agent_activation import activation_blockers, ensure_activation_allowed
+from src.services.agent_activation import (
+    activation_blockers,
+    ensure_activation_allowed,
+    persona_blockers,
+)
 from src.services.agent_mute import set_agent_mute_state
 from src.services.assessment_chat_suggestions import page_suggestions
 from src.services.assessment_detail import build_assessment_detail
@@ -104,6 +110,8 @@ from src.services.industry_evidence import rescore_user
 from src.services.jhu_rules import get_tenure_start
 from src.services.job_queue import request_job
 from src.services.nih_reporter import profile_id_exists
+from src.services.person_names import InvalidPersonName
+from src.services.persona_lifecycle import export_after_lifecycle
 from src.services.pi_companies import (
     PI_COMPANY_ROLE_LABELS,
     CompanyNotFoundError,
@@ -120,9 +128,11 @@ from src.services.pi_companies import (
     reject_company,
 )
 from src.services.pi_onboarding import (
+    OrcidNameRequired,
     adopt_agentless_pi,
     create_pending_agent_for,
     find_or_create_pi_by_orcid,
+    validate_orcid,
 )
 from src.services.profile_edit import (
     apply_profile_edits,
@@ -135,6 +145,8 @@ from src.services.profile_publish import (
     reexport_persona,
     write_persona_files,
 )
+from src.services.pubmed import fetch_pubmed_records
+from src.services.revision_history import list_public_revisions
 from src.services.slack_tokens import token_for_agent_row
 from src.services.star_topology import ensure_lab_spoke
 from src.services.thread_panel import panel_cards_by_thread
@@ -279,7 +291,11 @@ async def manager_pi_detail(
 
     The Companies card (spec 2026-10-02 §7.2) gets the confirmed rows for every
     viewer, and the suggested rows and the discovery state for staff only: a
-    reviewer sees the confirmed list. Rejected rows are never listed."""
+    reviewer sees the confirmed list. Rejected rows are never listed.
+
+    Staff also get the corpus and profile review cards (``review``, spec 2026-10-05 §6.3
+    Review UIs, D47) and the revision history (spec 2026-10-05 §6.4, D61); both are None
+    for a reviewer."""
     detail = await load_user_detail(db, user_id)
     if detail is None or detail["user"].user_role != USER_ROLE_PI:
         raise HTTPException(status_code=404, detail="PI not found")
@@ -292,7 +308,8 @@ async def manager_pi_detail(
     # queries.
     blocked = request.query_params.get("activation_blocked")
     blockers = (
-        await activation_blockers(db, agent) if blocked and agent is not None else []
+        await activation_blockers(db, agent) + await persona_blockers(db, agent)
+        if blocked and agent is not None else []
     )
     companies = await list_companies(db, user_id)
     confirmed = [_company_view(c) for c in companies if c.status == "confirmed"]
@@ -336,6 +353,15 @@ async def manager_pi_detail(
             company_roles=PI_COMPANY_ROLES,
             company_role_labels=PI_COMPANY_ROLE_LABELS,
             discovery=discovery,
+            review=(
+                await profile_review.load_review_cards(db, user_id)
+                if current_user.is_staff else None
+            ),
+            revisions=await list_public_revisions(db, user_id) if current_user.is_staff else None,
+            # The export's tenure year when none is recorded: a provisional one (U-9).
+            tenure_provisional=(
+                detail["grant_sections"].tenure_start if tenure_start is None else None
+            ),
         ),
     )
 
@@ -344,6 +370,10 @@ def _create_pi_error_code(exc: ValueError) -> str:
     """Map service failures to canned codes — the raw exception text used to
     be interpolated into the redirect Location unescaped (it embeds the
     submitted ORCID string and upstream httpx internals; audit L1)."""
+    if isinstance(exc, OrcidNameRequired):
+        return "name_required"
+    if isinstance(exc, InvalidPersonName):
+        return "invalid_name"
     text = str(exc)
     if "Invalid ORCID" in text:
         return "invalid_orcid"
@@ -358,6 +388,7 @@ def _create_pi_error_code(exc: ValueError) -> str:
 async def manager_create_pi(
     request: Request,
     orcid: str = Form(...),
+    name: str = Form(""),
     db: AsyncSession = _DB,
     current_user: User = _STAFF,
 ):
@@ -378,15 +409,27 @@ async def manager_create_pi(
     before being added) is adopted rather than refused: the agent row is minted
     for that account (``adopt_agentless_pi``). Every refusal rolls the whole
     attempt back: ``get_db`` commits on a clean return, so a redirect after a
-    partial write would otherwise persist it."""
+    partial write would otherwise persist it.
+
+    When ORCID has no public name the form must carry ``name`` (spec 2026-10-05 §6.3);
+    a name outside the D60 allowlist answers ``invalid_name``.
+
+    After the commit the persona is published
+    (``persona_lifecycle.export_after_lifecycle``); a brand-new PI has no profile yet, so
+    its file is written by the profile job."""
     adopted = False
+    entered_name = name.strip() or None
     try:
-        pi = await adopt_agentless_pi(db, orcid)
+        pi = await adopt_agentless_pi(db, orcid, name=entered_name)
         adopted = pi is not None
         if pi is None:
-            pi = await find_or_create_pi_by_orcid(db, orcid)
+            pi = await find_or_create_pi_by_orcid(db, orcid, name=entered_name)
+        pi_id = pi.id
         await create_pending_agent_for(db, pi)
         await db.commit()
+    except OrcidNameRequired as exc:
+        await db.rollback()
+        return RedirectResponse(url=_name_required_url(exc.orcid), status_code=302)
     except ValueError as exc:
         await db.rollback()
         return RedirectResponse(
@@ -414,6 +457,12 @@ async def manager_create_pi(
         return RedirectResponse(
             url="/manager/pis?error=agent_conflict", status_code=302
         )
+    # The new lab's persona after the commit (spec 2026-10-05 §6.4, D31): written when the
+    # adopted account already has a profile; a file left at the slug is archived either way.
+    await export_after_lifecycle(
+        db, pi_id, event="Agent created (Add-PI)", actor_id=current_user.id,
+        replace_leftover=True,
+    )
     if adopted:
         flash(
             request,
@@ -421,7 +470,18 @@ async def manager_create_pi(
             "their lab agent has been created.",
             "success",
         )
-    return RedirectResponse(url=f"/manager/pis/{pi.id}", status_code=302)
+    return RedirectResponse(url=f"/manager/pis/{pi_id}", status_code=302)
+
+
+def _name_required_url(orcid: str) -> str:
+    """The Add-PI form again, asking for the name, with the ORCID iD refilled when it is a
+    valid one (never an unvalidated string in the Location)."""
+    query = {"error": "name_required"}
+    try:
+        query["orcid"] = validate_orcid(orcid)
+    except ValueError:
+        pass
+    return f"/manager/pis?{urlencode(query)}"
 
 
 @router.post("/pis/{user_id}/profile")
@@ -432,7 +492,7 @@ async def manager_edit_pi_profile(
     email: str = Form(""),
     institution: str = Form(""),
     department: str = Form(""),
-    research_summary: str = Form(""),
+    research_summary: str | None = Form(None),
     jhu_tenure_start: str = Form(""),
     profile_version: str = Form(""),
     db: AsyncSession = _DB,
@@ -479,11 +539,16 @@ async def _manager_set_mute(
             url=f"/manager/pis/{user_id}?error=no_agent", status_code=302
         )
 
+    # Read before the call: a refusal rolls ``db`` back, expiring ``current_user``.
+    actor_id = current_user.id
     refusal = await set_agent_mute_state(db, agent=agent, muted=muted, actor=current_user)
     if refusal is not None:
         return RedirectResponse(
             url=f"/manager/pis/{user_id}?error={refusal}", status_code=302
         )
+    if not muted:
+        # The unmuted lab serves its persona again (spec 2026-10-05 §6.4, D31).
+        await export_after_lifecycle(db, user_id, event="Agent unmuted", actor_id=actor_id)
     return RedirectResponse(url=f"/manager/pis/{user_id}", status_code=302)
 
 
@@ -986,7 +1051,11 @@ async def manager_activate_agent(
 
     The status write is ``UPDATE … WHERE status = 'pending'`` (D-07). The token
     check is ``token_for_agent_row`` (D-11), the predicate /manager/slack-bots shows.
+
+    The gate includes the persona checks no override waives
+    (``agent_activation.persona_blockers``); the persona is re-exported after the commit.
     """
+    actor_id = current_user.id
     agent = await _pending_pi_agent(db, user_id)
     if not token_for_agent_row(agent):
         flash(request, "Slack provisioning failed: Install the Slack bot first.", "error")
@@ -1034,6 +1103,7 @@ async def manager_activate_agent(
         )
         return RedirectResponse(url=f"/manager/pis/{user_id}", status_code=302)
     await db.commit()
+    await export_after_lifecycle(db, user_id, event="Agent activated", actor_id=actor_id)
     return RedirectResponse(
         url=f"/manager/pis/{user_id}?activated=1", status_code=302
     )
@@ -1050,7 +1120,8 @@ async def manager_retry_profile(
 
     Before this route, a dead generation job or an ungrounded profile left a manager
     nothing to do but ask an admin to impersonate the PI and press Try Again — the
-    activation gate refuses both states. Allowed only in those states
+    activation gate refuses both states (and an empty summary, spec 2026-10-05 §6.4).
+    Allowed only in those states
     (``profile_retry_warranted``), and the enqueue is the shared idempotent one, so
     a double click runs one pipeline."""
     target = await _require_pi(db, user_id)
@@ -1071,7 +1142,7 @@ async def manager_retry_profile(
         flash(
             request,
             "Nothing to retry: profile generation is running, or the profile is "
-            "already grounded.",
+            "already grounded and has a summary.",
             "error",
         )
         return RedirectResponse(url=f"/manager/pis/{user_id}", status_code=302)
@@ -1082,6 +1153,282 @@ async def manager_retry_profile(
     else:
         flash(request, "Profile generation queued.", "success")
     return RedirectResponse(url=f"/manager/pis/{user_id}", status_code=302)
+
+
+# --------------------------------------------------------------------------- #
+# Corpus and profile review (spec 2026-10-05 §6.3 Review UIs, D21, D45, D47, D71).
+# Every route: _STAFF, _require_pi, lookups scoped by user_id, the persona writer lock
+# (bounded) before any row, the effective user recorded, a WARNING under impersonation.
+# --------------------------------------------------------------------------- #
+
+
+def _review_redirect(user_id: uuid.UUID, error: str | None = None) -> RedirectResponse:
+    query = f"?error={error}" if error else ""
+    return RedirectResponse(url=f"/manager/pis/{user_id}{query}#review", status_code=302)
+
+
+def _review_busy(request: Request, user_id: uuid.UUID) -> RedirectResponse:
+    flash(request, "This PI's profile is being updated — try again in a moment.", "error")
+    return _review_redirect(user_id, "persona_busy")
+
+
+async def _publish(
+    request: Request, db: AsyncSession, target_id: uuid.UUID, current_user: User, *,
+    mechanism: str, summary: str, action: str,
+) -> None:
+    """Record the revision (``reexport_persona``), commit, write the persona file."""
+    note = _warn_if_impersonated(request, current_user, action, target_id)
+    await reexport_persona(
+        db, target_id, mechanism=mechanism, changed_by_user_id=current_user.id,
+        change_summary=note or summary,
+    )
+    await db.commit()
+    await write_persona_files(db, target_id)
+
+
+def _log_actor(current_user: User, action: str, user_id: uuid.UUID) -> None:
+    """Record who acted where no column does (Keep, Discard, Regenerate)."""
+    logger.info("Staff user %s: %s on PI %s", current_user.id, action, user_id)
+
+
+async def _no_rows() -> None:
+    return None
+
+
+@router.post("/pis/{user_id}/candidates/{candidate_id}/accept")
+async def manager_accept_candidate(
+    user_id: uuid.UUID, candidate_id: uuid.UUID, request: Request,
+    db: AsyncSession = _DB, current_user: User = _STAFF,
+):
+    """Store a candidate paper with provenance ``manual`` from its PubMed record (fetched
+    before any lock; nothing is written when PubMed fails) and record a ``paper_review``
+    revision. 404 for another PI's or an already decided candidate."""
+    await _require_pi(db, user_id)
+    pmid = await db.scalar(select(PublicationCandidate.pmid).where(
+        PublicationCandidate.id == candidate_id, PublicationCandidate.user_id == user_id,
+        PublicationCandidate.status == "pending",
+    ))
+    if pmid is None:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    try:
+        records = await fetch_pubmed_records([pmid], strict=True)
+    except Exception:
+        logger.warning("PubMed fetch for candidate PMID %s failed", pmid, exc_info=True)
+        return _review_redirect(user_id, "pubmed_unreachable")
+    record = next((r for r in records if str(r.get("pmid")) == pmid), None)
+    if record is None:
+        return _review_redirect(user_id, "pubmed_not_found")
+    actor_id = current_user.id
+    try:
+        cand = await _bounded_persona_locks(
+            db, user_id, PERSONA_LOCK_TIMEOUT,
+            lambda: profile_review.accept_candidate(
+                db, user_id, candidate_id, record, actor_id=actor_id
+            ),
+        )
+    except _PersonaBusy:
+        return _review_busy(request, user_id)
+    if cand is None:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    await _publish(request, db, user_id, current_user, mechanism="paper_review",
+                   summary=f"Paper accepted: PMID {pmid}", action="Candidate paper accept")
+    flash(request, "Paper added to the corpus.", "success")
+    return _review_redirect(user_id)
+
+
+@router.post("/pis/{user_id}/candidates/{candidate_id}/reject")
+async def manager_reject_candidate(
+    user_id: uuid.UUID, candidate_id: uuid.UUID, request: Request,
+    db: AsyncSession = _DB, current_user: User = _STAFF,
+):
+    """Reject a candidate paper; the row is kept so it is never offered again."""
+    await _require_pi(db, user_id)
+    actor_id = current_user.id
+    try:
+        cand = await _bounded_persona_locks(
+            db, user_id, PERSONA_LOCK_TIMEOUT,
+            lambda: profile_review.reject_candidate(db, user_id, candidate_id, actor_id=actor_id),
+        )
+    except _PersonaBusy:
+        return _review_busy(request, user_id)
+    if cand is None:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    _warn_if_impersonated(request, current_user, "Candidate paper reject", user_id)
+    await db.commit()
+    flash(request, "Paper rejected; it will not be offered again.", "success")
+    return _review_redirect(user_id)
+
+
+@router.post("/pis/{user_id}/publications/{publication_id}/keep")
+async def manager_keep_publication(
+    user_id: uuid.UUID, publication_id: uuid.UUID, request: Request,
+    db: AsyncSession = _DB, current_user: User = _STAFF,
+):
+    """Keep an unanchored paper (provenance ``manual``). It changes no rendered text, so no
+    revision is recorded; anything but an unanchored, non-excluded row is a no-op."""
+    await _require_pi(db, user_id)
+    try:
+        row = await _bounded_persona_locks(
+            db, user_id, PERSONA_LOCK_TIMEOUT,
+            lambda: profile_review.keep_publication(db, user_id, publication_id),
+        )
+    except _PersonaBusy:
+        return _review_busy(request, user_id)
+    if row is None:
+        return _review_redirect(user_id)
+    _warn_if_impersonated(request, current_user, "Publication keep", user_id)
+    _log_actor(current_user, f"kept publication PMID {row.pmid}", user_id)
+    await db.commit()
+    flash(request, "Kept.", "success")
+    return _review_redirect(user_id)
+
+
+@router.post("/pis/{user_id}/publications/{publication_id}/exclude")
+async def manager_exclude_publication(
+    user_id: uuid.UUID, publication_id: uuid.UUID, request: Request,
+    db: AsyncSession = _DB, current_user: User = _STAFF,
+):
+    """Exclude a stored paper (kept, ignored by every reader: D45) and record a
+    ``paper_review`` revision of the re-rendered persona."""
+    await _require_pi(db, user_id)
+    actor_id = current_user.id
+    try:
+        row = await _bounded_persona_locks(
+            db, user_id, PERSONA_LOCK_TIMEOUT,
+            lambda: profile_review.exclude_publication(
+                db, user_id, publication_id, actor_id=actor_id
+            ),
+        )
+    except _PersonaBusy:
+        return _review_busy(request, user_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Publication not found")
+    await _publish(request, db, user_id, current_user, mechanism="paper_review",
+                   summary=f"Paper excluded: PMID {row.pmid}", action="Publication exclude")
+    flash(request, "Paper excluded.", "success")
+    return _review_redirect(user_id)
+
+
+@router.post("/pis/{user_id}/publications/{publication_id}/restore")
+async def manager_restore_publication(
+    user_id: uuid.UUID, publication_id: uuid.UUID, request: Request,
+    db: AsyncSession = _DB, current_user: User = _STAFF,
+):
+    """Undo an Exclude (D71): the paper is read again everywhere; a ``paper_review``
+    revision of the re-rendered persona records the acting user."""
+    await _require_pi(db, user_id)
+    try:
+        row = await _bounded_persona_locks(
+            db, user_id, PERSONA_LOCK_TIMEOUT,
+            lambda: profile_review.restore_publication(db, user_id, publication_id),
+        )
+    except _PersonaBusy:
+        return _review_busy(request, user_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Publication not found")
+    await _publish(request, db, user_id, current_user, mechanism="paper_review",
+                   summary=f"Paper restored: PMID {row.pmid}", action="Publication restore")
+    flash(request, "Paper restored to the corpus.", "success")
+    return _review_redirect(user_id)
+
+
+@router.post("/pis/{user_id}/draft/accept")
+async def manager_accept_draft(
+    user_id: uuid.UUID, request: Request, db: AsyncSession = _DB, current_user: User = _STAFF,
+):
+    """Accept the staged regeneration draft (D19): refused when it is stale or a generation
+    is in flight; records a ``draft_accept`` revision and exports."""
+    await _require_pi(db, user_id)
+    try:
+        code = await _bounded_persona_locks(
+            db, user_id, PERSONA_LOCK_TIMEOUT,
+            lambda: profile_review.accept_draft(db, user_id),
+        )
+    except _PersonaBusy:
+        return _review_busy(request, user_id)
+    if code is not None:
+        await db.rollback()
+        return _review_redirect(user_id, code)
+    await _publish(request, db, user_id, current_user, mechanism="draft_accept",
+                   summary="Regenerated profile draft accepted", action="Draft accept")
+    flash(request, "Draft accepted.", "success")
+    return _review_redirect(user_id)
+
+
+@router.post("/pis/{user_id}/draft/discard")
+async def manager_discard_draft(
+    user_id: uuid.UUID, request: Request, db: AsyncSession = _DB, current_user: User = _STAFF,
+):
+    """Discard the staged regeneration draft; the profile is unchanged."""
+    await _require_pi(db, user_id)
+    try:
+        discarded = await _bounded_persona_locks(
+            db, user_id, PERSONA_LOCK_TIMEOUT,
+            lambda: profile_review.discard_draft(db, user_id),
+        )
+    except _PersonaBusy:
+        return _review_busy(request, user_id)
+    if discarded:
+        _warn_if_impersonated(request, current_user, "Draft discard", user_id)
+        _log_actor(current_user, "discarded the profile draft", user_id)
+    await db.commit()
+    flash(request, "Draft discarded." if discarded else "No draft to discard.",
+          "success" if discarded else "error")
+    return _review_redirect(user_id)
+
+
+@router.post("/pis/{user_id}/regenerate")
+async def manager_regenerate_profile(
+    user_id: uuid.UUID, request: Request, db: AsyncSession = _DB, current_user: User = _STAFF,
+):
+    """Queue a profile generation for any profile, refused while one is in flight or within
+    ``profile_review.REGENERATE_COOLDOWN`` of the last completed one. A profile edited since
+    its last generation gets a draft to review instead of an overwrite (D19)."""
+    target = await _require_pi(db, user_id)
+    refusal = await profile_review.regenerate_refusal(db, user_id)
+    if refusal is not None:
+        flash(request, refusal, "error")
+        return _review_redirect(user_id, "regenerate_refused")
+    job = await enqueue_profile_job_if_absent(db, target, priority=INTERACTIVE_PRIORITY)
+    _warn_if_impersonated(request, current_user, "Profile regenerate", user_id)
+    _log_actor(current_user, "queued a profile regeneration", user_id)
+    await db.commit()
+    if job is None:
+        flash(request, "This account's access is denied; no profile is generated.", "error")
+    else:
+        flash(
+            request,
+            "Profile generation queued. A profile edited since its last generation gets a "
+            "draft to review.",
+            "success",
+        )
+    return _review_redirect(user_id)
+
+
+@router.post("/pis/{user_id}/persona/reexport")
+async def manager_reexport_persona(
+    user_id: uuid.UUID, request: Request, db: AsyncSession = _DB, current_user: User = _STAFF,
+):
+    """Re-render the persona, record a ``reexport`` revision, commit and write the file
+    (the repair for a failed post-commit write, ``agents.persona_export_failed_at``)."""
+    await _require_pi(db, user_id)
+    try:
+        await _bounded_persona_locks(db, user_id, PERSONA_LOCK_TIMEOUT, _no_rows)
+    except _PersonaBusy:
+        return _review_busy(request, user_id)
+    note = _warn_if_impersonated(request, current_user, "Persona re-export", user_id)
+    rendered = await reexport_persona(
+        db, user_id, mechanism="reexport", changed_by_user_id=current_user.id,
+        change_summary=note or "Staff re-export",
+    )
+    await db.commit()
+    if rendered is None:
+        flash(request, "This PI has no agent or profile to export.", "error")
+    elif await write_persona_files(db, user_id) is None:
+        flash(request, "Re-export failed; see the ERROR log.", "error")
+    else:
+        flash(request, "Persona file re-exported.", "success")
+    return _review_redirect(user_id)
 
 
 def _company_view(row: PiCompany) -> dict:

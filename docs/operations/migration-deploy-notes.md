@@ -1176,3 +1176,49 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > `$DC up -d blackbird-app worker` (and `agent` with no live run). `alembic downgrade 0060`, if wanted, runs from
 > a one-off container off the NEW image before the images are restored, and drops both
 > tables and the column.
+
+> **Deploy order for `0062_corpus_provenance_profile_drafts` — the single combined
+> Phases 3-5 deploy: migrate BEFORE the new code serves, with the WORKER STOPPED; then web
+> and worker; then the agent (no live run); then re-run the D55 backfill and the corpus
+> scripts; the regeneration of every PI is queued LAST (decision D68).** `0062`
+> adds `publications.provenance` / `excluded_at` / `excluded_by_user_id` / `doi_verified`,
+> the `publication_candidates` review queue, `researcher_profiles.human_edited_at` /
+> `evidence_flagged_count` and `agents.persona_export_failed_at`, and backfills
+> `human_edited_at` from web revisions (spec D55). Design:
+> `docs/specs/2026-10-05-pi-profile-remediation-design.md` §6.3.
+>
+> *Old code on the new schema* is safe: it reads none of it. *New code on the old schema*
+> is not: the three models map the new columns. **Agent image:** rebuild — the engine
+> imports `src.models`.
+>
+> **Stop the worker** for `--apply` (`$DC stop worker`, after no row is `processing`).
+> Commit before building.
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     for s in blackbird-app worker agent; do
+>       docker image tag copi-blackbird-$s:latest copi-blackbird-$s:rollback-pre-0062
+>     done
+>     $DC build blackbird-app worker
+>     $DC --profile agent build agent
+>     $DC stop worker
+>     ./scripts/migrate/run_migration.sh              # rehearse (writes nothing)
+>     ./scripts/migrate/run_migration.sh --apply      # dump → preflight → apply → postflight
+>     $DC run --rm blackbird-app alembic current      # must equal `alembic heads` (0062)
+>     $DC up -d blackbird-app worker
+>     $DC up -d agent                                 # ONLY when /admin/simulation shows no live run
+>     $DC run --rm --no-deps -T blackbird-app python scripts/backfill_human_edited_at.py --apply
+>
+> The backfill works row by row (`FOR UPDATE SKIP LOCKED`) and names any profile it
+> skipped because another session held it; re-run it until none is skipped. Then
+> `scripts/unanchored_publications_report.py --dry-run`, then `--apply` (an inline,
+> paced script: it enqueues nothing). The regeneration of every PI is queued last, once
+> every Phase 3-5 change is serving (decision D68), and is followed by
+> `scripts/verify_corpus_remediation.py`. Nothing here starts a run.
+>
+> Rollback: `$DC stop worker`, then clear staged drafts, which old code would list as
+> "Pending Update" with no way to review them:
+> `UPDATE researcher_profiles SET pending_profile = NULL, pending_profile_created_at = NULL WHERE pending_profile IS NOT NULL`;
+> redeploy the `rollback-pre-0062` images, `$DC up -d blackbird-app worker` (and `agent` with
+> no live run). Old code ignores provenance, exclusions and candidates, and its cap logic
+> returns. `alembic downgrade 0061`, if wanted, runs from a one-off container off the NEW
+> image before the images are restored.

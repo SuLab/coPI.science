@@ -226,7 +226,6 @@ async def test_start_announces_only_fresh_runs_after_validation(monkeypatch, tmp
             monkeypatch.setattr(eng, name, _rec(name)[0])
         for name in (
             "_ensure_seeded_channels", "_ensure_assessments_summary_channel",
-            "refresh_lab_directories",
         ):
             monkeypatch.setattr(eng, name, _rec(name)[1])
         monkeypatch.setattr(eng, "_validate_star_topology", _rec("_validate", [])[1])

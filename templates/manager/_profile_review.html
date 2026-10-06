@@ -1,0 +1,105 @@
+{# Corpus and profile review (spec 2026-10-05 §6.3 Review UIs, D21, D45, D47, D71); staff
+   only: the router passes `review` (profile_review.ReviewCards) as None for reviewers. #}
+{% set field_labels = {'research_summary': 'Research Summary', 'techniques': 'Techniques',
+    'experimental_models': 'Model Systems', 'disease_areas': 'Disease Areas',
+    'key_targets': 'Key Targets', 'keywords': 'Keywords'} %}
+{% macro field_value(v) -%}
+{%- if v is none or v == '' or v == [] -%}—
+{%- elif v is string -%}{{ v }}
+{%- else -%}{{ v | join(', ') }}{%- endif -%}
+{%- endmacro %}
+<section id="review" class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+  <h2 class="font-semibold text-gray-800 mb-1">Corpus and profile review</h2>
+
+  {% if review.persona_out_of_date %}
+  <div class="mb-3">
+    <p class="text-sm text-amber-700">Persona file out of date{% if target_user.agent and target_user.agent.persona_export_failed_at %} (last write failed {{ target_user.agent.persona_export_failed_at | ts }}){% endif %}.</p>
+    <form method="post" action="/manager/pis/{{ target_user.id }}/persona/reexport" class="mt-1">
+      <button type="submit" class="text-sm px-3 py-1 rounded bg-gray-700 text-white hover:opacity-90">Re-export</button>
+    </form>
+  </div>
+  {% endif %}
+
+  <div class="mb-4">
+    <form method="post" action="/manager/pis/{{ target_user.id }}/regenerate">
+      <button type="submit" class="text-sm px-3 py-1 rounded bg-indigo-600 text-white hover:opacity-90{% if review.regenerate_refusal %} opacity-50{% endif %}"{% if review.regenerate_refusal %} disabled{% endif %}>Regenerate profile</button>
+    </form>
+    {% if review.regenerate_refusal %}<p class="text-xs text-gray-500 mt-1">{{ review.regenerate_refusal }}</p>{% endif %}
+  </div>
+
+  {% if review.draft %}
+  <h3 class="font-medium text-gray-800 mb-1">Pending draft</h3>
+  <p class="text-xs text-gray-500 mb-2">Draft from {{ review.draft.created_at | ts }}{% if not review.draft.synthesis_validated %} · <span class="text-amber-700">failed the quality checks</span>{% endif %}</p>
+  {% if not review.draft_diff %}<p class="text-sm text-gray-500 mb-2">The draft matches the stored profile.</p>{% endif %}
+  <ul class="divide-y mb-2">
+    {% for field, stored, drafted in review.draft_diff %}
+    <li class="py-2 text-sm">
+      <div class="font-medium">{{ field_labels.get(field, field) }}</div>
+      <div class="text-xs text-gray-500">Stored: <span class="text-gray-700">{{ field_value(stored) }}</span></div>
+      <div class="text-xs text-gray-500">Draft: <span class="text-gray-700">{{ field_value(drafted) }}</span></div>
+    </li>
+    {% endfor %}
+  </ul>
+  <div class="flex gap-4 mb-4">
+    {% if review.draft_stale %}
+    <p class="text-xs text-amber-700">The profile changed since this draft was made; discard it or regenerate.</p>
+    {% else %}
+    <form method="post" action="/manager/pis/{{ target_user.id }}/draft/accept"><button type="submit" class="text-xs text-green-700 underline">Accept draft</button></form>
+    {% endif %}
+    <form method="post" action="/manager/pis/{{ target_user.id }}/draft/discard"><button type="submit" class="text-xs text-red-700 underline">Discard draft</button></form>
+  </div>
+  {% endif %}
+
+  <h3 class="font-medium text-gray-800 mb-1">Candidate papers ({{ review.candidates | length }})</h3>
+  <p class="text-xs text-gray-500 mb-2">Found by name with no ORCID anchor. Accept stores the paper; a rejected paper is never offered again.</p>
+  {% if not review.candidates %}<p class="text-sm text-gray-500 mb-4">No candidates waiting.</p>{% endif %}
+  <ul class="divide-y mb-4">
+    {% for c in review.candidates %}
+    <li class="py-2 flex justify-between gap-4 text-sm">
+      <div>
+        <div class="font-medium">{{ c.title or '(no title)' }}</div>
+        <div class="text-xs text-gray-500">{{ c.year or 'year unknown' }}{% if c.stages %} · stages {{ c.stages }}{% endif %} ·
+          <a href="https://pubmed.ncbi.nlm.nih.gov/{{ c.pmid }}/" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">PMID {{ c.pmid }}</a></div>
+      </div>
+      <div class="flex gap-2">
+        <form method="post" action="/manager/pis/{{ target_user.id }}/candidates/{{ c.id }}/accept"><button type="submit" class="text-xs text-green-700 underline">Accept</button></form>
+        <form method="post" action="/manager/pis/{{ target_user.id }}/candidates/{{ c.id }}/reject"><button type="submit" class="text-xs text-red-700 underline">Reject</button></form>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+
+  <h3 class="font-medium text-gray-800 mb-1">Unanchored papers ({{ review.unanchored | length }})</h3>
+  <p class="text-xs text-gray-500 mb-2">Stored papers no ORCID anchor confirms. Keep marks one as checked; Exclude removes it from the profile and the persona (Restore undoes it).</p>
+  {% if not review.unanchored %}<p class="text-sm text-gray-500 mb-2">No unanchored papers.</p>{% endif %}
+  <ul class="divide-y mb-2">
+    {% for p in review.unanchored %}
+    <li class="py-2 flex justify-between gap-4 text-sm">
+      <div>
+        <div class="font-medium">{{ p.title or '(no title)' }}</div>
+        <div class="text-xs text-gray-500">{{ p.journal or 'journal unknown' }} · {{ p.year or 'year unknown' }}{% if p.pmid %} ·
+          <a href="https://pubmed.ncbi.nlm.nih.gov/{{ p.pmid }}/" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">PMID {{ p.pmid }}</a>{% endif %}</div>
+      </div>
+      <div class="flex gap-2">
+        <form method="post" action="/manager/pis/{{ target_user.id }}/publications/{{ p.id }}/keep"><button type="submit" class="text-xs text-green-700 underline">Keep</button></form>
+        <form method="post" action="/manager/pis/{{ target_user.id }}/publications/{{ p.id }}/exclude"><button type="submit" class="text-xs text-red-700 underline">Exclude</button></form>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% if review.excluded %}
+  <details class="mt-2"><summary class="text-sm text-blue-700 cursor-pointer">Excluded papers ({{ review.excluded | length }})</summary>
+    <ul class="divide-y mt-2">
+      {% for p in review.excluded %}
+      <li class="py-2 flex justify-between gap-4 text-sm">
+        <div class="opacity-50">
+          <div class="font-medium">{{ p.title or '(no title)' }}</div>
+          <div class="text-xs text-gray-500">{{ p.journal or 'journal unknown' }} · {{ p.year or 'year unknown' }}{% if p.pmid %} · PMID {{ p.pmid }}{% endif %} · excluded {{ p.excluded_at | ts }}</div>
+        </div>
+        <form method="post" action="/manager/pis/{{ target_user.id }}/publications/{{ p.id }}/restore"><button type="submit" class="text-xs text-green-700 underline">Restore</button></form>
+      </li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+</section>

@@ -27,6 +27,7 @@ from src.services.star_topology import EXTRA_SPOKE_MEMBERS
 from tests import factories
 from tests.integration._webui_helpers import follow
 from tests.integration.test_manager_access import auth_headers
+from tests.persona_support import write_persona
 
 pytestmark = pytest.mark.integration
 
@@ -52,6 +53,8 @@ async def _lab(db_session, *, agent_id, status="pending", token="xoxb-lab", grou
         await factories.make_profile(
             db_session, user=pi, evidence_pmid_count=10, evidence_pub_count=8,
         )
+    # R2: the persona-file gate (spec 2026-10-05 §6.4); every activation here needs the file
+    write_persona(agent_id)
     await db_session.flush()
     return pi, agent
 
@@ -190,11 +193,11 @@ async def test_admin_approval_wires_the_renamed_slug(client, db_session):
     assert await _spoke_members(db_session, "oldslug") is None
 
 
-async def test_an_admin_approval_refused_for_its_spoke_applies_no_edits(
+async def test_a_refused_activation_keeps_the_committed_admin_rename(
     client, db_session, monkeypatch,
 ):
-    """admin_approve_agent's contract: a refusal applies NO edits — the rename, the
-    bot name and the token roll back with the activation."""
+    """D31 commits the rename and account edits before checking activation; a refused
+    activation keeps those edits but leaves the agent pending and creates no spoke."""
     monkeypatch.setattr(get_settings(), "cohort_isolation_enabled", True)
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     await _hub(db_session)
@@ -216,7 +219,7 @@ async def test_an_admin_approval_refused_for_its_spoke_applies_no_edits(
     )).scalar_one()
     await db_session.refresh(row)
     assert (row.agent_id, row.bot_name, row.slack_bot_token, row.status) == (
-        "keepme", "KeepmeBot", "xoxb-lab", "pending",
+        "renamed", "RenamedBot", "xoxb-new", "pending",
     )
     assert await _spoke_members(db_session, "renamed") is None
 

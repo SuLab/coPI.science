@@ -6,7 +6,11 @@ from pathlib import Path
 
 from src.agent import prompt_snapshot
 from src.agent.dois import extract_dois as _extract_dois
+from src.agent.dois import paper_ids_in
+from src.agent.persona_sections import recent_publication_pmids
 from src.agent.post_types import render_menu
+from src.agent.prompt_safety import delimit
+from src.agent.role_capabilities import hub_role_names
 from src.agent.roles import DEFAULT_ROLE, resolve_prompt_path
 from src.agent.state import AgentState, ThreadState
 from src.agent.thread_guidance import phase4_guidance
@@ -48,8 +52,7 @@ class Agent:
         self.role = role  # e.g., "pi_lab" — selects prompt/role overrides
         self._public_profile: str | None = None
         self._public_working_memory: str | None = None  # cached public memory segment
-        self._own_publication_dois: set[str] | None = None  # cached DOIs from own profiles
-        self._lab_directory: str | None = None
+        self._own_paper_ids: set[str] | None = None  # cached; see own_paper_ids
         self.api_call_count: int = 0
         self.message_count: int = 0
         self.state = AgentState()
@@ -190,36 +193,32 @@ class Agent:
         return self.public_working_memory
 
     @property
-    def own_publication_dois(self) -> set[str]:
-        """DOIs of the lab's own papers, parsed from its public profile.
-
-        Used to detect when a post or thread is about a paper this lab
-        (co)authored. The public profile lists each PI's representative
-        publications with DOIs, so a DOI appearing here means the paper is the
-        lab's own work. Note this only catches papers whose DOI is present in
-        the profile — a prose-only profile yields an empty set, which is why
-        the scan/reply prompts also instruct the model to recognize its own
-        published methods semantically. See GitHub issue #7.
-
-        Derives from the public profile only — there is no private-profile
-        segment to union anymore (private instructions were removed).
-        """
-        if self._own_publication_dois is None:
-            self._own_publication_dois = _extract_dois(self.public_profile)
-        return self._own_publication_dois
+    def own_paper_ids(self) -> set[str]:
+        """Ids of the lab's own papers, parsed from its public persona (spec 2026-10-05
+        D49): every DOI anywhere in it (lowercased) plus the PMIDs its Recent Publications
+        section lists (``persona_sections.recent_publication_pmids``). Used to recognise a
+        post or a tool lookup about the lab's own work. Cached until ``reload_profiles``."""
+        if self._own_paper_ids is None:
+            profile = self.public_profile
+            self._own_paper_ids = _extract_dois(profile) | recent_publication_pmids(profile)
+        return self._own_paper_ids
 
     def cites_own_paper(self, content: str | None) -> bool:
-        """True if ``content`` cites a DOI belonging to this lab's own papers."""
-        own = self.own_publication_dois
+        """True if ``content`` cites one of ``own_paper_ids`` by DOI or labelled PMID
+        (``dois.paper_ids_in``)."""
+        own = self.own_paper_ids
         if not own:
             return False
-        return bool(_extract_dois(content) & own)
+        return bool(paper_ids_in(content) & own)
 
     def reload_profiles(self):
         """Reload profiles from disk."""
         self._public_profile = None
         self._public_working_memory = None
-        self._own_publication_dois = None
+        self._own_paper_ids = None
+
+    def _is_hub(self) -> bool:
+        return self.role in hub_role_names()
 
     # ------------------------------------------------------------------
     # System prompt (shared across all phases)
@@ -237,8 +236,7 @@ class Agent:
         ``channel_id`` is also injected. See specs/privacy-and-channel-visibility.md §G1.
         """
         return self._compose_system_prompt(
-            include_memory=True,
-            include_lab_directory=True,
+            trailing_newline=True,
             visibility=visibility,
             channel_id=channel_id,
         )
@@ -250,16 +248,14 @@ class Agent:
     ) -> str:
         """Build a system prompt for thread replies.
 
-        Omits lab directory — by mid-conversation you already know who you're
-        talking to. Use retrieve_profile tool if you need details on another lab.
-        Includes working memory since it may contain thread-relevant context.
+        Identical to ``build_system_prompt`` except that it does not end with the
+        final newline (D29 kept that newline only where it always was).
 
         visibility/channel_id: same semantics as build_system_prompt — determines
         which memory segment is injected.
         """
         return self._compose_system_prompt(
-            include_memory=True,
-            include_lab_directory=False,
+            trailing_newline=False,
             visibility=visibility,
             channel_id=channel_id,
         )
@@ -297,18 +293,17 @@ class Agent:
     def _compose_system_prompt(
         self,
         *,
-        include_memory: bool,
-        include_lab_directory: bool,
+        trailing_newline: bool,
         visibility: str = VISIBILITY_PUBLIC,
         channel_id: str | None = None,
     ) -> str:
-        """Assemble a system prompt from the shared sections.
-
-        This is the single composer behind build_system_prompt and
-        build_thread_reply_system_prompt — the include_memory/
-        include_lab_directory flags reproduce each builder's original section
-        set byte-for-byte (see the callers above).
-        """
+        """Assemble a system prompt: the role's ``agent-system.md`` (rubric rendered into
+        a ``{rubric}`` placeholder), the identity block, for a non-hub role the
+        "## Your Lab Profile (Public)" section, then "## Your Working Memory".
+        ``trailing_newline`` adds the final ``\\n`` ``build_system_prompt`` has always
+        ended with (it used to precede the removed lab directory, spec 2026-10-05 D29);
+        keeping it keeps every lab prompt byte-identical. A hub role has no profile
+        section (D26): Blackbird's brief for labs is served by ``retrieve_profile``."""
         base_prompt = self._load_prompt("agent-system.md", _default_system_prompt())
         # The scouting hub's system prompt carries the screening rubric as a
         # `{rubric}` placeholder, rendered from prompts/rubric/
@@ -323,31 +318,12 @@ class Agent:
                 _RUBRIC_PLACEHOLDER, render_rubric_markdown()
             )
         identity = self._render_identity()
-
-        header = f"""{base_prompt}
-
-{identity}
-
-## Your Lab Profile (Public)
-{self.public_profile}"""
-
-        if not include_memory:
-            return header
-
+        header = f"{base_prompt}\n\n{identity}"
+        if not self._is_hub():
+            header += f"\n\n## Your Lab Profile (Public)\n{self.public_profile}"
         working_memory_text = self._compose_working_memory(visibility, channel_id)
-        memory_block = f"\n\n## Your Working Memory\n{working_memory_text}"
-
-        if include_lab_directory:
-            lab_directory_section = ""
-            if self._lab_directory:
-                lab_directory_section = f"""
-## Other Labs' Recent Publications
-Use these to reference other labs' work in conversations. Include links when citing.
-{self._lab_directory}
-"""
-            return f"{header}{memory_block}\n{lab_directory_section}"
-
-        return f"{header}{memory_block}"
+        prompt = f"{header}\n\n## Your Working Memory\n{working_memory_text}"
+        return f"{prompt}\n" if trailing_newline else prompt
 
     def _compose_working_memory(
         self,
@@ -390,7 +366,8 @@ Use these to reference other labs' work in conversations. Include links when cit
         """
         Build system + messages for Phase 4 thread reply.
 
-        thread_history: list of {sender, content} dicts.
+        thread_history: list of {sender, content} dicts, optionally with
+            ``sender_agent_id``.
         visibility/channel_id: visibility class of the thread's channel and the
             channel's Slack ID. Threaded through to the system prompt builder
             for visibility-scoped memory injection.
@@ -426,9 +403,7 @@ Use these to reference other labs' work in conversations. Include links when cit
         )
 
         # Format thread history
-        history_text = "\n".join(
-            f"**{m['sender']}**: {m['content']}" for m in thread_history
-        )
+        history_text = "\n".join(self._history_line(m) for m in thread_history)
 
         # If the thread's root post is about a paper this lab authored, warn the
         # model not to engage as if it were external work (see issue #7).
@@ -443,6 +418,7 @@ Use these to reference other labs' work in conversations. Include links when cit
         prompt_text = phase4_template.replace("{channel_name}", thread.channel)
         prompt_text = prompt_text.replace("{other_agent_name}", other_agent_name)
         prompt_text = prompt_text.replace("{other_agent_lab}", other_agent_lab)
+        prompt_text = prompt_text.replace("{other_agent_id}", thread.other_agent_id)
         # Shown to the model right alongside `{thread_phase}`/`{phase_guidance}`
         # ("Message count: N of 12 max"), so it must be the same ordinal fed to
         # phase4_guidance above — otherwise a CONCLUDE-guided reply would see
@@ -456,6 +432,22 @@ Use these to reference other labs' work in conversations. Include links when cit
 
         messages = [{"role": "user", "content": prompt_text}]
         return system_prompt, messages
+
+    def _history_line(self, message: dict) -> str:
+        """One thread-history line, ``**sender**: content``. A hub fences every message it
+        did not write as ``<lab_message>`` data (spec 2026-10-05 §6.5, D38); a lab's lines
+        are unchanged. A message is the hub's own when its ``sender_agent_id`` is this
+        agent's id or, for a history without that key, when its sender is this agent's
+        bot name."""
+        content = message["content"]
+        if self._is_hub():
+            if "sender_agent_id" in message:
+                own = message["sender_agent_id"] == self.agent_id
+            else:
+                own = message["sender"] == self.bot_name
+            if not own:
+                content = delimit(content, "lab_message")
+        return f"**{message['sender']}**: {content}"
 
     # ------------------------------------------------------------------
     # Phase 5: New Post prompt

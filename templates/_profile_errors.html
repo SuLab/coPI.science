@@ -1,0 +1,13 @@
+{# Messages for apply_profile_edits' refusal codes (src/services/profile_edit.py, C6). The
+   numbers are src/services/profile_limits.py's and person_names.NAME_MAX_CHARS
+   (tests/integration/test_profile_edit_rules.py pins them). #}
+{% macro profile_error_text(code) -%}
+{%- if code == 'profile_version_missing' -%}This form was opened before the profile existed (or is out of date). Reload the page and make your changes again.
+{%- elif code == 'invalid_name' -%}Names may contain letters, spaces, hyphens, apostrophes, periods and commas, at most 100 characters.
+{%- elif code == 'summary_too_long' -%}The research summary is limited to 350 words. It is also limited to 20,000 characters.
+{%- elif code == 'too_many_tags' -%}Each list is limited to 30 items.
+{%- elif code == 'tag_too_long' -%}Each list item is limited to 200 characters.
+{%- elif code == 'tag_invalid' -%}A list item may not contain a line break or start with #.
+{%- elif code == 'nothing_to_save' -%}There is nothing to save yet — fill in at least one field.
+{%- endif -%}
+{%- endmacro %}

@@ -448,7 +448,7 @@ class FakeSlackClient:
     async def ais_bot_user(self, user_id: str) -> bool:
         return self.is_bot_user(user_id)
 
-    def join_channel(self, channel_id: str) -> None:
+    def join_channel(self, channel_id: str) -> bool:
         # For test tracking, extract the channel name from the ID.
         # FakeSlackClient creates IDs as "C_name"; a "G_name" private id is stripped
         # the same way, and real IDs pass through.
@@ -456,8 +456,9 @@ class FakeSlackClient:
         if channel_id.startswith(("C_", "G_")):
             ch_name = channel_id[2:]  # Strip the "C_" or "G_" prefix
         self.joined_channels.add(ch_name)
+        return True
 
-    async def ajoin_channel(self, channel_id: str) -> None:
+    async def ajoin_channel(self, channel_id: str) -> bool:
         return self.join_channel(channel_id)
 
     def create_channel(self, name: str) -> dict:

@@ -101,7 +101,6 @@ def _record_start(monkeypatch, eng, calls):
         monkeypatch.setattr(eng, name, lambda *a, _n=name, **k: _rec_async(_n), raising=False)
     for name in (
         "_ensure_seeded_channels", "_ensure_assessments_summary_channel",
-        "refresh_lab_directories",
     ):
         monkeypatch.setattr(eng, name, lambda *a, _n=name, **k: calls.append(_n), raising=False)
     monkeypatch.setattr(eng, "_validate_star_topology", lambda: calls.append("_validate") or [])

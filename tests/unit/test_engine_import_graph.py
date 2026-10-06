@@ -232,7 +232,6 @@ EXPECTED_METHOD_OWNER: dict[str, str] = {
     "_count_today_posts": "scheduler", "_turn_eligible": "scheduler", "_select_agent": "scheduler",
     "_poll_control_plane": "control",
     "_sync_profiles_from_disk": "roster", "_sync_roster_from_db": "roster",
-    "_build_lab_directories": "roster", "refresh_lab_directories": "roster",
     "_infer_agent_id": "roster", "_disable_all_gates": "roster",
     "_validate_star_topology": "roster", "_recompute_allowed_sender_ids": "roster",
     "_apply_cohort_gate_to_state": "roster", "cohort_topology_snapshot": "roster",

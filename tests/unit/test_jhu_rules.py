@@ -126,9 +126,9 @@ def test_a_current_hopkins_employment_without_a_start_year_yields_none():
 
 def test_paper_tier_uses_the_earliest_paper_where_the_pi_herself_is_at_hopkins():
     records = [
-        {"year": 2005, "pi_affiliations": ["University of Somewhere"]},
-        {"year": 2018, "pi_affiliations": ["Johns Hopkins University"]},
-        {"year": 2020, "pi_affiliations": ["Johns Hopkins University"]},
+        {"year": 2005, "pi_affiliations": ["University of Somewhere"], "stages": ["s1"]},
+        {"year": 2018, "pi_affiliations": ["Johns Hopkins University"], "stages": ["s1"]},
+        {"year": 2020, "pi_affiliations": ["Johns Hopkins University"], "stages": ["s1"]},
     ]
     assert derive_start_from_papers(records) == 2018
 
@@ -193,3 +193,14 @@ async def test_legacy_agent_id_map_is_read_as_a_fallback(db_session):
     user_id = uuid.uuid4()  # no per-user row exists
     assert await get_tenure_start(db_session, user_id, agent_id="wu") == 2009
     assert await get_tenure_start(db_session, user_id, agent_id="zzz") is None
+
+
+def test_only_orcid_anchored_papers_date_tenure():
+    hopkins = ["Johns Hopkins University School of Medicine"]
+    records = [
+        {"year": 1990, "pi_affiliations": hopkins, "stages": ["s4"]},   # namesake risk
+        {"year": 2001, "pi_affiliations": hopkins, "stages": ["s2"]},
+        {"year": 2005, "pi_affiliations": hopkins, "stages": ["s1", "s4"]},
+    ]
+    assert derive_start_from_papers(records) == 2005
+    assert derive_start_from_papers(records[:2]) is None

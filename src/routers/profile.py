@@ -25,7 +25,11 @@ from src.services.profile_edit import (
     parse_expected_version,
 )
 from src.services.profile_jobs import enqueue_profile_job_if_absent
-from src.services.tenure_scope import publication_order_by, scoped_publications_for
+from src.services.tenure_scope import (
+    publication_in_use,
+    publication_order_by,
+    scoped_publications_for,
+)
 from src.services.user_deletion import delete_user_account
 from src.web.flash import flash
 from src.web.templating import make_templates
@@ -75,7 +79,7 @@ async def profile_view(
 
     pub_result = await db.execute(
         select(Publication)
-        .where(Publication.user_id == current_user.id)
+        .where(Publication.user_id == current_user.id, publication_in_use())
         .order_by(*publication_order_by())
     )
     publications = pub_result.scalars().all()
@@ -147,7 +151,7 @@ async def profile_save(
     email: str = Form(""),
     institution: str = Form(""),
     department: str = Form(""),
-    research_summary: str = Form(""),
+    research_summary: str | None = Form(None),
     profile_version: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_pi_user),

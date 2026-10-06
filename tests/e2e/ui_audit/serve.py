@@ -20,7 +20,8 @@ def main() -> None:
     import uvicorn
 
     from src.main import create_app
-    from src.services import assessment_chat
+    from src.routers import manager
+    from src.services import assessment_chat, profile_publish
     from tests.assessment_chat_support import PITCH_TEXT, RECORD_URL, citation
     from tests.fakes import ChatScript, FakeAsyncAnthropic
 
@@ -34,6 +35,29 @@ def main() -> None:
          for _ in range(200)]
     )
     assessment_chat.get_async_anthropic_client = lambda: fake
+
+    async def fake_pubmed_records(pmids, *, strict=False):
+        """The review-card candidate route has no outbound dependency in the harness."""
+        return [
+            {"pmid": str(pmid), "title": "P3 accepted candidate paper",
+             "abstract": "A fake PubMed abstract for the isolated UI audit.",
+             "journal": "Audit Journal", "year": 2024, "pmcid": None, "doi": None}
+            for pmid in pmids
+        ]
+
+    manager.fetch_pubmed_records = fake_pubmed_records
+    real_export = profile_publish.export_profile_to_markdown
+    failed_slugs: set[str] = set()
+
+    def fail_renamed_pi_c_export(user, profile, agent_id, *args, **kwargs):
+        # Operator choice for J4-5: lifecycle export is attempted before activation, but its
+        # isolated writer failure leaves the renamed pending lab behind the hard file gate.
+        if agent_id == "p4-refusal-renamed" and agent_id not in failed_slugs:
+            failed_slugs.add(agent_id)
+            return None
+        return real_export(user, profile, agent_id, *args, **kwargs)
+
+    profile_publish.export_profile_to_markdown = fail_renamed_pi_c_export
     uvicorn.run(create_app(), host="127.0.0.1", port=args.port, log_level="warning")
 
 

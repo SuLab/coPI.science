@@ -38,3 +38,24 @@ def test_prompt_only_requests_author_weighting_the_context_supplies():
             "the synthesis prompt asks for last-author weighting, but the "
             "context it is given never marks a last-author paper"
         )
+
+
+def test_the_prompt_states_the_summary_range_and_tag_limits():
+    prompt = _PROMPT.read_text()
+    assert "100–350 words (aim for 150–250)" in prompt
+    assert "At most 30 items per list" in prompt and "200 characters" in prompt
+
+
+def test_the_prompt_no_longer_mentions_submitted_texts():
+    assert "submitted text" not in _PROMPT.read_text().lower()
+
+
+def test_the_researcher_block_comes_from_the_user_record():
+    from types import SimpleNamespace
+
+    from src.services.profile_pipeline import _researcher_info
+
+    user = SimpleNamespace(name="Jane Doe", institution="JHU", department=None)
+    info = _researcher_info(user, {"name": "J. Doe (ORCID)", "institution": "Elsewhere",
+                                   "lab_website": "https://lab"})
+    assert info == {"name": "Jane Doe", "institution": "JHU", "lab_website": "https://lab"}

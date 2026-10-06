@@ -37,8 +37,10 @@ connection during the run, bounds its own wait on the ``jobs`` row the same way.
 
 The caller passes the publications to step 1, so each path keeps its own query (FA3-V3);
 step 2 always uses ``scoped_publications_for_export``. A post-commit write failure is
-logged at ERROR and swallowed (``agents.persona_export_failed_at`` arrives with migration
-0062)."""
+logged at ERROR and recorded in ``agents.persona_export_failed_at`` (migration 0062), which
+the next successful write clears; the manager PI page then offers Re-export. The flag is
+written after the writer's own transaction ends (outside the per-PI lock), so it never
+waits on a deletion while holding that lock."""
 from __future__ import annotations
 
 import functools
@@ -46,9 +48,9 @@ import logging
 import uuid
 from pathlib import Path
 
-from sqlalchemy import event, select
+from sqlalchemy import event, func, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
-from sqlalchemy.orm import Session, SessionTransaction
+from sqlalchemy.orm import Session, SessionTransaction, selectinload
 
 from src.database import get_session_factory
 from src.models import AgentRegistry, ResearcherProfile, User
@@ -120,7 +122,8 @@ async def _load_owner(
     if agent is None:
         return None
     user = (await db.execute(
-        select(User).where(User.id == user_id).execution_options(**fresh)
+        select(User).where(User.id == user_id).options(selectinload(User.agent))
+        .execution_options(**fresh)
     )).scalar_one_or_none()
     profile = (await db.execute(
         select(ResearcherProfile).where(ResearcherProfile.user_id == user_id)
@@ -203,6 +206,19 @@ async def render_persona_from_db(
     return agent, render_profile_markdown(user, profile, publications=publications, grants=grants)
 
 
+async def persona_out_of_date(db: AsyncSession, user_id: uuid.UUID) -> bool | None:
+    """Whether the PI's persona file needs a Re-export: the last post-commit write failed
+    (agents.persona_export_failed_at) or the file differs from a fresh render. None when
+    the PI has no agent or no profile. Reads only; takes no lock."""
+    rendered = await render_persona_from_db(db, user_id)
+    if rendered is None:
+        return None
+    agent, text = rendered
+    if agent.persona_export_failed_at is not None:
+        return True
+    return persona_file_text(agent.agent_id) != text
+
+
 def _writer_session(db: AsyncSession) -> AsyncSession:
     """A new session for the post-commit write on ``db``'s bind: its own connection for an
     engine bind; a savepoint on the same connection when ``db`` is bound to one (tests).
@@ -217,13 +233,16 @@ def _writer_session(db: AsyncSession) -> AsyncSession:
     return AsyncSession(bind=bind, expire_on_commit=False)
 
 
-async def _write_files(db: AsyncSession, user_id: uuid.UUID) -> Path | None:
-    """Lock, re-select, re-render and write, in ``db``'s transaction; errors propagate."""
+async def _write_files(db: AsyncSession, user_id: uuid.UUID) -> tuple[Path | None, bool]:
+    """Lock, re-select, re-render and write, in ``db``'s transaction; errors propagate.
+    Returns ``(path, attempted)``: ``path`` is None when the persona write failed or was not
+    attempted; ``attempted`` is False when there was no owner (agent, user, profile) to
+    write for."""
     await lock_agent_persona(db, user_id)
     db.info[_PERSONA_LOCK_HELD] = True
     owner = await _load_owner(db, user_id)
     if owner is None:
-        return None
+        return None, False
     user, profile, agent = owner
     publications = await scoped_publications_for_export(db, user_id, agent.agent_id)
     grants = await load_grant_sections(db, user_id)
@@ -233,7 +252,36 @@ async def _write_files(db: AsyncSession, user_id: uuid.UUID) -> Path | None:
     if path is None:
         logger.error("Persona write failed for user %s (agent %s)", user_id, agent.agent_id)
     await export_companies_file(db, user_id)
-    return path
+    return path, True
+
+
+async def _record_export_result(db: AsyncSession, user_id: uuid.UUID, *, failed: bool) -> None:
+    """Set (``failed``) or clear ``agents.persona_export_failed_at`` for the PI's agent, in
+    ``db``'s transaction. A clear touches only a flagged row."""
+    stmt = update(AgentRegistry).where(AgentRegistry.user_id == user_id)
+    if failed:
+        stmt = stmt.values(persona_export_failed_at=func.now())
+    else:
+        stmt = stmt.where(AgentRegistry.persona_export_failed_at.is_not(None)).values(
+            persona_export_failed_at=None)
+    await db.execute(stmt.execution_options(synchronize_session=False))
+
+
+async def _record_export_result_after(
+    db: AsyncSession, user_id: uuid.UUID, *, failed: bool,
+) -> None:
+    """``_record_export_result`` in a short transaction of its own (a new session on
+    ``db``'s bind), after the writer's transaction released the per-PI lock. Any error is
+    logged at ERROR and swallowed."""
+    session = _writer_session(db)
+    try:
+        await _record_export_result(session, user_id, failed=failed)
+        await session.commit()
+    except Exception:
+        logger.exception("Recording the persona export result failed for user %s", user_id)
+        await session.rollback()
+    finally:
+        await session.close()
 
 
 async def write_persona_files(
@@ -242,6 +290,8 @@ async def write_persona_files(
     """The post-commit persona write (spec 2026-10-05 §4.3). Takes the per-PI lock,
     re-selects the agent by ``user_id`` (none: deleted or unlinked, nothing is written),
     re-renders from the database and writes the persona and the companies file.
+    Maintains ``agents.persona_export_failed_at``: a failed attempt sets it, a successful
+    one clears it (nothing changes when there was no owner to write for).
 
     Returns the persona path, or None when nothing was written or the write failed.
     ``commit=True`` runs in a new session on ``db``'s bind and commits it to release the
@@ -256,9 +306,16 @@ async def write_persona_files(
     connection would wait for the caller's own lock forever. The caller must commit first.
     A ``db`` bound to a single connection (tests) is exempt, as its writer session shares
     the connection and so the lock. A read-only transaction opened after the commit holds
-    no lock and passes."""
+    no lock and passes.
+
+    ``commit=False`` records the flag in ``db``'s transaction (the caller holds the lock
+    and commits it); ``commit=True`` records it in a second short transaction after the
+    writer's commit or rollback, so the flag write never runs under the per-PI lock."""
     if not commit:
-        return await _write_files(db, user_id)
+        path, attempted = await _write_files(db, user_id)
+        if attempted:
+            await _record_export_result(db, user_id, failed=path is None)
+        return path
     if (
         db.in_transaction() and db.info.get(_PERSONA_LOCK_HELD)
         and not isinstance(db.bind, AsyncConnection)
@@ -268,16 +325,20 @@ async def write_persona_files(
             "transaction holds the persona lock: commit it first"
         )
     session = _writer_session(db)
+    path: Path | None = None
+    attempted = True  # an exception counts as an attempted, failed write
     try:
-        path = await _write_files(session, user_id)
+        path, attempted = await _write_files(session, user_id)
         await session.commit()
-        return path
     except Exception:
         logger.exception("Persona write failed after commit for user %s", user_id)
         await session.rollback()
-        return None
+        path = None
     finally:
         await session.close()
+    if attempted:
+        await _record_export_result_after(db, user_id, failed=path is None)
+    return path
 
 
 async def schedule_persona_write(

@@ -4,7 +4,7 @@ export did. A healthy run never leaves one behind."""
 import pytest
 from sqlalchemy import select
 
-from src.models import AppSetting, Publication
+from src.models import AppSetting, Publication, ResearcherProfile
 from src.services import corpus as corpus_module
 from src.services import profile_export, profile_pipeline
 from src.services.jhu_rules import (
@@ -96,7 +96,13 @@ async def test_an_orcid_failure_scopes_later_edit_exports_like_the_pipeline_expo
     pipeline_export = (export_dir / "p014ada.md").read_text(encoding="utf-8")
     assert "Pre-Hopkins paper" not in pipeline_export
 
+    # R1-a: the pipeline created the profile; the save carries its current version.
+    version = (await db_session.execute(
+        select(ResearcherProfile.profile_version).where(ResearcherProfile.user_id == user.id)
+        .execution_options(populate_existing=True)
+    )).scalar_one()
     resp = await client.post("/profile/save", data={
+        "profile_version": str(version),
         "name": user.name, "email": user.email, "institution": "", "department": "",
         "research_summary": "Edited.", "techniques": "", "experimental_models": "",
         "disease_areas": "", "key_targets": "", "keywords": "",

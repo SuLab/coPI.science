@@ -1,8 +1,9 @@
 """The /manager surface: deny-by-default, PI-scoped, and read-only except for
-an explicit, mechanically-enumerated allowlist of nineteen write routes (design
+an explicit, mechanically-enumerated allowlist of twenty-eight write routes (design
 D1, amended 2026-09-10 by F2, 2026-09-11 by the two enrichment vetoes,
-2026-10-01 by email verification, 2026-10-02 by the five Companies routes and
-2026-10-05 by the profile retry and the four grant-identity and ORCID-veto routes)."""
+2026-10-01 by email verification, 2026-10-02 by the five Companies routes,
+2026-10-05 by the profile retry and the four grant-identity and ORCID-veto routes and
+2026-10-06 by the nine corpus and profile review routes)."""
 
 import re
 import uuid
@@ -56,8 +57,8 @@ def _manager_get_paths(param_values: dict[str, str] | None = None) -> list[str]:
 
 def test_manager_router_mutations_are_an_explicit_allowlist():
     """D12 amended, not abolished (design decision D1): the manager router may
-    have non-GET routes now, but only these nineteen, named exactly. A future
-    accidental twentieth write route still fails this test loudly. The two
+    have non-GET routes now, but only these twenty-eight, named exactly. A future
+    accidental twenty-ninth write route still fails this test loudly. The two
     provisioning routes joined the list with F2 (2026-09-10): a manager may
     install a PI's Slack bot and activate the agent from /manager/pis/{id}.
     The grant veto joined 2026-09-11 (Task 5 of
@@ -72,7 +73,8 @@ def test_manager_router_mutations_are_an_explicit_allowlist():
     company discovery. The profile retry joined 2026-10-05: a manager may queue
     generation again for a PI whose job died or whose profile is ungrounded.
     The four grant-identity and ORCID-veto routes joined 2026-10-05 (spec
-    2026-10-05 §6.1).
+    2026-10-05 §6.1). The nine review routes joined 2026-10-06 (spec 2026-10-05 §6.3
+    Review UIs; the eighth and ninth are Re-export and D71's Restore).
     """
     allowed_post_paths = {
         "/pis",
@@ -94,6 +96,15 @@ def test_manager_router_mutations_are_an_explicit_allowlist():
         "/pis/{user_id}/companies/{company_id}/delete",
         "/pis/{user_id}/companies/{company_id}/confirm",
         "/pis/{user_id}/companies/{company_id}/reject",
+        "/pis/{user_id}/candidates/{candidate_id}/accept",
+        "/pis/{user_id}/candidates/{candidate_id}/reject",
+        "/pis/{user_id}/publications/{publication_id}/keep",
+        "/pis/{user_id}/publications/{publication_id}/exclude",
+        "/pis/{user_id}/publications/{publication_id}/restore",
+        "/pis/{user_id}/draft/accept",
+        "/pis/{user_id}/draft/discard",
+        "/pis/{user_id}/regenerate",
+        "/pis/{user_id}/persona/reexport",
     }
     methods = {m for r in manager_router.router.routes for m in getattr(r, "methods", ())}
     assert methods == {"GET", "POST"}, f"unexpected method on the manager router: {methods}"
@@ -781,6 +792,7 @@ async def test_impersonating_admin_sees_every_manager_control(client, db_session
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, name="Adm Imp")
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER, name="Mgr Imp")
     pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)
+    await factories.make_profile(db_session, user=pi)
     await factories.make_agent(db_session, user=pi, status="active")
     await db_session.flush()
     db_session.expire(pi)  # so the detail page's `target_user.agent` loads the new row

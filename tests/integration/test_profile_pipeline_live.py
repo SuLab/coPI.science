@@ -47,7 +47,6 @@ Run it on the host (the image installs without the ``[dev]`` extra, so has no py
       -m 'live_api and real_llm'
 """
 
-import hashlib
 import os
 import re
 import uuid
@@ -961,12 +960,14 @@ async def test_t45_the_four_mocked_golden_masters_still_describe_the_live_shape(
             private_profile_seed None (never written — synthesize_private_profile
             was deleted outright in the 2026-08-12 PI-interaction removal cycle),
             the six synthesized fields are list/str, publications carry
-            pmid/doi/title/journal/year/pmcid/abstract, raw_abstracts_hash is the sha256
-            of the joined abstracts, and exactly one LLM call (public synthesis only).
+            pmid/doi/title/journal/year/pmcid/abstract, raw_abstracts_hash is None (no
+            writer since 2026-10-05, spec D34, P33), and exactly one LLM call (public
+            synthesis only).
       GM #2 test_profile_pipeline_llm_failure_leaves_fields_unset
-            synthesis raises -> version stays 0, fields stay None, hash still set.
-            Reproduced live below with an unauthenticated Anthropic client: a real 401
-            from api.anthropic.com, zero tokens.
+            synthesis raises -> the exception propagates (process_job retries, then
+            marks the job dead) and no profile row survives the rollback (spec
+            2026-10-05 §6.3, D18). Reproduced live below with an unauthenticated
+            Anthropic client: a real 401 from api.anthropic.com, zero tokens.
       GM #3 test_profile_pipeline_doi_correction_stores_authoritative
             the stored DOI is the one PubMed has on file for that PMID, never an
             unverified ORCID candidate. Checked against live esummary.
@@ -1027,15 +1028,8 @@ async def test_t45_the_four_mocked_golden_masters_still_describe_the_live_shape(
         f"Across {len(single['stored_pubs'])} live rows only {sorted(populated)} were ever "
         "populated, so the GM overstates what the real ingest produces"
     )
-    # The hash rule, recomputed from the real records the real run synthesized from.
-    expected_hash = hashlib.sha256(
-        "\n".join(p.get("abstract", "") for p in single["pubs_for_synthesis"]).encode()
-    ).hexdigest()
-    assert single["raw_abstracts_hash"] == expected_hash, (
-        "GM #1 pins raw_abstracts_hash as the sha256 of the newline-joined abstracts of "
-        "the publications passed to synthesis. Recomputing that over the live corpus "
-        f"gives {expected_hash[:12]}… but the pipeline stored "
-        f"{single['raw_abstracts_hash'][:12]}… — the hashed set is not the synthesized set"
+    assert single["raw_abstracts_hash"] is None, (
+        "raw_abstracts_hash has had no writer since 2026-10-05 (spec D34, P33)"
     )
     assert single["llm_calls"] == 1, (
         f"GM #1 asserts exactly one LLM call on the happy path (public synthesis only "
@@ -1101,7 +1095,10 @@ async def test_t45_the_four_mocked_golden_masters_still_describe_the_live_shape(
     # --- GM #2, reproduced against the real API ------------------------------------------
     # Not a fake: the client below talks to api.anthropic.com and is rejected with a real
     # 401. That is the only way to see the pipeline's synthesis-failure path with the real
-    # SDK's exception types, and it costs nothing.
+    # SDK's exception types, and it costs nothing. GM #2's contract
+    # (test_profile_pipeline_llm_failure_leaves_fields_unset): the exception propagates
+    # out of the run, so process_job retries and then marks the job dead, and the job's
+    # rollback leaves no profile row.
     user, _agent = await seed_pi(db_session, tmp_path, monkeypatch)
     probe = PipelineProbe().install(monkeypatch)
     monkeypatch.setattr(
@@ -1109,40 +1106,23 @@ async def test_t45_the_four_mocked_golden_masters_still_describe_the_live_shape(
         lambda: anthropic.Anthropic(api_key="sk-ant-t4-deliberately-invalid"),
     )
     api_budget.wait("orcid")
-    failed = await profile_pipeline.run_profile_pipeline(user.id, db_session)
+    with pytest.raises(anthropic.AuthenticationError):
+        await profile_pipeline.run_profile_pipeline(user.id, db_session)
+    await db_session.rollback()
 
+    # Control: the corpus ran and the one synthesis call was made, so the failure is
+    # the one engineered here, not an earlier step's.
     assert probe.public_calls == 1 and probe.private_calls == 0, (
         "the failure path did not attempt exactly the one synthesis call the "
         "post-removal pipeline makes (public only — step 9b/synthesize_private_profile "
         "was deleted outright), so GM #2's shape is not the one being reconciled: "
         f"public={probe.public_calls} private={probe.private_calls}"
     )
-    gm2_expected = {
-        "profile_version": 0,
-        "research_summary": None,
-        "techniques": None,
-        "disease_areas": None,
-        "private_profile_seed": None,
-        "raw_abstracts_hash_is_set": True,
-    }
-    gm2_live = {
-        "profile_version": failed.profile_version,
-        "research_summary": failed.research_summary,
-        "techniques": failed.techniques,
-        "disease_areas": failed.disease_areas,
-        "private_profile_seed": failed.private_profile_seed,
-        "raw_abstracts_hash_is_set": failed.raw_abstracts_hash is not None,
-    }
-    assert gm2_live == gm2_expected, (
-        "GM #2 (test_profile_pipeline_llm_failure_leaves_fields_unset) does not describe "
-        "what happens when the REAL Anthropic API rejects the call. Snapshot claims "
-        f"{gm2_expected}, live measured {gm2_live}. GM #2 raises RuntimeError from a fake; "
-        "if the live shape differs, the pipeline's `except Exception` is not catching what "
-        "the real SDK raises"
-    )
-    # Control: the failure must be the one we engineered, not a network outage that would
-    # have produced the same all-None row for a different reason.
-    assert failed.raw_abstracts_hash != hashlib.sha256(b"").hexdigest(), (
-        "the failed run also had an empty abstract corpus, so this reproduced 'PubMed was "
-        "down' rather than 'the LLM call failed' and GM #2 was not actually reconciled"
+    rows = (await db_session.execute(
+        select(ResearcherProfile).where(ResearcherProfile.user_id == user.id)
+    )).scalars().all()
+    assert rows == [], (
+        "GM #2 (test_profile_pipeline_llm_failure_leaves_fields_unset) says a failed "
+        "synthesis leaves no profile row once the job rolls back; the REAL 401 left "
+        f"{len(rows)}"
     )

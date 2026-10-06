@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from src.models import USER_ROLE_ADMIN, USER_ROLE_MANAGER, USER_ROLE_PI, User
 from tests import factories
 from tests.integration.test_manager_access import auth_headers
+from tests.persona_support import write_persona
 
 pytestmark = pytest.mark.integration
 
@@ -138,6 +139,7 @@ async def test_manager_mutes_and_unmutes_a_pi(client, db_session):
     # Unmute goes through the activation gate (RA-01): grounded profile + token.
     await factories.make_profile(db_session, user=pi, evidence_pub_count=3, evidence_pmid_count=3)
     agent = await factories.make_agent(db_session, user=pi, status="active", slack_bot_token="xoxb-1")
+    write_persona(agent.agent_id)  # R2: the unmute needs the persona file (spec 2026-10-05 §6.4)
 
     r = await client.post(
         f"/manager/pis/{pi.id}/mute", headers=auth_headers(manager.id), follow_redirects=False,
@@ -407,9 +409,12 @@ async def test_manager_can_correct_the_tenure_year_from_the_edit_form(
     pi = await factories.make_user(
         db_session, user_role=USER_ROLE_PI, orcid="0000-0013-0000-0000",
     )
+    profile = await factories.make_profile(db_session, user=pi)
     r = await client.post(
         f"/manager/pis/{pi.id}/profile",
-        data={"name": pi.name, "research_summary": "S", "jhu_tenure_start": "2014"},
+        # R1-a: a save over an existing profile carries its current version (spec 2026-10-05 §6.4)
+        data={"name": pi.name, "research_summary": "S", "jhu_tenure_start": "2014",
+              "profile_version": str(profile.profile_version)},
         headers=auth_headers(manager.id), follow_redirects=False,
     )
     assert r.status_code == 302 and r.headers["location"] == f"/manager/pis/{pi.id}"

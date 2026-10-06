@@ -59,6 +59,7 @@ from src.services.industry_score import SCORER_VERSION, IndustryView, cohort_raw
 from src.services.rubric_revisions import RubricRevisionView, resolve_revision
 from src.services.runs import runs_ordered
 from src.services.tenure_scope import (
+    publication_in_use,
     publication_order_by,
     scoped_counts,
     scoped_publications_for,
@@ -179,13 +180,18 @@ def _pi_directory_query(*, status_filter, institution_filter, claimed_filter, ro
 
     ``profile_status`` mirrors the Python rules it replaced: no profile row ->
     ``no_profile``; a non-empty ``pending_profile`` -> ``pending_update``; a non-empty
-    ``research_summary`` -> ``complete``; else ``generating`` while a profile job is
-    pending or processing, otherwise ``no_profile``. "Non-empty" for the JSON column
+    ``research_summary`` -> ``complete``; else ``generating`` while a ``generate_profile`` job
+    is pending or processing (an enrichment or discovery job is not a generation, U-14),
+    otherwise ``no_profile``. "Non-empty" for the JSON column
     excludes the JSON scalar ``null`` and an empty object or list, which Python read
     as falsy."""
     active_job = (
         select(Job.id)
-        .where(Job.user_id == User.id, Job.status.in_(("pending", "processing")))
+        .where(
+            Job.user_id == User.id,
+            Job.type == "generate_profile",
+            Job.status.in_(("pending", "processing")),
+        )
         .exists()
     )
     status_expr = case(
@@ -340,6 +346,7 @@ async def load_user_detail(db: AsyncSession, user_id: uuid.UUID) -> dict[str, An
         select(User)
         .where(User.id == user_id)
         .options(selectinload(User.profile), selectinload(User.jobs), selectinload(User.agent))
+        .execution_options(populate_existing=True)
     )
     user = result.scalar_one_or_none()
     if not user:
@@ -347,7 +354,7 @@ async def load_user_detail(db: AsyncSession, user_id: uuid.UUID) -> dict[str, An
 
     pub_result = await db.execute(
         select(Publication)
-        .where(Publication.user_id == user_id)
+        .where(Publication.user_id == user_id, publication_in_use())
         .order_by(*publication_order_by())
     )
     publications = pub_result.scalars().all()

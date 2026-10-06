@@ -57,12 +57,15 @@ def profile_retry_warranted(
 ) -> bool:
     """Whether staff may queue this PI's profile generation again (the manager's
     "Retry profile generation"): never while a job is pending or processing; yes
-    when the newest generate_profile job is dead, or when there is no profile or
-    it is not grounded in a publication abstract — the states the activation gate
-    refuses. A grounded profile is not regenerated from here: that would spend a
+    when the newest generate_profile job is dead, or when there is no profile, it is
+    not grounded in a publication abstract, or its summary is empty — the states the
+    activation gate refuses. A grounded profile is not regenerated from here: that would spend a
     pipeline run for nothing the gate needs."""
     if latest_job is not None and latest_job.status in _LIVE_STATUSES:
         return False
     if latest_job is not None and latest_job.status == "dead":
         return True
-    return profile is None or profile.evidence_state != "grounded"
+    return (
+        profile is None or profile.evidence_state != "grounded"
+        or not (profile.research_summary or "").strip()
+    )

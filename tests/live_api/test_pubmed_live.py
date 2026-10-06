@@ -49,10 +49,8 @@ JINEK_PMCID = "PMC6286148"
 JINEK_YEAR = 2012
 
 # Li et al. 2009, Bioinformatics — "The Sequence Alignment/Map format and SAMtools".
-# Fully open access in PMC, and its full text has a section titled "2 METHODS". Note
-# that "2 methods" is NOT in `_extract_methods_section`'s exact-title set, so this
-# record exercises the substring fallback, which is the tier that actually fires in
-# production (see the namespace note in test_extract_methods_uses_the_unnamespaced...).
+# Fully open access in PMC, and its full text has a section titled "2 METHODS", which
+# `_extract_methods_section`'s substring match finds.
 SAMTOOLS_PMCID = "PMC2723002"
 
 # Bolger et al. 2014, Bioinformatics — "Trimmomatic". Also fully open access with a
@@ -570,36 +568,6 @@ async def test_pmc_methods_extraction_on_real_open_access_articles(api_budget):
         f"{JINEK_PMCID} is a metadata-only PMC record (no <body>), so fetch_pmc_methods "
         f"must return None. Got {type(absent).__name__} {str(absent)[:120]!r} — if this "
         "is '' the caller can no longer tell 'no full text' from 'empty methods'"
-    )
-
-
-async def test_extract_methods_uses_the_unnamespaced_fallback_on_real_pmc_xml(api_budget):
-    """PMC's efetch output carries NO JATS namespace, so the first two tiers of
-    `_extract_methods_section` — both of which query `{http://jats.nlm.nih.gov}sec` —
-    never match a live response. Everything is done by the third, unnamespaced tier,
-    whose match is a loose `"method" in title` substring rather than the curated
-    exact-title set above it.
-
-    This is asserted rather than left implicit because it means the exact-title
-    `methods_keywords` set is dead code against efetch, and anyone tightening the
-    substring tier would silently break every extraction. Control: the same document is
-    shown to contain sections in the unnamespaced form, so "the namespaced query found
-    nothing" cannot be explained by the document being empty.
-    """
-    raw = await _efetch_pmc_xml(api_budget, SAMTOOLS_PMCID)
-    root = ET.fromstring(raw)
-    plain = root.findall(".//sec")
-    namespaced = root.findall(".//{http://jats.nlm.nih.gov}sec")
-
-    assert plain, (
-        "the live PMC document has no <sec> elements at all, so neither branch could "
-        "match and this test proves nothing — PMC's full-text shape has changed"
-    )
-    assert not namespaced, (
-        "PMC efetch now DOES emit JATS-namespaced <sec> elements. That is good news, "
-        "but it means _extract_methods_section's first two (exact-title) tiers have "
-        "started firing for the first time and their behaviour is now live — "
-        f"{len(namespaced)} namespaced sections found"
     )
 
 

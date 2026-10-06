@@ -128,11 +128,6 @@ ALLOWLIST: dict[str, str] = {
         "No CSV export exists in src/ any more (git grep -i csv, 2026-09-25); used only by tests/unit/test_validators.py. "
         "Outside the 2026-09-24 RCA's scope, so kept for now; deletion is follow-up 2026-09-25/R-dead-code in docs/audits/open-findings.md."
     ),
-    "src.services.person_names:validate_person_name": (
-        "D60 validator for human-entered names (spec 2026-10-05 §4.1), shipped with its tests "
-        "in Phase 1. Phase 4 (§6.4 Names) adopts it in apply_profile_edits, Add-PI, onboarding "
-        "and the CLI; delete this entry in that task."
-    ),
     # Phase 2 (docs/plans/2026-09-29-audit-remediation-phase-2.md) lands some helpers
     # a task before their caller. Each entry names the task that brings the caller;
     # that task removes the entry (the stale-entry test fails until it does).

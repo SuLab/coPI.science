@@ -21,6 +21,10 @@ USER_ROLE_ADMIN = "admin"
 # on assessments but must not gain the manager/admin surfaces is_staff gates.
 USER_ROLE_REVIEWER = "reviewer"
 VALID_USER_ROLES = (USER_ROLE_PI, USER_ROLE_MANAGER, USER_ROLE_ADMIN, USER_ROLE_REVIEWER)
+#: The roles that may use the PI surfaces (``User.may_use_pi_surfaces``): PIs and admins.
+#: An allowlist, so a role added later is excluded until listed. The role-change guard
+#: (``src/services/user_roles.py``) and the activation gate read it too.
+PI_SURFACE_ROLES = (USER_ROLE_PI, USER_ROLE_ADMIN)
 
 
 class User(Base):
@@ -89,7 +93,8 @@ class User(Base):
         "ResearcherProfile", back_populates="user", uselist=False, cascade="all, delete-orphan"
     )
     publications: Mapped[list["Publication"]] = relationship(
-        "Publication", back_populates="user", cascade="all, delete-orphan"
+        "Publication", back_populates="user", cascade="all, delete-orphan",
+        foreign_keys="Publication.user_id",
     )
     jobs: Mapped[list["Job"]] = relationship(
         "Job", back_populates="user", cascade="all, delete-orphan"
@@ -146,7 +151,7 @@ class User(Base):
         """The PI surfaces (My Profile, My Agent, onboarding, PI writes): PIs and
         admins (admins keep them; CLAUDE.md "Exclude manager, never non-PI").
         An allowlist, so a role added later is excluded until listed."""
-        return self.user_role in (USER_ROLE_PI, USER_ROLE_ADMIN)
+        return self.user_role in PI_SURFACE_ROLES
 
     # The "may see the manager views" predicate. Everything that means
     # "admin OR manager" must name THIS, never a widened is_admin (F7).

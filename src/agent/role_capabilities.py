@@ -15,12 +15,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+#: Blackbird's brief for labs (spec 2026-10-05 §6.5, D26): part of the hub's prompt set,
+#: so the engine snapshots it at start and ``prompt_set_stamp`` hashes it, but never
+#: composed into the hub's own prompt; ``retrieve_profile`` serves it, fenced, when a
+#: lab asks for a hub agent.
+LAB_BRIEF_FILE = "lab-brief.md"
+
 
 @dataclass(frozen=True)
 class RoleCapabilities:
     #: May open a new top-level thread (Phase 5 pitch).
     posts_new_threads: bool
-    #: Subscribes to and activates labs' top-level posts (Phase 3, P0-03).
+    #: Activates labs' top-level posts in its subscribed channels — for a hub role every
+    #: ``SEEDED_CHANNELS`` entry (Phase 3, P0-03; spec 2026-10-05 D28).
     auto_activates_on_lab_posts: bool
     #: Its replies carry the ``<assessment_json>`` verdict sidecar.
     captures_verdicts: bool
@@ -32,8 +39,11 @@ class RoleCapabilities:
     requires_linked_user: bool
     #: Its place in the star topology.
     star_topology_role: Literal["spoke", "hub", "none"]
-    #: The prompt files this role composes, in stamp order (moved verbatim from
-    #: ``roles.ROLE_PROMPT_FILES``; ``prompt_set_stamp`` hashes them in this order).
+    #: The role's prompt-set files, in stamp order (moved verbatim from
+    #: ``roles.ROLE_PROMPT_FILES``; ``prompt_set_stamp`` hashes them in this order,
+    #: ``PromptSnapshot`` loads them). The composer reads its files by name, so a file
+    #: listed here is not composed unless the composer asks for it (``LAB_BRIEF_FILE``
+    #: never is).
     prompt_files: tuple[str, ...]
 
 
@@ -52,7 +62,7 @@ ROLE_CAPABILITIES: dict[str, RoleCapabilities] = {
         ),
     ),
     # Reply-only: scout_hub omits phase5-new-post.md, so a pi-side edit to that
-    # file never moves the hub's prompt-set hash.
+    # file never moves the hub's prompt-set hash, and holds the brief it serves to labs.
     "scout_hub": RoleCapabilities(
         posts_new_threads=False,
         auto_activates_on_lab_posts=True,
@@ -62,7 +72,7 @@ ROLE_CAPABILITIES: dict[str, RoleCapabilities] = {
         requires_linked_user=False,
         star_topology_role="hub",
         prompt_files=(
-            "agent-system.md", "identity.md", "phase4-thread-reply.md",
+            "agent-system.md", "identity.md", "phase4-thread-reply.md", LAB_BRIEF_FILE,
         ),
     ),
 }

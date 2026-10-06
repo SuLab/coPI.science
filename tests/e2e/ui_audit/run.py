@@ -140,6 +140,13 @@ async def _run(stack: Stack, args) -> dict:
                         await h.browser.close()
                     except Exception:  # noqa: BLE001 - already gone
                         pass
+            if args.phase == 4:
+                audit = subprocess.run(
+                    [sys.executable, str(REPO_ROOT / "scripts/persona_file_audit.py"), "--check"],
+                    cwd=Path.cwd(), env=h.env, capture_output=True, text=True,
+                )
+                report["persona_audit"] = {"ok": audit.returncode == 0,
+                                            "output": audit.stdout + audit.stderr}
     return report
 
 
@@ -172,6 +179,8 @@ def main() -> None:
     Path(args.out).write_text(json.dumps(report, indent=1))
     failed = report.get("crawl", {}).get("violations", []) + [
         name for name, r in report.get("journeys", {}).items() if not r.get("ok")]
+    if report.get("persona_audit", {}).get("ok") is False:
+        failed.append("persona_audit")
     print(json.dumps({"report": args.out, "failed": failed}, indent=1))
     sys.exit(1 if failed else 0)
 

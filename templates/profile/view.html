@@ -40,11 +40,9 @@
 
     {# The "Updated Profile Available" banner that used to sit here linked to
        GET /profile/review-update, a route b99fdfd never implemented — its only
-       control was a silent 404. Nothing in src/ writes
-       ResearcherProfile.pending_profile either, so the banner's condition never
-       held and there was no "changes below" for it to point at. Rebuild the
-       producer and the review page together if the feature is wanted; a banner
-       whose only action 404s is worse than no banner. #}
+       control was a silent 404. ResearcherProfile.pending_profile is now a
+       staff-reviewed regeneration draft (manager PI page, spec 2026-10-05 §6.3),
+       not something this page offers the PI; the banner stays removed. #}
 
     {% if not profile %}
     <!-- No profile yet -->
@@ -168,9 +166,6 @@
                     <p class="text-sm font-medium text-gray-800">{{ pub.title }}</p>
                     <p class="text-xs text-gray-500 mt-1">
                         {{ pub.journal }}{% if pub.year %} · {{ pub.year }}{% endif %}
-                        {% if pub.author_position %}
-                        · <span class="text-indigo-600 capitalize">{{ pub.author_position }} author</span>
-                        {% endif %}
                     </p>
                     <div class="flex gap-2 mt-1">
                         {% if pub.pmid %}
