@@ -21,6 +21,7 @@ from src.services.profile_edit import (
 )
 from src.services.profile_jobs import enqueue_profile_job_if_absent
 from src.web.templating import make_templates
+from src.web.page_context import page_context
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -28,19 +29,7 @@ templates = make_templates()
 
 
 def _template_context(request: Request, user: User, **kwargs) -> dict:
-    """``current_user`` is the real admin under impersonation (it drives the nav); ``user`` is the
-    effective account, which every form field must read (FN-02)."""
-    impersonated = getattr(user, "_is_impersonated", False)
-    real_admin = getattr(user, "_real_admin", None)
-    ctx = {
-        "request": request,
-        "current_user": real_admin if impersonated else user,
-        "user": user,
-        "impersonation_banner": user if impersonated else None,
-        "active_page": "onboarding",
-    }
-    ctx.update(kwargs)
-    return ctx
+    return page_context(request, user, active_page="onboarding", user=user, **kwargs)
 
 
 @router.get("", response_class=HTMLResponse)
@@ -60,13 +49,13 @@ async def onboarding_start(
     # admins keep the PI surfaces (templates/base.html shows them My Profile /
     # My Agent, and /profile bounces anyone whose onboarding is incomplete
     # straight back here), so a `!= 'pi'` test would trap an admin in a
-    # permanent /profile -> /onboarding -> /manager/pis deflection.
+    # permanent /profile -> /onboarding -> /workspace/pis deflection.
     # A REVIEWER is neither staff nor PI and has no research profile either;
     # each role keeps its own landing page.
     if not current_user.may_use_pi_surfaces:
         if current_user.is_manager:
-            return RedirectResponse(url="/manager/pis", status_code=302)
-        return RedirectResponse(url="/manager/assessments", status_code=302)
+            return RedirectResponse(url="/workspace/pis", status_code=302)
+        return RedirectResponse(url="/workspace/assessments", status_code=302)
 
     # Get latest job for this user
     result = await db.execute(

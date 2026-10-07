@@ -10,23 +10,14 @@ from fastapi.responses import HTMLResponse
 from src.dependencies import get_current_user
 from src.models import User
 from src.web.templating import make_templates
+from src.web.page_context import page_context
 
 router = APIRouter()
 templates = make_templates()
 
 
 def _template_context(request: Request, user: User, **kwargs) -> dict:
-    impersonated = getattr(user, "_is_impersonated", False)
-    real_admin = getattr(user, "_real_admin", None)
-    ctx = {
-        "request": request,
-        "current_user": real_admin if impersonated else user,
-        "user": user,
-        "impersonation_banner": user if impersonated else None,
-        "active_page": "settings",
-    }
-    ctx.update(kwargs)
-    return ctx
+    return page_context(request, user, active_page="settings", user=user, **kwargs)
 
 
 @router.get("", response_class=HTMLResponse)

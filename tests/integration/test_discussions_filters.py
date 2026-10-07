@@ -140,7 +140,7 @@ async def test_export_under_a_status_filter_excludes_the_mislisted_thread(
     await db_session.flush()
 
     r = await client.get(
-        f"/admin/discussions?run_id={run.id}&status_filter=no_proposal&export=true",
+        f"/workspace/discussions?run_id={run.id}&status_filter=no_proposal&export=true",
         headers=_auth(admin.id),
     )
     assert r.status_code == 200
@@ -156,7 +156,7 @@ async def _admin_page(client, db_session, run, query: str) -> str:
     )
     await db_session.flush()
     r = await client.get(
-        f"/admin/discussions?run_id={run.id}{query}", headers=_auth(admin.id)
+        f"/workspace/discussions?run_id={run.id}{query}", headers=_auth(admin.id)
     )
     assert r.status_code == 200
     return r.text

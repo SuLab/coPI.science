@@ -1938,7 +1938,7 @@ class TestMissingSidecarIsRecordedAsADrop:
 
     `_warn_if_hub_conclude_missing_assessment` only logged. A concluding reply
     that carries no sidecar is the quietest loss of all — the reply posts, the
-    thread closes, and /admin/assessments simply never gains a row. The method
+    thread closes, and /workspace/assessments simply never gains a row. The method
     stays synchronous (its existing tests call it directly); it now reports
     whether it warned, and the async call site records the drop.
     """

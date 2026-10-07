@@ -19,7 +19,7 @@ returns the IMPERSONATED user, so a router- or route-level `get_review_user` wou
 403 an impersonating admin with "Review access required" before `_refused` ever gets
 a chance to answer `{"error": "impersonating"}` — the drawer then shows a generic
 failure instead of the impersonation message it knows how to render. `_refused` checks
-impersonation first and only then applies `get_review_user`'s own predicate by hand.
+impersonation first and only then applies the shared `can_review` predicate.
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ from src.database import get_db
 from src.dependencies import get_current_user
 from src.models import OpportunityAssessment, User
 from src.services import assessment_chat as chat
+from src.services.web_permissions import can_review
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -58,10 +59,9 @@ def _refused(request: Request, current_user: User) -> JSONResponse | None:
     # The attribute exists only on an impersonated user object (src/dependencies.py).
     if getattr(current_user, "_is_impersonated", False):
         return _error(403, "impersonating")
-    # Same predicate as get_review_user (src/dependencies.py) — kept in sync by hand,
-    # since we can't depend on get_review_user itself without losing the ordering
-    # above.
-    if not (current_user.is_staff or current_user.is_reviewer):
+    # Share get_review_user's pure predicate without invoking its dependency:
+    # that dependency would lose the ordered impersonation JSON refusal above.
+    if not can_review(current_user):
         return _error(403, "forbidden")
     if not getattr(request.app.state, "assessment_chat_enabled", False):
         return _error(503, "disabled")

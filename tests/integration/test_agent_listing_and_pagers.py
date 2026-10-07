@@ -64,7 +64,7 @@ async def test_a_page_past_the_end_is_clamped_and_keeps_its_pager(client, db_ses
             db_session, run=run, agent_id="su", channel_name="general",
             message_ts=f"5.{i:04d}", phase="new_post",
         )
-    r = await client.get(f"/admin/activity/{run.id}?page=99", headers=auth_headers(admin.id))
+    r = await client.get(f"/workspace/activity/{run.id}?page=99", headers=auth_headers(admin.id))
     assert r.status_code == 200
     assert "Page 2 of 2" in r.text
     assert 'href="?page=1"' in r.text
@@ -73,6 +73,6 @@ async def test_a_page_past_the_end_is_clamped_and_keeps_its_pager(client, db_ses
 async def test_a_run_with_no_messages_shows_no_pager(client, db_session):
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     run = await factories.make_simulation_run(db_session)
-    r = await client.get(f"/admin/activity/{run.id}?page=5", headers=auth_headers(admin.id))
+    r = await client.get(f"/workspace/activity/{run.id}?page=5", headers=auth_headers(admin.id))
     assert r.status_code == 200
     assert 'id="run-messages-pager"' not in r.text

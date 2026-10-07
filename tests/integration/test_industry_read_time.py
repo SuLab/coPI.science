@@ -5,7 +5,7 @@ badge."""
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from src.models import USER_ROLE_MANAGER, USER_ROLE_PI, PiIndustryScore
 from src.services import directory
@@ -94,11 +94,36 @@ async def test_the_pages_show_the_view_and_the_partial_badge(client, db_session)
     await _score(db_session, partial, 4.0, coverage={"openalex": "ok", "uspto": "truncated",
                                                       "ctgov": "unavailable:http_503"})
     await db_session.commit()
-    page = (await client.get(f"/manager/pis/{partial.id}", headers=auth_headers(mgr.id))).text
+    page = (await client.get(f"/workspace/pis/{partial.id}", headers=auth_headers(mgr.id))).text
     assert ">partial</span>" in page
     assert "uspto truncated" in page and "ctgov unavailable:http_503" in page   # JSONB reorders keys
     assert "80.0" in page                              # 4.0 is 4th of 5 cohort members
-    page = (await client.get(f"/manager/pis/{old.id}", headers=auth_headers(mgr.id))).text
+    page = (await client.get(f"/workspace/pis/{old.id}", headers=auth_headers(mgr.id))).text
     assert "Rescoring" in page
-    listing = (await client.get("/manager/pis", headers=auth_headers(mgr.id))).text
+    listing = (await client.get("/workspace/pis", headers=auth_headers(mgr.id))).text
     assert "rescoring" in listing and "· partial" in listing and "100.0" in listing
+
+
+async def test_reviewer_sees_scores_but_not_scoring_or_job_diagnostics(client, db_session):
+    reviewer = await factories.make_user(db_session, user_role="reviewer")
+    users = [await factories.make_user(db_session) for _ in range(4)]
+    for user, raw in zip(users, (1.0, 2.0, 3.0, 13.5), strict=True):
+        await _score(db_session, user, raw, coverage={"patents": "COVERAGE_DIAGNOSTIC"})
+    score = await db_session.scalar(select(PiIndustryScore).where(PiIndustryScore.user_id == users[-1].id))
+    score.components = {"COMPONENT_DIAGNOSTIC": {"distinct_companies": 9, "weighted": 4.0}}
+    old = await factories.make_user(db_session)
+    await _score(db_session, old, 99.0, version="OLD_SCORER_SECRET")
+    await db_session.flush()
+    headers = auth_headers(reviewer.id)
+    response = await client.get(f"/workspace/pis/{users[-1].id}", headers=headers)
+    assert response.status_code == 200
+    assert "100.0" in response.text and "Raw score 13.5" in response.text
+    assert "1 evidence rows" in response.text
+    listing = await client.get("/workspace/pis", headers=headers)
+    assert listing.status_code == 200 and "100.0" in listing.text
+    unavailable = await client.get(f"/workspace/pis/{old.id}", headers=headers)
+    assert unavailable.status_code == 200 and "No score available." in unavailable.text
+    for html in (response.text, listing.text, unavailable.text):
+        for diagnostic in ("COVERAGE_DIAGNOSTIC", "OLD_SCORER_SECRET", "Rescoring",
+                           "rescoring", "· partial", ">partial</span>", "scorer v", "industry job", "COMPONENT DIAGNOSTIC"):
+            assert diagnostic not in html

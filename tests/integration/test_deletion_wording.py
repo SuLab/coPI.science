@@ -17,5 +17,5 @@ async def test_the_self_service_page_mentions_the_logs(client, db_session):
 async def test_the_admin_page_mentions_the_logs(client, db_session):
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     pi = await factories.make_user(db_session)
-    body = (await client.get(f"/admin/users/{pi.id}", headers=auth_headers(admin.id))).text
+    body = (await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(admin.id))).text
     assert "simulation's model-call logs remain" in body

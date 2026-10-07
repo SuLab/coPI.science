@@ -38,7 +38,7 @@ async def _seed(db_session):
 async def test_the_detail_brief_renders_labelled_extras_as_lines(client, db_session, admin):
     _run, row = await _seed(db_session)
     html = (await client.get(
-        f"/admin/assessments/{row.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{row.id}", headers=auth_headers(admin.id)
     )).text
     brief = html[html.index('id="brief"'):html.index('id="signals"')]
     assert "<p>COMAIN commercial main.</p>" in brief
@@ -59,7 +59,7 @@ async def test_the_detail_brief_renders_labelled_extras_as_lines(client, db_sess
 async def test_the_list_card_renders_labelled_extras_as_lines(client, db_session, admin):
     run, _row = await _seed(db_session)
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
     points = html[html.index("assessment-card-points"):html.index("assessment-card-score-rationale")]
     assert '<p class="text-sm text-gray-700">COMAIN commercial main.</p>' in points

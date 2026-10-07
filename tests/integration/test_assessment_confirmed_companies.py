@@ -91,7 +91,7 @@ async def test_the_block_sits_directly_under_lab_background_with_confirmed_rows_
         "proposal": ["PROPOSAL main."],
     })
     viewer = await factories.make_user(db_session, user_role=role)
-    brief = await _brief(client, f"/{surface}/assessments/{row.id}", viewer)
+    brief = await _brief(client, f"/workspace/assessments/{row.id}", viewer)
     assert brief.index("Lab Background") < brief.index(HEADING) < brief.index("Proposal")
     assert "COMPANYSENTINEL Diagnostics &mdash; Founder" in brief
     assert "SECONDSENTINEL Therapeutics &mdash; Co-founder" in brief
@@ -112,7 +112,7 @@ async def test_without_lab_background_the_block_ends_the_key_points(
     client, db_session, admin, key_points, last_point
 ):
     row = await _seed(db_session, key_points=key_points)
-    brief = await _brief(client, f"/admin/assessments/{row.id}", admin)
+    brief = await _brief(client, f"/workspace/assessments/{row.id}", admin)
     keypoints = brief[brief.index('class="assessment-brief-keypoints"'):]
     assert keypoints.index(last_point) < keypoints.index(HEADING)
     assert '<div class="assessment-brief-companies mt-2">' in keypoints
@@ -120,7 +120,7 @@ async def test_without_lab_background_the_block_ends_the_key_points(
 
 async def test_without_key_points_the_block_stands_on_its_own(client, db_session, admin):
     row = await _seed(db_session, key_points=None)
-    brief = await _brief(client, f"/admin/assessments/{row.id}", admin)
+    brief = await _brief(client, f"/workspace/assessments/{row.id}", admin)
     assert "assessment-brief-keypoints" not in brief
     assert '<div class="assessment-brief-companies assessment-prose max-w-none mt-4">' in brief
     assert HEADING in brief
@@ -133,7 +133,7 @@ async def test_a_subject_that_resolves_to_no_pi_renders_no_block(client, db_sess
     subject resolves to no PI, so the page renders, without the block."""
     await factories.make_agent(db_session, agent_id="orphan-lab")
     row = await _seed(db_session, key_points={"lab_background": ["LAB main."]}, subject=subject)
-    resp = await client.get(f"/admin/assessments/{row.id}", headers=auth_headers(admin.id))
+    resp = await client.get(f"/workspace/assessments/{row.id}", headers=auth_headers(admin.id))
     assert resp.status_code == 200
     assert "assessment-brief-companies" not in resp.text
     assert "Companies (staff-confirmed" not in resp.text
@@ -142,7 +142,7 @@ async def test_a_subject_that_resolves_to_no_pi_renders_no_block(client, db_sess
 async def test_a_pi_with_no_confirmed_company_renders_no_block(client, db_session, admin):
     row = await _seed(db_session, key_points={"lab_background": ["LAB main."]},
                       with_companies=False)
-    resp = await client.get(f"/admin/assessments/{row.id}", headers=auth_headers(admin.id))
+    resp = await client.get(f"/workspace/assessments/{row.id}", headers=auth_headers(admin.id))
     assert resp.status_code == 200
     assert "assessment-brief-companies" not in resp.text
 

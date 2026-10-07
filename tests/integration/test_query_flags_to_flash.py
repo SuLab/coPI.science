@@ -57,12 +57,12 @@ async def test_manager_profile_save_flashes(client, db_session):
     pi = await factories.make_user(db_session)
     await factories.make_profile(db_session, user=pi)
     r = await client.post(
-        f"/manager/pis/{pi.id}/profile",
+        f"/workspace/pis/{pi.id}/profile",
         data={"name": pi.name, "email": pi.email, "research_summary": "Manager words",
               "profile_version": "1"},  # R1-a: make_profile's default version is current
         headers=auth_headers(manager.id), follow_redirects=False,
     )
-    assert r.headers["location"] == f"/manager/pis/{pi.id}"
+    assert r.headers["location"] == f"/workspace/pis/{pi.id}"
     page = await follow(client, r)
     assert "Profile saved." in page.text
 
@@ -87,7 +87,7 @@ async def test_muting_a_pi_without_an_agent_explains_why(client, db_session):
     manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     pi = await factories.make_user(db_session)
     await db_session.commit()
-    r = await client.get(f"/manager/pis/{pi.id}?error=no_agent", headers=auth_headers(manager.id))
+    r = await client.get(f"/workspace/pis/{pi.id}?error=no_agent", headers=auth_headers(manager.id))
     assert "This PI has no lab agent yet, so there is nothing to mute or unmute." in r.text
     assert "Something went wrong saving changes." not in r.text
 
@@ -109,7 +109,7 @@ async def test_the_callback_flashes_success_for_a_manager(client, db_session, mo
         "/admin/agents/slack/callback?code=c&state=flash-1",
         headers=auth_headers(manager.id), follow_redirects=False,
     )
-    assert r.headers["location"] == f"/manager/pis/{pi.id}"
+    assert r.headers["location"] == f"/workspace/pis/{pi.id}"
     page = await follow(client, r)
     assert "Slack bot installed" in page.text
 
@@ -184,7 +184,7 @@ async def test_finalize_requested_flashes_on_the_run_page(client, db_session, mo
         data={"run_id": str(run.id), "confirm_run": str(run.id)[:8]},
         headers=auth_headers(admin.id), follow_redirects=False,
     )
-    assert r.headers["location"] == f"/admin/activity/{run.id}"
+    assert r.headers["location"] == f"/workspace/activity/{run.id}"
     page = await follow(client, r)
     assert "Finalize run requested." in page.text
     spoof = await client.get(

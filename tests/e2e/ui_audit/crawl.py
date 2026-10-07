@@ -10,8 +10,8 @@
 * no console error from an ENFORCED Content-Security-Policy (report-only messages,
   which Chromium prefixes "[Report Only]", are reported, not failed).
 
-Overflow and axe findings (1280 px, five roles) are reported, not failed; later phases
-gate them in their own journeys.
+Overflow and axe findings (1280 px, five roles) include page-level evidence;
+the consolidation phase fails on accessibility findings as well as regressions.
 """
 
 from __future__ import annotations
@@ -26,9 +26,9 @@ AXE_ROLES = ("anon", "admin", "manager", "reviewer", "pi")
 #: (path prefix, roles that may get a 200 there). First matching prefix wins.
 EXPECTED: tuple[tuple[str, frozenset[str]], ...] = (
     ("/admin/", frozenset({"admin"})),
-    ("/manager/pis", frozenset({"admin", "manager", "reviewer"})),
-    ("/manager/assessments", frozenset({"admin", "manager", "reviewer"})),
-    ("/manager/", frozenset({"admin", "manager"})),
+    ("/workspace/pis", frozenset({"admin", "manager", "reviewer"})),
+    ("/workspace/assessments", frozenset({"admin", "manager", "reviewer"})),
+    ("/workspace/", frozenset({"admin", "manager"})),
     ("/agent/obrien/", frozenset({"pi", "delegate"})),
 )
 
@@ -42,15 +42,15 @@ def routes(ids: dict) -> list[str]:
         "/agent/obrien/conversations", "/agent/obrien/public-profile",
         "/agent/obrien/public-profile/edit", "/agent/nosuch/dashboard",
         "/admin/users", f"/admin/users/{ids['pi']}", f"/admin/users/{bad}",
-        f"/admin/users/{ids['script_user']}", "/admin/jobs", "/admin/activity",
-        f"/admin/activity/{run}", f"/admin/activity/{run}/llm-calls", "/admin/discussions",
-        "/admin/agents", f"/admin/agents/{ids['agent_obrien']}", "/admin/assessments",
-        f"/admin/assessments/{a1}", f"/admin/assessments/{a2}", f"/admin/assessments/{a3}",
-        f"/admin/assessments/{bad}", "/admin/cohorts", "/admin/cohorts/topology",
-        "/admin/access-requests", "/admin/simulation", "/manager/pis",
-        f"/manager/pis/{ids['pi']}", "/manager/assessments", f"/manager/assessments/{a2}",
-        "/manager/discussions", "/manager/activity", f"/manager/activity/{run}",
-        "/manager/slack-bots", "/manager/prompt-suggestions", f"/assessment-chat/{a2}",
+        f"/admin/users/{ids['script_user']}", "/admin/jobs", "/workspace/activity",
+        f"/workspace/activity/{run}", f"/admin/activity/{run}/llm-calls", "/workspace/discussions",
+        "/admin/agents", f"/admin/agents/{ids['agent_obrien']}", "/workspace/assessments",
+        f"/workspace/assessments/{a1}", f"/workspace/assessments/{a2}", f"/workspace/assessments/{a3}",
+        f"/workspace/assessments/{bad}", "/admin/cohorts", "/admin/cohorts/topology",
+        "/admin/access-requests", "/admin/simulation", "/workspace/pis",
+        f"/workspace/pis/{ids['pi']}", "/workspace/assessments", f"/workspace/assessments/{a2}",
+        "/workspace/discussions", "/workspace/activity", f"/workspace/activity/{run}",
+        "/workspace/slack-bots", "/workspace/prompt-suggestions", f"/assessment-chat/{a2}",
         "/invite/badtoken",
     ]
 
@@ -89,9 +89,10 @@ async def _axe(h, role: str, route: str) -> list:
         await page.add_script_tag(content=h.axe_source)
         return await page.evaluate("""async () => (await axe.run(document,
             {runOnly: {type: 'tag', values: ['wcag2a','wcag2aa','wcag21a','wcag21aa',
-             'wcag22aa']}})).violations.map(v => [v.id, v.impact, v.nodes.length])""")
-    except Exception as exc:  # noqa: BLE001 - reported, not failed
-        return [["axe-error", str(exc)[:120], 0]]
+             'wcag22aa']}})).violations.map(v =>
+                [v.id, v.impact, v.nodes.length, v.nodes.map(n => n.target)])""")
+    except Exception as exc:  # noqa: BLE001 - a failed accessibility check is not green
+        return [["axe-error", str(exc)[:120], 1, []]]
     finally:
         await ctx.close()
 
@@ -108,6 +109,10 @@ def violations(records: list[dict]) -> list[str]:
             out.append(f"{where}: XSS canary fired")
         if r.get("pageerror"):
             out.append(f"{where}: page error {r['pageerror'][0]}")
+        if r.get("requestfailed"):
+            out.append(f"{where}: request failed {r['requestfailed'][0]}")
+        if r.get("unexpected_network"):
+            out.append(f"{where}: unexpected network {r['unexpected_network'][0]}")
         public = r["route"] in PUBLIC[:3] or r["route"].startswith(PUBLIC[3])
         if (r["role"] == "anon" and not public and r.get("status") == 200
                 and not (r.get("final") or "").startswith("/login")):
@@ -119,8 +124,8 @@ def violations(records: list[dict]) -> list[str]:
                 and landed == r["route"].split("?")[0]):
             out.append(f"{where}: {r['role']} got a 200 outside the gate")
         for line in r.get("console", []):
-            if "Content Security Policy" in line and "[Report Only]" not in line:
-                out.append(f"{where}: enforced CSP violation: {line[:160]}")
+            if "[Report Only]" not in line:
+                out.append(f"{where}: console error: {line[:160]}")
     return out
 
 
@@ -137,10 +142,15 @@ async def crawl(h, widths: tuple[int, ...] = (1280, 375)) -> dict:
                   for route in routes(h.ids)]
     records = await asyncio.gather(*tasks)
     axe_counts: dict[str, int] = {}
+    axe_findings = []
     for r in records:
-        for rule, _impact, nodes in r.get("axe", []):
+        for rule, impact, nodes, targets in r.get("axe", []):
             axe_counts[rule] = axe_counts.get(rule, 0) + nodes
+            axe_findings.append({"role": r["role"], "route": r["route"],
+                                 "final": r.get("final"), "rule": rule,
+                                 "impact": impact, "count": nodes, "targets": targets})
     return {"records": len(records), "violations": violations(records), "axe": axe_counts,
+            "axe_findings": axe_findings,
             "overflow_375": sorted({(r["role"], r["route"], r["overflow"])
                                     for r in records
                                     if r["width"] == 375 and (r.get("overflow") or 0) > 0})}

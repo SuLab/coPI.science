@@ -46,16 +46,16 @@ def test_ui_js_delegates_every_behaviour_on_document():
 
 
 def test_row_hrefs_are_local_paths():
+    from tests.unit.test_reachability import _expand_named_urls, http_routes
     hrefs = [
         (name, m.group(1))
         for name, text in _templates()
-        for m in re.finditer(r'data-row-href="([^"]*)"', text)
+        for m in re.finditer(r'data-row-href="([^"]*)"', _expand_named_urls(text, http_routes()))
     ]
     assert {name for name, _ in hrefs} == {
         "admin/users.html",
-        "manager/pis.html",
-        "admin/activity.html",
-        "manager/activity.html",
+        "workspace/pis.html",
+        "workspace/activity.html",
     }
     assert all(h.startswith("/") and not h.startswith("//") for _, h in hrefs)
 

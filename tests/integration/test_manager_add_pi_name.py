@@ -1,4 +1,4 @@
-"""POST /manager/pis with a nameless ORCID record (spec 2026-10-05 §6.3 Names)."""
+"""POST /workspace/pis with a nameless ORCID record (spec 2026-10-05 §6.3 Names)."""
 import pytest
 from sqlalchemy import select
 
@@ -24,7 +24,7 @@ def nameless(monkeypatch, tmp_path):
 
 async def test_a_nameless_record_without_a_name_is_refused(client, db_session, nameless):
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
-    r = await client.post("/manager/pis", data={"orcid": _OID}, headers=auth_headers(mgr.id),
+    r = await client.post("/workspace/pis", data={"orcid": _OID}, headers=auth_headers(mgr.id),
                           follow_redirects=False)
     assert "error=name_required" in r.headers["location"] and _OID in r.headers["location"]
     assert (await db_session.execute(select(User).where(User.orcid == _OID))).scalar_one_or_none() is None
@@ -32,7 +32,7 @@ async def test_a_nameless_record_without_a_name_is_refused(client, db_session, n
 
 async def test_a_nameless_record_with_a_name_is_created(client, db_session, nameless):
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
-    r = await client.post("/manager/pis", data={"orcid": _OID, "name": "Ada Lovelace"},
+    r = await client.post("/workspace/pis", data={"orcid": _OID, "name": "Ada Lovelace"},
                           headers=auth_headers(mgr.id), follow_redirects=False)
     assert r.status_code == 302 and "error" not in r.headers["location"]
     user = (await db_session.execute(select(User).where(User.orcid == _OID))).scalar_one()
@@ -41,6 +41,6 @@ async def test_a_nameless_record_with_a_name_is_created(client, db_session, name
 
 async def test_an_invalid_name_is_refused(client, db_session, nameless):
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
-    r = await client.post("/manager/pis", data={"orcid": _OID, "name": "Ada <b>"},
+    r = await client.post("/workspace/pis", data={"orcid": _OID, "name": "Ada <b>"},
                           headers=auth_headers(mgr.id), follow_redirects=False)
     assert "error=invalid_name" in r.headers["location"]

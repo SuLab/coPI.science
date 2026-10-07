@@ -112,7 +112,7 @@ async def test_finalize_asks_and_carries_the_short_id_field(client, db_session):
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     run = await _stopped_run(db_session)
     short = str(run.id)[:8]
-    r = await client.get(f"/admin/activity/{run.id}", headers=auth_headers(admin.id))
+    r = await client.get(f"/workspace/activity/{run.id}", headers=auth_headers(admin.id))
     form = _form_tag(r.text, 'action="/admin/simulation/finalize-run"')
     assert f'data-confirm="Finalize run {short}: ' in form
     assert 'name="confirm_run"' in r.text and '<label for="confirm-run"' in r.text
@@ -128,7 +128,7 @@ async def test_finalize_with_the_wrong_short_id_is_refused(client, db_session, m
             "/admin/simulation/finalize-run", data={"run_id": str(run.id), "confirm_run": wrong},
             headers=auth_headers(admin.id), follow_redirects=False,
         )
-        assert r.headers["location"] == f"/admin/activity/{run.id}", wrong
+        assert r.headers["location"] == f"/workspace/activity/{run.id}", wrong
         assert session_flashes(r) == [{
             "text": f"Type the run's short id ({short}) to confirm Finalize run.", "kind": "error",
         }], wrong
@@ -156,7 +156,7 @@ async def test_review_delete_asks_first(client, db_session):
                               reviewer_name=admin.name, score=3, comment="c", feedback_mode="learn")
     db_session.add(review)
     await db_session.flush()
-    r = await client.get(f"/admin/assessments/{interview.assessment_id}",
+    r = await client.get(f"/workspace/assessments/{interview.assessment_id}",
                          headers=auth_headers(admin.id))
     form = _form_tag(r.text, f'action="/reviews/feedback/{review.id}/delete"')
     assert 'data-confirm="Delete this review? This cannot be undone."' in form

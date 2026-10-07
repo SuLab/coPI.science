@@ -9,13 +9,17 @@ async def _delete_dialog(h, user_key: str) -> dict:
     ctx, page, log = await h.page("admin")
     try:
         await page.goto(f"{h.base_url}/admin/users/{h.ids[user_key]}", wait_until="networkidle")
+        landed = page.url
+        posts = []
+        page.on("request", lambda request: posts.append(request.url)
+                if request.method == "POST" else None)
         await page.click("form[action$='/delete'] button[type=submit]")
         await page.wait_for_timeout(1500)
-        still_here = f"/admin/users/{h.ids[user_key]}" in page.url
-        xss = await page.evaluate("window.__xss || 0") if still_here else None
-        return {"ok": bool(log["dialogs"]) and still_here and not xss and not log["pageerror"],
+        still_here = page.url == landed
+        xss = await page.evaluate("window.__xss || 0")
+        return {"ok": bool(log["dialogs"]) and still_here and not posts and not xss and not log["pageerror"],
                 "dialogs": log["dialogs"], "url": page.url, "xss": xss,
-                "pageerror": log["pageerror"]}
+                "pageerror": log["pageerror"], "cancelled_post_count": len(posts)}
     finally:
         await ctx.close()
 
@@ -64,7 +68,7 @@ async def journey_delete_confirm_hostile_names(h) -> dict:
 
 async def journey_injected_transcript_form(h) -> dict:
     out = {}
-    for role, prefix in (("admin", "/admin"), ("reviewer", "/manager")):
+    for role, prefix in (("admin", "/admin"), ("reviewer", "/workspace")):
         ctx, page, log = await h.page(role)
         try:
             await page.goto(f"{h.base_url}{prefix}/assessments/{h.ids['assessments'][1]}",
@@ -88,7 +92,7 @@ async def journey_raw_html_shapes(h) -> dict:
     stays a line break; markdown images become links."""
     ctx, page, log = await h.page("admin")
     try:
-        await page.goto(f"{h.base_url}/admin/assessments/{h.ids['assessments'][1]}",
+        await page.goto(f"{h.base_url}/workspace/assessments/{h.ids['assessments'][1]}",
                         wait_until="networkidle")
         await page.wait_for_timeout(3000)
         await page.evaluate("document.getElementById('timeline').open = true")
@@ -272,7 +276,7 @@ async def journey_timeline_toggle_after_open(h) -> dict:
         document.head.appendChild(s);
     }, {once: true});""")
     try:
-        await page.goto(f"{h.base_url}/admin/assessments/{h.ids['assessments'][1]}",
+        await page.goto(f"{h.base_url}/workspace/assessments/{h.ids['assessments'][1]}",
                         wait_until="networkidle")
         await page.wait_for_timeout(1500)
         await page.click("[data-details-toggle='open']")

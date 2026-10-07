@@ -93,13 +93,13 @@ async def test_the_manager_form_saves_tags_whole(client, db_session):
     pi = await factories.make_user(db_session)
     await factories.make_profile(db_session, user=pi)
     r = await client.post(
-        f"/manager/pis/{pi.id}/profile",
+        f"/workspace/pis/{pi.id}/profile",
         data={"profile_version": "1",  # R1-a: make_profile's default version is current
               "name": pi.name, "email": pi.email, "research_summary": "s",
               "tag_fields": ["key_targets"], "key_targets": ["PD-1, PD-L1 axis"]},
         headers=auth_headers(manager.id), follow_redirects=False,
     )
-    assert r.headers["location"] == f"/manager/pis/{pi.id}"
+    assert r.headers["location"] == f"/workspace/pis/{pi.id}"
     profile = await _profile(db_session, pi.id)
     await db_session.refresh(profile)
     assert profile.key_targets == ["PD-1, PD-L1 axis"]

@@ -12,13 +12,14 @@ from src.database import get_db
 from src.dependencies import get_admin_user, refuse_impersonation
 from src.models import USER_ROLE_ADMIN, VALID_USER_ROLES, User
 from src.routers.admin._common import _ADMIN, _DB, _template_context, router, templates
+from src.routers.workspace.compatibility import redirect
 from src.services import directory
 from src.services.admin_invariant import LastAdminError, ensure_admin_remains
 from src.services.directory import (
     MAX_PAGE,
     count_pi_directory,
     list_pi_directory,
-    load_user_detail,
+    load_account_detail,
 )
 from src.services.email_verification import mark_email_verified
 from src.services.user_deletion import delete_user_account
@@ -29,7 +30,7 @@ logger = logging.getLogger("src.routers.admin")
 _PAGE = Query(1, ge=1, le=MAX_PAGE)
 
 
-@router.get("", response_class=HTMLResponse)
+@router.get("", response_class=HTMLResponse, name="legacy_admin_root")
 @router.get("/users", response_class=HTMLResponse)
 async def admin_users(
     request: Request,
@@ -78,7 +79,12 @@ async def admin_user_detail(
     current_user: User = Depends(get_admin_user),
 ):
     """Admin user detail page."""
-    detail = await load_user_detail(db, user_id)
+    target = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target.user_role == "pi":
+        return redirect(request, current_user, "pi_detail", "workspace_pi_detail", user_id=user_id, fragment="account")
+    detail = await load_account_detail(db, user_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="User not found")
 

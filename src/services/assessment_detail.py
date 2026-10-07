@@ -540,7 +540,7 @@ def _gating_definitions(
     today's definition rendered against a decision of unknown provenance would
     mislabel it the way a hardcoded score threshold would. An entry that is not a
     non-empty `title`/`description` pair is skipped, so this cannot raise.
-    `templates/admin/_assessments_body.html` applies the same rule to each row's
+    `templates/assessments/_body.html` applies the same rule to each row's
     `revision_view.gating`.
     """
     if revision_provenance == PROVENANCE_LIVE:
@@ -1974,7 +1974,7 @@ async def build_assessment_detail(
         # model: a reviewer account reaches the manager detail route but must
         # not see model text the hub was told may cite unpublished results or
         # Blackbird's own commercial diligence. All four are gated on this one
-        # key in `templates/admin/_assessment_detail_body.html`; a fifth such
+        # key in `templates/assessments/_detail_body.html`; a fifth such
         # field belongs in the same place.
         "viewer_is_staff": viewer_is_staff,
         # Human-review card. All three review tables are ordered

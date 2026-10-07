@@ -46,6 +46,7 @@ from src.services.runs import latest_run_id
 from src.services.validators import is_valid_email
 from src.web.flash import flash
 from src.web.templating import make_templates
+from src.web.page_context import page_context
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -92,17 +93,7 @@ async def _visible_channels(db: AsyncSession, run_id, aid: str) -> list[str]:
 
 
 def _template_context(request: Request, user: User, **kwargs) -> dict:
-    impersonated = getattr(user, "_is_impersonated", False)
-    real_admin = getattr(user, "_real_admin", None)
-    ctx = {
-        "request": request,
-        "current_user": real_admin if impersonated else user,
-        "user": user,
-        "impersonation_banner": user if impersonated else None,
-        "active_page": "agent",
-    }
-    ctx.update(kwargs)
-    return ctx
+    return page_context(request, user, active_page="agent", user=user, **kwargs)
 
 
 # --------------------------------------------------------------------------
@@ -118,7 +109,7 @@ async def agent_landing(
 ):
     """Agent landing page — lists all agents the user has access to."""
     # M-08: a manager or reviewer has no lab; the request form here would 403.
-    bounce = staff_landing_redirect(current_user)
+    bounce = staff_landing_redirect(current_user, request)
     if bounce is not None:
         return bounce
 

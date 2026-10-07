@@ -158,11 +158,11 @@ async def test_invite_invalid_token_renders_error_200(client):
     assert "text/html" in r.headers["content-type"]
 
 
-# --- /admin/discussions: nullable agent_id on Slack-imported posts ------------
+# --- /workspace/discussions: nullable agent_id on Slack-imported posts ------------
 
 
 async def test_admin_discussions_survives_a_bot_post_with_no_agent_id(client, db_session):
-    """Regression: /admin/discussions 500'd in production.
+    """Regression: /workspace/discussions 500'd in production.
 
     `_rebuild_state_from_slack` records real Slack messages whose sender cannot
     be mapped to a known bot as `is_bot=True, agent_id=NULL` — measured: 7 such
@@ -186,7 +186,7 @@ async def test_admin_discussions_survives_a_bot_post_with_no_agent_id(client, db
     )
     await db_session.flush()
 
-    r = await client.get("/admin/discussions", headers=_auth_headers(u.id))
+    r = await client.get("/workspace/discussions", headers=_auth_headers(u.id))
     assert r.status_code == 200
     # The NULL-agent thread's "Posted By" cell must not read as a real bot —
     # `{{ t.agent_id | capitalize }}Bot` printed the literal "NoneBot".
@@ -209,7 +209,7 @@ async def test_admin_discussions_export_with_zero_runs_still_renders_html(client
     u = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
 
     r = await client.get(
-        "/admin/discussions", params={"export": "true"}, headers=_auth_headers(u.id)
+        "/workspace/discussions", params={"export": "true"}, headers=_auth_headers(u.id)
     )
     assert r.status_code == 200
     assert "text/html" in r.headers["content-type"]
@@ -217,12 +217,12 @@ async def test_admin_discussions_export_with_zero_runs_still_renders_html(client
 
 
 async def test_admin_activity_detail_survives_a_bot_post_with_no_agent_id(client, db_session):
-    """Regression: /admin/activity/{run_id} 500'd the same way /admin/discussions
+    """Regression: /workspace/activity/{run_id} 500'd the same way /workspace/discussions
     did (fixed in 73a78c3 for that route only).
 
     `admin_activity_detail` builds `channel_stats[...]["agents"]` as a set and
     does `channel_stats[channel]["agents"].add(msg.agent_id)` with no guard, then
-    `templates/admin/activity_detail.html` does `{{ stats.agents | sort | join(', ') }}`
+    `templates/workspace/activity_detail.html` does `{{ stats.agents | sort | join(', ') }}`
     — Jinja's `sort` is `sorted()`, so one NULL `agent_id` (the same
     `_rebuild_state_from_slack` "sender maps to no known bot" case) takes the whole
     page down with `TypeError: '<' not supported between instances of 'NoneType'
@@ -244,7 +244,7 @@ async def test_admin_activity_detail_survives_a_bot_post_with_no_agent_id(client
     )
     await db_session.flush()
 
-    r = await client.get(f"/admin/activity/{run.id}", headers=_auth_headers(u.id))
+    r = await client.get(f"/workspace/activity/{run.id}", headers=_auth_headers(u.id))
     assert r.status_code == 200
     # The NULL-agent row must not be rendered as a lie: no literal "NoneBot"
     # anywhere on the page (Messages-by-Agent table, by-channel agent list, or

@@ -173,13 +173,13 @@
     {% if latest_run %}
     <p class="mt-3 text-base text-gray-700">
         Latest run:
-        <a class="text-indigo-700 hover:underline" href="/admin/activity/{{ latest_run.id }}">{{ latest_run.id }}</a>
+        <a class="text-indigo-700 hover:underline" href="/workspace/activity/{{ latest_run.id }}">{{ latest_run.id }}</a>
         — {{ latest_run.status }}, started {{ latest_run.started_at | ts }}
     </p>
     {% if held_counts is not none %}
     <p class="mt-1 text-base text-gray-700">
         Held headlines for this stopped run: {{ held_counts[0] }} open interviews, {{ held_counts[1] }} ended
-        — waiting on <a class="text-indigo-700 hover:underline" href="/admin/activity/{{ latest_run.id }}">Finalize run</a> or a resume.
+        — waiting on <a class="text-indigo-700 hover:underline" href="/workspace/activity/{{ latest_run.id }}">Finalize run</a> or a resume.
     </p>
     {% endif %}
     {% endif %}
@@ -707,7 +707,7 @@
             <td class="px-4 py-1">{{ 'yes' if link.announced else 'no' }}</td>
             <td class="px-4 py-1 sc-num">{{ link.cost }}</td>
             <td class="px-4 py-1 sc-num">{{ link.span }}</td>
-            <td class="px-4 py-1"><a class="text-indigo-700 hover:underline" href="/admin/assessments/{{ link.assessment_id }}">detail &rarr;</a></td>
+            <td class="px-4 py-1"><a class="text-indigo-700 hover:underline" href="/workspace/assessments/{{ link.assessment_id }}">detail &rarr;</a></td>
         </tr>
         {% endfor %}
         </tbody>

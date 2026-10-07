@@ -31,7 +31,7 @@ async def _seed_one_orcid(orcid: str, run_pipeline: bool = True) -> None:
 
     Refuses (creates nothing) when the ORCID fetch fails or the record has no public
     name: a user is never named by its iD (spec 2026-10-05 §6.3). Add-PI on
-    ``/manager/pis`` asks for the name of such a record."""
+    ``/workspace/pis`` asks for the name of such a record."""
     from datetime import UTC, datetime
 
     from sqlalchemy import select
@@ -70,7 +70,7 @@ async def _seed_one_orcid(orcid: str, run_pipeline: bool = True) -> None:
                 if not profile_data.get("name"):
                     console.print(
                         f"[red]ORCID {orcid} has no public name; add the PI on "
-                        f"/manager/pis, which asks for the name[/red]"
+                        f"/workspace/pis, which asks for the name[/red]"
                     )
                     return
 

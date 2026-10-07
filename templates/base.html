@@ -38,7 +38,7 @@
 </div>
 {% endif %}
 
-{% set effective_user = impersonation_banner or current_user %}
+{% set effective_user = effective_user if effective_user is defined else (impersonation_banner or current_user) %}
 
 <!-- Navigation -->
 <nav aria-label="Main" class="bg-white shadow-sm border-b border-gray-200">
@@ -51,7 +51,7 @@
                 </a>
                 {% if current_user %}
                 <div class="ml-8 flex flex-wrap gap-x-4 gap-y-1">
-                    {% if current_user.may_use_pi_surfaces %}
+                    {% if effective_user.may_use_pi_surfaces %}
                     <a href="/profile" class="text-gray-600 hover:text-indigo-600 px-3 py-2 rounded-md text-sm font-medium
                         {% if active_page == 'profile' %}text-indigo-600 font-semibold{% endif %}">
                         My Profile
@@ -61,46 +61,20 @@
                         {% if active_page == 'settings' %}text-indigo-600 font-semibold{% endif %}">
                         Settings
                     </a>
-                    {% if current_user.may_use_pi_surfaces %}
+                    {% if effective_user.may_use_pi_surfaces %}
                     <a href="/agent" class="text-gray-600 hover:text-indigo-600 px-3 py-2 rounded-md text-sm font-medium relative
                         {% if active_page == 'agent' %}text-indigo-600 font-semibold{% endif %}">
                         My Agent
                     </a>
                     {% endif %}
-                    {% if current_user.is_admin and not impersonation_banner %}
+                    {% if effective_user.is_admin and not impersonation_banner %}
                     <a href="/admin/users" class="text-gray-600 hover:text-indigo-600 px-3 py-2 rounded-md text-sm font-medium
                         {% if active_page == 'admin' %}text-indigo-600 font-semibold{% endif %}">
                         Admin
                     </a>
                     {% endif %}
-                    {# Managers-only (2026-08-27), deliberately narrower than the
-                       is_staff ACCESS gate on /manager/*: an admin still reaches
-                       those pages by URL (and the manager sub-nav below renders
-                       there, except on the two prompt-suggestion pages, which the
-                       admin sub-nav links and which keep it for an admin who is not
-                       impersonating: admin_surface in src/routers/manager.py, spec
-                       2026-10-02 §4), but their top-bar entry point is the Admin panel.
-                       Gated on the EFFECTIVE user, so an admin impersonating a
-                       manager keeps the link — see
-                       test_admin_impersonating_a_manager_sees_the_manager_nav_link. #}
-                    {% if effective_user.is_manager %}
-                    <a href="/manager" class="text-gray-600 hover:text-indigo-600 px-3 py-2 rounded-md text-sm font-medium
-                        {% if active_page == 'manager' %}text-indigo-600 font-semibold{% endif %}">
-                        Manager
-                    </a>
-                    {% endif %}
-                    {# Reviewer-only: a reviewer is never is_manager, so this
-                       is a separate block rather than a widening of the gate above —
-                       test_a_plain_admin_has_no_manager_nav_link pins that the Manager
-                       link stays narrower than the access gate, and this must not
-                       loosen it. The reviewer's entry point is the assessments list
-                       directly, since /manager (the bare-prefix redirect) is the only
-                       manager route a reviewer has no independent reason to visit. #}
-                    {% if effective_user.is_reviewer %}
-                    <a href="/manager/assessments" class="text-gray-600 hover:text-indigo-600 px-3 py-2 rounded-md text-sm font-medium
-                        {% if active_page == 'manager' %}text-indigo-600 font-semibold{% endif %}">
-                        Review
-                    </a>
+                    {% if effective_user.is_staff or effective_user.is_reviewer %}
+                    <a href="{{ page_url(request, 'workspace_root') }}" class="text-gray-600 hover:text-indigo-600 px-3 py-2 rounded-md text-sm font-medium {% if active_page == 'workspace' %}text-indigo-600 font-semibold{% endif %}">Workspace</a>
                     {% endif %}
                 </div>
                 {% endif %}
@@ -122,38 +96,32 @@
 </nav>
 
 <!-- Admin sub-navigation -->
-{% if active_page == 'admin' and current_user and current_user.is_admin %}
+{% if active_page == 'admin' and current_user and effective_user.is_admin %}
 <nav aria-label="Admin sections" class="bg-gray-50 border-b border-gray-200">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div class="flex flex-wrap gap-x-6 gap-y-1 min-h-10 py-2 items-center text-sm">
             <a href="/admin/users" class="{% if active_admin == 'users' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Users</a>
             <a href="/admin/jobs" class="{% if active_admin == 'jobs' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Jobs</a>
-            <a href="/admin/activity" class="{% if active_admin == 'activity' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Activity</a>
-            <a href="/admin/discussions" class="{% if active_admin == 'discussions' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Discussions</a>
+            <a href="{{ page_url(request, 'workspace_activity') }}" class="{% if active_admin == 'activity' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Activity</a>
+            <a href="{{ page_url(request, 'workspace_discussions') }}" class="{% if active_admin == 'discussions' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Discussions</a>
             <a href="/admin/agents" class="{% if active_admin == 'agents' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Agents</a>
-            <a href="/admin/assessments" class="{% if active_admin == 'assessments' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Assessments</a>
+            <a href="{{ page_url(request, 'workspace_assessments') }}" class="{% if active_admin == 'assessments' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Assessments</a>
             <a href="/admin/cohorts" class="{% if active_admin == 'cohorts' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Cohorts</a>
             <a href="/admin/access-requests" class="{% if active_admin == 'access' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Access</a>
             <a href="/admin/simulation" class="{% if active_admin == 'simulation' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Simulation</a>
-            <a href="/manager/prompt-suggestions" class="{% if active_admin == 'prompt-suggestions' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Prompt Suggestions</a>
+            <a href="{{ page_url(request, 'workspace_prompt_suggestions') }}" class="{% if active_admin == 'prompt-suggestions' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Prompt Suggestions</a>
         </div>
     </div>
 </nav>
 {% endif %}
 
-{% if active_page == 'manager' and effective_user and (effective_user.is_staff or effective_user.is_reviewer) %}
-<!-- Manager sub-navigation -->
-<nav aria-label="Manager sections" class="bg-gray-50 border-b border-gray-200">
+{% if active_page == 'workspace' and workspace_navigation %}
+<nav aria-label="Workspace sections" class="bg-gray-50 border-b border-gray-200">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div class="flex flex-wrap gap-x-6 gap-y-1 min-h-10 py-2 items-center text-sm">
-            <a href="/manager/pis" class="{% if active_manager == 'pis' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">PIs</a>
-            <a href="/manager/assessments" class="{% if active_manager == 'assessments' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Assessments</a>
-            {% if effective_user.is_staff %}
-            <a href="/manager/slack-bots" class="{% if active_manager == 'slack-bots' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Slack Bots</a>
-            <a href="/manager/discussions" class="{% if active_manager == 'discussions' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Discussions</a>
-            <a href="/manager/activity" class="{% if active_manager == 'activity' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Activity</a>
-            <a href="/manager/prompt-suggestions" class="{% if active_manager == 'prompt-suggestions' %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">Prompt Suggestions</a>
-            {% endif %}
+            {% for item in workspace_navigation %}
+            <a href="{{ item.url }}" class="{% if active_section == item.section %}text-indigo-600 font-semibold{% else %}text-gray-500 hover:text-gray-700{% endif %}">{{ item.label }}</a>
+            {% endfor %}
         </div>
     </div>
 </nav>

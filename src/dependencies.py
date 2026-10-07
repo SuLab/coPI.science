@@ -14,6 +14,7 @@ from sqlalchemy.orm import selectinload
 from src.database import get_db
 from src.models import User
 from src.services.session_epoch import current_epoch, epoch_in_session
+from src.web.urls import page_url
 
 logger = logging.getLogger(__name__)
 
@@ -293,15 +294,15 @@ async def get_pi_user(
     return current_user
 
 
-def staff_landing_redirect(user: User) -> RedirectResponse | None:
+def staff_landing_redirect(user: User, request: Request) -> RedirectResponse | None:
     """Where a GET of a PI-only page sends an account with no lab (M-08): a
-    manager to /manager/pis, a reviewer to /manager/assessments. None for a PI or
+    manager to /workspace/pis, a reviewer to /workspace/assessments. None for a PI or
     an admin (``User.may_use_pi_surfaces``). The PI-only POSTs keep get_pi_user's
     403; this is the navigation half."""
     if user.may_use_pi_surfaces:
         return None
     return RedirectResponse(
-        url="/manager/pis" if user.is_manager else "/manager/assessments", status_code=302
+        url=page_url(request, "workspace_pis" if user.is_manager else "workspace_assessments"), status_code=302
     )
 
 
@@ -338,11 +339,11 @@ async def get_staff_user(
 ) -> User:
     """Dependency that requires admin OR manager.
 
-    Used by the /manager router, the /reviews router's staff-only routes, and
+    Used by the workspace operations and compatibility router, the /reviews router's staff-only routes, and
     the /admin Slack OAuth callback (``admin_provision_slack_callback``, widened
     from admin to staff under F2).
     This is deliberately a separate dependency rather than a relaxation of
-    get_admin_user: /admin declares its gate on 39 individual handlers (F5),
+    get_admin_user: /admin declares its gates on individual handlers,
     and widening the one they share is how a read-only role would quietly
     acquire write endpoints.
 
@@ -361,7 +362,8 @@ async def get_review_user(current_user: User = Depends(get_current_user)) -> Use
     router's reviewer-visible GETs. Deliberately separate from get_staff_user:
     is_staff keeps gating manager writes, discussions, activity and prompt
     suggestions, which a reviewer must never reach."""
-    if not (current_user.is_staff or current_user.is_reviewer):
+    from src.services.web_permissions import can_review
+    if not can_review(current_user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
                             detail="Review access required")
     return current_user

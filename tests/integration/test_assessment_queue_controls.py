@@ -91,7 +91,7 @@ async def test_both_surfaces_offer_the_sort_and_lab_controls(
 
     html = (
         await client.get(
-            f"{base}/assessments?run_id={run.id}", headers=auth_headers(staff.id)
+            f"/workspace/assessments?run_id={run.id}", headers=auth_headers(staff.id)
         )
     ).text
 
@@ -106,7 +106,7 @@ async def test_both_surfaces_offer_the_sort_and_lab_controls(
     assert '<option value="gordy"' in html
     # One form, so each select carries the others. Asserted structurally: the
     # run select and both new selects must be inside the SAME <form>.
-    form = html.split(f'action="{base}/assessments"', 1)[1].split("</form>", 1)[0]
+    form = html.split('action="/workspace/assessments"', 1)[1].split("</form>", 1)[0]
     assert 'name="run_id"' in form
     assert 'name="sort"' in form
     assert 'name="lab"' in form
@@ -121,12 +121,12 @@ async def test_sort_recent_reorders_the_table_on_both_surfaces(
 
     default_html = (
         await client.get(
-            f"{base}/assessments?run_id={run.id}", headers=auth_headers(staff.id)
+            f"/workspace/assessments?run_id={run.id}", headers=auth_headers(staff.id)
         )
     ).text
     recent_html = (
         await client.get(
-            f"{base}/assessments?run_id={run.id}&sort=recent",
+            f"/workspace/assessments?run_id={run.id}&sort=recent",
             headers=auth_headers(staff.id),
         )
     ).text
@@ -145,7 +145,7 @@ async def test_the_lab_filter_narrows_the_table(client, db_session, base, admin,
 
     html = (
         await client.get(
-            f"{base}/assessments?run_id={run.id}&lab=gordy",
+            f"/workspace/assessments?run_id={run.id}&lab=gordy",
             headers=auth_headers(staff.id),
         )
     ).text
@@ -178,7 +178,7 @@ async def test_the_run_selection_survives_a_sort_change(
 
     html = (
         await client.get(
-            f"{base}/assessments?run_id={old_run.id}&sort=lab",
+            f"/workspace/assessments?run_id={old_run.id}&sort=lab",
             headers=auth_headers(staff.id),
         )
     ).text
@@ -192,7 +192,7 @@ async def test_the_run_selection_survives_a_sort_change(
 async def test_an_unknown_sort_or_lab_still_renders_the_queue(client, db_session, admin):
     run = await _seed(db_session)
     resp = await client.get(
-        f"/admin/assessments?run_id={run.id}&sort=by-vibes&lab=ghostlab",
+        f"/workspace/assessments?run_id={run.id}&sort=by-vibes&lab=ghostlab",
         headers=auth_headers(admin.id),
     )
     assert resp.status_code == 200
@@ -205,7 +205,7 @@ async def test_the_manager_controls_never_point_into_admin(client, db_session, m
     run = await _seed(db_session)
     html = (
         await client.get(
-            f"/manager/assessments?run_id={run.id}&sort=lab&lab=wang",
+            f"/workspace/assessments?run_id={run.id}&sort=lab&lab=wang",
             headers=auth_headers(manager.id),
         )
     ).text
@@ -234,7 +234,7 @@ async def test_the_admin_detail_page_links_to_this_interviews_llm_calls(
 
     html = (
         await client.get(
-            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
         )
     ).text
 
@@ -261,7 +261,7 @@ async def test_the_manager_detail_page_has_no_llm_calls_link(
 
     html = (
         await client.get(
-            f"/manager/assessments/{assessment.id}", headers=auth_headers(manager.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(manager.id)
         )
     ).text
 
@@ -335,7 +335,7 @@ async def test_the_list_page_flags_an_unrecorded_panel(
 
     html = (
         await client.get(
-            f"{base}/assessments?run_id={run.id}", headers=auth_headers(staff.id)
+            f"/workspace/assessments?run_id={run.id}", headers=auth_headers(staff.id)
         )
     ).text
 
@@ -391,7 +391,7 @@ async def test_a_verified_panel_gets_no_badge_and_no_warning(
 
     html = (
         await client.get(
-            f"{base}/assessments?run_id={run.id}", headers=auth_headers(staff.id)
+            f"/workspace/assessments?run_id={run.id}", headers=auth_headers(staff.id)
         )
     ).text
 
@@ -442,7 +442,7 @@ async def test_an_unknown_panel_state_is_never_left_unbadged(
 
     html = (
         await client.get(
-            f"{base}/assessments?run_id={run.id}", headers=auth_headers(staff.id)
+            f"/workspace/assessments?run_id={run.id}", headers=auth_headers(staff.id)
         )
     ).text
 
@@ -521,7 +521,7 @@ async def _seed_reviewed_row(db_session, run, *, project="Reviewed Co"):
 
 #: The exact opening substring the template's card `<div>` must carry
 #: (trailing space included) — see the comment above the card `<div>` in
-#: templates/admin/_assessments_body.html.
+#: templates/assessments/_body.html.
 _CARD_OPEN = 'class="assessment-card '
 
 
@@ -651,7 +651,7 @@ async def test_list_pages_show_reviewer_columns(client, db_session, base, role):
     # fixture carries feedback, so it lives on the Reviewed tab now.
     html = (
         await client.get(
-            f"{base}/assessments?run_id={run.id}&review=all",
+            f"/workspace/assessments?run_id={run.id}&review=all",
             headers=auth_headers(staff.id),
         )
     ).text
@@ -754,7 +754,7 @@ async def test_no_detail_prose_in_new_columns(client, db_session, admin):
     # on the Reviewed tab rather than the default Unreviewed one.
     html = (
         await client.get(
-            f"/admin/assessments?run_id={run.id}&review=all",
+            f"/workspace/assessments?run_id={run.id}&review=all",
             headers=auth_headers(admin.id),
         )
     ).text
@@ -776,7 +776,7 @@ async def test_the_card_leads_with_the_headline_and_keeps_the_short_label(
     await db_session.flush()
 
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
     assert "assessment-card-headline" in html
     assert "HEADLINE-MARKER" in html
@@ -798,7 +798,7 @@ async def test_a_row_with_no_headline_falls_back_to_the_short_label(
     await db_session.flush()
 
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
     assert "ONLY-LABEL-MARKER" in html
     # No bullet block, and no subtitle line — the fallback shows the label
@@ -834,7 +834,7 @@ async def test_the_card_keeps_gating_panel_flags_and_rubric_on_its_face(
     await db_session.flush()
 
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
     # A 3.4.0 row: its registry entry carries gate tables, so the gate shows its
     # rubric title rather than the raw key (hub 1.10.0, spec §5.2-§5.3).
@@ -857,7 +857,7 @@ async def test_the_manager_surface_renders_the_same_cards(client, db_session):
     await db_session.flush()
 
     html = (await client.get(
-        f"/manager/assessments?run_id={run.id}", headers=auth_headers(manager.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(manager.id)
     )).text
     assert "assessment-card" in html
     assert "MANAGER-HEADLINE-MARKER" in html
@@ -928,7 +928,7 @@ async def test_quick_scoring_is_expanded_and_labelled(client, db_session, admin)
     run, _ = await _seed_narrative_row(db_session, project="Quickscore Co")
 
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
 
     assert "assessment-card-quickscore" in html
@@ -941,8 +941,8 @@ async def test_quick_scoring_is_expanded_and_labelled(client, db_session, admin)
 @pytest.mark.parametrize(
     ("base", "role", "surface"),
     [
-        ("/admin", USER_ROLE_ADMIN, "admin-list"),
-        ("/manager", USER_ROLE_MANAGER, "manager-list"),
+        ("/admin", USER_ROLE_ADMIN, "workspace-list"),
+        ("/manager", USER_ROLE_MANAGER, "workspace-list"),
     ],
 )
 async def test_quick_scoring_posts_to_literal_review_paths_on_both_surfaces(
@@ -961,7 +961,7 @@ async def test_quick_scoring_posts_to_literal_review_paths_on_both_surfaces(
     run, assessment = await _seed_narrative_row(db_session, project="Paths Co")
 
     html = (await client.get(
-        f"{base}/assessments?run_id={run.id}", headers=auth_headers(staff.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(staff.id)
     )).text
 
     assert f'action="/reviews/assessments/{assessment.id}/feedback"' in html
@@ -995,7 +995,7 @@ async def test_quick_scoring_offers_no_rubric_dimension_fields(
     run, _ = await _seed_narrative_row(db_session, project="No Dims Co")
 
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
 
     assert 'name="dim_' not in html
@@ -1012,7 +1012,7 @@ async def test_quick_scoring_offers_no_edit_delete_or_assign_controls(
     run, _ = await _seed_narrative_row(db_session, project="No Edit Co")
 
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
 
     assert "/reviews/feedback/" not in html
@@ -1033,7 +1033,7 @@ async def test_quick_scoring_select_ids_are_unique_and_labelled(
     await _seed_narrative_row(db_session, project="Unique Ids Two", run=run)
 
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
 
     select_ids = re.findall(r'<select[^>]*\bid="([^"]+)"', html)
@@ -1059,12 +1059,12 @@ async def test_quick_scoring_renders_for_a_reviewer_on_the_manager_surface(
     run, assessment = await _seed_narrative_row(db_session, project="Reviewer Co")
 
     html = (await client.get(
-        f"/manager/assessments?run_id={run.id}", headers=auth_headers(reviewer.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(reviewer.id)
     )).text
 
     assert "assessment-card-quickscore" in html
     assert f'action="/reviews/assessments/{assessment.id}/feedback"' in html
-    assert 'value="manager-list"' in html
+    assert 'value="workspace-list"' in html
     assert "/admin/" not in html
 
 
@@ -1084,7 +1084,7 @@ async def test_the_card_scores_disclosure_is_closed_by_default_and_holds_the_gat
     )
 
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
 
     assert "assessment-card-scores" in html
@@ -1120,7 +1120,7 @@ async def test_the_card_scores_use_the_rows_own_revision(client, db_session, adm
     )
 
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
 
     scores = _details_slice(html, "assessment-card-scores")
@@ -1141,7 +1141,7 @@ async def test_the_list_page_renders_the_pitch_and_key_points_side_by_side(
     )
 
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
 
     assert "assessment-card-pitch" in html
@@ -1162,7 +1162,7 @@ async def test_the_card_renders_the_six_groups_in_order(client, db_session, admi
         },
     )
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
     block = html[html.index("assessment-card-points"):]
     marks = ["I-MARK", "L-MARK", "P-MARK", "A-MARK", "Q-MARK", "C-MARK"]
@@ -1185,7 +1185,7 @@ async def test_a_legacy_five_group_card_keeps_its_labels_and_order(
         },
     )
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
     block = html[html.index("assessment-card-points"):]
     labels = [
@@ -1218,14 +1218,14 @@ async def test_a_row_with_no_pitch_or_points_renders_neither_box(
     )
 
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
 
     assert "Bare Card Co" in html
     assert "Empty Points Co" in html
     # ROW-scoped, not page-wide: the wrapper's own stylesheet carries a
     # `.assessment-card-pitch .assessment-prose { max-width: none; }` rule
-    # (templates/admin/assessments.html), so the class NAME is on every render
+    # (templates/workspace/assessments.html), so the class NAME is on every render
     # whether or not any card emits the box. The claim being tested is about
     # the card's markup, so it is asserted inside the card.
     for marker in ("Bare Card Co", "Empty Points Co"):
@@ -1260,7 +1260,7 @@ async def test_the_list_page_stays_under_a_size_ceiling(client, db_session, admi
     For scale: before this change a card was ~3.0 KiB, so the 500-row worst
     case was ~1.5 MB. The first cut of this markup measured 8,669,804 bytes at
     500 rows; whitespace control in the two disclosures (see the comment on the
-    dimension-row loop in templates/admin/_assessments_body.html) took it to
+    dimension-row loop in templates/assessments/_body.html) took it to
     the 7,130,306 above with byte-identical rendered output. The DEFAULT view is
     run-scoped and holds 6-20 rows, i.e. ~280 KB; the multi-megabyte figure is
     reachable only via "All Runs".
@@ -1332,7 +1332,7 @@ async def test_the_list_page_stays_under_a_size_ceiling(client, db_session, admi
     await db_session.flush()
 
     resp = await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )
     assert resp.status_code == 200
     assert "Weight Co 0" in resp.text
@@ -1366,7 +1366,7 @@ async def test_the_card_pitch_renders_a_doi_as_a_cited_paper_link(
     )
 
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
     card = _row_slice(html, "Cited Co")
 
@@ -1388,7 +1388,7 @@ async def test_a_plain_text_card_pitch_renders_a_real_anchor(
     )
 
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
     card = _row_slice(html, "Plain Cited Co")
 
@@ -1412,7 +1412,7 @@ async def test_the_manager_surface_renders_citation_links_too(client, db_session
     )
 
     resp = await client.get(
-        f"/manager/assessments?run_id={run.id}", headers=auth_headers(manager.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(manager.id)
     )
     assert resp.status_code == 200
     assert ">cited paper</a>" in _row_slice(resp.text, "Manager Cited Co")
@@ -1434,7 +1434,7 @@ async def test_the_detail_button_sits_in_the_pitch_box(client, db_session, admin
         key_points=["a point the reviewer can read"],
     )
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
     card = _row_slice(html, "Pitch Button Co")
 
@@ -1458,12 +1458,12 @@ async def test_a_card_with_no_pitch_still_has_exactly_one_detail_button(
     await db_session.flush()
 
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
     card = _row_slice(html, "No Pitch Button Co")
 
     assert card.count("assessment-open-link") == 1
-    assert "/admin/assessments/" in card
+    assert "/workspace/assessments/" in card
 
 
 # --- the chat control (2026-09-28 / spec §3.3) -------------------------------
@@ -1482,11 +1482,11 @@ async def test_each_card_offers_a_chat_button_into_the_open_drawer(
         key_points=["a point the reviewer can read"],
     )
     html = (await client.get(
-        f"/{surface}/assessments?run_id={run.id}", headers=auth_headers(user.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(user.id)
     )).text
     card = _row_slice(html, "Chat Button Co")
     assert card.count("assessment-chat-link") == 1
-    assert f"/{surface}/assessments/{assessment.id}#chat" in card
+    assert re.search(r'href="/workspace/assessments/' + str(assessment.id) + r'\?[^"#]*#chat"', card)
     # The detail button is untouched: still exactly one.
     assert card.count("assessment-open-link") == 1
     if surface == "manager":
@@ -1497,11 +1497,11 @@ async def test_a_card_with_no_pitch_also_offers_the_chat_button(client, db_sessi
     """The no-pitch fallback is the other call site, and the commoner card."""
     run, assessment = await _seed_narrative_row(db_session, project="No Pitch Chat Co")
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
     card = _row_slice(html, "No Pitch Chat Co")
     assert card.count("assessment-chat-link") == 1
-    assert f"/admin/assessments/{assessment.id}#chat" in card
+    assert re.search(r'href="/workspace/assessments/' + str(assessment.id) + r'\?[^"#]*#chat"', card)
     assert card.count("assessment-open-link") == 1
 
 
@@ -1509,7 +1509,7 @@ async def test_the_chat_button_is_absent_while_impersonating(client, db_session,
     run, _ = await _seed_narrative_row(db_session, project="No Chat Co")
     headers = auth_headers(admin.id, impersonate=manager.id)
     html = (await client.get(
-        f"/manager/assessments?run_id={run.id}", headers=headers
+        f"/workspace/assessments?run_id={run.id}", headers=headers
     )).text
     card = _row_slice(html, "No Chat Co")
     assert "assessment-chat-link" not in card
@@ -1522,7 +1522,7 @@ async def test_the_chat_button_is_absent_when_the_chat_is_disabled(
     asgi_app.state.assessment_chat_enabled = False
     run, _ = await _seed_narrative_row(db_session, project="Disabled Chat Co")
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
     card = _row_slice(html, "Disabled Chat Co")
     assert "assessment-chat-link" not in card
@@ -1540,7 +1540,7 @@ async def test_the_score_and_band_live_inside_the_collapsed_why_this_score_box(
         db_session, project="Score Box Co", score_rationale="Because of the cohort.",
     )
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
     card = _row_slice(html, "Score Box Co")
 
@@ -1569,7 +1569,7 @@ async def test_a_row_with_no_score_rationale_still_shows_its_score_in_the_box(
         db_session, project="No Rationale Co", score_rationale=None,
     )
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
     box = _details_slice(html, "assessment-card-score-rationale")
     assert "3.05" in box
@@ -1587,7 +1587,7 @@ async def test_a_row_with_no_weighted_score_renders_the_em_dash_in_the_box(
     ))
     await db_session.flush()
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
     box = _details_slice(html, "assessment-card-score-rationale")
     assert "&mdash;" in box or "—" in box
@@ -1607,10 +1607,10 @@ async def test_both_surfaces_offer_the_review_tabs(client, db_session, base, rol
     run, _ = await _seed_narrative_row(db_session, project="Tab Co")
 
     html = (await client.get(
-        f"{base}/assessments?run_id={run.id}", headers=auth_headers(staff.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(staff.id)
     )).text
 
-    assert f'href="{base}/assessments?' in html
+    assert 'href="/workspace/assessments?' in html
     assert "review=reviewed" in html and "review=unreviewed" in html and "review=all" in html
     assert 'aria-current="page"' in html
 
@@ -1620,7 +1620,7 @@ async def test_the_review_tab_survives_a_sort_change(client, db_session, admin):
     form field is dropped the moment a select changes."""
     run, _ = await _seed_narrative_row(db_session, project="Sticky Tab Co")
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}&review=all", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}&review=all", headers=auth_headers(admin.id)
     )).text
     assert '<input type="hidden" name="review" value="all">' in html
 
@@ -1638,7 +1638,7 @@ async def test_the_empty_state_names_the_tab_not_the_run(client, db_session, adm
     await db_session.flush()
 
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}&review=unreviewed",
+        f"/workspace/assessments?run_id={run.id}&review=unreviewed",
         headers=auth_headers(admin.id),
     )).text
     assert "No assessments stored for" not in html
@@ -1653,7 +1653,7 @@ async def test_the_admin_surface_forwards_the_review_keys(client, db_session, ad
     nowhere else."""
     run, _ = await _seed_narrative_row(db_session, project="Allowlist Co")
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
     assert "review=all" in html  # the All tab link renders its count
     assert "(1)" in html or "(0)" in html
@@ -1690,7 +1690,7 @@ async def test_each_review_tab_renders_only_its_own_rows(
 
     async def _get(review: str) -> str:
         return (await client.get(
-            f"{base}/assessments?run_id={run.id}&review={review}",
+            f"/workspace/assessments?run_id={run.id}&review={review}",
             headers=auth_headers(staff.id),
         )).text
 
@@ -1718,7 +1718,7 @@ async def test_a_run_with_no_assessments_at_all_says_so_on_the_default_tab(
     await db_session.flush()
 
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
     assert "No assessments stored for" in html
     assert "Nothing is owed here" not in html
@@ -1739,7 +1739,7 @@ async def test_the_card_pitch_renders_two_dois_as_two_links(
         ),
     )
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
     card = _row_slice(html, "Two Cites Co")
     assert card.count("cited paper") == 2
@@ -1760,7 +1760,7 @@ async def test_quick_scoring_is_expanded_on_both_surfaces(
     run, _ = await _seed_narrative_row(db_session, project="Open Both Co")
 
     html = (await client.get(
-        f"{base}/assessments?run_id={run.id}", headers=auth_headers(staff.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(staff.id)
     )).text
     assert " open" in _details_open_tag(html, "assessment-card-quickscore")
 
@@ -1778,12 +1778,12 @@ async def test_the_dimension_panel_names_the_tab_it_describes(
     )
 
     default_tab = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
     assert "(unreviewed only)" in default_tab
 
     all_tab = (await client.get(
-        f"/admin/assessments?run_id={run.id}&review=all", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}&review=all", headers=auth_headers(admin.id)
     )).text
     assert " only)" not in all_tab
 
@@ -1812,7 +1812,7 @@ async def test_a_card_renders_a_one_point_group_as_text_with_its_doi_linked(
         },
     )
     block = _card_points_block((await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text)
     url = "https://doi.org/10.1101/2025.10.19.682634"
     assert (
@@ -1834,7 +1834,7 @@ async def test_a_flat_card_list_is_bulleted_only_with_several_points(
         db_session, project="Card Flat Co", key_points=points,
     )
     block = _card_points_block((await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text)
     assert ("<ul" in block) is bulleted
     for point in points:

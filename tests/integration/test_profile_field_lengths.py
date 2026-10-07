@@ -53,7 +53,7 @@ async def test_the_manager_form_reports_the_same_error(client, db_session):
     pi = await factories.make_user(db_session)
     await factories.make_profile(db_session, user=pi)
     r = await client.post(
-        f"/manager/pis/{pi.id}/profile", data={"name": "M" * 300, "research_summary": "x",
+        f"/workspace/pis/{pi.id}/profile", data={"name": "M" * 300, "research_summary": "x",
                     "profile_version": "1"},  # R1-a: current version of the seeded profile
         headers=auth_headers(manager.id), follow_redirects=False,
     )
@@ -73,6 +73,6 @@ async def test_both_forms_cap_the_inputs_at_their_field_limit(client, db_session
         rf'<input(?=[^>]*\bname="{field}")(?=[^>]*\bmaxlength="{limit}")[^>]*>'
     )
     own = await client.get("/profile/edit", headers=auth_headers(pi.id))
-    managed = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))
+    managed = await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(manager.id))
     assert pattern.search(own.text)
     assert pattern.search(managed.text)

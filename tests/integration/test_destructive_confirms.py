@@ -22,7 +22,7 @@ async def test_delete_user_confirm_is_an_escaped_data_attribute(client, db_sessi
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     target = await factories.make_user(db_session, name=name)
     await db_session.commit()
-    html = (await client.get(f"/admin/users/{target.id}", headers=auth_headers(admin.id))).text
+    html = (await client.get(f"/workspace/pis/{target.id}", headers=auth_headers(admin.id))).text
     form = html[html.index(f'action="/admin/users/{target.id}/delete"'):]
     form = form[: form.index(">")]
     assert "onsubmit" not in form

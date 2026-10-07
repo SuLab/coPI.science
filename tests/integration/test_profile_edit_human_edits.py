@@ -19,7 +19,7 @@ async def _post(client, db_session, data, *, tenure=""):
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     await db_session.commit()
     version = profile.profile_version
-    r = await client.post(f"/manager/pis/{pi.id}/profile", data={
+    r = await client.post(f"/workspace/pis/{pi.id}/profile", data={
         "name": pi.name, "email": pi.email, "institution": pi.institution or "",
         "department": "", "jhu_tenure_start": tenure,
         "profile_version": str(version), **data,

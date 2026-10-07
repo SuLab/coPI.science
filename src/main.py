@@ -336,6 +336,8 @@ def create_app() -> FastAPI:
     application.include_router(agent_page.router, prefix="/agent", tags=["agent"])
     application.include_router(admin.router, prefix="/admin", tags=["admin"])
     application.include_router(manager.router, prefix="/manager", tags=["manager"])
+    from src.routers import workspace
+    application.include_router(workspace.router, prefix="/workspace", tags=["workspace"])
     application.include_router(reviews.router, prefix="/reviews", tags=["reviews"])
     application.include_router(
         assessment_chat.router, prefix="/assessment-chat", tags=["assessment-chat"]

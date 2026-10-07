@@ -129,7 +129,7 @@ async def test_admin_discussions_shows_the_panel_for_a_thread_with_no_decision(
 
     html = (
         await client.get(
-            f"/admin/discussions?run_id={run.id}", headers=auth_headers(admin.id)
+            f"/workspace/discussions?run_id={run.id}", headers=auth_headers(admin.id)
         )
     ).text
 
@@ -161,7 +161,7 @@ async def test_admin_discussions_shows_the_verbatim_specialist_reply(
     run, _ = await _thread_with_a_panel_and_no_decision(db_session)
     html = (
         await client.get(
-            f"/admin/discussions?run_id={run.id}", headers=auth_headers(admin.id)
+            f"/workspace/discussions?run_id={run.id}", headers=auth_headers(admin.id)
         )
     ).text
     assert RAW_OPINION_MARKER in html
@@ -177,7 +177,7 @@ async def test_manager_discussions_shows_the_same_cards_without_the_raw_reply(
 
     html = (
         await client.get(
-            f"/manager/discussions?run_id={run.id}", headers=auth_headers(manager.id)
+            f"/workspace/discussions?run_id={run.id}", headers=auth_headers(manager.id)
         )
     ).text
 
@@ -213,7 +213,7 @@ async def test_a_thread_with_a_decision_keeps_its_summary_and_gains_the_panel(
 
     html = (
         await client.get(
-            f"/admin/discussions?run_id={run.id}", headers=auth_headers(admin.id)
+            f"/workspace/discussions?run_id={run.id}", headers=auth_headers(admin.id)
         )
     ).text
 
@@ -243,7 +243,7 @@ async def test_a_thread_with_no_consults_gets_no_panel_section(
 
     html = (
         await client.get(
-            f"/admin/discussions?run_id={run.id}", headers=auth_headers(admin.id)
+            f"/workspace/discussions?run_id={run.id}", headers=auth_headers(admin.id)
         )
     ).text
 
@@ -292,7 +292,7 @@ async def test_the_panel_read_is_scoped_to_the_threads_on_the_page(
 
     html = (
         await client.get(
-            f"/admin/discussions?run_id={run.id}&channel_filter={CHANNEL}",
+            f"/workspace/discussions?run_id={run.id}&channel_filter={CHANNEL}",
             headers=auth_headers(admin.id),
         )
     ).text
@@ -323,7 +323,7 @@ async def test_the_row_cap_keeps_the_newest_consults_and_says_so(
 
     html = (
         await client.get(
-            f"/admin/discussions?run_id={run.id}", headers=auth_headers(admin.id)
+            f"/workspace/discussions?run_id={run.id}", headers=auth_headers(admin.id)
         )
     ).text
 
@@ -353,7 +353,7 @@ async def test_an_exact_fit_is_not_reported_as_truncated(
 
     html = (
         await client.get(
-            f"/admin/discussions?run_id={run.id}", headers=auth_headers(admin.id)
+            f"/workspace/discussions?run_id={run.id}", headers=auth_headers(admin.id)
         )
     ).text
 
@@ -375,7 +375,7 @@ async def test_the_truncation_notice_reaches_the_manager_page_too(
 
     html = (
         await client.get(
-            f"/manager/discussions?run_id={run.id}", headers=auth_headers(manager.id)
+            f"/workspace/discussions?run_id={run.id}", headers=auth_headers(manager.id)
         )
     ).text
 
@@ -388,7 +388,7 @@ async def test_a_pi_still_cannot_reach_either_discussions_page(client, db_sessio
     pi = await factories.make_user(
         db_session, user_role=USER_ROLE_PI, email="panel-pi@example.org"
     )
-    for path in ("/admin/discussions", "/manager/discussions"):
+    for path in ("/workspace/discussions", "/workspace/discussions"):
         resp = await client.get(
             path, headers=auth_headers(pi.id), follow_redirects=False
         )
@@ -468,7 +468,7 @@ async def test_a_truncated_consult_is_not_carded_as_a_caution_opinion(
     run, _ = await _thread_with_one_truncated_consult(db_session)
     html = (
         await client.get(
-            f"/admin/discussions?run_id={run.id}", headers=auth_headers(admin.id)
+            f"/workspace/discussions?run_id={run.id}", headers=auth_headers(admin.id)
         )
     ).text
 
@@ -490,7 +490,7 @@ async def test_the_manager_discussions_page_marks_it_too(client, db_session, man
     run, _ = await _thread_with_one_truncated_consult(db_session)
     html = (
         await client.get(
-            f"/manager/discussions?run_id={run.id}", headers=auth_headers(manager.id)
+            f"/workspace/discussions?run_id={run.id}", headers=auth_headers(manager.id)
         )
     ).text
 
@@ -508,7 +508,7 @@ async def test_a_null_truncated_column_still_reads_as_an_opinion(
     run, _ = await _thread_with_a_panel_and_no_decision(db_session)  # both NULL
     html = (
         await client.get(
-            f"/admin/discussions?run_id={run.id}", headers=auth_headers(admin.id)
+            f"/workspace/discussions?run_id={run.id}", headers=auth_headers(admin.id)
         )
     ).text
 

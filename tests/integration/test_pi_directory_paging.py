@@ -65,9 +65,9 @@ async def test_the_manager_pager_keeps_the_institution_filter_and_a_late_page_is
         await factories.make_user(db_session, name=f"Kept {i}", institution="Kept University")
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     await db_session.flush()
-    first = await client.get("/manager/pis?institution_filter=Kept+University",
+    first = await client.get("/workspace/pis?institution_filter=Kept+University",
                              headers=auth_headers(mgr.id))
     assert "institution_filter=" in first.text.split("Next", 1)[0].rsplit("<a ", 1)[-1]
-    late = await client.get("/manager/pis?institution_filter=Kept+University&page=9",
+    late = await client.get("/workspace/pis?institution_filter=Kept+University&page=9",
                             headers=auth_headers(mgr.id))
     assert late.status_code == 200 and "Kept 1" in late.text

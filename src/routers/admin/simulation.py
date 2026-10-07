@@ -32,6 +32,7 @@ from src.services.simulation_control import panel_state as read_panel_state
 from src.services.simulation_stats import funnel
 from src.services.simulation_view import live_tab_context
 from src.web.flash import flash
+from src.web.urls import page_url
 
 # ---------------------------------------------------------------------------
 # /admin/simulation — the control-plane panel (Task 7 of
@@ -358,7 +359,7 @@ async def admin_simulation_finalize_run(
     the FOR KEY SHARE locks the engine's inserts take on the referenced run row
     (plan audit Q2-06)."""
     def _refuse(message: str):
-        return _refuse_to(request, f"/admin/activity/{run_id}", message)
+        return _refuse_to(request, page_url(request, "workspace_activity_detail", run_id=run_id), message)
 
     short_id = str(run_id)[:8]
     if confirm_run.strip().lower() != short_id:
@@ -408,7 +409,7 @@ async def admin_simulation_finalize_run(
         payload=_audit_payload(payload, current_user),
     )
     flash(request, "Finalize run requested.", "success")
-    return RedirectResponse(url=f"/admin/activity/{run_id}", status_code=302)
+    return RedirectResponse(url=page_url(request, "workspace_activity_detail", run_id=run_id), status_code=302)
 
 
 @router.post("/simulation/stop")

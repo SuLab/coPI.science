@@ -60,7 +60,7 @@ def test_manager_router_mutations_are_an_explicit_allowlist():
     have non-GET routes now, but only these twenty-eight, named exactly. A future
     accidental twenty-ninth write route still fails this test loudly. The two
     provisioning routes joined the list with F2 (2026-09-10): a manager may
-    install a PI's Slack bot and activate the agent from /manager/pis/{id}.
+    install a PI's Slack bot and activate the agent from /workspace/pis/{id}.
     The grant veto joined 2026-09-11 (Task 5 of
     docs/plans/2026-09-11-pi-external-enrichment-implementation-plan.md): a
     manager may mark one NIH RePORTER grant as "not this PI". The
@@ -139,14 +139,14 @@ async def test_pi_is_denied_the_manager_surface(client, db_session):
 async def test_staff_can_reach_every_manager_route(client, db_session):
     """Paired with the denial sweep above: the same live-router enumeration
     also proves staff are NOT accidentally locked out of a route added later.
-    A 200 (rendered page) or a 302 (the root's redirect to /manager/pis) both
+    A 200 (rendered page) or a 302 (the root's redirect to /workspace/pis) both
     count as reached; a 403 or 404 does not.
 
     A real SimulationRun backs the {run_id} slot: /manager/activity/{run_id}
     correctly 404s on a random UUID, and a 404 does not count as "reached" per
     the assertion above, so this sweep needs a run that actually exists rather
     than a syntactically-valid-but-absent one. The same is true of the
-    {assessment_id} slot that /manager/assessments/{id} added, and of the
+    {assessment_id} slot that /workspace/assessments/{id} added, and of the
     {suggestion_id} slot that /manager/prompt-suggestions/{id}
     added, so a real OpportunityAssessment and a real PromptChangeSuggestion
     back those two."""
@@ -183,7 +183,7 @@ async def test_staff_can_reach_every_manager_route(client, db_session):
 async def test_staff_can_read_the_pi_directory(client, db_session, role):
     staff = await factories.make_user(db_session, user_role=role)
     await factories.make_user(db_session, user_role=USER_ROLE_PI, name="Dr Target")
-    r = await client.get("/manager/pis", headers=auth_headers(staff.id))
+    r = await client.get("/workspace/pis", headers=auth_headers(staff.id))
     assert r.status_code == 200
     assert "Dr Target" in r.text
 
@@ -192,7 +192,32 @@ async def test_manager_root_redirects_to_the_pi_directory(client, db_session):
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     r = await client.get("/manager", headers=auth_headers(mgr.id), follow_redirects=False)
     assert r.status_code == 302
-    assert r.headers["location"] == "/manager/pis"
+    assert r.headers["location"] == "/workspace"
+
+
+async def test_legacy_pi_gets_guard_then_redirect_to_workspace(client, db_session):
+    """Compatibility GETs retain their target guard before their canonical redirect."""
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+
+    directory = await client.get(
+        "/manager/pis?institution_filter=Hopkins&page=2",
+        headers=auth_headers(mgr.id), follow_redirects=False,
+    )
+    assert directory.status_code == 302
+    assert directory.headers["location"] == "/workspace/pis?institution_filter=Hopkins&page=2"
+
+    detail = await client.get(
+        f"/manager/pis/{pi.id}", headers=auth_headers(mgr.id), follow_redirects=False,
+    )
+    assert detail.status_code == 302
+    assert detail.headers["location"] == f"/workspace/pis/{pi.id}"
+
+    missing = await client.get(
+        f"/manager/pis/{admin.id}", headers=auth_headers(mgr.id), follow_redirects=False,
+    )
+    assert missing.status_code == 404
 
 
 async def test_directory_excludes_staff_accounts(client, db_session):
@@ -204,10 +229,10 @@ async def test_directory_excludes_staff_accounts(client, db_session):
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER, name="Mgr Self")
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, name="Sneaky Admin")
     pi = await factories.make_user(db_session, user_role=USER_ROLE_PI, name="Real PI")
-    r = await client.get("/manager/pis", headers=auth_headers(mgr.id))
+    r = await client.get("/workspace/pis", headers=auth_headers(mgr.id))
     assert "Real PI" in r.text
-    assert f"/manager/pis/{pi.id}" in r.text
-    assert f"/manager/pis/{admin.id}" not in r.text
+    assert f"/workspace/pis/{pi.id}" in r.text
+    assert f"/workspace/pis/{admin.id}" not in r.text
     assert "Sneaky Admin" not in r.text
 
 
@@ -220,7 +245,7 @@ async def test_pi_directory_has_no_admin_controls(client, db_session):
     directly instead."""
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     await factories.make_user(db_session, user_role=USER_ROLE_PI)
-    body = (await client.get("/manager/pis", headers=auth_headers(mgr.id))).text
+    body = (await client.get("/workspace/pis", headers=auth_headers(mgr.id))).text
     assert "impersonate" not in body.lower()
     assert "/admin/" not in body
     assert "/delete" not in body
@@ -246,7 +271,7 @@ async def test_pi_directory_renders_a_complete_profile_row(client, db_session):
         claimed_at=datetime.now(UTC),
     )
     await factories.make_profile(db_session, user=pi)
-    r = await client.get("/manager/pis", headers=auth_headers(mgr.id))
+    r = await client.get("/workspace/pis", headers=auth_headers(mgr.id))
     assert r.status_code == 200
     assert "Dr Populated" in r.text
     assert r.text.count("Complete") >= 2, "expected the dropdown option AND this row's badge"
@@ -257,7 +282,7 @@ async def test_pi_detail_is_readable(client, db_session):
     pi = await factories.make_user(
         db_session, user_role=USER_ROLE_PI, name="Dr Detail", email="pi@example.edu"
     )
-    r = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(mgr.id))
+    r = await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(mgr.id))
     assert r.status_code == 200
     assert "Dr Detail" in r.text
     assert "pi@example.edu" in r.text  # D3: contact info is in scope
@@ -267,7 +292,7 @@ async def test_pi_detail_404s_for_a_staff_account(client, db_session):
     """Closes UUID enumeration of admin/manager records."""
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
-    r = await client.get(f"/manager/pis/{admin.id}", headers=auth_headers(mgr.id))
+    r = await client.get(f"/workspace/pis/{admin.id}", headers=auth_headers(mgr.id))
     assert r.status_code == 404
 
 
@@ -275,7 +300,7 @@ async def test_pi_detail_has_no_delete_or_impersonate_control(client, db_session
     """F6: the admin templates carry both; the manager templates must not."""
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)
-    body = (await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(mgr.id))).text
+    body = (await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(mgr.id))).text
     assert "/delete" not in body
     assert "impersonate" not in body.lower()
     assert "Danger Zone" not in body
@@ -324,7 +349,7 @@ async def test_a_hand_set_impersonate_cookie_is_ignored_for_a_manager(client, db
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER, name="Mgr")
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, name="TheAdmin")
     headers = auth_headers(mgr.id, impersonate=admin.id)
-    r = await client.get("/manager/pis", headers=headers, follow_redirects=False)
+    r = await client.get("/workspace/pis", headers=headers, follow_redirects=False)
     assert r.status_code == 200          # still the manager, not the admin
     r2 = await client.get("/admin/users", headers=headers, follow_redirects=False)
     assert r2.status_code == 403         # did NOT become an admin
@@ -342,7 +367,7 @@ async def test_admin_impersonating_a_manager_has_a_way_back(client, db_session):
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, name="Adm One")
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER, name="Mgr Two")
     headers = auth_headers(admin.id, impersonate=mgr.id)
-    r = await client.get("/manager/pis", headers=headers)
+    r = await client.get("/workspace/pis", headers=headers)
     assert r.status_code == 200
     assert 'action="/admin/impersonate/stop"' in r.text
     assert "Mgr Two" in r.text  # banner names the impersonated user
@@ -380,9 +405,9 @@ async def test_admin_impersonating_a_manager_sees_the_manager_nav_link(client, d
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, name="Adm Nav")
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER, name="Mgr Nav")
     headers = auth_headers(admin.id, impersonate=mgr.id)
-    r = await client.get("/manager/pis", headers=headers)
+    r = await client.get("/workspace/pis", headers=headers)
     assert r.status_code == 200
-    assert 'href="/manager"' in r.text
+    assert 'href="/workspace"' in r.text
     assert 'action="/admin/impersonate/stop"' in r.text
 
 
@@ -401,9 +426,9 @@ async def test_admin_impersonating_a_pi_has_no_manager_nav_link(client, db_sessi
 
     r = await client.get("/settings", headers=headers)
     assert r.status_code == 200
-    assert 'href="/manager"' not in r.text
+    assert 'href="/workspace"' not in r.text
 
-    r2 = await client.get("/manager/pis", headers=headers, follow_redirects=False)
+    r2 = await client.get("/workspace/pis", headers=headers, follow_redirects=False)
     assert r2.status_code == 403
 
 
@@ -411,28 +436,22 @@ async def test_a_plain_manager_sees_the_manager_nav_link(client, db_session):
     """Not impersonated at all: the effective-user rule must reduce to the
     real user's own role, same as before this hotfix."""
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER, name="Plain Mgr Nav")
-    r = await client.get("/manager/pis", headers=auth_headers(mgr.id))
+    r = await client.get("/workspace/pis", headers=auth_headers(mgr.id))
     assert r.status_code == 200
-    assert 'href="/manager"' in r.text
+    assert 'href="/workspace"' in r.text
 
 
-async def test_a_plain_admin_has_no_manager_nav_link(client, db_session):
-    """2026-08-27: the top-bar Manager link is gated on is_manager, not
-    is_staff — an admin's entry point is the Admin panel, so the link must
-    not render for a non-impersonating admin. Deliberately NARROWER than the
-    access gate: the admin still reaches /manager/* by URL (get_staff_user),
-    and this test pins that too, so hiding the link stays a navigation
-    decision rather than an access change. Read off /settings, the one page
-    every logged-in role can always reach (same choice as the
-    impersonated-PI nav test above)."""
+async def test_a_plain_admin_sees_workspace_and_admin_nav_links(client, db_session):
+    """The consolidated workspace is available to a non-impersonating admin,
+    while the Admin panel remains separately available from settings."""
     adm = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, name="Plain Adm Nav")
 
     r = await client.get("/settings", headers=auth_headers(adm.id))
     assert r.status_code == 200
-    assert 'href="/manager"' not in r.text
+    assert 'href="/workspace"' in r.text
     assert 'href="/admin/users"' in r.text  # the Admin link is still offered
 
-    r2 = await client.get("/manager/pis", headers=auth_headers(adm.id), follow_redirects=False)
+    r2 = await client.get("/workspace/pis", headers=auth_headers(adm.id), follow_redirects=False)
     assert r2.status_code == 200  # access unchanged — only the link is gone
 
 
@@ -440,14 +459,14 @@ async def test_a_non_impersonating_manager_sees_no_banner(client, db_session):
     """The banner must not render unconditionally — only under real
     impersonation. Paired negative for the two positive tests above."""
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER, name="Plain Mgr")
-    r = await client.get("/manager/pis", headers=auth_headers(mgr.id))
+    r = await client.get("/workspace/pis", headers=auth_headers(mgr.id))
     assert r.status_code == 200
     assert 'action="/admin/impersonate/stop"' not in r.text
 
 
 async def test_manager_can_read_assessments(client, db_session):
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
-    r = await client.get("/manager/assessments", headers=auth_headers(mgr.id))
+    r = await client.get("/workspace/assessments", headers=auth_headers(mgr.id))
     assert r.status_code == 200
     assert "Opportunity Assessments" in r.text
 
@@ -455,7 +474,7 @@ async def test_manager_can_read_assessments(client, db_session):
 async def test_pi_is_denied_assessments(client, db_session):
     pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)
     r = await client.get(
-        "/manager/assessments", headers=auth_headers(pi.id), follow_redirects=False
+        "/workspace/assessments", headers=auth_headers(pi.id), follow_redirects=False
     )
     assert r.status_code == 403
 
@@ -463,7 +482,7 @@ async def test_pi_is_denied_assessments(client, db_session):
 async def test_manager_assessments_never_links_into_admin(client, db_session):
     """A live-looking control that 403s on click is worse than no control (F6)."""
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
-    body = (await client.get("/manager/assessments", headers=auth_headers(mgr.id))).text
+    body = (await client.get("/workspace/assessments", headers=auth_headers(mgr.id))).text
     assert "/admin/" not in body
 
 
@@ -525,7 +544,7 @@ async def test_manager_assessments_renders_a_populated_verdict_row(client, db_se
     )
     await db_session.flush()
 
-    resp = await client.get("/manager/assessments", headers=auth_headers(mgr.id))
+    resp = await client.get("/workspace/assessments", headers=auth_headers(mgr.id))
     assert resp.status_code == 200
     html = resp.text
 
@@ -537,7 +556,7 @@ async def test_manager_assessments_renders_a_populated_verdict_row(client, db_se
 
 async def test_manager_assessments_renders_the_incomplete_panel_marker(client, db_session):
     """``incomplete_panel_count`` and ``a.panel_incomplete``/``a.missing_domains``
-    reach ``/manager/assessments`` only via ``manager_assessments``'s ``**view``
+    reach ``/workspace/assessments`` only via ``manager_assessments``'s ``**view``
     splat (``src/routers/manager.py``) — there is no per-key allowlist the way
     ``admin.py`` has one. Jinja's ``Undefined`` is falsy in ``{% if %}`` and
     never raises, so if a future change stopped forwarding that key (or
@@ -567,7 +586,7 @@ async def test_manager_assessments_renders_the_incomplete_panel_marker(client, d
     )
     await db_session.flush()
 
-    resp = await client.get("/manager/assessments", headers=auth_headers(mgr.id))
+    resp = await client.get("/workspace/assessments", headers=auth_headers(mgr.id))
     assert resp.status_code == 200
     html = resp.text
 
@@ -592,9 +611,17 @@ async def test_manager_assessments_renders_the_incomplete_panel_marker(client, d
 
 async def test_manager_can_read_discussions_and_activity(client, db_session):
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
-    for path in ("/manager/discussions", "/manager/activity"):
+    for path in ("/workspace/discussions", "/workspace/activity"):
         r = await client.get(path, headers=auth_headers(mgr.id))
         assert r.status_code == 200, path
+
+    for legacy, canonical in (
+        ("/manager/discussions", "/workspace/discussions"),
+        ("/manager/activity", "/workspace/activity"),
+    ):
+        r = await client.get(legacy, headers=auth_headers(mgr.id), follow_redirects=False)
+        assert r.status_code == 302
+        assert r.headers["location"] == canonical
 
 
 async def test_manager_has_no_llm_calls_route(client, db_session):
@@ -618,9 +645,16 @@ async def test_manager_has_no_llm_calls_route(client, db_session):
 async def test_manager_activity_detail_404s_on_an_unknown_run(client, db_session):
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     r = await client.get(
-        f"/manager/activity/{uuid.uuid4()}", headers=auth_headers(mgr.id)
+        f"/workspace/activity/{uuid.uuid4()}", headers=auth_headers(mgr.id)
     )
     assert r.status_code == 404
+
+    legacy = await client.get(
+        f"/manager/activity/{uuid.uuid4()}",
+        headers=auth_headers(mgr.id),
+        follow_redirects=False,
+    )
+    assert legacy.status_code == 404
 
 
 async def test_manager_activity_detail_renders_the_populated_shared_partial(
@@ -677,13 +711,13 @@ async def test_manager_activity_detail_renders_the_populated_shared_partial(
     )
     await db_session.flush()
 
-    r = await client.get(f"/manager/activity/{run.id}", headers=auth_headers(mgr.id))
+    r = await client.get(f"/workspace/activity/{run.id}", headers=auth_headers(mgr.id))
     assert r.status_code == 200
     body = r.text
 
     # The wrapper rendered (control for the four partial assertions below).
     assert "Simulation Run" in body
-    assert "/manager/activity" in body
+    assert "/workspace/activity" in body
 
     # The partial's populated path.
     assert "partial-proof-channel" in body
@@ -748,7 +782,7 @@ async def test_manager_discussions_renders_a_real_thread_with_no_export_control(
     )
     await db_session.flush()
 
-    body = (await client.get("/manager/discussions", headers=auth_headers(mgr.id))).text
+    body = (await client.get("/workspace/discussions", headers=auth_headers(mgr.id))).text
 
     # The partial rendered a real row, not the empty-state placeholder. The
     # rendered `data-markdown` attribute's *value* is asserted, not just its
@@ -785,7 +819,7 @@ async def test_manager_discussions_renders_a_real_thread_with_no_export_control(
 
 async def test_impersonating_admin_sees_every_manager_control(client, db_session):
     """Operator decision 2026-09-11: the PI-management controls on
-    /manager/pis are not hidden while impersonating. The Add-PI form, the
+    /workspace/pis are not hidden while impersonating. The Add-PI form, the
     Edit Profile form and the mute button all render for an admin wearing a
     manager. (Assign/unassign and the chat drawer on the assessment pages are
     still hidden under impersonation.)"""
@@ -798,13 +832,13 @@ async def test_impersonating_admin_sees_every_manager_control(client, db_session
     db_session.expire(pi)  # so the detail page's `target_user.agent` loads the new row
     headers = auth_headers(admin.id, impersonate=mgr.id)
 
-    pis_body = (await client.get("/manager/pis", headers=headers)).text
-    assert 'action="/manager/pis"' in pis_body
+    pis_body = (await client.get("/workspace/pis", headers=headers)).text
+    assert 'action="/workspace/pis"' in pis_body
     assert 'action="/admin/impersonate/stop"' in pis_body  # banner still shown
 
-    detail_body = (await client.get(f"/manager/pis/{pi.id}", headers=headers)).text
-    assert f'action="/manager/pis/{pi.id}/profile"' in detail_body
-    assert f'action="/manager/pis/{pi.id}/mute"' in detail_body
+    detail_body = (await client.get(f"/workspace/pis/{pi.id}", headers=headers)).text
+    assert f'action="/workspace/pis/{pi.id}/profile"' in detail_body
+    assert f'action="/workspace/pis/{pi.id}/mute"' in detail_body
 
 
 async def test_slack_bots_page_lists_every_pi_lab_bot_with_the_right_action(
@@ -826,13 +860,13 @@ async def test_slack_bots_page_lists_every_pi_lab_bot_with_the_right_action(
     )
     await db_session.flush()
 
-    r = await client.get("/manager/slack-bots", headers=auth_headers(mgr.id))
+    r = await client.get("/workspace/slack-bots", headers=auth_headers(mgr.id))
     assert r.status_code == 200
     body = r.text
-    assert 'href="/manager/slack-bots"' in body  # linked from the sub-nav
+    assert 'href="/workspace/slack-bots"' in body  # linked from the sub-nav
     assert "Pending NoToken" in body and "Active One" in body
     assert "HubOnlyBot" not in body  # hub is not a PI lab bot
-    assert f'action="/manager/pis/{p1.id}/slack/provision"' in body
-    assert f'action="/manager/pis/{p2.id}/activate"' in body
-    assert f'action="/manager/pis/{p3.id}/mute"' in body
-    assert f'action="/manager/pis/{p4.id}/unmute"' in body
+    assert f'action="/workspace/pis/{p1.id}/slack/provision"' in body
+    assert f'action="/workspace/pis/{p2.id}/activate"' in body
+    assert f'action="/workspace/pis/{p3.id}/mute"' in body
+    assert f'action="/workspace/pis/{p4.id}/unmute"' in body

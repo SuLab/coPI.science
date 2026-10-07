@@ -62,7 +62,7 @@ async def test_a_stale_form_is_refused(client, db_session, export_dir, route):
     if route == "manager":
         manager = await _manager(db_session)
         path, data, actor = (
-            f"/manager/pis/{user.id}/profile",
+            f"/workspace/pis/{user.id}/profile",
             {**_FIELDS, "name": user.name, "email": user.email, "institution": "",
              "department": "", "jhu_tenure_start": ""},
             manager.id,

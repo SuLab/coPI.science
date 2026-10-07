@@ -6,10 +6,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 NAVIGATING = {
-    "templates/admin/activity.html": "/admin/activity/{{ run.id }}",
-    "templates/manager/activity.html": "/manager/activity/{{ run.id }}",
+    "templates/workspace/activity.html": "{{ page_url(request, 'workspace_activity_detail', run_id=run.id) }}",
     "templates/admin/users.html": "/admin/users/{{ item.user.id }}",
-    "templates/manager/pis.html": "/manager/pis/{{ item.user.id }}",
+    "templates/workspace/pis.html": "{{ page_url(request, 'workspace_pi_detail', user_id=item.user.id) }}",
 }
 
 
@@ -30,7 +29,7 @@ def test_navigating_rows_link_from_their_first_cell():
 
 
 def test_the_discussion_row_expands_through_a_button():
-    text = (ROOT / "templates/admin/_discussions_threads.html").read_text(encoding="utf-8")
+    text = (ROOT / "templates/discussions/_threads.html").read_text(encoding="utf-8")
     assert "onclick" not in text
     row, cell = _row_and_first_cell(text, "data-row-toggles")
     assert 'data-toggles="detail-{{ loop.index }}"' in cell

@@ -25,7 +25,7 @@ async def _page(client, db_session, role, surface):
     seeded = await seed_interview(db_session)
     user = await factories.make_user(db_session, user_role=role)
     resp = await client.get(
-        f"/{surface}/assessments/{seeded.assessment_id}", headers=auth_headers(user.id)
+        f"/workspace/assessments/{seeded.assessment_id}", headers=auth_headers(user.id)
     )
     assert resp.status_code == 200
     return seeded, user, _main(resp.text)
@@ -55,7 +55,7 @@ async def test_impersonation_renders_text_instead_of_a_control(client, db_sessio
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     headers = auth_headers(admin.id, impersonate=manager.id)
-    resp = await client.get(f"/manager/assessments/{seeded.assessment_id}", headers=headers)
+    resp = await client.get(f"/workspace/assessments/{seeded.assessment_id}", headers=headers)
     body = _main(resp.text)
     assert "Chat unavailable while impersonating" in body
     assert "data-chat-open" not in body

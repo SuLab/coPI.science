@@ -2,7 +2,7 @@
 ``docs/plans/2026-09-22-pi-corpus-attribution-remediation-plan.md`` (§3B D17):
 every publication count/list surface scopes to the PI's JHU tenure window.
 
-Covers the four D17 surfaces: the /manager/pis and /admin/users list
+Covers the four D17 surfaces: the /workspace/pis and /admin/users list
 columns, the two staff detail pages, and the PI's own /profile — plus the
 D20 full-career badge for a PI with no recorded tenure year.
 
@@ -46,7 +46,7 @@ async def test_manager_pis_list_shows_the_scoped_count(client, db_session):
     manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     pi = await _make_pi_with_publications(db_session, tenure_start=2020)
 
-    resp = await client.get("/manager/pis", headers=auth_headers(manager.id))
+    resp = await client.get("/workspace/pis", headers=auth_headers(manager.id))
     assert resp.status_code == 200
     body = resp.text
     idx = body.index(str(pi.id))
@@ -78,7 +78,7 @@ async def test_manager_pi_detail_lists_only_in_tenure_papers(
     manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     pi = await _make_pi_with_publications(db_session, tenure_start=2020)
 
-    resp = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))
+    resp = await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(manager.id))
     assert resp.status_code == 200
     body = resp.text
     assert "JHU tenure, since 2020" in body
@@ -97,7 +97,7 @@ async def test_admin_user_detail_lists_only_in_tenure_papers(
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     pi = await _make_pi_with_publications(db_session, tenure_start=2020)
 
-    resp = await client.get(f"/admin/users/{pi.id}", headers=auth_headers(admin.id))
+    resp = await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(admin.id))
     assert resp.status_code == 200
     body = resp.text
     assert "JHU tenure, since 2020" in body
@@ -118,7 +118,7 @@ async def test_a_pi_with_all_publications_out_of_tenure_still_renders_the_sectio
     db_session.add(Publication(user_id=pi.id, title="Ancient Paper", year=2015))
     await db_session.flush()
 
-    resp = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))
+    resp = await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(manager.id))
     assert resp.status_code == 200
     body = resp.text
     assert "JHU tenure, since 2030" in body
@@ -134,13 +134,13 @@ async def test_a_pi_with_no_tenure_start_shows_the_full_career_badge(
     manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     pi = await _make_pi_with_publications(db_session, tenure_start=None)
 
-    list_resp = await client.get("/manager/pis", headers=auth_headers(manager.id))
+    list_resp = await client.get("/workspace/pis", headers=auth_headers(manager.id))
     idx = list_resp.text.index(str(pi.id))
     row = list_resp.text[max(0, idx - 3000) : idx + 3000]
     assert "full career" in row.lower()
 
     detail_resp = await client.get(
-        f"/manager/pis/{pi.id}", headers=auth_headers(manager.id)
+        f"/workspace/pis/{pi.id}", headers=auth_headers(manager.id)
     )
     detail_body = detail_resp.text
     assert "full career — no JHU tenure start recorded" in detail_body

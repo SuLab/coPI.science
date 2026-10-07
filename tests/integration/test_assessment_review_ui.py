@@ -6,8 +6,8 @@ Fed by `build_assessment_detail`'s four new keys (`review_feedback`,
 `review_capable_users` gated on `viewer_is_staff`) and posting to the
 `/reviews` routes Tasks 4/5 already wired up. These tests exercise the
 rendered HTML on all three surfaces a human reviewer can reach it from:
-/admin/assessments/{id}, /manager/assessments/{id} as a manager, and
-/manager/assessments/{id} as a reviewer (get_review_user admits all three).
+/workspace/assessments/{id}, /workspace/assessments/{id} as a manager, and
+/workspace/assessments/{id} as a reviewer (get_review_user admits all three).
 
 Rows are seeded with EXPLICIT `created_at` values throughout: Postgres
 `now()` is transaction-start, so two rows written in the same test
@@ -106,9 +106,9 @@ async def test_feedback_and_status_render_on_all_three_surfaces(
     await _seed_review_activity(db_session, assessment, feedback_user=reviewer, status_actor=admin)
 
     for path, user in (
-        (f"/admin/assessments/{assessment.id}", admin),
-        (f"/manager/assessments/{assessment.id}", manager),
-        (f"/manager/assessments/{assessment.id}", reviewer),
+        (f"/workspace/assessments/{assessment.id}", admin),
+        (f"/workspace/assessments/{assessment.id}", manager),
+        (f"/workspace/assessments/{assessment.id}", reviewer),
     ):
         resp = await client.get(path, headers=auth_headers(user.id))
         assert resp.status_code == 200, f"{path} as {user.user_role}: {resp.text}"
@@ -127,7 +127,7 @@ async def test_feedback_and_status_render_on_all_three_surfaces(
 async def test_card_explains_the_score_rates_the_proposal(client, db_session, admin):
     assessment = await _seed_assessment(db_session)
     resp = await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )
     assert resp.status_code == 200
     html = resp.text
@@ -150,7 +150,7 @@ async def test_comment_is_escaped_not_rendered(client, db_session, admin, review
     await db_session.flush()
 
     resp = await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )
     assert resp.status_code == 200
     html = resp.text
@@ -168,17 +168,17 @@ async def test_the_forms_post_to_literal_review_paths(
 
     admin_html = (
         await client.get(
-            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
         )
     ).text
     manager_html = (
         await client.get(
-            f"/manager/assessments/{assessment.id}", headers=auth_headers(manager.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(manager.id)
         )
     ).text
     reviewer_html = (
         await client.get(
-            f"/manager/assessments/{assessment.id}", headers=auth_headers(reviewer.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(reviewer.id)
         )
     ).text
 
@@ -217,21 +217,21 @@ async def test_edit_form_renders_only_for_the_author(client, db_session, admin, 
 
     author_html = (
         await client.get(
-            f"/manager/assessments/{assessment.id}", headers=auth_headers(reviewer.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(reviewer.id)
         )
     ).text
     assert f"/reviews/feedback/{review.id}/edit" in author_html
 
     other_html = (
         await client.get(
-            f"/manager/assessments/{assessment.id}", headers=auth_headers(other.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(other.id)
         )
     ).text
     assert f"/reviews/feedback/{review.id}/edit" not in other_html
 
     admin_html = (
         await client.get(
-            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
         )
     ).text
     assert f"/reviews/feedback/{review.id}/edit" not in admin_html
@@ -253,21 +253,21 @@ async def test_delete_button_renders_only_for_admin(
 
     admin_html = (
         await client.get(
-            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
         )
     ).text
     assert f"/reviews/feedback/{review.id}/delete" in admin_html
 
     manager_html = (
         await client.get(
-            f"/manager/assessments/{assessment.id}", headers=auth_headers(manager.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(manager.id)
         )
     ).text
     assert f"/reviews/feedback/{review.id}/delete" not in manager_html
 
     reviewer_html = (
         await client.get(
-            f"/manager/assessments/{assessment.id}", headers=auth_headers(reviewer.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(reviewer.id)
         )
     ).text
     assert f"/reviews/feedback/{review.id}/delete" not in reviewer_html
@@ -283,7 +283,7 @@ async def test_impersonating_admin_sees_write_forms_and_the_reviewing_as_notice(
     assessment = await _seed_assessment(db_session)
     headers = auth_headers(admin.id, impersonate=manager.id)
 
-    resp = await client.get(f"/manager/assessments/{assessment.id}", headers=headers)
+    resp = await client.get(f"/workspace/assessments/{assessment.id}", headers=headers)
     assert resp.status_code == 200
     html = resp.text
     assert "Human review" in html
@@ -297,7 +297,7 @@ async def test_a_real_manager_sees_no_impersonation_notice(client, db_session, m
     signed in as themselves has the full write half and needs no explanation."""
     assessment = await _seed_assessment(db_session)
     resp = await client.get(
-        f"/manager/assessments/{assessment.id}", headers=auth_headers(manager.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(manager.id)
     )
     assert resp.status_code == 200
     assert "review-impersonation-notice" not in resp.text
@@ -342,10 +342,10 @@ async def test_unknown_status_action_and_mode_render_alarming(
             detail["review_status_history"] = [stub_event]
         return detail
 
-    monkeypatch.setattr("src.routers.admin.assessments.build_assessment_detail", _patched)
+    monkeypatch.setattr("src.routers.workspace.assessments.build_assessment_detail", _patched)
 
     resp = await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )
     assert resp.status_code == 200
     html = resp.text
@@ -366,7 +366,7 @@ async def test_the_add_form_renders_one_select_per_live_rubric_dimension(
 
     html = (
         await client.get(
-            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
         )
     ).text
 
@@ -396,7 +396,7 @@ async def test_the_form_shows_the_bots_own_score_beside_each_dimension(
 
     html = (
         await client.get(
-            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
         )
     ).text
 
@@ -442,7 +442,7 @@ async def test_a_stored_review_renders_its_dimension_scores(
 
     html = (
         await client.get(
-            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
         )
     ).text
     assert "review-dimension-list" in html
@@ -489,7 +489,7 @@ async def test_recorded_by_renders_the_impersonation_note_only_when_set(
 
     html = (
         await client.get(
-            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
         )
     ).text
     marker = f"(entered by {admin.name} while impersonating)"
@@ -535,7 +535,7 @@ async def test_a_review_stamped_with_an_unknown_revision_shows_raw_keys(
 
     html = (
         await client.get(
-            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
         )
     ).text
     assert "some_retired_dimension" in html
@@ -557,7 +557,7 @@ async def test_the_form_renders_for_a_reviewer_on_the_manager_surface(
 
     html = (
         await client.get(
-            f"/manager/assessments/{assessment.id}", headers=auth_headers(reviewer.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(reviewer.id)
         )
     ).text
     assert f'name="dim_{first.key}"' in html
@@ -570,7 +570,7 @@ async def test_every_select_on_the_detail_page_has_an_external_label(
     assessment = await _seed_assessment(db_session)
     html = (
         await client.get(
-            f"/manager/assessments/{assessment.id}", headers=auth_headers(manager.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(manager.id)
         )
     ).text
     assert "Proposal merit" not in html

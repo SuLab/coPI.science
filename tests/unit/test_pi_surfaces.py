@@ -22,6 +22,6 @@ def test_sites_use_the_property():
     root = Path(__file__).resolve().parents[2]
     base = (root / "templates/base.html").read_text()
     assert "current_user.user_role == 'pi' or current_user.is_admin" not in base
-    assert base.count("current_user.may_use_pi_surfaces") >= 2
+    assert base.count("effective_user.may_use_pi_surfaces") >= 2
     dep = (root / "src/dependencies.py").read_text()
     assert "if not current_user.may_use_pi_surfaces:" in dep

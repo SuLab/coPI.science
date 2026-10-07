@@ -2,8 +2,8 @@
 object here, so a global, filter or test registered for one surface is available on
 all of them and no router carries its own ``Jinja2Templates(directory="templates")``.
 
-The admin and manager routers include the same ``_assessments_body.html`` and
-``_assessment_detail_body.html`` partials, and each ``Jinja2Templates`` instance
+The admin and manager routers include the same ``assessments/_body.html`` and
+``assessments/_detail_body.html`` partials, and each ``Jinja2Templates`` instance
 keeps its own globals, so the registrations have to be identical on every instance.
 """
 
@@ -21,7 +21,6 @@ def make_templates() -> Jinja2Templates:
         markdown_with_citation_links,
         plain_with_citation_links,
     )
-
     from src.web.flash import flash_context
 
     # `get_flashes()` for base.html's flash block (src/web/flash.py). A context
@@ -37,7 +36,7 @@ def make_templates() -> Jinja2Templates:
     templates.env.tests["truncated_stop"] = is_truncated_stop
     # Key-point sections of a stored `key_points` value (current or legacy labels).
     # A global rather than a context key: the admin assessments handler forbids a new
-    # context key (see the comment on `_assessments_body.html`'s card-list block).
+    # context key (see the comment on `assessments/_body.html`'s card-list block).
     templates.env.globals["key_point_sections"] = key_point_sections
     # Render-time URL -> "cited paper" rewriting (spec 2026-09-21 §7).
     templates.env.globals["md_citations"] = markdown_with_citation_links
@@ -47,4 +46,7 @@ def make_templates() -> Jinja2Templates:
     templates.env.globals["staff_only_verdict_fields"] = STAFF_ONLY_VERDICT_FIELDS
     templates.env.globals["band_class"] = band_class
     templates.env.globals["band_label"] = band_label
+    from src.web.urls import page_url
+
+    templates.env.globals["page_url"] = page_url
     return templates

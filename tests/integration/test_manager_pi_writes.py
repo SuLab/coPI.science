@@ -22,13 +22,13 @@ async def test_pi_is_denied_all_four_write_routes(client, db_session):
     target = await factories.make_user(db_session, user_role=USER_ROLE_PI)
     headers = auth_headers(pi.id)
 
-    r = await client.post("/manager/pis", data={"orcid": "0000-0003-0000-0000"}, headers=headers)
+    r = await client.post("/workspace/pis", data={"orcid": "0000-0003-0000-0000"}, headers=headers)
     assert r.status_code == 403
-    r = await client.post(f"/manager/pis/{target.id}/profile", data={}, headers=headers)
+    r = await client.post(f"/workspace/pis/{target.id}/profile", data={}, headers=headers)
     assert r.status_code == 403
-    r = await client.post(f"/manager/pis/{target.id}/mute", headers=headers)
+    r = await client.post(f"/workspace/pis/{target.id}/mute", headers=headers)
     assert r.status_code == 403
-    r = await client.post(f"/manager/pis/{target.id}/unmute", headers=headers)
+    r = await client.post(f"/workspace/pis/{target.id}/unmute", headers=headers)
     assert r.status_code == 403
 
 
@@ -48,11 +48,11 @@ async def test_manager_creates_a_pi_via_orcid(client, db_session):
         }),
     ):
         r = await client.post(
-            "/manager/pis", data={"orcid": "0000-0004-0000-0000"},
+            "/workspace/pis", data={"orcid": "0000-0004-0000-0000"},
             headers=auth_headers(manager.id), follow_redirects=False,
         )
     assert r.status_code == 302
-    assert "/manager/pis/" in r.headers["location"]
+    assert "/workspace/pis/" in r.headers["location"]
 
     created = (await db_session.execute(
         select(User).where(User.orcid == "0000-0004-0000-0000")
@@ -60,7 +60,7 @@ async def test_manager_creates_a_pi_via_orcid(client, db_session):
     assert created is not None
     assert created.name == "Ada Lovelace"
     assert created.user_role == USER_ROLE_PI
-    assert f"/manager/pis/{created.id}" == r.headers["location"]
+    assert f"/workspace/pis/{created.id}" == r.headers["location"]
 
 
 async def test_manager_create_pi_rejects_a_duplicate_orcid(client, db_session):
@@ -72,7 +72,7 @@ async def test_manager_create_pi_rejects_a_duplicate_orcid(client, db_session):
     await db_session.commit()  # the refusal rolls the request back
 
     r = await client.post(
-        "/manager/pis", data={"orcid": existing.orcid},
+        "/workspace/pis", data={"orcid": existing.orcid},
         headers=auth_headers(manager.id), follow_redirects=False,
     )
     assert r.status_code == 302
@@ -84,7 +84,7 @@ async def test_manager_edits_a_pi_profile(client, db_session):
     pi = await factories.make_user(db_session, name="Old Name")
 
     r = await client.post(
-        f"/manager/pis/{pi.id}/profile",
+        f"/workspace/pis/{pi.id}/profile",
         data={
             "name": "New Name", "email": pi.email or "", "institution": "",
             "department": "", "research_summary": "Edited.", "techniques": "",
@@ -103,7 +103,7 @@ async def test_manager_edit_404s_on_a_non_pi_target(client, db_session):
     other_admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
 
     r = await client.post(
-        f"/manager/pis/{other_admin.id}/profile", data={}, headers=auth_headers(manager.id),
+        f"/workspace/pis/{other_admin.id}/profile", data={}, headers=auth_headers(manager.id),
     )
     assert r.status_code == 404
 
@@ -117,7 +117,7 @@ async def test_manager_mute_404s_on_a_non_pi_target(client, db_session):
     await factories.make_agent(db_session, user=other_admin, status="active")
 
     r = await client.post(
-        f"/manager/pis/{other_admin.id}/mute", headers=auth_headers(manager.id),
+        f"/workspace/pis/{other_admin.id}/mute", headers=auth_headers(manager.id),
     )
     assert r.status_code == 404
 
@@ -128,7 +128,7 @@ async def test_manager_unmute_404s_on_a_non_pi_target(client, db_session):
     await factories.make_agent(db_session, user=other_admin, status="inactive")
 
     r = await client.post(
-        f"/manager/pis/{other_admin.id}/unmute", headers=auth_headers(manager.id),
+        f"/workspace/pis/{other_admin.id}/unmute", headers=auth_headers(manager.id),
     )
     assert r.status_code == 404
 
@@ -142,7 +142,7 @@ async def test_manager_mutes_and_unmutes_a_pi(client, db_session):
     write_persona(agent.agent_id)  # R2: the unmute needs the persona file (spec 2026-10-05 §6.4)
 
     r = await client.post(
-        f"/manager/pis/{pi.id}/mute", headers=auth_headers(manager.id), follow_redirects=False,
+        f"/workspace/pis/{pi.id}/mute", headers=auth_headers(manager.id), follow_redirects=False,
     )
     assert r.status_code == 302
     await db_session.refresh(agent)
@@ -150,7 +150,7 @@ async def test_manager_mutes_and_unmutes_a_pi(client, db_session):
     assert agent.muted_by == manager.id
 
     r = await client.post(
-        f"/manager/pis/{pi.id}/unmute", headers=auth_headers(manager.id), follow_redirects=False,
+        f"/workspace/pis/{pi.id}/unmute", headers=auth_headers(manager.id), follow_redirects=False,
     )
     assert r.status_code == 302
     await db_session.refresh(agent)
@@ -163,7 +163,7 @@ async def test_muting_a_pi_with_no_agent_redirects_with_an_error(client, db_sess
     pi = await factories.make_user(db_session)
 
     r = await client.post(
-        f"/manager/pis/{pi.id}/mute", headers=auth_headers(manager.id), follow_redirects=False,
+        f"/workspace/pis/{pi.id}/mute", headers=auth_headers(manager.id), follow_redirects=False,
     )
     assert r.status_code == 302
     assert "error=" in r.headers["location"]
@@ -175,7 +175,7 @@ async def test_muting_a_pending_agent_redirects_with_an_error(client, db_session
     await factories.make_agent(db_session, user=pi, status="pending")
 
     r = await client.post(
-        f"/manager/pis/{pi.id}/mute", headers=auth_headers(manager.id), follow_redirects=False,
+        f"/workspace/pis/{pi.id}/mute", headers=auth_headers(manager.id), follow_redirects=False,
     )
     assert r.status_code == 302
     assert "error=" in r.headers["location"]
@@ -183,9 +183,9 @@ async def test_muting_a_pending_agent_redirects_with_an_error(client, db_session
 
 async def test_pis_page_shows_an_add_pi_form(client, db_session):
     manager = await _manager(db_session)
-    r = await client.get("/manager/pis", headers=auth_headers(manager.id))
+    r = await client.get("/workspace/pis", headers=auth_headers(manager.id))
     assert r.status_code == 200
-    assert '<form' in r.text and 'action="/manager/pis"' in r.text
+    assert '<form' in r.text and 'action="/workspace/pis"' in r.text
     assert 'name="orcid"' in r.text
 
 
@@ -194,9 +194,9 @@ async def test_pi_detail_shows_mute_button_for_an_active_agent(client, db_sessio
     pi = await factories.make_user(db_session)
     await factories.make_agent(db_session, user=pi, status="active")
 
-    r = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))
+    r = await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(manager.id))
     assert r.status_code == 200
-    assert f'/manager/pis/{pi.id}/mute' in r.text
+    assert f'/workspace/pis/{pi.id}/mute' in r.text
 
 
 async def test_pi_detail_hides_mute_button_for_a_pending_agent(client, db_session):
@@ -204,9 +204,9 @@ async def test_pi_detail_hides_mute_button_for_a_pending_agent(client, db_sessio
     pi = await factories.make_user(db_session)
     await factories.make_agent(db_session, user=pi, status="pending")
 
-    r = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))
+    r = await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(manager.id))
     assert r.status_code == 200
-    assert f'/manager/pis/{pi.id}/mute' not in r.text
+    assert f'/workspace/pis/{pi.id}/mute' not in r.text
 
 
 _ORCID_PROFILE = {
@@ -236,7 +236,7 @@ async def test_manager_create_pi_also_mints_a_pending_agent_and_tenure_entry(
         new=AsyncMock(return_value=dict(_ORCID_PROFILE)),
     ):
         r = await client.post(
-            "/manager/pis", data={"orcid": "0000-0007-0000-0000"},
+            "/workspace/pis", data={"orcid": "0000-0007-0000-0000"},
             headers=auth_headers(manager.id), follow_redirects=False,
         )
     assert r.status_code == 302
@@ -268,11 +268,11 @@ async def test_manager_create_pi_rejects_a_malformed_orcid_with_a_canned_code(
     fetch = AsyncMock()
     with patch("src.services.pi_onboarding.fetch_orcid_profile", new=fetch):
         r = await client.post(
-            "/manager/pis", data={"orcid": "0000-0001; DROP[Affiliation]"},
+            "/workspace/pis", data={"orcid": "0000-0001; DROP[Affiliation]"},
             headers=auth_headers(manager.id), follow_redirects=False,
         )
     assert r.status_code == 302
-    assert r.headers["location"] == "/manager/pis?error=invalid_orcid", (
+    assert r.headers["location"] == "/workspace/pis?error=invalid_orcid", (
         "raw exception text must not be interpolated into the redirect"
     )
     fetch.assert_not_awaited()
@@ -294,20 +294,20 @@ async def test_manager_create_pi_maps_known_failures_to_canned_codes(
     headers = auth_headers(manager.id)
 
     r = await client.post(
-        "/manager/pis", data={"orcid": existing.orcid},
+        "/workspace/pis", data={"orcid": existing.orcid},
         headers=headers, follow_redirects=False,
     )
-    assert r.headers["location"] == "/manager/pis?error=exists"
+    assert r.headers["location"] == "/workspace/pis?error=exists"
 
     with patch(
         "src.services.pi_onboarding.fetch_orcid_profile",
         new=AsyncMock(side_effect=RuntimeError("ORCID down")),
     ):
         r = await client.post(
-            "/manager/pis", data={"orcid": "0000-0009-0000-0000"},
+            "/workspace/pis", data={"orcid": "0000-0009-0000-0000"},
             headers=headers, follow_redirects=False,
         )
-    assert r.headers["location"] == "/manager/pis?error=fetch_failed"
+    assert r.headers["location"] == "/workspace/pis?error=fetch_failed"
 
 
 async def test_a_collision_race_rolls_back_cleanly_instead_of_500ing(
@@ -325,16 +325,16 @@ async def test_a_collision_race_rolls_back_cleanly_instead_of_500ing(
             new=AsyncMock(return_value=dict(_ORCID_PROFILE)),
         ),
         patch(
-            "src.routers.manager.create_pending_agent_for",
+            "src.routers.workspace.pi_directory.create_pending_agent_for",
             new=AsyncMock(side_effect=IntegrityError("dup", None, Exception())),
         ),
     ):
         r = await client.post(
-            "/manager/pis", data={"orcid": "0000-0010-0000-0000"},
+            "/workspace/pis", data={"orcid": "0000-0010-0000-0000"},
             headers=auth_headers(manager.id), follow_redirects=False,
         )
     assert r.status_code == 302
-    assert r.headers["location"] == "/manager/pis?error=agent_conflict"
+    assert r.headers["location"] == "/workspace/pis?error=agent_conflict"
 
     ghost = (await db_session.execute(
         select(User).where(User.orcid == "0000-0010-0000-0000")
@@ -367,15 +367,15 @@ async def test_pi_detail_shows_agent_state_and_the_manager_provision_button(
     db_session.add(job)
     await db_session.flush()
 
-    r = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))
+    r = await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(manager.id))
     assert r.status_code == 200
     assert "Profile generating" in r.text
-    assert f'action="/manager/pis/{pi.id}/slack/provision"' in r.text
+    assert f'action="/workspace/pis/{pi.id}/slack/provision"' in r.text
     assert "ask an admin" not in r.text.lower()
 
     job.status = "dead"
     await db_session.flush()
-    r = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))
+    r = await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(manager.id))
     assert "generation failed" in r.text.lower()
     assert "awaiting Slack install" not in r.text
 
@@ -386,16 +386,16 @@ async def test_pi_detail_shows_agent_state_and_the_manager_provision_button(
     await db_session.flush()
     # The shared session cached pi.profile as None on the earlier loads.
     await db_session.refresh(pi, attribute_names=["profile"])
-    r = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(admin.id))
+    r = await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(admin.id))
     assert "Awaiting Slack install" in r.text
-    assert f'action="/manager/pis/{pi.id}/slack/provision"' in r.text, (
+    assert f'action="/workspace/pis/{pi.id}/slack/provision"' in r.text, (
         "an admin viewer gets the same button"
     )
 
     agent.slack_bot_token = "xoxb-installed"
     await db_session.flush()
-    r = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))
-    assert f'action="/manager/pis/{pi.id}/activate"' in r.text, (
+    r = await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(manager.id))
+    assert f'action="/workspace/pis/{pi.id}/activate"' in r.text, (
         "with the bot installed the button becomes Activate"
     )
 
@@ -411,13 +411,13 @@ async def test_manager_can_correct_the_tenure_year_from_the_edit_form(
     )
     profile = await factories.make_profile(db_session, user=pi)
     r = await client.post(
-        f"/manager/pis/{pi.id}/profile",
+        f"/workspace/pis/{pi.id}/profile",
         # R1-a: a save over an existing profile carries its current version (spec 2026-10-05 §6.4)
         data={"name": pi.name, "research_summary": "S", "jhu_tenure_start": "2014",
               "profile_version": str(profile.profile_version)},
         headers=auth_headers(manager.id), follow_redirects=False,
     )
-    assert r.status_code == 302 and r.headers["location"] == f"/manager/pis/{pi.id}"
+    assert r.status_code == 302 and r.headers["location"] == f"/workspace/pis/{pi.id}"
     assert await get_tenure_start(db_session, pi.id) == 2014
 
 
@@ -428,14 +428,14 @@ async def test_a_concurrent_add_of_the_same_orcid_reports_exists(client, db_sess
         Exception('duplicate key value violates unique constraint "users_orcid_key"'),
     )
     with patch(
-        "src.routers.manager.find_or_create_pi_by_orcid", new=AsyncMock(side_effect=dup)
+        "src.routers.workspace.pi_directory.find_or_create_pi_by_orcid", new=AsyncMock(side_effect=dup)
     ):
         r = await client.post(
-            "/manager/pis", data={"orcid": "0000-0012-0000-0001"},
+            "/workspace/pis", data={"orcid": "0000-0012-0000-0001"},
             headers=auth_headers(manager.id), follow_redirects=False,
         )
     assert r.status_code == 302
-    assert r.headers["location"] == "/manager/pis?error=exists"
+    assert r.headers["location"] == "/workspace/pis?error=exists"
 
 
 async def test_the_users_orcid_unique_constraint_is_named_users_orcid_key(db_session):

@@ -36,7 +36,7 @@ def test_no_runs_selects_nothing():
 
 
 def test_the_discussions_pages_use_the_same_fallback():
-    """B-13 on /admin/discussions and /manager/discussions (``_select_run``)."""
+    """B-13 on /workspace/discussions and /workspace/discussions (``_select_run``)."""
     from src.services.directory import _select_run
 
     runs = _runs(2)

@@ -12,7 +12,7 @@ from src.models import (
     Publication,
     PublicationCandidate,
 )
-from src.routers import manager as manager_routes
+from src.routers.workspace import pi_profile as manager_routes
 from src.services import profile_export
 from src.services.profile_drafts import build_draft_payload
 from src.services.profile_limits import SUMMARY_MAX_CHARS
@@ -57,7 +57,7 @@ async def test_accept_writes_fields_bumps_version_and_stamps_generated_at(client
     pi, profile, agent, mgr = await _setup(db_session, pending_profile=_draft(),
                                            pending_profile_created_at=datetime.now(UTC),
                                            human_edited_at=edited)
-    r = await _post(client, f"/manager/pis/{pi.id}/draft/accept", mgr)
+    r = await _post(client, f"/workspace/pis/{pi.id}/draft/accept", mgr)
     assert r.status_code == 302 and "error" not in r.headers["location"]
     await db_session.refresh(profile)
     assert profile.research_summary == "Draft summary." and profile.profile_version == 4
@@ -70,7 +70,7 @@ async def test_accept_writes_fields_bumps_version_and_stamps_generated_at(client
 
 async def test_accept_refuses_a_stale_draft(client, db_session, public):
     pi, profile, _agent, mgr = await _setup(db_session, pending_profile=_draft(base_version=2))
-    r = await _post(client, f"/manager/pis/{pi.id}/draft/accept", mgr)
+    r = await _post(client, f"/workspace/pis/{pi.id}/draft/accept", mgr)
     assert "error=draft_stale" in r.headers["location"]
     await db_session.refresh(profile)
     assert profile.profile_version == 3 and profile.pending_profile is not None
@@ -84,7 +84,7 @@ async def test_accept_refuses_an_oversized_legacy_draft_without_exporting(
         pending_profile=_draft(summary="x" * (SUMMARY_MAX_CHARS + 1)),
     )
     slug = agent.agent_id
-    r = await _post(client, f"/manager/pis/{pi.id}/draft/accept", mgr)
+    r = await _post(client, f"/workspace/pis/{pi.id}/draft/accept", mgr)
     assert "error=summary_too_long" in r.headers["location"]
     await db_session.refresh(profile)
     assert profile.research_summary == "Keep this profile."
@@ -96,14 +96,14 @@ async def test_accept_refuses_while_a_generation_is_in_flight(client, db_session
     pi, profile, _agent, mgr = await _setup(db_session, pending_profile=_draft())
     db_session.add(Job(type="generate_profile", user_id=pi.id, payload={}, status="pending"))
     await db_session.commit()
-    r = await _post(client, f"/manager/pis/{pi.id}/draft/accept", mgr)
+    r = await _post(client, f"/workspace/pis/{pi.id}/draft/accept", mgr)
     assert "error=profile_generating" in r.headers["location"]
 
 
 async def test_discard_clears_the_draft(client, db_session, public):
     pi, profile, _agent, mgr = await _setup(db_session, pending_profile=_draft(),
                                             pending_profile_created_at=datetime.now(UTC))
-    await _post(client, f"/manager/pis/{pi.id}/draft/discard", mgr)
+    await _post(client, f"/workspace/pis/{pi.id}/draft/discard", mgr)
     await db_session.refresh(profile)
     assert profile.pending_profile is None and profile.pending_profile_created_at is None
 
@@ -120,7 +120,7 @@ async def test_candidate_accept_stores_a_manual_row_from_pubmed(client, db_sessi
                  "year": 2022, "doi": "10.1/321", "pmcid": None}]
 
     monkeypatch.setattr(manager_routes, "fetch_pubmed_records", fetch)
-    r = await _post(client, f"/manager/pis/{pi.id}/candidates/{cand.id}/accept", mgr)
+    r = await _post(client, f"/workspace/pis/{pi.id}/candidates/{cand.id}/accept", mgr)
     assert r.status_code == 302
     row = (await db_session.execute(select(Publication).where(
         Publication.user_id == pi.id, Publication.pmid == "321"))).scalar_one()
@@ -140,7 +140,7 @@ async def test_candidate_accept_with_pubmed_down_writes_nothing(client, db_sessi
         raise ConnectionError("down")
 
     monkeypatch.setattr(manager_routes, "fetch_pubmed_records", down)
-    r = await _post(client, f"/manager/pis/{pi.id}/candidates/{cand.id}/accept", mgr)
+    r = await _post(client, f"/workspace/pis/{pi.id}/candidates/{cand.id}/accept", mgr)
     assert "error=pubmed_unreachable" in r.headers["location"]
     await db_session.refresh(cand)
     assert cand.status == "pending"
@@ -153,7 +153,7 @@ async def test_another_pis_candidate_is_404(client, db_session, public):
                                 status="pending")
     db_session.add(cand)
     await db_session.commit()
-    r = await _post(client, f"/manager/pis/{pi.id}/candidates/{cand.id}/reject", mgr)
+    r = await _post(client, f"/workspace/pis/{pi.id}/candidates/{cand.id}/reject", mgr)
     assert r.status_code == 404
 
 
@@ -163,7 +163,7 @@ async def test_reject_keeps_the_row_rejected(client, db_session, public):
                                 status="pending")
     db_session.add(cand)
     await db_session.commit()
-    await _post(client, f"/manager/pis/{pi.id}/candidates/{cand.id}/reject", mgr)
+    await _post(client, f"/workspace/pis/{pi.id}/candidates/{cand.id}/reject", mgr)
     await db_session.refresh(cand)
     assert cand.status == "rejected" and cand.decided_by_user_id == mgr.id
 
@@ -174,8 +174,8 @@ async def test_keep_and_exclude(client, db_session, public):
     drop = Publication(user_id=pi.id, pmid="21", title="Drop me", provenance="unanchored", year=2023)
     db_session.add_all([keep, drop])
     await db_session.commit()
-    await _post(client, f"/manager/pis/{pi.id}/publications/{keep.id}/keep", mgr)
-    await _post(client, f"/manager/pis/{pi.id}/publications/{drop.id}/exclude", mgr)
+    await _post(client, f"/workspace/pis/{pi.id}/publications/{keep.id}/keep", mgr)
+    await _post(client, f"/workspace/pis/{pi.id}/publications/{drop.id}/exclude", mgr)
     await db_session.refresh(keep)
     await db_session.refresh(drop)
     assert keep.provenance == "manual"
@@ -189,11 +189,11 @@ async def test_restore_undoes_an_exclude_and_reexports(client, db_session, publi
                       year=2023)
     db_session.add(row)
     await db_session.commit()
-    await _post(client, f"/manager/pis/{pi.id}/publications/{row.id}/exclude", mgr)
-    page = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(mgr.id))
+    await _post(client, f"/workspace/pis/{pi.id}/publications/{row.id}/exclude", mgr)
+    page = await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(mgr.id))
     assert "Excluded papers (1)" in page.text
     assert f"/publications/{row.id}/restore" in page.text
-    r = await _post(client, f"/manager/pis/{pi.id}/publications/{row.id}/restore", mgr)
+    r = await _post(client, f"/workspace/pis/{pi.id}/publications/{row.id}/restore", mgr)
     assert r.status_code == 302 and "error" not in r.headers["location"]
     await db_session.refresh(row)
     assert row.excluded_at is None and row.excluded_by_user_id is None
@@ -209,26 +209,26 @@ async def test_restoring_a_row_that_is_not_excluded_is_404(client, db_session, p
     row = Publication(user_id=pi.id, pmid="23", title="Never excluded")
     db_session.add(row)
     await db_session.commit()
-    r = await _post(client, f"/manager/pis/{pi.id}/publications/{row.id}/restore", mgr)
+    r = await _post(client, f"/workspace/pis/{pi.id}/publications/{row.id}/restore", mgr)
     assert r.status_code == 404
 
 
 async def test_regenerate_queues_interactive_and_refuses_in_flight_or_recent(client, db_session, public):
     pi, _p, _a, mgr = await _setup(db_session)
-    r = await _post(client, f"/manager/pis/{pi.id}/regenerate", mgr)
+    r = await _post(client, f"/workspace/pis/{pi.id}/regenerate", mgr)
     assert "error" not in r.headers["location"]
     [job] = (await db_session.execute(select(Job).where(
         Job.user_id == pi.id, Job.type == "generate_profile"))).scalars().all()
     assert job.status == "pending" and job.priority == manager_routes.INTERACTIVE_PRIORITY
-    r = await _post(client, f"/manager/pis/{pi.id}/regenerate", mgr)
+    r = await _post(client, f"/workspace/pis/{pi.id}/regenerate", mgr)
     assert "error=regenerate_refused" in r.headers["location"]
     job.status, job.completed_at = "completed", datetime.now(UTC) - timedelta(minutes=10)
     await db_session.commit()
-    r = await _post(client, f"/manager/pis/{pi.id}/regenerate", mgr)
+    r = await _post(client, f"/workspace/pis/{pi.id}/regenerate", mgr)
     assert "error=regenerate_refused" in r.headers["location"]
     job.completed_at = datetime.now(UTC) - timedelta(hours=2)
     await db_session.commit()
-    r = await _post(client, f"/manager/pis/{pi.id}/regenerate", mgr)
+    r = await _post(client, f"/workspace/pis/{pi.id}/regenerate", mgr)
     assert "error" not in r.headers["location"]
 
 
@@ -236,12 +236,12 @@ async def test_reexport_rewrites_the_file_and_clears_the_card(client, db_session
     pi, _p, agent, mgr = await _setup(db_session)
     agent.persona_export_failed_at = datetime.now(UTC)
     await db_session.commit()
-    page = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(mgr.id))
+    page = await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(mgr.id))
     assert "Persona file out of date" in page.text
-    await _post(client, f"/manager/pis/{pi.id}/persona/reexport", mgr)
+    await _post(client, f"/workspace/pis/{pi.id}/persona/reexport", mgr)
     await db_session.refresh(agent)
     assert agent.persona_export_failed_at is None
-    page = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(mgr.id))
+    page = await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(mgr.id))
     assert "Persona file out of date" not in page.text
 
 
@@ -253,9 +253,9 @@ async def test_the_cards_render_for_staff_and_not_for_reviewers(client, db_sessi
                                         reason="no_orcid_anchor", status="pending"))
     rev = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
     await db_session.commit()
-    staff = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(mgr.id))
+    staff = await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(mgr.id))
     assert "Shown candidate" in staff.text and "Draft summary." in staff.text
-    seen = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(rev.id))
+    seen = await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(rev.id))
     assert seen.status_code == 200 and "Shown candidate" not in seen.text
 
 
@@ -265,8 +265,8 @@ async def test_an_impersonated_action_logs_a_warning(client, db_session, public,
     pi, _p, _a, mgr = await _setup(db_session)
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     await db_session.commit()
-    with caplog.at_level(logging.WARNING, logger="src.routers.manager"):
-        await client.post(f"/manager/pis/{pi.id}/regenerate",
+    with caplog.at_level(logging.WARNING, logger="src.routers.workspace._pi_common"):
+        await client.post(f"/workspace/pis/{pi.id}/regenerate",
                           headers=auth_headers(admin.id, impersonate=mgr.id),
                           follow_redirects=False)
     assert "impersonated" in caplog.text
@@ -294,9 +294,9 @@ async def test_keep_and_discard_log_the_impersonation(client, db_session, public
     row = Publication(user_id=pi.id, pmid="40", title="Kept", provenance="unanchored")
     db_session.add(row)
     await db_session.commit()
-    path = (f"/manager/pis/{pi.id}/publications/{row.id}/keep" if action == "keep"
-            else f"/manager/pis/{pi.id}/draft/discard")
-    with caplog.at_level(logging.INFO, logger="src.routers.manager"):
+    path = (f"/workspace/pis/{pi.id}/publications/{row.id}/keep" if action == "keep"
+            else f"/workspace/pis/{pi.id}/draft/discard")
+    with caplog.at_level(logging.INFO, logger="src.routers.workspace._pi_common"):
         await client.post(path, headers=auth_headers(admin.id, impersonate=mgr.id),
                           follow_redirects=False)
     assert "impersonated" in caplog.text and str(mgr.id) in caplog.text

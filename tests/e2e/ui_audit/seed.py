@@ -104,12 +104,12 @@ async def _seed_phase3(s, *, run, now: datetime) -> dict:
     rubric_hash = sha12("prompts/rubric/blackbird-rubric.toml")
     founder = await factories.make_user(
         s, user_role=USER_ROLE_PI, name="Carla Founder", orcid="0000-0002-1111-0008",
-        email="founder@uiaudit.test")
+        email="phase5-private-founder@uiaudit.test")
     await factories.make_profile(
         s, user=founder, research_summary="P3 stored summary.", profile_version=2,
         evidence_pub_count=1, evidence_pmid_count=1,
         pending_profile={
-            "fields": {"research_summary": "P3 draft summary.", "techniques": ["flow cytometry"],
+            "fields": {"research_summary": "PHASE5 PRIVATE DRAFT", "techniques": ["flow cytometry"],
                        "experimental_models": None, "disease_areas": None, "key_targets": None,
                        "keywords": None},
             "synthesis_validated": True, "evidence_pmid_count": 1, "evidence_pub_count": 1,
@@ -236,7 +236,11 @@ async def main() -> None:
         USER_ROLE_REVIEWER,
         AgentDelegate,
         Job,
+        PiIndustryEvidence,
+        PiIndustryScore,
     )
+    from src.models.review import AssessmentReviewAssignment
+    from src.services.industry_score import SCORER_VERSION
     from tests import factories
     from tests.assessment_chat_support import seed_interview
 
@@ -257,7 +261,7 @@ async def main() -> None:
         pending = await mk(s, user_role=USER_ROLE_PI, name="Pending " + XSS,
                            orcid="0000-0002-1111-0007", email="pend@uiaudit.test",
                            access_status="pending", onboarding_complete=False)
-        script_user = await mk(s, name=SCRIPT_NAME, orcid="0000-0002-1111-0091",
+        script_user = await mk(s, user_role=USER_ROLE_MANAGER, name=SCRIPT_NAME, orcid="0000-0002-1111-0091",
                                email="x1@uiaudit.test")
         apostrophe_user = await mk(s, name=APOSTROPHE_NAME, orcid="0000-0002-1111-0092",
                                    email="x2@uiaudit.test")
@@ -275,7 +279,9 @@ async def main() -> None:
         now = datetime.now(UTC)
         run = await factories.make_simulation_run(
             s, status="completed", started_at=now - timedelta(hours=3),
-            ended_at=now - timedelta(hours=1))
+            ended_at=now - timedelta(hours=1),
+            config={"rubric_version": "3.5.0", "prompt_stamps": {"private": "PHASE5 PRIVATE RUN CONFIG"},
+                    "announcement_text": "PHASE5 PRIVATE ANNOUNCEMENT"})
         a1 = await seed_interview(s, run=run, subject="vogelstein", channel="interview-one")
         a2 = await seed_interview(
             s, run=run, subject="obrien", channel="interview-two",
@@ -293,6 +299,23 @@ async def main() -> None:
         a3 = await seed_interview(s, run=run, subject="vogelstein", channel="interview-three",
                                   with_messages=False, recommendation="advance",
                                   band="advance", weighted_score=4.6, headline="Strong one")
+        s.add_all([
+            AssessmentReviewAssignment(
+                assessment_id=a1.assessment_id, assignee_user_id=reviewer.id,
+                assignee_name=reviewer.name, assigned_by_user_id=admin.id,
+                assigned_by_name=admin.name,
+            ),
+            AssessmentReviewAssignment(
+                assessment_id=a1.assessment_id, assignee_user_id=manager.id,
+                assignee_name=manager.name, assigned_by_user_id=admin.id,
+                assigned_by_name=admin.name,
+            ),
+            AssessmentReviewAssignment(
+                assessment_id=a3.assessment_id, assignee_user_id=reviewer.id,
+                assignee_name=reviewer.name, assigned_by_user_id=admin.id,
+                assigned_by_name=admin.name,
+            ),
+        ])
         # A long hub reply (timeline clamp) and a raw-HTML form that would promote pi2.
         long_reply = ("Paragraph of a very long hub reply. " * 40 + "\n\n") * 6
         injected = (
@@ -316,7 +339,24 @@ async def main() -> None:
                       payload={"note": XSS},
                       last_error=XSS if status == "failed" else None))
         phase3 = await _seed_phase3(s, run=run, now=now)
+        s.add(Job(
+            type="generate_profile", status="failed", user_id=uuid.UUID(phase3["p3_pi"]),
+            payload={"sentinel": "PHASE5 PRIVATE JOB"}, last_error="PHASE5 PRIVATE JOB",
+        ))
         phase4 = await _seed_phase4(s)
+        # Research-visible scores and evidence; coverage remains a staff diagnostic.
+        for score_user, raw in ((pi.id, 1.0), (pi2.id, 2.0),
+                                (uuid.UUID(phase4["p4_pi_a"]), 3.0),
+                                (uuid.UUID(phase3["p3_pi"]), 13.5)):
+            s.add(PiIndustryScore(user_id=score_user, raw_sum=raw, evidence_count=1,
+                                  tenure_start_used=2015, scorer_version=SCORER_VERSION,
+                                  components={"PHASE5_COMPONENT_DIAGNOSTIC": {"distinct_companies": 9, "weighted": 4.0}},
+                                  coverage={"uspto": "PHASE5 COVERAGE DIAGNOSTIC"}))
+        s.add(PiIndustryEvidence(user_id=uuid.UUID(phase3["p3_pi"]), source="uspto",
+                                kind="patent_assignment", external_id="uiaudit-patent",
+                                company_name="PHASE5 INDUSTRY EVIDENCE", company_class="company",
+                                year=2024, pi_role="inventor", in_tenure=True,
+                                evidence={"title": "PHASE5 RESEARCH PATENT"}))
         await s.commit()
         from src.services.profile_publish import write_persona_files
         await write_persona_files(s, pi.id)
@@ -337,6 +377,26 @@ async def main() -> None:
             "assessments": [str(a1.assessment_id), str(a2.assessment_id),
                             str(a3.assessment_id)],
             "a2_root_ts": a2.root_ts,
+            "phase5_assignments": {
+                "all": [str(a1.assessment_id), str(a2.assessment_id), str(a3.assessment_id),
+                        str(phase3["p3_assessment_gated"]), str(phase3["p3_assessment_ungated"])],
+                "mine": [str(a3.assessment_id), str(a1.assessment_id)],
+                "unassigned": str(a2.assessment_id),
+                "next_after_feedback": str(a1.assessment_id),
+            },
+            "phase5_private": {
+                "pi": str(phase3["p3_pi"]),
+                "email": "phase5-private-founder@uiaudit.test",
+                "job": "PHASE5 PRIVATE JOB",
+                "draft": "PHASE5 PRIVATE DRAFT",
+                "suggestion": "Ask how each in vivo claim was measured.",
+            },
+            "phase5_impersonation": {
+                "admin": {"orcid": admin.orcid, "name": admin.name, "destination": "/workspace/pis"},
+                "manager": {"orcid": manager.orcid, "name": manager.name, "destination": "/workspace/pis"},
+                "reviewer": {"orcid": reviewer.orcid, "name": reviewer.name, "destination": "/workspace/assessments"},
+                "pi": {"orcid": pi.orcid, "name": pi.name, "destination": "/profile"},
+            },
             "bad_uuid": str(uuid.UUID(int=0)),
             # Phase 3 (hub 1.10.0) rows, under their own keys: `assessments` stays the
             # three rows crawl.routes unpacks.

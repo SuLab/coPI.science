@@ -36,7 +36,7 @@ async def _both_surfaces(client, db_session) -> list[str]:
     out = []
     for base, user in (("/admin", admin), ("/manager", manager)):
         resp = await client.get(
-            f"{base}/assessments?run_id={run.id}", headers=auth_headers(user.id)
+            f"/workspace/assessments?run_id={run.id}", headers=auth_headers(user.id)
         )
         assert resp.status_code == 200, base
         out.append(resp.text)
@@ -47,6 +47,12 @@ async def test_both_list_pages_carry_the_sanitizing_markdown_scripts(
     client, db_session
 ):
     for html in await _both_surfaces(client, db_session):
+        assert 'href="/static/css/assessment.css"' in html
+        css_response = await client.get("/static/css/assessment.css")
+        assert css_response.status_code == 200
+        assert 'src="/static/js/assessment_print.js"' in html
+        script_response = await client.get("/static/js/assessment_print.js")
+        assert script_response.status_code == 200
         assert 'src="/static/vendor/marked-12.0.2.min.js"' in html
         assert re.search(r'src="/static/vendor/purify-3\.4\.\d+\.min\.js"', html)
         assert "cdn.jsdelivr.net" not in html
@@ -55,13 +61,27 @@ async def test_both_list_pages_carry_the_sanitizing_markdown_scripts(
 
 async def test_both_list_pages_set_the_readable_prose_scale(client, db_session):
     for html in await _both_surfaces(client, db_session):
-        assert "font-size: 1.0625rem" in html
-        assert "max-width: 68ch" in html
+        assert 'href="/static/css/assessment.css"' in html
+        css_response = await client.get("/static/css/assessment.css")
+        assert css_response.status_code == 200
+        css = css_response.text
+        assert 'src="/static/js/assessment_print.js"' in html
+        script_response = await client.get("/static/js/assessment_print.js")
+        assert script_response.status_code == 200
+        assert "font-size: 1.0625rem" in css
+        assert "max-width: 68ch" in css
 
 
 async def test_both_list_pages_style_prose_links(client, db_session):
     for html in await _both_surfaces(client, db_session):
-        assert ".citation-link" in html, (
+        assert 'href="/static/css/assessment.css"' in html
+        css_response = await client.get("/static/css/assessment.css")
+        assert css_response.status_code == 200
+        css = css_response.text
+        assert 'src="/static/js/assessment_print.js"' in html
+        script_response = await client.get("/static/js/assessment_print.js")
+        assert script_response.status_code == 200
+        assert ".citation-link" in css, (
             "the citation link rule must be in BOTH list wrappers; no test compares "
             "the two wrappers to each other, so a one-sided edit passes everything else"
         )
@@ -69,14 +89,28 @@ async def test_both_list_pages_style_prose_links(client, db_session):
 
 async def test_both_list_pages_make_keyboard_focus_visible(client, db_session):
     for html in await _both_surfaces(client, db_session):
-        assert "a:focus-visible" in html
-        assert "summary:focus-visible" in html
-        assert "outline: 2px solid #4338ca" in html
+        assert 'href="/static/css/assessment.css"' in html
+        css_response = await client.get("/static/css/assessment.css")
+        assert css_response.status_code == 200
+        css = css_response.text
+        assert 'src="/static/js/assessment_print.js"' in html
+        script_response = await client.get("/static/js/assessment_print.js")
+        assert script_response.status_code == 200
+        assert "a:focus-visible" in css
+        assert "summary:focus-visible" in css
+        assert "outline: 2px solid #4338ca" in css
 
 
 async def test_both_list_pages_carry_print_rules(client, db_session):
     for html in await _both_surfaces(client, db_session):
-        assert "@media print" in html
+        assert 'href="/static/css/assessment.css"' in html
+        css_response = await client.get("/static/css/assessment.css")
+        assert css_response.status_code == 200
+        css = css_response.text
+        assert 'src="/static/js/assessment_print.js"' in html
+        script_response = await client.get("/static/js/assessment_print.js")
+        assert script_response.status_code == 200
+        assert "@media print" in css
 
 
 async def test_the_manager_list_page_never_links_into_admin(client, db_session):
@@ -91,6 +125,12 @@ _LABEL_FOR_RE = re.compile(r'<label\b[^>]*\bfor="([^"]+)"', re.IGNORECASE)
 
 async def test_every_select_on_both_list_pages_has_a_labelled_id(client, db_session):
     for html in await _both_surfaces(client, db_session):
+        assert 'href="/static/css/assessment.css"' in html
+        css_response = await client.get("/static/css/assessment.css")
+        assert css_response.status_code == 200
+        assert 'src="/static/js/assessment_print.js"' in html
+        script_response = await client.get("/static/js/assessment_print.js")
+        assert script_response.status_code == 200
         select_ids = set()
         for tag in _SELECT_RE.findall(html):
             match = _ID_RE.search(tag)

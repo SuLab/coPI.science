@@ -131,7 +131,7 @@ async def test_learn_feedback_enqueues_nothing_until_a_manual_generate(
     )
     assert generated.status_code == 302, generated.text
     assert generated.headers["location"] == (
-        "/manager/prompt-suggestions?generated=1&eligible=1"
+        "/workspace/prompt-suggestions?generated=1&eligible=1"
     )
 
     jobs = await _analysis_jobs(db_session)
@@ -200,7 +200,7 @@ async def test_two_pending_jobs_already_exist_dedupe_still_succeeds(client, db_s
     )
     assert generated.status_code == 302, generated.text
     assert generated.headers["location"] == (
-        "/manager/prompt-suggestions?generated=0&eligible=1"
+        "/workspace/prompt-suggestions?generated=0&eligible=1"
     )
     assert len(await _analysis_jobs(db_session)) == 2
 
@@ -237,7 +237,7 @@ async def test_log_only_feedback_enqueues_nothing(client, db_session):
     )
     assert generated.status_code == 302, generated.text
     assert generated.headers["location"] == (
-        "/manager/prompt-suggestions?generated=0&eligible=0"
+        "/workspace/prompt-suggestions?generated=0&eligible=0"
     )
     assert (await db_session.execute(select(Job))).scalars().all() == []
 
@@ -551,7 +551,7 @@ async def test_a_reviewer_posting_surface_admin_is_clamped_to_manager(client, db
         follow_redirects=False,
     )
     assert r.status_code == 302, r.text
-    assert r.headers["location"] == f"/manager/assessments/{assessment.id}"
+    assert r.headers["location"] == f"/workspace/assessments/{assessment.id}"
 
 
 async def test_reviewer_can_approve_and_history_appends(client, db_session):
@@ -854,7 +854,7 @@ async def test_a_reviewer_posting_surface_admin_list_is_clamped_to_manager(
     )
     assert r.status_code == 302, r.text
     assert r.headers["location"] == (
-        f"/manager/assessments?run_id={run_id}&sort={ASSESSMENT_SORTS[1]}"
+        f"/workspace/assessments?run_id={run_id}&sort={ASSESSMENT_SORTS[1]}"
         f"&lab=somelab#a-{assessment.id}"
     )
 
@@ -883,7 +883,7 @@ async def test_an_admin_posting_surface_admin_list_returns_to_the_admin_list(
         follow_redirects=False,
     )
     assert r.status_code == 302, r.text
-    assert r.headers["location"] == f"/admin/assessments#a-{assessment.id}"
+    assert r.headers["location"] == f"/workspace/assessments#a-{assessment.id}"
 
 
 async def test_run_id_all_survives_and_a_lab_is_urlencoded(client, db_session):
@@ -909,7 +909,7 @@ async def test_run_id_all_survives_and_a_lab_is_urlencoded(client, db_session):
     )
     assert r.status_code == 302, r.text
     assert r.headers["location"] == (
-        f"/manager/assessments?run_id=all&lab=a%26sort%3Devil#a-{assessment.id}"
+        f"/workspace/assessments?run_id=all&lab=a%26sort%3Devil#a-{assessment.id}"
     )
 
 
@@ -935,12 +935,12 @@ async def test_an_unrecognised_surface_still_lands_on_the_manager_detail_page(
         follow_redirects=False,
     )
     assert r.status_code == 302, r.text
-    assert r.headers["location"] == f"/manager/assessments/{assessment.id}"
+    assert r.headers["location"] == f"/workspace/assessments/{assessment.id}"
 
 
 async def test_a_reviewer_cannot_generate_prompt_suggestions(client, db_session):
     """`_STAFF`, not `_REVIEW`, deliberately: a reviewer cannot see
-    /manager/prompt-suggestions (a suggestion can quote an unpublished PI
+    /workspace/prompt-suggestions (a suggestion can quote an unpublished PI
     disclosure verbatim), so a reviewer must not be able to create one
     either."""
     reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
@@ -1133,7 +1133,7 @@ async def test_the_default_review_tab_is_dropped_from_the_redirect(client, db_se
         headers=auth_headers(reviewer.id),
         follow_redirects=False,
     )
-    assert r.headers["location"] == f"/manager/assessments#a-{assessment.id}"
+    assert r.headers["location"] == f"/workspace/assessments#a-{assessment.id}"
 
 
 _SAME = {"score": "4", "comment": "same words", "feedback_mode": "log_only",
@@ -1204,7 +1204,7 @@ async def test_quick_score_on_the_unreviewed_tab_anchors_the_next_card(client, d
               "surface": "manager-list", "review": "unreviewed", "next_id": str(next_id)},
         headers=auth_headers(manager.id), follow_redirects=False,
     )
-    assert r.headers["location"] == f"/manager/assessments#a-{next_id}"
+    assert r.headers["location"] == f"/workspace/assessments#a-{next_id}"
     page = await follow(client, r)
     assert "Moved to Reviewed." in page.text
 
@@ -1218,7 +1218,7 @@ async def test_quick_score_on_the_last_unreviewed_card_has_no_anchor(client, db_
               "surface": "manager-list", "next_id": ""},
         headers=auth_headers(manager.id), follow_redirects=False,
     )
-    assert r.headers["location"] == "/manager/assessments"
+    assert r.headers["location"] == "/workspace/assessments"
 
 
 async def test_quick_score_on_the_all_tab_keeps_the_scored_card_anchor(client, db_session):
@@ -1230,7 +1230,7 @@ async def test_quick_score_on_the_all_tab_keeps_the_scored_card_anchor(client, d
               "surface": "manager-list", "review": "all", "next_id": str(uuid.uuid4())},
         headers=auth_headers(manager.id), follow_redirects=False,
     )
-    assert r.headers["location"] == f"/manager/assessments?review=all#a-{assessment.id}"
+    assert r.headers["location"] == f"/workspace/assessments?review=all#a-{assessment.id}"
 
 
 async def test_each_quick_score_form_names_the_following_card(client, db_session):
@@ -1243,7 +1243,7 @@ async def test_each_quick_score_form_names_the_following_card(client, db_session
     ))
     await db_session.flush()
     page = await client.get(
-        f"/manager/assessments?run_id={first.simulation_run_id}&review=all",
+        f"/workspace/assessments?run_id={first.simulation_run_id}&review=all",
         headers=auth_headers(manager.id),
     )
     cards = re.findall(r'id="a-([0-9a-f-]{36})"', page.text)

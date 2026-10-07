@@ -60,7 +60,7 @@ def test_posthog_is_gone():
     assert "PostHogContextMiddleware" not in names
     for rel in (
         "templates/base.html",
-        "templates/admin/_assessment_chat_drawer.html",
+        "templates/assessments/_chat_drawer.html",
         "nginx/nginx.conf",
     ):
         text = (ROOT / rel).read_text(encoding="utf-8").lower()

@@ -43,8 +43,7 @@ def test_no_retired_contrast_class_is_used():
 
 
 def test_dynamic_shades_are_the_passing_ones():
-    body = (ROOT / "templates/admin/_assessments_body.html").read_text()
+    body = (ROOT / "templates/assessments/_body.html").read_text()
     assert "band_class(a.band, 600, 400)" not in body
-    for rel in ("templates/admin/jobs.html", "templates/admin/discussions.html",
-                "templates/manager/discussions.html"):
+    for rel in ("templates/admin/jobs.html", "templates/workspace/discussions.html"):
         assert "}}-600" not in (ROOT / rel).read_text(), rel

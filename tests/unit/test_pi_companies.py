@@ -155,7 +155,7 @@ def test_the_service_imports_no_industry_module_and_neither_of_its_importers():
     ("https://", None),
     ("https://exa mple.org", None),
     ("https://example.org/\nx", None),
-    ("/manager/pis", None),
+    ("/workspace/pis", None),
     (None, None),
     (42, None),
 ])

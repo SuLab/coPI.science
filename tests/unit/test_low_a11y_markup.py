@@ -20,12 +20,12 @@ def test_the_gantt_table_states_announced_in_text():
 
 
 def test_glyph_labels_sit_on_role_img():
-    text = (T / "admin/_assessment_detail_body.html").read_text()
+    text = (T / "assessments/_detail_body.html").read_text()
     for span in re.findall(r"<span[^>]*\baria-label=[^>]*>", text):
         assert 'role="img"' in span, span
 
 
 def test_dimension_selects_are_a_fieldset_with_a_legend():
-    text = (T / "admin/_assessment_detail_body.html").read_text()
+    text = (T / "assessments/_detail_body.html").read_text()
     assert text.count("<legend") >= 2
     assert '<label class="block text-sm font-medium text-gray-600 mb-1 mt-3">Rubric dimensions (optional)</label>' not in text

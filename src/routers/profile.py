@@ -33,6 +33,7 @@ from src.services.tenure_scope import (
 from src.services.user_deletion import delete_user_account
 from src.web.flash import flash
 from src.web.templating import make_templates
+from src.web.page_context import page_context
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -40,17 +41,7 @@ templates = make_templates()
 
 
 def _template_context(request: Request, user: User, **kwargs) -> dict:
-    impersonated = getattr(user, "_is_impersonated", False)
-    real_admin = getattr(user, "_real_admin", None)
-    ctx = {
-        "request": request,
-        "current_user": real_admin if impersonated else user,
-        "user": user,
-        "impersonation_banner": user if impersonated else None,
-        "active_page": "profile",
-    }
-    ctx.update(kwargs)
-    return ctx
+    return page_context(request, user, active_page="profile", user=user, **kwargs)
 
 
 @router.get("", response_class=HTMLResponse)
@@ -64,7 +55,7 @@ async def profile_view(
     # A manager or reviewer has no lab profile to view (M-08) — bounce before the
     # onboarding check, which would otherwise send it to a page it can never
     # complete (get_pi_user gates the only writer of onboarding_complete).
-    bounce = staff_landing_redirect(current_user)
+    bounce = staff_landing_redirect(current_user, request)
     if bounce is not None:
         return bounce
 
@@ -125,7 +116,7 @@ async def profile_edit(
     """Edit profile page."""
     # Same bounce as GET /profile: without it a manager or reviewer renders a
     # profile-edit form whose POST /profile/save 403s (get_pi_user).
-    bounce = staff_landing_redirect(current_user)
+    bounce = staff_landing_redirect(current_user, request)
     if bounce is not None:
         return bounce
 

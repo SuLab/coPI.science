@@ -33,8 +33,8 @@ async def _both_surfaces(client, db_session) -> list[str]:
     )
     out = []
     for path, user in (
-        (f"/admin/assessments/{assessment.id}", admin),
-        (f"/manager/assessments/{assessment.id}", manager),
+        (f"/workspace/assessments/{assessment.id}", admin),
+        (f"/workspace/assessments/{assessment.id}", manager),
     ):
         resp = await client.get(path, headers=auth_headers(user.id))
         assert resp.status_code == 200, path
@@ -57,44 +57,78 @@ async def test_the_skip_link_and_main_landmark_are_on_the_detail_pages(
     client, db_session
 ):
     for html in await _both_surfaces(client, db_session):
+        assert 'href="/static/css/assessment.css"' in html
+        css_response = await client.get("/static/css/assessment.css")
+        assert css_response.status_code == 200
+        assert 'src="/static/js/assessment_print.js"' in html
+        script_response = await client.get("/static/js/assessment_print.js")
+        assert script_response.status_code == 200
         assert SKIP_LINK_HREF in html
         assert 'id="main-content"' in html
 
 
 async def test_both_wrappers_set_the_readable_prose_scale(client, db_session):
     for html in await _both_surfaces(client, db_session):
-        assert "font-size: 1.0625rem" in html
-        assert "max-width: 68ch" in html
-        assert "line-height: 1.6" in html
-        assert "text-wrap: pretty" in html
+        assert 'href="/static/css/assessment.css"' in html
+        css_response = await client.get("/static/css/assessment.css")
+        assert css_response.status_code == 200
+        css = css_response.text
+        assert 'src="/static/js/assessment_print.js"' in html
+        script_response = await client.get("/static/js/assessment_print.js")
+        assert script_response.status_code == 200
+        assert "font-size: 1.0625rem" in css
+        assert "max-width: 68ch" in css
+        assert "line-height: 1.6" in css
+        assert "text-wrap: pretty" in css
         # The brief's pitch column is narrower than 68ch already.
-        assert ".assessment-brief-pitch .assessment-prose" in html
+        assert ".assessment-brief-pitch .assessment-prose" in css
         # The hub headline is content, not a section heading (2026-09-15 audit M5).
-        assert "p.assessment-headline" in html
-        assert "text-wrap: balance" in html
+        assert "p.assessment-headline" in css
+        assert "text-wrap: balance" in css
         # The old 65ch/1rem scale is gone.
-        assert "max-width: 65ch" not in html
+        assert "max-width: 65ch" not in css
 
 
 async def test_both_wrappers_make_keyboard_focus_visible(client, db_session):
     for html in await _both_surfaces(client, db_session):
-        assert "a:focus-visible" in html
-        assert "summary:focus-visible" in html
-        assert "outline: 2px solid #4338ca" in html
+        assert 'href="/static/css/assessment.css"' in html
+        css_response = await client.get("/static/css/assessment.css")
+        assert css_response.status_code == 200
+        css = css_response.text
+        assert 'src="/static/js/assessment_print.js"' in html
+        script_response = await client.get("/static/js/assessment_print.js")
+        assert script_response.status_code == 200
+        assert "a:focus-visible" in css
+        assert "summary:focus-visible" in css
+        assert "outline: 2px solid #4338ca" in css
 
 
 async def test_both_wrappers_carry_print_rules_and_open_details_for_print(
     client, db_session
 ):
     for html in await _both_surfaces(client, db_session):
-        assert "@media print" in html
-        assert ".assessment-jump-nav" in html
+        assert 'href="/static/css/assessment.css"' in html
+        css_response = await client.get("/static/css/assessment.css")
+        assert css_response.status_code == 200
+        css = css_response.text
+        assert 'src="/static/js/assessment_print.js"' in html
+        script_response = await client.get("/static/js/assessment_print.js")
+        assert script_response.status_code == 200
+        script = script_response.text
+        assert "@media print" in css
+        assert ".assessment-jump-nav" in css
         # CSS cannot force a <details> open, so the script has to.
-        assert "beforeprint" in html
-        assert "afterprint" in html
+        assert "beforeprint" in script
+        assert "afterprint" in script
 
 
 async def test_both_wrappers_use_a_link_coloured_back_link(client, db_session):
     for html in await _both_surfaces(client, db_session):
+        assert 'href="/static/css/assessment.css"' in html
+        css_response = await client.get("/static/css/assessment.css")
+        assert css_response.status_code == 200
+        assert 'src="/static/js/assessment_print.js"' in html
+        script_response = await client.get("/static/js/assessment_print.js")
+        assert script_response.status_code == 200
         assert 'class="text-sm text-indigo-700 hover:underline"' in html
         assert 'class="text-sm text-gray-600 hover:text-gray-700"' not in html

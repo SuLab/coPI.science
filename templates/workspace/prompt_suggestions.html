@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}Workspace — Prompt Suggestions — CoPI{% endblock %}
+
+{% block content %}
+<div class="flex flex-wrap items-center justify-between mb-2 gap-4">
+    <h1 class="text-2xl font-bold text-gray-900">Prompt Suggestions</h1>
+    <div class="flex flex-wrap items-center gap-4">
+        <form method="GET" action="{{ page_url(request, 'workspace_prompt_suggestions') }}" class="flex flex-wrap items-center gap-2">
+            <label for="prompt-suggestions-status" class="text-sm text-gray-500">Status:</label>
+            <select id="prompt-suggestions-status" name="status"
+                    class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+                <option value="" {% if not status_filter %}selected{% endif %}>All</option>
+                <option value="open" {% if status_filter == 'open' %}selected{% endif %}>Open</option>
+                <option value="dismissed" {% if status_filter == 'dismissed' %}selected{% endif %}>Dismissed</option>
+                <option value="implemented" {% if status_filter == 'implemented' %}selected{% endif %}>Implemented</option>
+            </select>
+            <button type="submit" class="px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">Apply</button>
+        </form>
+        {% if permissions.manage_suggestions and not impersonation_banner %}
+        <form method="post" action="/reviews/suggestions/generate" class="flex flex-col items-end">
+            <button type="submit" {% if eligible_count == 0 %}disabled{% endif %}
+                    class="text-sm px-3 py-1.5 rounded-md font-medium
+                        {% if eligible_count == 0 %}bg-gray-100 text-gray-600 cursor-not-allowed{% else %}bg-indigo-600 text-white hover:bg-indigo-700{% endif %}">
+                Generate suggestions from current reviews
+            </button>
+            <span class="text-xs text-gray-600 mt-1">
+                {% if eligible_count == 0 %}
+                    Nothing to analyse
+                {% else %}
+                    {{ eligible_count }} assessment{{ '' if eligible_count == 1 else 's' }} have
+                    review feedback marked Learn that no suggestion has consumed yet.
+                    {% if eligible_count > analyses_per_press %}
+                    One press analyses the {{ analyses_per_press }} with the oldest
+                    feedback; press again for the rest.
+                    {% endif %}
+                {% endif %}
+            </span>
+        </form>
+        {% endif %}
+    </div>
+</div>
+{# Coerced to int, not reflected as given: these are autoescaped so the raw
+   form was never an XSS vector, but a hand-crafted link could otherwise show
+   staff an arbitrary string as a "Queued N of M" count. `|int` renders 0 for
+   anything non-numeric, and the pair only shows at all when both are present. #}
+{% set flash_generated = request.query_params.get('generated') %}
+{% set flash_eligible = request.query_params.get('eligible') %}
+{% if flash_generated is not none and flash_eligible is not none %}
+<p class="text-sm text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-md px-3 py-2 mb-2">
+    Queued {{ flash_generated | int }} of {{ flash_eligible | int }}
+    eligible assessment(s). The worker processes them in the background; refresh this
+    page in a minute. Any assessment already queued for analysis was skipped, and one
+    press analyses at most {{ analyses_per_press }}.
+</p>
+{% endif %}
+<p class="text-sm text-gray-500 mb-2">
+    Suggestions are generated only when a human presses "Generate suggestions from
+    current reviews" above. Reviewer feedback marked Learn only marks an
+    assessment eligible for that analysis — it does not itself generate a
+    suggestion. Nothing here is ever applied to a prompt file automatically —
+    the status below is staff-set attribution only.
+</p>
+<p class="text-xs text-gray-600 mb-4">
+    {% if total_count > suggestions_limit %}
+        Displaying the top {{ suggestions_limit }} of {{ total_count }} matching
+        suggestions, newest first; the rest sit further down that order. Narrow by
+        status to reach them.
+    {% else %}
+        {{ total_count }} suggestion{{ '' if total_count == 1 else 's' }}.
+    {% endif %}
+</p>
+
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto" tabindex="0" role="region" aria-label="Prompt suggestions">
+    <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+            <tr>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Created</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Subject</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Target</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+            {% set status_colors = {
+                'open': 'bg-amber-100 text-amber-700',
+                'dismissed': 'bg-gray-100 text-gray-600',
+                'implemented': 'bg-green-100 text-green-700',
+            } %}
+            {% for s in suggestions %}
+            <tr class="prompt-suggestion-row hover:bg-gray-50">
+                <td class="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">
+                    {{ s.created_at | ts }}
+                </td>
+                <td class="px-4 py-3 text-sm text-gray-900">
+                    <a class="underline text-indigo-600 hover:text-indigo-800"
+                       href="{{ page_url(request, 'workspace_prompt_suggestion_detail', suggestion_id=s.id) }}">{{ s.subject_label or '—' }}</a>
+                    {% if not s.assessment_id %}
+                    <span class="text-gray-600 italic">(assessment no longer available)</span>
+                    {% endif %}
+                </td>
+                <td class="px-4 py-3 text-sm text-gray-600 font-mono text-xs">{{ s.target }}</td>
+                <td class="px-4 py-3">
+                    <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium
+                        {{ status_colors.get(s.status, 'bg-gray-100 text-gray-600') }}">
+                        {{ s.status | title }}
+                    </span>
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="4" class="px-4 py-8 text-center text-gray-600 text-sm">No suggestions found</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

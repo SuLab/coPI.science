@@ -152,9 +152,9 @@ async def test_every_address_form_clears_the_verification(client, db_session):
 
     pi.email_verified_at = stamp
     await db_session.flush()
-    r = await client.post(f"/manager/pis/{pi.id}/profile", data={**form, "email": "a3@example.edu"},
+    r = await client.post(f"/workspace/pis/{pi.id}/profile", data={**form, "email": "a3@example.edu"},
                           headers=auth_headers(mgr.id))
-    assert r.headers["location"] == f"/manager/pis/{pi.id}"
+    assert r.headers["location"] == f"/workspace/pis/{pi.id}"
     await db_session.refresh(pi)
     assert (pi.email, pi.email_verified_at) == ("a3@example.edu", None)
 

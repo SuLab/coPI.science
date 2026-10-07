@@ -189,7 +189,7 @@ async def manager(db_session):
 async def test_admin_detail_page_renders_the_whole_verdict(client, db_session, admin):
     _, assessment = await _seed(db_session)
     resp = await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )
     assert resp.status_code == 200
     html = resp.text
@@ -213,7 +213,7 @@ async def test_admin_detail_page_renders_the_whole_verdict(client, db_session, a
     assert "Specialist panel incomplete" in html
     assert "chemistry" in html
     # Back to the list.
-    assert 'href="/admin/assessments"' in html
+    assert 'href="/workspace/assessments"' in html
 
 
 async def test_detail_page_renders_the_recommended_next_experiment(
@@ -239,8 +239,8 @@ async def test_detail_page_renders_the_recommended_next_experiment(
     await db_session.flush()
 
     for path, user in (
-        (f"/admin/assessments/{assessment.id}", admin),
-        (f"/manager/assessments/{assessment.id}", manager),
+        (f"/workspace/assessments/{assessment.id}", admin),
+        (f"/workspace/assessments/{assessment.id}", manager),
     ):
         resp = await client.get(path, headers=auth_headers(user.id))
         assert resp.status_code == 200
@@ -300,8 +300,8 @@ async def test_timeline_messages_render_via_data_markdown_on_both_surfaces(
     await db_session.flush()
 
     for path, user in (
-        (f"/admin/assessments/{assessment.id}", admin),
-        (f"/manager/assessments/{assessment.id}", manager),
+        (f"/workspace/assessments/{assessment.id}", admin),
+        (f"/workspace/assessments/{assessment.id}", manager),
     ):
         resp = await client.get(path, headers=auth_headers(user.id))
         assert resp.status_code == 200
@@ -330,8 +330,8 @@ async def test_sidecar_prose_stays_plain_text(client, db_session, admin, manager
     await db_session.flush()
 
     for path, user in (
-        (f"/admin/assessments/{assessment.id}", admin),
-        (f"/manager/assessments/{assessment.id}", manager),
+        (f"/workspace/assessments/{assessment.id}", admin),
+        (f"/workspace/assessments/{assessment.id}", manager),
     ):
         resp = await client.get(path, headers=auth_headers(user.id))
         assert resp.status_code == 200
@@ -370,8 +370,8 @@ async def test_prose_format_markdown_renders_data_markdown_divs_on_both_surfaces
     await db_session.flush()
 
     for path, user in (
-        (f"/admin/assessments/{assessment.id}", admin),
-        (f"/manager/assessments/{assessment.id}", manager),
+        (f"/workspace/assessments/{assessment.id}", admin),
+        (f"/workspace/assessments/{assessment.id}", manager),
     ):
         resp = await client.get(path, headers=auth_headers(user.id))
         assert resp.status_code == 200
@@ -409,8 +409,8 @@ async def test_markdown_cards_carry_the_md_content_class(
     await db_session.flush()
 
     for path, user in (
-        (f"/admin/assessments/{assessment.id}", admin),
-        (f"/manager/assessments/{assessment.id}", manager),
+        (f"/workspace/assessments/{assessment.id}", admin),
+        (f"/workspace/assessments/{assessment.id}", manager),
     ):
         resp = await client.get(path, headers=auth_headers(user.id))
         assert resp.status_code == 200
@@ -446,8 +446,8 @@ async def test_pass_recommendation_and_band_render_as_decline_on_the_detail_page
 
     assert BANDING["pass_label"] == "decline"
     for path, user in (
-        (f"/admin/assessments/{assessment.id}", admin),
-        (f"/manager/assessments/{assessment.id}", manager),
+        (f"/workspace/assessments/{assessment.id}", admin),
+        (f"/workspace/assessments/{assessment.id}", manager),
     ):
         resp = await client.get(path, headers=auth_headers(user.id))
         assert resp.status_code == 200
@@ -467,8 +467,8 @@ async def test_human_review_card_sits_between_dimension_scores_and_the_timeline(
     _, assessment = await _seed(db_session)
 
     for path, user in (
-        (f"/admin/assessments/{assessment.id}", admin),
-        (f"/manager/assessments/{assessment.id}", manager),
+        (f"/workspace/assessments/{assessment.id}", admin),
+        (f"/workspace/assessments/{assessment.id}", manager),
     ):
         resp = await client.get(path, headers=auth_headers(user.id))
         assert resp.status_code == 200
@@ -490,7 +490,7 @@ async def test_admin_detail_page_shows_the_panel_and_the_tool_activity(
     _, assessment = await _seed(db_session)
     html = (
         await client.get(
-            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
         )
     ).text
 
@@ -514,7 +514,7 @@ async def test_admin_detail_page_shows_the_raw_verdict(client, db_session, admin
     _, assessment = await _seed(db_session)
     html = (
         await client.get(
-            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
         )
     ).text
     assert RAW_VERDICT_MARKER in html
@@ -567,7 +567,7 @@ async def test_admin_detail_page_files_an_uncorrelated_turn_as_unplaced(
 
     html = (
         await client.get(
-            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
         )
     ).text
     assert "Unplaced turns" in html
@@ -638,7 +638,7 @@ async def test_admin_detail_page_tool_scan_keeps_the_newest_turns(
 
     html = (
         await client.get(
-            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
         )
     ).text
     assert newest_marker in html
@@ -652,7 +652,7 @@ async def test_admin_detail_page_survives_a_wiped_transcript(client, db_session,
     The verdict must still render; only the timeline degrades."""
     _, assessment = await _seed(db_session, with_messages=False, with_consult=False)
     resp = await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )
     assert resp.status_code == 200
     assert "Interview messages unavailable" in resp.text
@@ -695,7 +695,7 @@ async def test_detail_page_renders_the_documents_banding_and_weights(
     assessment = await _seed_scale_fixture(db_session, funnel_stage="incubation")
     html = (
         await client.get(
-            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
         )
     ).text
     assert "&ge;3.4 advance" in html
@@ -728,7 +728,7 @@ async def test_an_archived_stamp_renders_that_revisions_dimensions(
     )
     html = (
         await client.get(
-            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
         )
     ).text
     assert 'class="score-ip_fto' in html
@@ -748,7 +748,7 @@ async def test_an_unknown_stamp_renders_the_rows_own_scores_with_a_warning(
     )
     html = (
         await client.get(
-            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
         )
     ).text
     assert 'class="score-mystery_dim' in html
@@ -768,7 +768,7 @@ async def test_an_unstamped_row_keeps_the_live_render_and_shows_extras(
     )
     html = (
         await client.get(
-            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
         )
     ).text
     assert 'class="score-differentiation_unmet_need' in html
@@ -778,7 +778,7 @@ async def test_an_unstamped_row_keeps_the_live_render_and_shows_extras(
 
 async def test_admin_detail_page_404s_on_an_unknown_id(client, db_session, admin):
     resp = await client.get(
-        f"/admin/assessments/{uuid.uuid4()}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{uuid.uuid4()}", headers=auth_headers(admin.id)
     )
     assert resp.status_code == 404
 
@@ -789,7 +789,7 @@ async def test_admin_detail_page_requires_admin(client, db_session):
         db_session, user_role=USER_ROLE_PI, email="detail-pi@example.org"
     )
     resp = await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(pi.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(pi.id)
     )
     assert resp.status_code == 403
 
@@ -804,7 +804,7 @@ async def test_manager_detail_page_shows_the_verdict_and_the_panel_substance(
 ):
     _, assessment = await _seed(db_session)
     resp = await client.get(
-        f"/manager/assessments/{assessment.id}", headers=auth_headers(manager.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(manager.id)
     )
     assert resp.status_code == 200
     html = resp.text
@@ -816,7 +816,7 @@ async def test_manager_detail_page_shows_the_verdict_and_the_panel_substance(
     assert HUB_QUESTION_MARKER in html
     assert CONCERN_MARKER in html
     assert QUESTION_MARKER in html
-    assert 'href="/manager/assessments"' in html
+    assert 'href="/workspace/assessments"' in html
 
 
 async def test_manager_detail_page_withholds_the_llm_drill_down(
@@ -828,7 +828,7 @@ async def test_manager_detail_page_withholds_the_llm_drill_down(
     _, assessment = await _seed(db_session)
     html = (
         await client.get(
-            f"/manager/assessments/{assessment.id}", headers=auth_headers(manager.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(manager.id)
         )
     ).text
     assert RAW_OPINION_MARKER not in html
@@ -842,7 +842,7 @@ async def test_manager_detail_page_withholds_the_llm_drill_down(
 
 async def test_manager_detail_page_404s_on_an_unknown_id(client, db_session, manager):
     resp = await client.get(
-        f"/manager/assessments/{uuid.uuid4()}", headers=auth_headers(manager.id)
+        f"/workspace/assessments/{uuid.uuid4()}", headers=auth_headers(manager.id)
     )
     assert resp.status_code == 404
 
@@ -853,7 +853,7 @@ async def test_pi_is_denied_the_manager_detail_page(client, db_session):
         db_session, user_role=USER_ROLE_PI, email="detail-pi2@example.org"
     )
     resp = await client.get(
-        f"/manager/assessments/{assessment.id}",
+        f"/workspace/assessments/{assessment.id}",
         headers=auth_headers(pi.id),
         follow_redirects=False,
     )
@@ -874,17 +874,17 @@ async def test_both_assessment_lists_link_to_the_detail_page(
     run, assessment = await _seed(db_session)
     admin_html = (
         await client.get(
-            f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+            f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
         )
     ).text
-    assert f'href="/admin/assessments/{assessment.id}"' in admin_html
+    assert f'href="/workspace/assessments/{assessment.id}?' in admin_html
 
     manager_html = (
         await client.get(
-            f"/manager/assessments?run_id={run.id}", headers=auth_headers(manager.id)
+            f"/workspace/assessments?run_id={run.id}", headers=auth_headers(manager.id)
         )
     ).text
-    assert f'href="/manager/assessments/{assessment.id}"' in manager_html
+    assert f'href="/workspace/assessments/{assessment.id}?' in manager_html
     assert "/admin/" not in manager_html
 
 
@@ -899,7 +899,7 @@ async def test_the_assessments_legend_states_the_rubric_thresholds(
     run, _ = await _seed(db_session)
     html = (
         await client.get(
-            f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+            f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
         )
     ).text
     assert f"&ge;{BANDING['advance_min']} advance" in html
@@ -947,13 +947,13 @@ async def test_discussions_pages_show_the_per_thread_panel_indicator(
     )
     await db_session.flush()
 
-    for base, user in (("/admin", admin), ("/manager", manager)):
+    for _base, user in (("/admin", admin), ("/manager", manager)):
         html = (
             await client.get(
-                f"{base}/discussions?run_id={run.id}", headers=auth_headers(user.id)
+                f"/workspace/discussions?run_id={run.id}", headers=auth_headers(user.id)
             )
         ).text
-        assert 'class="thread-panel' in html, f"no panel indicator on {base}/discussions"
+        assert 'class="thread-panel' in html, "no panel indicator on /workspace/discussions"
         assert "chemistry" in html
         # The signal drives the colour, and blocking must not read as neutral.
         assert "text-red-600" in html
@@ -974,7 +974,7 @@ async def test_a_thread_with_no_consults_renders_unchanged(client, db_session, a
     await db_session.flush()
     html = (
         await client.get(
-            f"/admin/discussions?run_id={run.id}", headers=auth_headers(admin.id)
+            f"/workspace/discussions?run_id={run.id}", headers=auth_headers(admin.id)
         )
     ).text
     assert f"#{CHANNEL}" in html
@@ -1068,7 +1068,7 @@ async def test_an_exempt_verdict_does_not_claim_a_verified_panel(
 ):
     assessment = await _seed_exempt(db_session, recommendation, panel_owed=False)
     resp = await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )
     assert resp.status_code == 200
     html = resp.text
@@ -1137,7 +1137,7 @@ async def test_a_conditional_verdict_still_reports_a_verified_panel(
     """
     assessment = await _seed_exempt(db_session, "conditional")
     resp = await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )
     assert resp.status_code == 200
     html = resp.text
@@ -1163,7 +1163,7 @@ async def test_a_floor_checked_verdict_reports_a_verified_panel(
     recorded no gap."""
     assessment = await _seed_exempt(db_session, "conditional", panel_owed=True)
     resp = await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )
     assert resp.status_code == 200
     html = resp.text
@@ -1196,7 +1196,7 @@ async def test_an_unknown_panel_state_never_renders_green(
         lambda _assessment: "a_state_that_does_not_exist",
     )
     resp = await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )
     assert resp.status_code == 200
     html = resp.text
@@ -1445,7 +1445,7 @@ async def test_a_truncated_consult_is_not_rendered_as_a_caution_opinion(
     _, assessment = await _seed_with_a_truncated_consult(db_session)
     html = (
         await client.get(
-            f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
         )
     ).text
 
@@ -1470,7 +1470,7 @@ async def test_the_truncated_marking_survives_a_manager_render(
     _, assessment = await _seed_with_a_truncated_consult(db_session)
     html = (
         await client.get(
-            f"/manager/assessments/{assessment.id}", headers=auth_headers(manager.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(manager.id)
         )
     ).text
 
@@ -1609,7 +1609,7 @@ async def test_the_brief_leads_with_headline_pitch_and_points(
     await db_session.flush()
 
     html = (await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     assert "assessment-brief" in html
     assert "HEADLINE-MARKER" in html
@@ -1632,7 +1632,7 @@ async def test_a_pre_0043_row_renders_the_brief_without_empty_states(
     await db_session.flush()
 
     html = (await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     assert "ONLY-LABEL-MARKER" in html
     body = _main(html)
@@ -1654,7 +1654,7 @@ async def test_the_panel_banner_is_never_inside_a_collapsed_details(
     await db_session.flush()
 
     html = (await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     # Everything inside any <details>...</details> must not contain the banner.
     inside = _top_level_details_contents(_main(html))
@@ -1677,7 +1677,7 @@ async def test_a_non_empty_red_flag_list_is_never_collapsed(
     await db_session.flush()
 
     html = (await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     inside = _top_level_details_contents(_main(html))
     # Positive control: same reasoning as the panel-banner test above — prove
@@ -1697,7 +1697,7 @@ async def test_the_rationale_is_collapsed_and_labelled_with_its_size(
     await db_session.flush()
 
     html = (await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     assert "Full rationale (3 paragraphs)" in html
 
@@ -1707,7 +1707,7 @@ async def test_the_jump_nav_lists_every_section(client, db_session, admin):
     await db_session.flush()
 
     html = (await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     assert "assessment-jump-nav" in html
     for anchor in ("#brief", "#rationale", "#panel", "#scores", "#review", "#timeline"):
@@ -1728,7 +1728,7 @@ async def test_the_jump_nav_omits_rationale_when_there_is_none(
     await db_session.flush()
 
     html = (await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     assert 'href="#rationale"' not in html
     for anchor in ("#brief", "#panel", "#scores", "#review", "#timeline"):
@@ -1750,7 +1750,7 @@ async def test_a_grouped_key_points_sidecar_renders_the_three_labels_in_order(
     await db_session.flush()
 
     resp = await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )
     html = resp.text
     assert "Significance" in html
@@ -1770,7 +1770,7 @@ async def test_the_detail_body_uses_readable_type_sizes(client, db_session, mana
     _, assessment = await _seed(db_session)
     html = (
         await client.get(
-            f"/manager/assessments/{assessment.id}", headers=auth_headers(manager.id)
+            f"/workspace/assessments/{assessment.id}", headers=auth_headers(manager.id)
         )
     ).text
     # Scoped to `<main>...</main>`: base.html's footer ("Blackbird
@@ -1804,7 +1804,7 @@ async def test_the_brief_is_two_columns_pitch_left_points_right(
     await db_session.flush()
 
     html = (await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     body = _main(html)
     assert "assessment-brief-grid" in body
@@ -1817,7 +1817,7 @@ async def test_the_brief_is_two_columns_pitch_left_points_right(
     assessment.key_points = None
     await db_session.flush()
     html = (await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     body = _main(html)
     assert "assessment-brief-pitch" in body
@@ -1840,7 +1840,7 @@ async def test_a_mapping_of_only_empty_lists_renders_no_key_points_column(
     await db_session.flush()
 
     html = (await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     body = _main(html)
     assert "assessment-brief-keypoints" not in body
@@ -1854,7 +1854,7 @@ async def test_rationale_and_scores_are_open_by_default(client, db_session, admi
     await db_session.flush()
 
     html = (await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     html = _main(html)
     assert re.search(r'<details[^>]*id="rationale"[^>]*\bopen\b', html)
@@ -1871,7 +1871,7 @@ async def test_expand_all_controls_render(client, db_session, admin):
     await db_session.flush()
 
     html = (await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     nav = _main(html).split('class="assessment-jump-nav', 1)[1].split("</nav>", 1)[0]
     assert 'data-details-toggle="open"' in nav
@@ -1892,7 +1892,7 @@ async def test_legacy_rationale_renders_paragraphs(client, db_session, admin):
     await db_session.flush()
 
     html = (await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     block = html.split("assessment-rationale", 1)[1].split("</div>", 1)[0]
     assert block.count("<p") >= 2, block
@@ -1907,7 +1907,7 @@ async def test_gating_legend_is_visible_text(client, db_session, admin):
     await db_session.flush()
 
     html = (await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     assert "gating-legend" in html
     match = re.search(r'<p class="gating-legend[^"]*"[^>]*>.*?</p>', html, re.DOTALL)
@@ -1990,8 +1990,8 @@ async def test_the_strengths_and_risks_box_renders_three_columns_and_a_footnote(
     await db_session.flush()
 
     for path, user in (
-        (f"/admin/assessments/{assessment.id}", admin),
-        (f"/manager/assessments/{assessment.id}", manager),
+        (f"/workspace/assessments/{assessment.id}", admin),
+        (f"/workspace/assessments/{assessment.id}", manager),
     ):
         body = _main((await client.get(path, headers=auth_headers(user.id))).text)
         assert "assessment-signals" in body
@@ -2030,7 +2030,7 @@ async def test_an_unconfirmed_gate_is_in_neither_the_green_nor_the_red_column(
     await db_session.flush()
 
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     strengths, risks, _unestablished = _signal_columns(body)
     assert "translational potential" not in strengths
@@ -2054,7 +2054,7 @@ async def test_a_row_with_an_unknown_revision_says_its_dimensions_could_not_be_c
         scores={"mystery_dim": 2},
     )
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     assert "could not be classified" in body
     assert "not in the registry" in body
@@ -2073,7 +2073,7 @@ async def test_the_box_is_never_inside_a_collapsed_details(
     await db_session.flush()
 
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     element = re.search(r'<div id="signals"[^>]*>', body)
     assert element is not None, "the #signals element did not render"
@@ -2103,7 +2103,7 @@ async def test_the_score_rationale_renders_markdown_only_when_stamped(
     await db_session.flush()
 
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     assert "assessment-brief-score-rationale" in body
     assert "Why this score" in body
@@ -2117,7 +2117,7 @@ async def test_the_score_rationale_renders_markdown_only_when_stamped(
     assessment.prose_format = None
     await db_session.flush()
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     assert "assessment-brief-score-rationale-body whitespace-pre-line" in body
     assert "assessment-brief-score-rationale-body md-content" not in body
@@ -2134,7 +2134,7 @@ async def test_a_pre_0048_row_renders_no_score_rationale_block(
     await db_session.flush()
 
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     assert "assessment-brief-score-rationale" not in body
     assert "Why this score" not in body
@@ -2159,7 +2159,7 @@ async def test_the_five_key_point_groups_render_in_order(client, db_session, adm
     await db_session.flush()
 
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     # Scoped to the key-points column, which ends where the signals card
     # begins: the rubric dimension titles further down the page must not be
@@ -2201,7 +2201,7 @@ async def test_the_six_key_point_groups_render_in_order(client, db_session, admi
     await db_session.flush()
 
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     block = body[
         body.index("assessment-brief-keypoints") : body.index("assessment-signals")
@@ -2228,7 +2228,7 @@ async def test_a_row_whose_groups_render_nothing_shows_no_key_points_column(
     await db_session.flush()
 
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     assert "assessment-brief-keypoints" not in body
     assert "md:grid-cols-2" not in body
@@ -2264,7 +2264,7 @@ async def test_hub_words_bullets_render_before_the_derived_list(
     await db_session.flush()
 
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     strengths, risks, _unestablished = _signal_columns(body)
 
@@ -2290,7 +2290,7 @@ async def test_no_hub_words_heading_when_strengths_and_risks_are_null(
     await db_session.flush()
 
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     strengths, risks, _unestablished = _signal_columns(body)
     assert "In the hub's words" not in strengths
@@ -2337,7 +2337,7 @@ async def test_a_consults_established_items_render_as_strength_sub_bullets(
     await db_session.flush()
 
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     strengths, _risks, _unestablished = _signal_columns(body)
     assert ESTABLISHED_MARKER in strengths
@@ -2382,7 +2382,7 @@ async def test_a_consults_concerns_render_as_risk_sub_bullets(
     await db_session.flush()
 
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     _strengths, risks, _unestablished = _signal_columns(body)
     assert CONSULT_CONCERN_MARKER in risks
@@ -2415,7 +2415,7 @@ async def test_empty_state_text_names_the_live_revisions_own_thresholds(
     thresholds (4 of 5 on the live 1-5 scale)."""
     assessment = await _seed_live_stamped(db_session)
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     strengths, risks, _unestablished = _signal_columns(body)
     assert "No dimension scored" in strengths
@@ -2438,7 +2438,7 @@ async def test_a_row_with_six_mid_scale_scores_shows_the_midscale_line(
     }
     assessment = await _seed_live_stamped(db_session, scores=scores)
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     card = _signals_card(body)
     assert "signals-midscale" in card
@@ -2465,7 +2465,7 @@ async def test_a_row_with_one_high_score_reports_the_remaining_midscale_count(
     }
     assessment = await _seed_live_stamped(db_session, scores=scores)
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     card = _signals_card(body)
     assert "signals-midscale" in card
@@ -2482,7 +2482,7 @@ async def test_the_manager_route_renders_the_signals_card(
     """The manager surface shares the same body template as the admin one."""
     _, assessment = await _seed(db_session)
     body = _main((await client.get(
-        f"/manager/assessments/{assessment.id}", headers=auth_headers(manager.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(manager.id)
     )).text)
     assert 'id="signals"' in body
 
@@ -2504,7 +2504,7 @@ async def test_a_reviewer_never_sees_the_hubs_own_bullets(client, db_session):
         db_session, user_role=USER_ROLE_REVIEWER, email="signals-reviewer@example.org"
     )
     body = _main((await client.get(
-        f"/manager/assessments/{assessment.id}", headers=auth_headers(reviewer.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(reviewer.id)
     )).text)
     assert 'id="signals"' in body
     assert "In the hub's words" not in body
@@ -2523,7 +2523,7 @@ async def test_hub_words_with_no_derived_entries_still_shows_the_derived_empty_s
     assessment.scores = None
     await db_session.flush()
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     strengths, _risks, _unestablished = _signal_columns(body)
     assert HUB_STRENGTH_ONE in strengths
@@ -2568,7 +2568,7 @@ async def test_quoted_consult_text_is_collapsed_by_default_with_a_one_line_previ
     await db_session.flush()
 
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     _strengths, risks, _unestablished = _signal_columns(body)
     entry = re.search(r'<details class="signal-collapsible[^"]*"[^>]*>(.*?)</details>', risks, re.DOTALL)
@@ -2619,7 +2619,7 @@ async def test_consults_in_one_domain_render_as_a_single_entry_from_the_latest(
     await db_session.flush()
 
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     strengths, risks, _unestablished = _signal_columns(body)
     assert risks.count("signal-source-consult") == 1
@@ -2701,7 +2701,7 @@ async def test_each_sections_derived_rows_are_grouped_and_labelled_by_source(
     await db_session.flush()
 
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     strengths, risks, unestablished = _signal_columns(body)
     card = _signals_card(body)
@@ -2752,7 +2752,7 @@ async def test_a_row_of_an_unknown_source_renders_under_other_rather_than_vanish
     monkeypatch.setattr(assessment_detail_module, "derive_strengths_and_risks", with_unknown_source)
     _, assessment = await _seed(db_session)
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     _strengths, risks, _unestablished = _signal_columns(body)
     groups = _signal_groups(risks)
@@ -2769,7 +2769,7 @@ async def test_the_score_rationale_pointer_is_conditional(client, db_session, ad
     await db_session.flush()
 
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     assert 'href="#score-rationale"' in body
     assert 'id="score-rationale"' in body
@@ -2777,7 +2777,7 @@ async def test_the_score_rationale_pointer_is_conditional(client, db_session, ad
     assessment.score_rationale = None
     await db_session.flush()
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     assert 'href="#score-rationale"' not in body
 
@@ -2823,7 +2823,7 @@ async def test_the_detail_brief_renders_a_cited_paper_link(client, db_session, a
         elevator_pitch=f"Published in ACS Med Chem Lett 2026 ({DETAIL_DOI}).",
     )
     html = (await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     assert "cited paper" in html
     assert f"&lt;{DETAIL_DOI}&gt;" in html
@@ -2841,7 +2841,7 @@ async def test_a_plain_rationale_paragraph_keeps_its_paragraphs_and_gains_a_link
         rationale=f"First paragraph, see {DETAIL_DOI}.\n\nSecond paragraph.",
     )
     html = (await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     assert html.count('<p class="whitespace-pre-line">') >= 2
     assert f'<a class="citation-link" href="{DETAIL_DOI}"' in html
@@ -2856,7 +2856,7 @@ async def test_a_plain_next_experiment_url_becomes_a_link(client, db_session, ad
         recommended_next_experiment=f"Run the panel; protocol at {DETAIL_DOI}.",
     )
     html = (await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     assert ">cited paper</a>" in html
 
@@ -2871,7 +2871,7 @@ async def test_the_manager_detail_page_renders_citation_links(client, db_session
         elevator_pitch=f"See {DETAIL_DOI}.",
     )
     resp = await client.get(
-        f"/manager/assessments/{assessment.id}", headers=auth_headers(manager.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(manager.id)
     )
     assert resp.status_code == 200
     assert ">cited paper</a>" in resp.text
@@ -2882,7 +2882,7 @@ async def test_add_feedback_is_open_by_default(client, db_session, admin):
     visible without a click on both surfaces."""
     assessment = await _seed_assessment(db_session)
     html = (await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     at = html.index("Add feedback")
     start = html.rfind("<details", 0, at)
@@ -2908,10 +2908,13 @@ async def test_both_detail_pages_style_prose_links(client, db_session, base, rol
     )
     assessment = await _seed_assessment(db_session)
     html = (await client.get(
-        f"{base}/assessments/{assessment.id}", headers=auth_headers(staff.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(staff.id)
     )).text
-    assert ".citation-link" in html
-    assert ".md-content a" in html
+    assert 'href="/static/css/assessment.css"' in html
+    css_response = await client.get("/static/css/assessment.css")
+    assert css_response.status_code == 200
+    assert ".citation-link" in css_response.text
+    assert ".md-content a" in css_response.text
 
 
 async def test_the_detail_brief_renders_two_dois_as_two_links(
@@ -2928,7 +2931,7 @@ async def test_the_detail_brief_renders_two_dois_as_two_links(
         ),
     )
     html = (await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     assert html.count("cited paper") >= 2
     assert f">{DETAIL_DOI}<" not in html
@@ -2948,7 +2951,7 @@ async def test_a_plain_field_with_a_url_still_escapes_its_surrounding_prose(
         ),
     )
     html = (await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     assert "<script>alert(1)</script>" not in html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
@@ -2974,7 +2977,7 @@ async def test_detail_key_points_get_the_same_citation_treatment_as_the_card(
         },
     )
     html = (await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     assert ">cited paper</a>" in html
     assert f">{DETAIL_DOI}<" not in html
@@ -2992,7 +2995,7 @@ async def test_add_feedback_is_open_on_both_surfaces(client, db_session, base, r
     )
     assessment = await _seed_assessment(db_session)
     html = (await client.get(
-        f"{base}/assessments/{assessment.id}", headers=auth_headers(staff.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(staff.id)
     )).text
     at = html.index("Add feedback")
     start = html.rfind("<details", 0, at)
@@ -3012,7 +3015,7 @@ async def test_a_flat_key_points_list_also_gets_the_citation_treatment(
         key_points=[f"Shown in the 2025 paper ({DETAIL_DOI})"],
     )
     html = (await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text
     assert ">cited paper</a>" in html
     assert f">{DETAIL_DOI}<" not in html
@@ -3025,7 +3028,7 @@ async def test_staff_see_the_landscape_and_maturity_sections(client, db_session,
     assessment.evidence_maturity = [HUB_MATURITY_ONE]
     await db_session.flush()
     card = _signals_card(_main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text))
     assert "Competitive landscape" in card
     assert "Evidence maturity" in card
@@ -3047,7 +3050,7 @@ async def test_a_reviewer_never_sees_the_landscape_or_maturity(client, db_sessio
         db_session, user_role=USER_ROLE_REVIEWER, email="landscape-reviewer@example.org"
     )
     body = _main((await client.get(
-        f"/manager/assessments/{assessment.id}", headers=auth_headers(reviewer.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(reviewer.id)
     )).text)
     assert 'id="signals"' in body
     assert HUB_LANDSCAPE_ONE not in body
@@ -3059,7 +3062,7 @@ async def test_the_signals_card_is_titled_evidence_summary(client, db_session, a
     navigation — a title naming two of five makes the rest unreachable."""
     _, assessment = await _seed(db_session)
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     assert "Evidence summary" in body
     assert "Strengths and risks" not in body
@@ -3082,7 +3085,7 @@ async def test_a_midscale_dimension_is_listed_with_its_reason(client, db_session
         },
     )
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     card = _signals_card(body)
     assert "assessment-signals-neutral" in card
@@ -3108,7 +3111,7 @@ async def test_a_row_with_no_midscale_dimension_renders_no_neutral_section(
         db_session, scores={"translational_path": 5, "scientific_credibility": 1},
     )
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     assert "assessment-signals-neutral" not in body
     assert "signal-midscale" not in body
@@ -3122,7 +3125,7 @@ async def test_a_null_rationale_map_renders_no_reason_lines(client, db_session, 
         db_session, scores={"translational_path": 3, "scientific_credibility": 5},
     )
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     assert "signal-rationale" not in body
     assert "score-rationale-line" not in body
@@ -3140,7 +3143,7 @@ async def test_the_scores_disclosure_shows_each_dimensions_reason(
         dimension_rationales={"translational_path": "SCORES-DISCLOSURE-REASON"},
     )
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     scores = body.split('id="scores"', 1)[1].split("</details>", 1)[0]
     lines = re.findall(r'<p class="score-rationale-line[^"]*"[^>]*>(.*?)</p>', scores, re.DOTALL)
@@ -3167,7 +3170,7 @@ async def test_the_provenance_compares_with_the_hubs_words_only_where_they_rende
         strengths=["A hub-written strength bullet."],
     )
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     assert "In the hub's words" in _signals_card(body)
     provenance = " ".join(body.split("signals-provenance", 1)[1].split("</p>", 1)[0].split())
@@ -3188,7 +3191,7 @@ async def test_an_unknown_revision_row_still_shows_its_reasons_in_scores(
     assessment.rubric_content_hash = "000000000000"
     await db_session.flush()
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     scores = body.split('id="scores"', 1)[1].split("</details>", 1)[0]
     assert "score-rationale-line" in scores
@@ -3210,7 +3213,7 @@ async def test_a_reviewer_sees_the_dimension_reasons(client, db_session):
         strengths=["A hub-written strength bullet."],
     )
     body = _main((await client.get(
-        f"/manager/assessments/{assessment.id}", headers=auth_headers(reviewer.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(reviewer.id)
     )).text)
     assert "REVIEWER-VISIBLE-REASON" in _signals_card(body)
     assert "REVIEWER-VISIBLE-REASON" in body.split('id="scores"', 1)[1]
@@ -3242,7 +3245,7 @@ async def test_a_one_point_group_renders_as_text_and_a_two_point_group_keeps_bul
     await db_session.flush()
 
     block = _key_points_block(_main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text))
     assert "<p>ONE-POINT-MARKER</p>" in block
     assert "<li>ONE-POINT-MARKER</li>" not in block
@@ -3262,7 +3265,7 @@ async def test_a_flat_key_point_list_is_bulleted_only_with_several_points(
     await db_session.flush()
 
     block = _key_points_block(_main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text))
     assert "assessment-brief-points" in block
     assert ("<ul" in block) is bulleted
@@ -3285,7 +3288,7 @@ async def test_a_doi_reference_in_a_key_point_is_a_cited_paper_link(
     await db_session.flush()
 
     body = _main((await client.get(
-        f"/admin/assessments/{assessment.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments/{assessment.id}", headers=auth_headers(admin.id)
     )).text)
     url = "https://doi.org/10.1021/acsmedchemlett.5c00623"
     assert (

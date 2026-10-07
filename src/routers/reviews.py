@@ -47,10 +47,10 @@ from src.services.directory import (
     ASSESSMENT_SORTS,
 )
 from src.web.flash import flash
+from src.web.urls import page_url
 
 #: Mirrors PromptChangeSuggestion.status's docstring (src/models/review.py).
-#: Kept local rather than shared with src/routers/manager.py's copy — see
-#: that module's comment for why.
+#: Status mutations and suggestion read filters share the persisted values.
 _SUGGESTION_STATUSES = frozenset({"open", "dismissed", "implemented"})
 
 logger = logging.getLogger(__name__)
@@ -63,10 +63,9 @@ _STAFF = Depends(get_staff_user)
 _ADMIN = Depends(get_admin_user)
 
 
-#: The two surface tokens that return the reader to the LIST page rather than
-#: the detail page (F1, 2026-09-14). The quick-score forms on both list pages
-#: post one of these; the detail-page forms keep posting "admin"/"manager".
-_LIST_SURFACES = frozenset({"admin-list", "manager-list"})
+#: Canonical forms post workspace-list/workspace. Retain the old role tokens
+#: for already-loaded forms, but return every writer to a canonical page.
+_LIST_SURFACES = frozenset({"admin-list", "manager-list", "workspace-list"})
 
 
 def _list_filter_query(
@@ -124,55 +123,38 @@ def _assessments_redirect(
     sort: str | None = None,
     lab: str | None = None,
     review: str | None = None,
+    assignment: str | None = None,
     anchor_id: uuid.UUID | None = None,
     no_anchor: bool = False,
+    request: Request,
 ) -> RedirectResponse:
-    """Whitelist lives HERE, not at call sites; admin surface only for
-    admins. NEVER build this from a bare "/admin" constant: test_reachability's
-    src_strings scan would mark the allowlisted GET /admin entry stale.
-
-    Four surfaces. ``admin``/``manager`` land on the detail page, unchanged.
-    ``admin-list``/``manager-list`` (F1) land back on the LIST page the reader
-    posted from, with their filters re-emitted and the fragment
-    ``#a-<assessment_id>`` so the browser scrolls to the row they just scored.
-    An UNRECOGNISED surface keeps today's behaviour and falls through to
-    ``/manager/assessments/{id}``: a surface string is unvalidated form input,
-    and a bad one must land the reader somewhere real rather than 400.
-
-    ``run_id``/``sort``/``lab`` are only passed by ``submit_review_feedback``
-    and ``set_review_status`` — and since 2026-09-21 the second has no UI
-    caller at all (its buttons were removed; see the ROUTE_ALLOWLIST entry in
-    tests/unit/test_reachability.py), so in practice the filtered redirect is
-    the feedback path's. That is also why ``review`` (the sub-tab, 2026-09-21)
-    is threaded from the feedback path ONLY: the callerless status route was
-    not given a tab it can never be posted from. The other FOUR call sites
-    (``edit``/``delete``/``assign``/``unassign``) pass nothing, which is a
-    documented consequence rather than an oversight: a ``*-list`` surface
-    posted to one of those four lands on the UNFILTERED list — the same
-    land-somewhere-real-rather-than-error posture as the surface fallback
-    above. Those four are detail-page-only forms today.
-
-    ``anchor_id`` replaces the scored card as the fragment target, and
-    ``no_anchor`` drops the fragment: the feedback path uses them when the scored card has just left
-    the Unreviewed tab (B-03).
-    """
+    """Accept old surface tokens, return only to named canonical pages."""
+    query = _list_filter_query(run_id, sort, lab, review)
+    if surface in {"workspace", "workspace-list"} and review == ASSESSMENT_REVIEW_DEFAULT:
+        query += ("&" if query else "?") + "review=" + ASSESSMENT_REVIEW_DEFAULT
+    if assignment == "mine":
+        query += ("&" if query else "?") + "assignment=mine"
     if surface in _LIST_SURFACES:
-        query = _list_filter_query(run_id, sort, lab, review)
         fragment = "" if no_anchor else f"#a-{anchor_id or assessment_id}"
-        if surface == "admin-list" and current_user.is_admin:
-            return RedirectResponse(
-                url=f"/admin/assessments{query}{fragment}", status_code=302
-            )
-        return RedirectResponse(
-            url=f"/manager/assessments{query}{fragment}", status_code=302
-        )
-    if surface == "admin" and current_user.is_admin:
-        return RedirectResponse(url=f"/admin/assessments/{assessment_id}", status_code=302)
-    return RedirectResponse(url=f"/manager/assessments/{assessment_id}", status_code=302)
+        path = page_url(request, "workspace_assessments")
+        return RedirectResponse(path + query + fragment, status_code=302)
+    path = page_url(request, "workspace_assessment_detail", assessment_id=assessment_id)
+    # Detail-only forms preserve canonical return state; old forms have no state.
+    return RedirectResponse(path + (query if surface == "workspace" else ""), status_code=302)
+
+
+async def _return_state(request):
+    if request is None:
+        return {}
+    form = await request.form()
+    return {key: _form_str(form, key) for key in ("run_id", "sort", "lab", "review", "assignment")}
 
 
 async def _load_review(
-    db: AsyncSession, feedback_id: uuid.UUID, *, for_update: bool = False,
+    db: AsyncSession,
+    feedback_id: uuid.UUID,
+    *,
+    for_update: bool = False,
 ) -> AssessmentReview:
     """The review row, or 404. ``for_update=True`` locks it for the rest of the
     request's transaction: the edit route uses it so the review bot's predicate
@@ -188,9 +170,7 @@ async def _load_review(
     return review
 
 
-async def _load_assessment(
-    db: AsyncSession, assessment_id: uuid.UUID
-) -> OpportunityAssessment:
+async def _load_assessment(db: AsyncSession, assessment_id: uuid.UUID) -> OpportunityAssessment:
     assessment = (
         await db.execute(
             select(OpportunityAssessment).where(OpportunityAssessment.id == assessment_id)
@@ -213,9 +193,7 @@ async def _load_assignee(db: AsyncSession, assignee_user_id: uuid.UUID) -> User:
     ).scalar_one_or_none()
     if assignee is None:
         raise HTTPException(status_code=400, detail="unknown user")
-    if not (
-        (assignee.is_staff or assignee.is_reviewer) and assignee.access_status == "allowed"
-    ):
+    if not ((assignee.is_staff or assignee.is_reviewer) and assignee.access_status == "allowed"):
         raise HTTPException(
             status_code=400,
             detail="assignee must be a staff member or reviewer with allowed access",
@@ -267,9 +245,7 @@ def _parse_dimension_scores(form: FormData) -> dict[str, int]:
         # score, so treat it the same as any other malformed value: 400,
         # not an unhandled AttributeError from calling .strip() on it.
         if not isinstance(raw, str):
-            raise HTTPException(
-                status_code=400, detail=f"Malformed dimension score for {field}"
-            )
+            raise HTTPException(status_code=400, detail=f"Malformed dimension score for {field}")
         value = raw.strip()
         if not value:
             continue
@@ -309,10 +285,10 @@ async def submit_review_feedback(
 ):
     assessment = await _load_assessment(db, assessment_id)
     # One `await request.form()` for both jobs: the dimension fields and the
-    # four list-page filters ride on the same POST (contract C6). `review` is
-    # read through `_form_str` like the other three rather than declared as a
+    # five list-page filters ride on the same POST (contract C6). `review` is
+    # read through `_form_str` like the other filters rather than declared as a
     # `Form(...)` parameter: a declared field turns a non-string part of that
-    # name into a 422, and these four filters are display state that must
+    # name into a 422, and these filters are display state that must
     # degrade to "no filter" rather than refuse the write the reader came to
     # make. `_list_filter_query` validates the value either way.
     form = await request.form()
@@ -345,7 +321,11 @@ async def submit_review_feedback(
         await db.commit()
         logger.info(
             "Review feedback by %s (%s) on assessment %s: score=%s mode=%s dims=%d",
-            current_user.name, current_user.id, assessment_id, score, feedback_mode,
+            current_user.name,
+            current_user.id,
+            assessment_id,
+            score,
+            feedback_mode,
             len(dimension_scores),
         )
     # B-03: scoring from the Unreviewed tab moves the card to Reviewed, so its own
@@ -364,11 +344,15 @@ async def submit_review_feedback(
     if moved_out and not duplicate:
         flash(request, "Moved to Reviewed.", "success")
     return _assessments_redirect(
-        surface, current_user, assessment_id,
+        surface,
+        current_user,
+        assessment_id,
         run_id=_form_str(form, "run_id"),
         sort=_form_str(form, "sort"),
         lab=_form_str(form, "lab"),
         review=_form_str(form, "review"),
+        assignment=_form_str(form, "assignment"),
+        request=request,
         anchor_id=anchor_id,
         no_anchor=moved_out and anchor_id is None,
     )
@@ -408,15 +392,26 @@ async def edit_review_feedback(
     await db.commit()
     logger.info(
         "Review feedback %s edited by %s (%s): score=%s mode=%s dims=%d",
-        feedback_id, current_user.name, current_user.id, score, feedback_mode,
+        feedback_id,
+        current_user.name,
+        current_user.id,
+        score,
+        feedback_mode,
         len(dimension_scores),
     )
-    return _assessments_redirect(surface, current_user, review.assessment_id)
+    return _assessments_redirect(
+        surface,
+        current_user,
+        review.assessment_id,
+        request=request,
+        **(await _return_state(request)),
+    )
 
 
 @router.post("/feedback/{feedback_id}/delete")
 async def delete_review_feedback(
     feedback_id: uuid.UUID,
+    request: Request,
     surface: str = Form("manager"),
     db: AsyncSession = _DB,
     current_user: User = _ADMIN,
@@ -428,19 +423,24 @@ async def delete_review_feedback(
     await db.commit()
     logger.info(
         "Review feedback %s deleted by %s (%s) recorded_by=%s",
-        feedback_id, current_user.name, current_user.id, getattr(recorder, "id", None),
+        feedback_id,
+        current_user.name,
+        current_user.id,
+        getattr(recorder, "id", None),
     )
-    return _assessments_redirect(surface, current_user, assessment_id)
+    return _assessments_redirect(
+        surface, current_user, assessment_id, request=request, **(await _return_state(request))
+    )
 
 
 @router.post("/assessments/{assessment_id}/status")
 async def set_review_status(
     assessment_id: uuid.UUID,
+    request: Request = None,
     action: str = Form(...),
     surface: str = Form("manager"),
-    # Declared rather than read off the raw form (this handler does not parse
-    # one) so the signature documents what the list-page forms post: the three
-    # filters that a `*-list` surface needs to rebuild the reader's queue.
+    # Preserve the existing declared filters; the optional workflow state is
+    # read from the raw form so malformed display state does not refuse a write.
     run_id: str | None = Form(None),
     sort: str | None = Form(None),
     lab: str | None = Form(None),
@@ -450,7 +450,10 @@ async def set_review_status(
     assessment = await _load_assessment(db, assessment_id)
     try:
         await record_status_event(
-            db, assessment=assessment, actor=current_user, action=action,
+            db,
+            assessment=assessment,
+            actor=current_user,
+            action=action,
             recorded_by=recorded_by(current_user),
         )
     except ValueError as exc:
@@ -458,16 +461,29 @@ async def set_review_status(
     await db.commit()
     logger.info(
         "Review status %s recorded by %s (%s) on assessment %s",
-        action, current_user.name, current_user.id, assessment_id,
+        action,
+        current_user.name,
+        current_user.id,
+        assessment_id,
     )
+    state = await _return_state(request)
     return _assessments_redirect(
-        surface, current_user, assessment_id, run_id=run_id, sort=sort, lab=lab
+        surface,
+        current_user,
+        assessment_id,
+        run_id=run_id,
+        sort=sort,
+        lab=lab,
+        review=state.get("review"),
+        assignment=state.get("assignment"),
+        request=request,
     )
 
 
 @router.post("/assessments/{assessment_id}/assign")
 async def assign_review(
     assessment_id: uuid.UUID,
+    request: Request = None,
     assignee_user_id: str = Form(...),
     surface: str = Form("manager"),
     db: AsyncSession = _DB,
@@ -481,14 +497,21 @@ async def assign_review(
     await db.commit()
     logger.info(
         "Assessment %s assigned to %s (%s) by %s (%s)",
-        assessment_id, assignee.name, assignee.id, current_user.name, current_user.id,
+        assessment_id,
+        assignee.name,
+        assignee.id,
+        current_user.name,
+        current_user.id,
     )
-    return _assessments_redirect(surface, current_user, assessment_id)
+    return _assessments_redirect(
+        surface, current_user, assessment_id, request=request, **(await _return_state(request))
+    )
 
 
 @router.post("/assessments/{assessment_id}/unassign")
 async def unassign_review(
     assessment_id: uuid.UUID,
+    request: Request = None,
     assignee_user_id: str = Form(...),
     surface: str = Form("manager"),
     db: AsyncSession = _DB,
@@ -501,9 +524,14 @@ async def unassign_review(
     await db.commit()
     logger.info(
         "Assessment %s unassigned from user %s by %s (%s)",
-        assessment_id, assignee_id, current_user.name, current_user.id,
+        assessment_id,
+        assignee_id,
+        current_user.name,
+        current_user.id,
     )
-    return _assessments_redirect(surface, current_user, assessment_id)
+    return _assessments_redirect(
+        surface, current_user, assessment_id, request=request, **(await _return_state(request))
+    )
 
 
 def _parse_optional_assessment_id(assessment_id: str) -> uuid.UUID | None:
@@ -522,6 +550,7 @@ def _parse_optional_assessment_id(assessment_id: str) -> uuid.UUID | None:
 
 @router.post("/suggestions/generate")
 async def generate_prompt_suggestions(
+    request: Request,
     assessment_id: str = Form(""),
     db: AsyncSession = _DB,
     current_user: User = _STAFF,
@@ -531,7 +560,7 @@ async def generate_prompt_suggestions(
     Neither ``submit_feedback`` nor ``edit_feedback`` enqueues any more — a
     suggestion is a 70-90k-token Opus call and is now spent only when a human
     asks for one. ``_STAFF``, deliberately NOT ``_REVIEW``: a reviewer cannot
-    see ``/manager/prompt-suggestions`` (a suggestion can quote an unpublished
+    see ``/workspace/prompt-suggestions`` (a suggestion can quote an unpublished
     PI disclosure verbatim), so a reviewer must not be able to create one
     either. Impersonation is refused for the same reason ``assign``/
     ``unassign``/suggestion-status refuse it — this spends real money — even
@@ -550,19 +579,23 @@ async def generate_prompt_suggestions(
     await db.commit()
     logger.info(
         "Prompt-suggestion generation requested by %s (%s): enqueued=%d eligible=%d scope=%s",
-        current_user.name, current_user.id, enqueued, eligible, scope,
+        current_user.name,
+        current_user.id,
+        enqueued,
+        eligible,
+        scope,
     )
-    # The full literal path, never a bare-prefix constant — the same
-    # discipline `_assessments_redirect` documents.
     return RedirectResponse(
-        url=f"/manager/prompt-suggestions?generated={enqueued}&eligible={eligible}",
+        url=page_url(
+            request,
+            "workspace_prompt_suggestions",
+            query={"generated": enqueued, "eligible": eligible},
+        ),
         status_code=302,
     )
 
 
-async def _load_suggestion(
-    db: AsyncSession, suggestion_id: uuid.UUID
-) -> PromptChangeSuggestion:
+async def _load_suggestion(db: AsyncSession, suggestion_id: uuid.UUID) -> PromptChangeSuggestion:
     suggestion = (
         await db.execute(
             select(PromptChangeSuggestion).where(PromptChangeSuggestion.id == suggestion_id)
@@ -576,15 +609,13 @@ async def _load_suggestion(
 @router.post("/suggestions/{suggestion_id}/status")
 async def set_suggestion_status(
     suggestion_id: uuid.UUID,
+    request: Request,
     action: str = Form(...),
     db: AsyncSession = _DB,
     current_user: User = _STAFF,
 ):
     """Staff-set attribution only — never auto-applied, never touches
-    the prompt files themselves. Redirects to the full literal detail path,
-    never a bare-prefix constant (the same discipline
-    ``_assessments_redirect`` documents), because there is no admin/manager
-    surface split to whitelist here: this page lives on /manager only."""
+    the prompt files themselves. Return to the named shared detail page."""
     refuse_impersonation(current_user)
     if action not in _SUGGESTION_STATUSES:
         raise HTTPException(status_code=400, detail="Invalid status action")
@@ -596,8 +627,12 @@ async def set_suggestion_status(
     await db.commit()
     logger.info(
         "Prompt suggestion %s status set to %s by %s (%s)",
-        suggestion_id, action, current_user.name, current_user.id,
+        suggestion_id,
+        action,
+        current_user.name,
+        current_user.id,
     )
     return RedirectResponse(
-        url=f"/manager/prompt-suggestions/{suggestion_id}", status_code=302
+        url=page_url(request, "workspace_prompt_suggestion_detail", suggestion_id=suggestion_id),
+        status_code=302,
     )

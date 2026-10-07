@@ -90,7 +90,7 @@ async def test_staff_see_the_list_and_reviewers_and_pis_do_not(
     await _seed_suggestion(db_session)
 
     r = await client.get(
-        "/manager/prompt-suggestions", headers=auth_headers(user.id), follow_redirects=False
+        "/workspace/prompt-suggestions", headers=auth_headers(user.id), follow_redirects=False
     )
     assert r.status_code == expected
     if expected == 200:
@@ -108,7 +108,7 @@ async def test_staff_see_the_detail_and_reviewers_and_pis_do_not(
     s = await _seed_suggestion(db_session)
 
     r = await client.get(
-        f"/manager/prompt-suggestions/{s.id}",
+        f"/workspace/prompt-suggestions/{s.id}",
         headers=auth_headers(user.id),
         follow_redirects=False,
     )
@@ -120,7 +120,7 @@ async def test_detail_renders_suggestion_as_sanitized_markdown(client, db_sessio
     s = await _seed_suggestion(db_session, suggestion="**bold** <script>x</script>")
 
     body = (
-        await client.get(f"/manager/prompt-suggestions/{s.id}", headers=auth_headers(mgr.id))
+        await client.get(f"/workspace/prompt-suggestions/{s.id}", headers=auth_headers(mgr.id))
     ).text
 
     assert 'data-markdown="**bold** &lt;script&gt;x&lt;/script&gt;"' in body
@@ -141,7 +141,7 @@ async def test_detail_shows_provenance_and_stale_badges(client, db_session):
     )
 
     body = (
-        await client.get(f"/manager/prompt-suggestions/{s.id}", headers=auth_headers(mgr.id))
+        await client.get(f"/workspace/prompt-suggestions/{s.id}", headers=auth_headers(mgr.id))
     ).text
 
     # Provenance: the feedback snapshot row.
@@ -166,7 +166,7 @@ async def test_status_transitions_record_attribution(client, db_session):
         follow_redirects=False,
     )
     assert r.status_code == 302
-    assert r.headers["location"] == f"/manager/prompt-suggestions/{s.id}"
+    assert r.headers["location"] == f"/workspace/prompt-suggestions/{s.id}"
 
     await db_session.refresh(s)
     assert s.status == "dismissed"
@@ -217,7 +217,7 @@ async def test_bad_or_missing_target_suggestion_is_400_or_404(client, db_session
     assert missing.status_code == 404
 
     missing_get = await client.get(
-        f"/manager/prompt-suggestions/{uuid.uuid4()}", headers=auth_headers(mgr.id)
+        f"/workspace/prompt-suggestions/{uuid.uuid4()}", headers=auth_headers(mgr.id)
     )
     assert missing_get.status_code == 404
 
@@ -229,13 +229,13 @@ async def test_status_filter_and_cap(client, db_session):
 
     filtered = (
         await client.get(
-            "/manager/prompt-suggestions?status=dismissed", headers=auth_headers(mgr.id)
+            "/workspace/prompt-suggestions?status=dismissed", headers=auth_headers(mgr.id)
         )
     ).text
     assert "Dismissed One" in filtered
     assert "Open One" not in filtered
 
-    from src.routers.manager import SUGGESTIONS_LIMIT
+    from src.routers.workspace.prompt_suggestions import SUGGESTIONS_LIMIT
 
     for i in range(SUGGESTIONS_LIMIT + 1):
         db_session.add(_make_suggestion(subject_label=f"Cap Fixture {i}", status="open"))
@@ -243,7 +243,7 @@ async def test_status_filter_and_cap(client, db_session):
 
     capped = (
         await client.get(
-            "/manager/prompt-suggestions?status=open", headers=auth_headers(mgr.id)
+            "/workspace/prompt-suggestions?status=open", headers=auth_headers(mgr.id)
         )
     ).text
     assert str(SUGGESTIONS_LIMIT) in capped
@@ -282,7 +282,7 @@ async def test_suggestion_survives_assessment_deletion(client, db_session):
     ) is None
 
     r = await client.get(
-        f"/manager/prompt-suggestions/{suggestion_id}", headers=auth_headers(mgr.id)
+        f"/workspace/prompt-suggestions/{suggestion_id}", headers=auth_headers(mgr.id)
     )
     assert r.status_code == 200
     assert "Doomed Assessment Co" in r.text
@@ -314,7 +314,7 @@ async def test_generate_button_renders_for_staff_with_eligible_count(
     await db_session.commit()
 
     body = (
-        await client.get("/manager/prompt-suggestions", headers=auth_headers(user.id))
+        await client.get("/workspace/prompt-suggestions", headers=auth_headers(user.id))
     ).text
 
     assert 'action="/reviews/suggestions/generate"' in body
@@ -331,7 +331,7 @@ async def test_generate_button_disabled_when_nothing_eligible(client, db_session
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
 
     body = (
-        await client.get("/manager/prompt-suggestions", headers=auth_headers(mgr.id))
+        await client.get("/workspace/prompt-suggestions", headers=auth_headers(mgr.id))
     ).text
 
     assert 'action="/reviews/suggestions/generate"' in body
@@ -348,7 +348,7 @@ async def test_generate_button_absent_while_impersonating(client, db_session):
 
     headers = auth_headers(admin.id, impersonate=mgr.id)
 
-    body = (await client.get("/manager/prompt-suggestions", headers=headers)).text
+    body = (await client.get("/workspace/prompt-suggestions", headers=headers)).text
 
     assert "Generate suggestions from current reviews" not in body
 
@@ -359,7 +359,7 @@ async def test_reviewer_still_403s_the_whole_page_with_the_button_present(
     reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
 
     r = await client.get(
-        "/manager/prompt-suggestions", headers=auth_headers(reviewer.id)
+        "/workspace/prompt-suggestions", headers=auth_headers(reviewer.id)
     )
 
     assert r.status_code == 403
@@ -370,7 +370,7 @@ async def test_flash_renders_from_query_string(client, db_session):
 
     body = (
         await client.get(
-            "/manager/prompt-suggestions?generated=2&eligible=3",
+            "/workspace/prompt-suggestions?generated=2&eligible=3",
             headers=auth_headers(mgr.id),
         )
     ).text
@@ -394,7 +394,7 @@ async def test_generate_enqueues_exactly_the_eligible_assessments_and_second_pre
         follow_redirects=False,
     )
     assert r.status_code == 302
-    assert r.headers["location"] == "/manager/prompt-suggestions?generated=1&eligible=1"
+    assert r.headers["location"] == "/workspace/prompt-suggestions?generated=1&eligible=1"
 
     jobs = (
         (
@@ -414,7 +414,7 @@ async def test_generate_enqueues_exactly_the_eligible_assessments_and_second_pre
         follow_redirects=False,
     )
     assert r2.status_code == 302
-    assert r2.headers["location"] == "/manager/prompt-suggestions?generated=0&eligible=1"
+    assert r2.headers["location"] == "/workspace/prompt-suggestions?generated=0&eligible=1"
 
     jobs_after = (
         (
@@ -436,10 +436,10 @@ async def test_status_buttons_are_hidden_while_impersonating(client, db_session)
     s = await _seed_suggestion(db_session)
     # The manager's own view first: the suite shares one session across requests, and
     # the impersonated request tags that session's ``manager`` object as worn.
-    own = await client.get(f"/manager/prompt-suggestions/{s.id}", headers=auth_headers(manager.id))
+    own = await client.get(f"/workspace/prompt-suggestions/{s.id}", headers=auth_headers(manager.id))
     assert "Mark Implemented" in own.text
     worn = await client.get(
-        f"/manager/prompt-suggestions/{s.id}", headers=impersonation_headers(admin.id, manager.id)
+        f"/workspace/prompt-suggestions/{s.id}", headers=impersonation_headers(admin.id, manager.id)
     )
     assert worn.status_code == 200
     assert "Mark Implemented" not in worn.text

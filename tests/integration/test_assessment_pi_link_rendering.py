@@ -26,8 +26,8 @@ async def test_admin_assessments_list_links_to_admin_users_page(client, db_sessi
     await factories.make_agent(db_session, user=pi, agent_id="wang")
     run, _ = await _run_and_assessment(db_session, "wang")
 
-    r = await client.get(f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id))
-    assert f'/admin/users/{pi.id}' in r.text
+    r = await client.get(f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id))
+    assert f'/workspace/pis/{pi.id}' in r.text
 
 
 async def test_manager_assessments_list_links_to_manager_pis_page(client, db_session):
@@ -36,15 +36,15 @@ async def test_manager_assessments_list_links_to_manager_pis_page(client, db_ses
     await factories.make_agent(db_session, user=pi, agent_id="wu")
     run, _ = await _run_and_assessment(db_session, "wu")
 
-    r = await client.get(f"/manager/assessments?run_id={run.id}", headers=auth_headers(manager.id))
-    assert f'/manager/pis/{pi.id}' in r.text
+    r = await client.get(f"/workspace/assessments?run_id={run.id}", headers=auth_headers(manager.id))
+    assert f'/workspace/pis/{pi.id}' in r.text
 
 
 async def test_unresolvable_subject_renders_plain_text_no_link(client, db_session):
     admin = await factories.make_user(db_session, user_role="admin")
     run, _ = await _run_and_assessment(db_session, "decommissioned-slug")
 
-    r = await client.get(f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id))
+    r = await client.get(f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id))
     assert "decommissioned-slug" in r.text
     assert '/admin/users/' not in r.text.split("decommissioned-slug")[0][-200:]
 
@@ -55,5 +55,5 @@ async def test_admin_assessment_detail_links_to_pi_profile(client, db_session):
     await factories.make_agent(db_session, user=pi, agent_id="su")
     _, a = await _run_and_assessment(db_session, "su")
 
-    r = await client.get(f"/admin/assessments/{a.id}", headers=auth_headers(admin.id))
-    assert f'/admin/users/{pi.id}' in r.text
+    r = await client.get(f"/workspace/assessments/{a.id}", headers=auth_headers(admin.id))
+    assert f'/workspace/pis/{pi.id}' in r.text

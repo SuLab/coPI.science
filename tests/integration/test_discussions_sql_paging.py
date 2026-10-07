@@ -59,5 +59,5 @@ async def test_html_refuses_all_runs_above_the_cap_but_export_does_not(client, d
     one_run = await directory.build_discussions_view(db_session, run_id=str(run.id), page=1, **_KW)
     assert one_run["all_runs_refused"] is False and len(one_run["threads"]) == 3
 
-    html = (await client.get("/admin/discussions?run_id=all", headers=auth_headers(admin.id))).text
+    html = (await client.get("/workspace/discussions?run_id=all", headers=auth_headers(admin.id))).text
     assert "too many to list on one page" in html

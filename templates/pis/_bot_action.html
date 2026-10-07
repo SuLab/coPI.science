@@ -1,0 +1,18 @@
+{# Shared PI bot lifecycle control. Callers gate staff access and supply display state;
+   the command handlers independently enforce lifecycle and impersonation safeguards. #}
+{% macro pi_bot_action(request, user_id, status, has_token=False, compact=False, form_class="inline") %}
+    {% if status == 'active' %}
+        {% set label = 'Mute' %}{% set color = 'bg-yellow-700' %}
+    {% elif status == 'inactive' %}
+        {% set label = 'Unmute' %}{% set color = 'bg-green-700' %}
+    {% elif status == 'pending' and not has_token %}
+        {% set label = 'Install Slack bot' %}{% set color = 'bg-indigo-600' %}
+    {% elif status == 'pending' %}
+        {% set label = 'Activate' if compact else 'Activate agent' %}{% set color = 'bg-green-700' %}
+    {% endif %}
+    {% if status in ('active', 'inactive', 'pending') %}
+    <form method="post" action="{% if status == 'active' %}{{ page_url(request, 'workspace_mute_pi', user_id=user_id) }}{% elif status == 'inactive' %}{{ page_url(request, 'workspace_unmute_pi', user_id=user_id) }}{% elif not has_token %}{{ page_url(request, 'workspace_provision_slack', user_id=user_id) }}{% else %}{{ page_url(request, 'workspace_activate_agent', user_id=user_id) }}{% endif %}" class="{{ form_class }}">
+        <button type="submit" class="{{ 'text-xs' if compact else 'text-sm' }} px-3 py-1 rounded {{ color }} text-white hover:opacity-90">{{ label }}</button>
+    </form>
+    {% endif %}
+{% endmacro %}

@@ -21,7 +21,7 @@ async def journey_manager_edit(h) -> dict:
     summary, tag = "P4 manager saved summary.", "P4 manager tag"
     ctx, page, log, csp = await _open(h, "manager")
     try:
-        await _goto(h, page, f"/manager/pis/{pi}", csp)
+        await _goto(h, page, f"/workspace/pis/{pi}", csp)
         await _manager_form(page, summary)
         await page.locator("#tag-input-keywords").fill(tag)
         await page.locator("#tag-input-keywords").press("Enter")
@@ -40,7 +40,7 @@ async def journey_manager_edit(h) -> dict:
 async def journey_stale_and_noop_save(h) -> dict:
     """J4-2: stale saves are refused, while a repeated identical save adds no revision."""
     pi = h.ids["p4_pi_a"]
-    path = f"/manager/pis/{pi}"
+    path = f"/workspace/pis/{pi}"
     one, two = "P4 tab one summary.", "P4 stale tab two summary."
     c1, p1, l1, x1 = await _open(h, "manager")
     c2, p2, l2, x2 = await _open(h, "manager")
@@ -70,7 +70,7 @@ async def journey_caps_and_name_refusals(h) -> dict:
     pi = h.ids["p4_pi_a"]
     ctx, page, log, csp = await _open(h, "manager")
     try:
-        await _goto(h, page, f"/manager/pis/{pi}", csp)
+        await _goto(h, page, f"/workspace/pis/{pi}", csp)
         baseline = await _body(page)
         await _manager_form(page, " ".join(["word"] * 351))
         await _submit(h, page, page.locator('form[action$="/profile"] button[type="submit"]'), csp)
@@ -90,7 +90,7 @@ async def journey_caps_and_name_refusals(h) -> dict:
 
 async def journey_profileless_and_reviewer_isolation(h) -> dict:
     """J4-4: staff receive the profileless explanation; reviewers receive no staff cards."""
-    path = f"/manager/pis/{h.ids['p4_pi_b']}"
+    path = f"/workspace/pis/{h.ids['p4_pi_b']}"
     results, logs = {}, {}
     for role in ("manager", "reviewer"):
         ctx, page, log, csp = await _open(h, role)
@@ -129,7 +129,7 @@ async def journey_admin_rename_activation_refusal(h) -> dict:
     # package-level scratch persona audit checks only successfully exported fixtures.
     ctx, page, repair_log, repair_csp = await _open(h, "manager")
     try:
-        await _goto(h, page, f"/manager/pis/{h.ids['p4_pi_c']}", repair_csp)
+        await _goto(h, page, f"/workspace/pis/{h.ids['p4_pi_c']}", repair_csp)
         await _submit(h, page, page.locator('form[action$="/persona/reexport"] button'), repair_csp)
         repaired = await _body(page)
         repair_clean = _clean(repair_log, repair_csp)

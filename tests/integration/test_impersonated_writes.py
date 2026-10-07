@@ -171,7 +171,7 @@ async def test_manager_profile_edit_under_impersonation_is_attributed(
     profile = await factories.make_profile(db_session, user=pi, profile_version=1)
     agent = await factories.make_agent(db_session, user=pi)
     r = await client.post(
-        f"/manager/pis/{pi.id}/profile",
+        f"/workspace/pis/{pi.id}/profile",
         data={"name": pi.name, "email": pi.email, "research_summary": "Manager imp edit",
               "profile_version": str(profile.profile_version)},
         headers=impersonation_headers(admin.id, manager.id), follow_redirects=False,

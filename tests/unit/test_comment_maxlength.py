@@ -8,8 +8,8 @@ from src.services.assessment_reviews import _MAX_COMMENT_CHARS
 
 ROOT = Path(__file__).resolve().parents[2]
 TEMPLATES = (
-    "templates/admin/_assessments_body.html",
-    "templates/admin/_assessment_detail_body.html",
+    "templates/assessments/_body.html",
+    "templates/assessments/_detail_body.html",
 )
 TEXTAREA = re.compile(r'<textarea\b[^>]*\bname="comment"[^>]*>')
 

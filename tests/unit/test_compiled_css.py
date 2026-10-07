@@ -18,9 +18,8 @@ BAND_CALLS = {(700, 600)}
 #: Template sites that splice a value into a utility name (R1-R4). A new site must
 #: add its classes to tailwind.config.js's safelist and its entry here.
 CONSTRUCTED_SITES = {
-    ("admin/discussions.html", "meta.color"),
-    ("manager/discussions.html", "meta.color"),
-    ("admin/_discussions_threads.html", "meta.color"),
+    ("workspace/discussions.html", "meta.color"),
+    ("discussions/_threads.html", "meta.color"),
     ("admin/jobs.html", "color"),
 }
 #: The same for src/ and static/js (R5).
@@ -91,8 +90,7 @@ def test_band_class_is_called_only_with_the_inventoried_shapes():
 
 def test_discussion_status_colours_are_safelisted():
     colours = (
-        _status_meta_colours("admin/discussions.html")
-        | _status_meta_colours("manager/discussions.html")
+        _status_meta_colours("workspace/discussions.html")
         | {"gray"}  # _discussions_threads.html's fallback
     )
     wanted = set()

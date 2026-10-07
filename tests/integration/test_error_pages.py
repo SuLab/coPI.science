@@ -54,7 +54,7 @@ async def test_paths_under_api_and_assessment_chat_stay_json(client):
 
 async def test_a_validation_error_is_an_html_422(client, db_session):
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
-    r = await client.get("/admin/activity/not-a-uuid", headers=auth_headers(admin.id))
+    r = await client.get("/workspace/activity/not-a-uuid", headers=auth_headers(admin.id))
     assert r.status_code == 422
     assert r.headers["content-type"].startswith("text/html")
     assert "Invalid request" in r.text
@@ -63,7 +63,7 @@ async def test_a_validation_error_is_an_html_422(client, db_session):
 async def test_a_validation_error_with_accept_json_keeps_the_error_list(client, db_session):
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     r = await client.get(
-        "/admin/activity/not-a-uuid",
+        "/workspace/activity/not-a-uuid",
         headers={**auth_headers(admin.id), "Accept": "application/json"},
     )
     assert r.status_code == 422

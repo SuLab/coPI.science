@@ -13,12 +13,12 @@ pytestmark = pytest.mark.integration
 @pytest.mark.parametrize(
     "role,path,target",
     [
-        (USER_ROLE_MANAGER, "/profile", "/manager/pis"),
-        (USER_ROLE_MANAGER, "/profile/edit", "/manager/pis"),
-        (USER_ROLE_MANAGER, "/agent", "/manager/pis"),
-        (USER_ROLE_REVIEWER, "/profile", "/manager/assessments"),
-        (USER_ROLE_REVIEWER, "/profile/edit", "/manager/assessments"),
-        (USER_ROLE_REVIEWER, "/agent", "/manager/assessments"),
+        (USER_ROLE_MANAGER, "/profile", "/workspace/pis"),
+        (USER_ROLE_MANAGER, "/profile/edit", "/workspace/pis"),
+        (USER_ROLE_MANAGER, "/agent", "/workspace/pis"),
+        (USER_ROLE_REVIEWER, "/profile", "/workspace/assessments"),
+        (USER_ROLE_REVIEWER, "/profile/edit", "/workspace/assessments"),
+        (USER_ROLE_REVIEWER, "/agent", "/workspace/assessments"),
     ],
 )
 async def test_staff_are_redirected_from_pi_only_pages(client, db_session, role, path, target):

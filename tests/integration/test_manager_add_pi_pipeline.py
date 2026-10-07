@@ -81,10 +81,10 @@ async def test_manager_activation_creates_the_labs_spoke(client, db_session):
     assert await _spoke_members(db_session, "newlab") is None
 
     r = await client.post(
-        f"/manager/pis/{pi.id}/activate", headers=auth_headers(manager.id),
+        f"/workspace/pis/{pi.id}/activate", headers=auth_headers(manager.id),
         follow_redirects=False,
     )
-    assert r.headers["location"] == f"/manager/pis/{pi.id}?activated=1"
+    assert r.headers["location"] == f"/workspace/pis/{pi.id}?activated=1"
     await db_session.refresh(agent)
     assert agent.status == "active"
     assert await _spoke_members(db_session, "newlab") == {
@@ -107,10 +107,10 @@ async def test_an_unwireable_lab_is_refused_while_isolation_is_on(
     pi_id = pi.id
 
     r = await client.post(
-        f"/manager/pis/{pi_id}/activate", headers=auth_headers(manager.id),
+        f"/workspace/pis/{pi_id}/activate", headers=auth_headers(manager.id),
         follow_redirects=False,
     )
-    assert r.headers["location"] == f"/manager/pis/{pi_id}"
+    assert r.headers["location"] == f"/workspace/pis/{pi_id}"
     await db_session.refresh(agent)
     assert agent.status == "pending"
     assert await _spoke_members(db_session, "stuck") is None
@@ -127,10 +127,10 @@ async def test_without_isolation_an_unwireable_lab_still_activates(
     await _hub(db_session, agent_id="blackbird2")
     pi, agent = await _lab(db_session, agent_id="openlab")
     r = await client.post(
-        f"/manager/pis/{pi.id}/activate", headers=auth_headers(manager.id),
+        f"/workspace/pis/{pi.id}/activate", headers=auth_headers(manager.id),
         follow_redirects=False,
     )
-    assert r.headers["location"] == f"/manager/pis/{pi.id}?activated=1"
+    assert r.headers["location"] == f"/workspace/pis/{pi.id}?activated=1"
     await db_session.refresh(agent)
     assert agent.status == "active"
 
@@ -145,10 +145,10 @@ async def test_a_parked_second_hub_does_not_make_the_centre_ambiguous(
     await _hub(db_session, agent_id="parkedhub", status="inactive")
     pi, agent = await _lab(db_session, agent_id="parkedcase")
     r = await client.post(
-        f"/manager/pis/{pi.id}/activate", headers=auth_headers(manager.id),
+        f"/workspace/pis/{pi.id}/activate", headers=auth_headers(manager.id),
         follow_redirects=False,
     )
-    assert r.headers["location"] == f"/manager/pis/{pi.id}?activated=1"
+    assert r.headers["location"] == f"/workspace/pis/{pi.id}?activated=1"
     assert await _spoke_members(db_session, "parkedcase") == {
         "parkedcase", hub.agent_id, *EXTRA_SPOKE_MEMBERS,
     }
@@ -159,10 +159,10 @@ async def test_unmute_wires_a_lab_that_has_no_spoke(client, db_session):
     hub = await _hub(db_session)
     pi, agent = await _lab(db_session, agent_id="muted", status="inactive")
     r = await client.post(
-        f"/manager/pis/{pi.id}/unmute", headers=auth_headers(manager.id),
+        f"/workspace/pis/{pi.id}/unmute", headers=auth_headers(manager.id),
         follow_redirects=False,
     )
-    assert r.headers["location"] == f"/manager/pis/{pi.id}"
+    assert r.headers["location"] == f"/workspace/pis/{pi.id}"
     await db_session.refresh(agent)
     assert agent.status == "active"
     assert await _spoke_members(db_session, "muted") == {
@@ -250,15 +250,15 @@ async def test_a_dead_generation_job_can_be_retried_by_a_manager(client, db_sess
     ))
     await db_session.flush()
 
-    page = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))
-    assert f'action="/manager/pis/{pi.id}/profile/retry"' in page.text
+    page = await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(manager.id))
+    assert f'action="/workspace/pis/{pi.id}/profile/retry"' in page.text
     assert "impersonate" not in page.text
 
     r = await client.post(
-        f"/manager/pis/{pi.id}/profile/retry", headers=auth_headers(manager.id),
+        f"/workspace/pis/{pi.id}/profile/retry", headers=auth_headers(manager.id),
         follow_redirects=False,
     )
-    assert r.headers["location"] == f"/manager/pis/{pi.id}"
+    assert r.headers["location"] == f"/workspace/pis/{pi.id}"
     statuses = (await db_session.execute(
         select(Job.status).where(Job.user_id == pi.id, Job.type == "generate_profile")
     )).scalars().all()
@@ -272,7 +272,7 @@ async def test_an_ungrounded_profile_can_be_retried(client, db_session):
         db_session, user=pi, evidence_pmid_count=12, evidence_pub_count=0,
     )
     r = await client.post(
-        f"/manager/pis/{pi.id}/profile/retry", headers=auth_headers(manager.id),
+        f"/workspace/pis/{pi.id}/profile/retry", headers=auth_headers(manager.id),
         follow_redirects=False,
     )
     assert r.status_code == 302
@@ -283,10 +283,10 @@ async def test_an_ungrounded_profile_can_be_retried(client, db_session):
 async def test_a_grounded_profile_is_not_regenerated_from_the_retry_route(client, db_session):
     manager = await _manager(db_session)
     pi, _agent = await _lab(db_session, agent_id="fine")
-    page = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))
-    assert f'action="/manager/pis/{pi.id}/profile/retry"' not in page.text
+    page = await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(manager.id))
+    assert f'action="/workspace/pis/{pi.id}/profile/retry"' not in page.text
     r = await client.post(
-        f"/manager/pis/{pi.id}/profile/retry", headers=auth_headers(manager.id),
+        f"/workspace/pis/{pi.id}/profile/retry", headers=auth_headers(manager.id),
         follow_redirects=False,
     )
     assert r.status_code == 302
@@ -310,10 +310,10 @@ async def test_add_pi_adopts_a_pi_who_signed_in_before_being_added(client, db_se
         "src.services.pi_onboarding.fetch_orcid_profile", new=AsyncMock(return_value=_PROFILE),
     ):
         r = await client.post(
-            "/manager/pis", data={"orcid": signed_in.orcid},
+            "/workspace/pis", data={"orcid": signed_in.orcid},
             headers=auth_headers(manager.id), follow_redirects=False,
         )
-    assert r.headers["location"] == f"/manager/pis/{signed_in.id}"
+    assert r.headers["location"] == f"/workspace/pis/{signed_in.id}"
     agent = (await db_session.execute(
         select(AgentRegistry).where(AgentRegistry.user_id == signed_in.id)
     )).scalar_one()
@@ -347,10 +347,10 @@ async def test_add_pi_still_refuses_any_other_holder_of_the_orcid(client, db_ses
     fetch = AsyncMock(return_value=_PROFILE)
     with patch("src.services.pi_onboarding.fetch_orcid_profile", new=fetch):
         r = await client.post(
-            "/manager/pis", data={"orcid": orcid},
+            "/workspace/pis", data={"orcid": orcid},
             headers=auth_headers(manager.id), follow_redirects=False,
         )
-    assert r.headers["location"] == "/manager/pis?error=exists"
+    assert r.headers["location"] == "/workspace/pis?error=exists"
     fetch.assert_not_awaited()
     agents = (await db_session.execute(
         select(AgentRegistry).where(AgentRegistry.user_id == user_id)
@@ -367,15 +367,15 @@ async def test_an_identity_derivation_failure_rolls_back_instead_of_500ing(clien
             new=AsyncMock(return_value=_PROFILE),
         ),
         patch(
-            "src.routers.manager.create_pending_agent_for",
+            "src.routers.workspace.pi_directory.create_pending_agent_for",
             new=AsyncMock(side_effect=RuntimeError("no free agent_id")),
         ),
     ):
         r = await client.post(
-            "/manager/pis", data={"orcid": "0000-0033-0000-0001"},
+            "/workspace/pis", data={"orcid": "0000-0033-0000-0001"},
             headers=auth_headers(manager.id), follow_redirects=False,
         )
-    assert r.headers["location"] == "/manager/pis?error=create_failed"
+    assert r.headers["location"] == "/workspace/pis?error=create_failed"
     ghost = (await db_session.execute(
         select(User).where(User.orcid == "0000-0033-0000-0001")
     )).scalar_one_or_none()

@@ -44,7 +44,7 @@ async def _post(client, db, kind, pi, agent, data):
     """POST one of the four profile forms as the actor that route admits."""
     if kind == "manager":
         manager = await factories.make_user(db, user_role=USER_ROLE_MANAGER)
-        url, actor = f"/manager/pis/{pi.id}/profile", manager.id
+        url, actor = f"/workspace/pis/{pi.id}/profile", manager.id
         base = {"name": pi.name, "email": pi.email, "institution": pi.institution or "",
                 "department": "", "jhu_tenure_start": ""}
     elif kind == "profile":
@@ -119,7 +119,7 @@ async def test_an_existing_over_long_tag_can_be_saved_again(client, db_session, 
     r = await _post(client, db_session, "manager", pi, agent, {
         "profile_version": "1", "tag_fields": ["techniques"], "techniques": [long_tag, "base editing"],
     })
-    assert r.headers["location"] == f"/manager/pis/{pi.id}"
+    assert r.headers["location"] == f"/workspace/pis/{pi.id}"
     await db_session.refresh(profile)
     assert profile.techniques == [long_tag, "base editing"]
 
@@ -139,7 +139,7 @@ async def test_a_name_edit_syncs_the_agent_pi_name(client, db_session, public):
     r = await _post(client, db_session, "manager", pi, agent, {
         "profile_version": "1", "name": "Jane Q. Wang-Ó",
     })
-    assert r.headers["location"] == f"/manager/pis/{pi.id}"
+    assert r.headers["location"] == f"/workspace/pis/{pi.id}"
     await db_session.refresh(pi)
     await db_session.refresh(agent)
     assert pi.name == "Jane Q. Wang-Ó"
@@ -153,7 +153,7 @@ async def test_an_unchanged_legacy_name_is_not_revalidated(client, db_session, p
     r = await _post(client, db_session, "manager", pi, agent, {
         "profile_version": "1", "research_summary": "An edited summary.",
     })
-    assert r.headers["location"] == f"/manager/pis/{pi.id}"
+    assert r.headers["location"] == f"/workspace/pis/{pi.id}"
 
 
 async def test_an_identical_resubmission_shows_success_and_writes_nothing(
@@ -163,9 +163,9 @@ async def test_an_identical_resubmission_shows_success_and_writes_nothing(
     form = {"profile_version": "1", "research_summary": "An edited summary.",
             "tag_fields": _TAGS, "techniques": ["base editing"]}
     first = await _post(client, db_session, "manager", pi, agent, form)
-    assert first.headers["location"] == f"/manager/pis/{pi.id}"
+    assert first.headers["location"] == f"/workspace/pis/{pi.id}"
     second = await _post(client, db_session, "manager", pi, agent, form)
-    assert second.headers["location"] == f"/manager/pis/{pi.id}"
+    assert second.headers["location"] == f"/workspace/pis/{pi.id}"
     assert session_flashes(second)[-1]["text"] == "Profile saved."
     await db_session.refresh(profile)
     assert profile.profile_version == 2

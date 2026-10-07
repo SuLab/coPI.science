@@ -67,6 +67,7 @@ from pathlib import Path
 
 import src
 from src.main import create_app
+from tests.workspace_support import POST_SUFFIXES
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_DIR = REPO_ROOT / "src"
@@ -143,6 +144,13 @@ ROUTE_ALLOWLIST: dict[tuple[str, str], str] = {
         "entries will say so."
     ),
 }
+
+# Old role-prefixed URLs are public compatibility endpoints, never primary UI links.
+
+for suffix in POST_SUFFIXES:
+    ROUTE_ALLOWLIST[("POST", "/manager" + suffix)] = "Legacy manager POST alias executes the exact canonical callable before returning; existing clients may submit it."
+for path in ("/manager", "/manager/pis", "/manager/pis/{user_id}", "/manager/assessments", "/manager/assessments/{assessment_id}", "/manager/slack-bots", "/manager/discussions", "/manager/activity", "/manager/activity/{run_id}", "/manager/prompt-suggestions", "/manager/prompt-suggestions/{suggestion_id}", "/admin/assessments", "/admin/assessments/{assessment_id}", "/admin/discussions", "/admin/activity", "/admin/activity/{run_id}"):
+    ROUTE_ALLOWLIST[("GET", path)] = "Guarded legacy GET compatibility endpoint; canonical workspace links are primary."
 
 # Optional third-party imports that are allowed to be absent at test time. Empty
 # today: every `try:`-guarded import in src/ resolves in the app image.
@@ -358,7 +366,14 @@ def _excluded_string_nodes(tree: ast.AST) -> set[int]:
     """
     excluded: set[int] = set()
     for node in ast.walk(tree):
+        if isinstance(node, ast.For) and isinstance(node.target, ast.Tuple) and any(isinstance(x, ast.Name) and x.id == "_path" for x in node.target.elts):
+            if any(isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute) and c.func.attr == "add_api_route" for c in ast.walk(node)):
+                for row in getattr(node.iter, "elts", []):
+                    if isinstance(row, ast.Tuple) and row.elts:
+                        excluded.add(id(row.elts[0]))
         if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "add_api_route" and node.args:
+                excluded.add(id(node.args[0]))
             for kw in node.keywords:
                 if kw.arg == "prefix":
                     excluded.add(id(kw.value))
@@ -487,6 +502,35 @@ _JINJA_TAG_RE = re.compile(r"{%.*?%}", re.S)
 _EXTERNAL_PREFIXES = ("http://", "https://", "//", "mailto:", "tel:", "javascript:", "data:")
 
 
+def _named_route_path(call, routes):
+    if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name) or call.func.id != "page_url":
+        return None
+    if len(call.args) < 2 or not isinstance(call.args[1], ast.Constant) or not isinstance(call.args[1].value, str):
+        return None
+    name = call.args[1].value
+    paths = {r.path for r in routes if r.name == name}
+    if len(paths) != 1:
+        return None
+    path = paths.pop()
+    supplied = {kw.arg for kw in call.keywords if kw.arg not in {"query", "fragment"}}
+    required = set(re.findall(r"{([^}:]+)(?::[^}]+)?}", path))
+    if supplied != required:
+        return None
+    return re.sub(r"{[^}]+}", HOLE, path)
+
+
+def _expand_named_urls(raw, routes):
+    def expand(match):
+        expression = match.group(1).strip()
+        try:
+            call = ast.parse(expression, mode="eval").body
+        except SyntaxError:
+            return match.group(0)
+        path = _named_route_path(call, routes)
+        return path if path is not None else match.group(0)
+    return re.sub(r"{{(.*?)}}", expand, raw, flags=re.S)
+
+
 def _normalize_link(raw: str) -> list[str]:
     """Turn one attribute value into zero or more candidate route paths.
 
@@ -496,6 +540,7 @@ def _normalize_link(raw: str) -> list[str]:
     a bare ``{{ var }}``, an anchor, a same-page ``?query=`` link) yields nothing —
     those are counted as unresolvable rather than guessed at.
     """
+    raw = _expand_named_urls(raw, http_routes())
     out: list[str] = []
     for chunk in _JINJA_TAG_RE.split(raw):
         value = chunk.strip()
@@ -556,6 +601,12 @@ def template_links() -> tuple[Link, ...]:
                 for path in _normalize_link(raw):
                     for method in ("GET", "POST", "PUT", "PATCH", "DELETE"):
                         links.append(Link(name, method, raw, path, method_known=False))
+    from src.web.navigation import WORKSPACE_NAVIGATION
+    for item in WORKSPACE_NAVIGATION:
+        call = ast.parse(f"page_url(request, {item.route_name!r})", mode="eval").body
+        path = _named_route_path(call, http_routes())
+        if path is not None:
+            links.append(Link("base.html", "GET", item.route_name, path))
     return tuple(links)
 
 
@@ -585,7 +636,9 @@ def link_attr_values() -> tuple[tuple[str, str], ...]:
             continue
         text = (TEMPLATES_DIR / name).read_text(encoding="utf-8", errors="replace")
         for m in attr_re.finditer(text):
-            out.append((name, m.group(1) if m.group(1) is not None else m.group(2)))
+            raw = m.group(1) if m.group(1) is not None else m.group(2)
+            if not raw.startswith("/static/"):
+                out.append((name, raw))
     return tuple(out)
 
 
@@ -706,8 +759,6 @@ def _resolve_relative(path: Path, level: int, module: str | None) -> str:
     file's own package, so a file at src/services/foo.py has package ``src.services``.
     """
     parts = list(path.relative_to(REPO_ROOT).with_suffix("").parts)
-    if parts and parts[-1] == "__init__":
-        parts.pop()
     package = parts[:-1] if parts else []
     base = package[: len(package) - (level - 1)] if level > 1 else package
     return ".".join([*base, *([module] if module else [])])
@@ -1161,3 +1212,13 @@ def test_teeth_normalizer_handles_the_jinja_shapes_in_this_repo():
     assert _normalize_link("#top") == []
     assert _normalize_link("?page={{ page + 1 }}") == []
     assert _normalize_link("/static/js/markdown.js") == []
+
+
+def test_teeth_named_urls_require_unique_names_exact_params_and_methods():
+    routes = (Route("GET", "/assessment/{id}", "detail"), Route("POST", "/assessment/{id}/feedback", "feedback"))
+    assert _named_route_path(ast.parse("page_url(request, 'detail', id=a.id)", mode="eval").body, routes) == "/assessment/" + HOLE
+    for expression in ("page_url(request, dynamic, id=a.id)", "page_url(request, 'detail')", "page_url(request, 'detail', id=a.id, extra=1)"):
+        assert _named_route_path(ast.parse(expression, mode="eval").body, routes) is None
+    assert _named_route_path(ast.parse("page_url(request, 'detail', id=1)", mode="eval").body, routes + (Route("GET", "/other/{id}", "detail"),)) is None
+    link = Link("page.html", "POST", "named detail", "/assessment/" + HOLE)
+    assert compute_broken_links((link,), routes, {"page.html"})

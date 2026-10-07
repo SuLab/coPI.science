@@ -44,7 +44,7 @@ async def journey_review_double_click_stores_one(h) -> dict:
     try:
         assessment_id = h.ids["assessments"][0]
         await page.goto(
-            f"{h.base_url}/manager/assessments/{assessment_id}", wait_until="networkidle"
+            f"{h.base_url}/workspace/assessments/{assessment_id}", wait_until="networkidle"
         )
         comment = f"double-click-{time.time_ns()}"
         await page.select_option("#add-score", "4")
@@ -58,7 +58,7 @@ async def journey_review_double_click_stores_one(h) -> dict:
         async with page.expect_navigation(wait_until="networkidle"):
             await submit.dblclick()
         await page.goto(
-            f"{h.base_url}/manager/assessments/{assessment_id}", wait_until="networkidle"
+            f"{h.base_url}/workspace/assessments/{assessment_id}", wait_until="networkidle"
         )
         # One stored review renders its comment twice for its author (the text and the
         # edit form's textarea); count the rendered review text only.
@@ -71,10 +71,10 @@ async def journey_review_double_click_stores_one(h) -> dict:
 async def journey_staff_redirected_from_pi_pages(h) -> dict:
     """M-08: managers and reviewers land on their own pages, not PI forms."""
     expected = {
-        ("manager", "/profile"): "/manager/pis",
-        ("manager", "/profile/edit"): "/manager/pis",
-        ("manager", "/agent"): "/manager/pis",
-        ("reviewer", "/agent"): "/manager/assessments",
+        ("manager", "/profile"): "/workspace/pis",
+        ("manager", "/profile/edit"): "/workspace/pis",
+        ("manager", "/agent"): "/workspace/pis",
+        ("reviewer", "/agent"): "/workspace/assessments",
     }
     landed = {}
     for (role, path), _target in expected.items():

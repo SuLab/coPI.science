@@ -24,7 +24,7 @@ from src.models import (
     ResearcherProfile,
 )
 from src.models.job import INTERACTIVE_PRIORITY
-from src.routers import manager as manager_routes
+from src.routers.workspace import pi_evidence as manager_routes
 from src.services import profile_export
 from src.services.advisory_locks import lock_agent_persona
 from src.services.profile_publish import lock_persona_writer
@@ -66,7 +66,7 @@ async def test_card_shows_status_candidates_evidence_and_the_d57_note(
         user_id=pi.id, group_key="k", title="Foundation award", funder_name="Golden Foundation",
     ))
     await db_session.commit()
-    html = (await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(mgr.id))).text
+    html = (await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(mgr.id))).text
     for expected in (
         "unconfirmed", "F. Zavala", "RePORTER profile 222", "This is the PI",
         "PI has no RePORTER profile", "Beta-lactam resistance", "PMID 34187885",
@@ -84,7 +84,7 @@ async def test_the_d57_note_follows_the_export_tenure_and_a_cut_name_is_flagged(
     await set_provisional_tenure_start(db_session, pi.id, 2015)
     pi.name_sanitized_at = datetime.now(UTC)
     await db_session.commit()
-    html = (await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(mgr.id))).text
+    html = (await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(mgr.id))).text
     assert "set a tenure year to show past grants" not in html, "a provisional year counts (D57)"
     assert "check the spelling" in html
 
@@ -96,7 +96,7 @@ async def test_grant_veto_records_actor_revision_and_rewrites_the_persona(
     wrong = _grant(pi.id, "R01XX000001", "Wrong person grant")
     db_session.add_all([wrong, _grant(pi.id, "R01XX000002", "Right grant")])
     await db_session.commit()
-    r = await client.post(f"/manager/pis/{pi.id}/grants/{wrong.id}/veto",
+    r = await client.post(f"/workspace/pis/{pi.id}/grants/{wrong.id}/veto",
                           headers=auth_headers(mgr.id), follow_redirects=False)
     assert r.status_code == 302
     await db_session.refresh(wrong)
@@ -122,14 +122,14 @@ async def test_a_second_veto_keeps_the_first_and_other_pis_grants_are_404(
     foreign = _grant(other.id, "R01XX000013", "Someone else's")
     db_session.add_all([g, foreign])
     await db_session.commit()
-    url = f"/manager/pis/{pi.id}/grants/{g.id}/veto"
+    url = f"/workspace/pis/{pi.id}/grants/{g.id}/veto"
     await client.post(url, headers=auth_headers(mgr.id), follow_redirects=False)
     await db_session.refresh(g)
     first = g.vetoed_at
     await client.post(url, headers=auth_headers(mgr.id), follow_redirects=False)
     await db_session.refresh(g)
     assert first is not None and g.vetoed_at == first
-    r = await client.post(f"/manager/pis/{pi.id}/grants/{foreign.id}/veto",
+    r = await client.post(f"/workspace/pis/{pi.id}/grants/{foreign.id}/veto",
                           headers=auth_headers(mgr.id), follow_redirects=False)
     assert r.status_code == 404
 
@@ -142,8 +142,8 @@ async def test_veto_under_impersonation_logs_the_real_admin(
     g = _grant(pi.id, "R01XX000020", "Impersonated veto")
     db_session.add(g)
     await db_session.commit()
-    with caplog.at_level(logging.WARNING, logger="src.routers.manager"):
-        await client.post(f"/manager/pis/{pi.id}/grants/{g.id}/veto",
+    with caplog.at_level(logging.WARNING, logger="src.routers.workspace._pi_common"):
+        await client.post(f"/workspace/pis/{pi.id}/grants/{g.id}/veto",
                           headers=auth_headers(admin.id, impersonate=mgr.id),
                           follow_redirects=False)
     assert "recorded under impersonated user" in caplog.text
@@ -156,7 +156,7 @@ async def test_pin_two_candidates_pins_and_requests_enrich_grants(
 ):
     pi, mgr, agent = await _pi(db_session, tmp_path, monkeypatch, status="held")
     await db_session.commit()
-    r = await client.post(f"/manager/pis/{pi.id}/grant-identity/pin",
+    r = await client.post(f"/workspace/pis/{pi.id}/grant-identity/pin",
                           data={"profile_ids": ["111", "222", "999"]},
                           headers=auth_headers(mgr.id), follow_redirects=False)
     assert r.status_code == 302
@@ -181,7 +181,7 @@ async def test_pin_while_enrich_grants_runs_requests_a_rerun(
                   attempts=1)
     db_session.add(running)
     await db_session.commit()
-    await client.post(f"/manager/pis/{pi.id}/grant-identity/pin", data={"profile_ids": ["222"]},
+    await client.post(f"/workspace/pis/{pi.id}/grant-identity/pin", data={"profile_ids": ["222"]},
                       headers=auth_headers(mgr.id), follow_redirects=False)
     await db_session.refresh(running)
     assert running.rerun_requested_at is not None
@@ -198,11 +198,11 @@ async def test_a_typed_id_needs_one_reporter_search(client, db_session, tmp_path
         return pid == 555
 
     monkeypatch.setattr(manager_routes, "profile_id_exists", fake_exists)
-    bad = await client.post(f"/manager/pis/{pi.id}/grant-identity/pin",
+    bad = await client.post(f"/workspace/pis/{pi.id}/grant-identity/pin",
                             data={"profile_id_text": "444"},
                             headers=auth_headers(mgr.id), follow_redirects=False)
     assert "error=invalid_reporter_id" in bad.headers["location"]
-    await client.post(f"/manager/pis/{pi.id}/grant-identity/pin", data={"profile_id_text": "555"},
+    await client.post(f"/workspace/pis/{pi.id}/grant-identity/pin", data={"profile_id_text": "555"},
                       headers=auth_headers(mgr.id), follow_redirects=False)
     identity = await db_session.get(PiGrantIdentity, pi.id)
     await db_session.refresh(identity)
@@ -212,13 +212,13 @@ async def test_a_typed_id_needs_one_reporter_search(client, db_session, tmp_path
 async def test_none_confirmed_then_unpin(client, db_session, tmp_path, monkeypatch):
     pi, mgr, _ = await _pi(db_session, tmp_path, monkeypatch, status="no_match")
     await db_session.commit()
-    await client.post(f"/manager/pis/{pi.id}/grant-identity/none", headers=auth_headers(mgr.id),
+    await client.post(f"/workspace/pis/{pi.id}/grant-identity/none", headers=auth_headers(mgr.id),
                       follow_redirects=False)
     identity = await db_session.get(PiGrantIdentity, pi.id)
     await db_session.refresh(identity)
     assert (identity.status, identity.none_confirmed, identity.pinned_by_user_id) == (
         "none_confirmed", True, mgr.id)
-    await client.post(f"/manager/pis/{pi.id}/grant-identity/unpin", headers=auth_headers(mgr.id),
+    await client.post(f"/workspace/pis/{pi.id}/grant-identity/unpin", headers=auth_headers(mgr.id),
                       follow_redirects=False)
     await db_session.refresh(identity)
     assert (
@@ -238,7 +238,7 @@ async def test_a_reviewer_sees_the_card_without_any_control(
         "matched_profile_id": 111, "name_on_award": "Fidel Zavala", "rule": "pinned"}))
     db_session.add(PiOrcidFunding(user_id=pi.id, group_key="k", title="Visible funding"))
     await db_session.commit()
-    r = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(reviewer.id))
+    r = await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(reviewer.id))
     assert r.status_code == 200
     html = r.text
     for shown in ("RePORTER identity:", "pinned by staff", "Reviewer-visible grant",
@@ -259,7 +259,7 @@ async def test_card_survives_null_profile_id_lists_and_names_the_pinned_award(
     db_session.add(_grant(pi.id, "R01XX000031", "Pinned award", identity_evidence={
         "matched_profile_id": 111, "name_on_award": "ZAVALA, FIDEL", "rule": "pinned"}))
     await db_session.commit()
-    r = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(mgr.id))
+    r = await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(mgr.id))
     assert r.status_code == 200
     assert "pinned by staff" in r.text and "ZAVALA, FIDEL" in r.text
 
@@ -275,7 +275,7 @@ async def test_a_typed_id_outside_the_integer_range_is_refused_without_a_search(
         raise AssertionError("no RePORTER search for an invalid id")
 
     monkeypatch.setattr(manager_routes, "profile_id_exists", never)
-    r = await client.post(f"/manager/pis/{pi.id}/grant-identity/pin",
+    r = await client.post(f"/workspace/pis/{pi.id}/grant-identity/pin",
                           data={"profile_id_text": typed},
                           headers=auth_headers(mgr.id), follow_redirects=False)
     assert r.status_code == 302 and "error=invalid_reporter_id" in r.headers["location"]
@@ -296,7 +296,7 @@ async def test_a_reporter_failure_on_a_typed_id_redirects_with_an_error(
         raise exc
 
     monkeypatch.setattr(manager_routes, "profile_id_exists", failing)
-    r = await client.post(f"/manager/pis/{pi.id}/grant-identity/pin",
+    r = await client.post(f"/workspace/pis/{pi.id}/grant-identity/pin",
                           data={"profile_id_text": "555"},
                           headers=auth_headers(mgr.id), follow_redirects=False)
     assert r.status_code == 302 and "error=reporter_unreachable" in r.headers["location"]
@@ -305,7 +305,7 @@ async def test_a_reporter_failure_on_a_typed_id_redirects_with_an_error(
 async def test_checkbox_ids_use_the_same_parsing(client, db_session, tmp_path, monkeypatch):
     pi, mgr, _ = await _pi(db_session, tmp_path, monkeypatch, status="held")
     await db_session.commit()
-    r = await client.post(f"/manager/pis/{pi.id}/grant-identity/pin",
+    r = await client.post(f"/workspace/pis/{pi.id}/grant-identity/pin",
                           data={"profile_ids": ["²", "1" * 4301, "２２２"]},
                           headers=auth_headers(mgr.id), follow_redirects=False)
     assert r.status_code == 302 and "error=no_profile_selected" in r.headers["location"]
@@ -319,7 +319,7 @@ async def test_pin_inserts_a_missing_identity_row_and_unpin_creates_none(
     other = await factories.make_user(db_session)
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     await db_session.commit()
-    r = await client.post(f"/manager/pis/{other.id}/grant-identity/unpin",
+    r = await client.post(f"/workspace/pis/{other.id}/grant-identity/unpin",
                           headers=auth_headers(mgr.id), follow_redirects=False)
     assert r.status_code == 302
     assert await db_session.get(PiGrantIdentity, other.id) is None
@@ -328,7 +328,7 @@ async def test_pin_inserts_a_missing_identity_row_and_unpin_creates_none(
         return True
 
     monkeypatch.setattr(manager_routes, "profile_id_exists", exists)
-    await client.post(f"/manager/pis/{pi.id}/grant-identity/pin", data={"profile_id_text": "777"},
+    await client.post(f"/workspace/pis/{pi.id}/grant-identity/pin", data={"profile_id_text": "777"},
                       headers=auth_headers(mgr.id), follow_redirects=False)
     identity = await db_session.get(PiGrantIdentity, pi.id)
     await db_session.refresh(identity)
@@ -343,7 +343,7 @@ async def test_orcid_veto_records_the_actor_and_drops_the_line(
                        funder_name="Golden Foundation", start_year=2024, end_year=2099)
     db_session.add(f)
     await db_session.commit()
-    r = await client.post(f"/manager/pis/{pi.id}/orcid-fundings/{f.id}/veto",
+    r = await client.post(f"/workspace/pis/{pi.id}/orcid-fundings/{f.id}/veto",
                           headers=auth_headers(mgr.id), follow_redirects=False)
     assert r.status_code == 302
     await db_session.refresh(f)
@@ -359,7 +359,7 @@ async def test_non_pi_targets_are_404_on_every_new_route(client, db_session):
     await db_session.commit()
     for path in ("grant-identity/pin", "grant-identity/unpin", "grant-identity/none",
                  f"orcid-fundings/{f.id}/veto"):
-        r = await client.post(f"/manager/pis/{staff.id}/{path}", headers=auth_headers(mgr.id),
+        r = await client.post(f"/workspace/pis/{staff.id}/{path}", headers=auth_headers(mgr.id),
                               follow_redirects=False)
         assert r.status_code == 404, path
 
@@ -376,9 +376,9 @@ async def test_grant_and_industry_vetoes_on_a_non_pi_account_are_404(client, db_
     )
     db_session.add(e)
     await db_session.commit()
-    r1 = await client.post(f"/manager/pis/{staff.id}/grants/{g.id}/veto",
+    r1 = await client.post(f"/workspace/pis/{staff.id}/grants/{g.id}/veto",
                            headers=auth_headers(mgr.id), follow_redirects=False)
-    r2 = await client.post(f"/manager/pis/{staff.id}/industry/{e.id}/veto",
+    r2 = await client.post(f"/workspace/pis/{staff.id}/industry/{e.id}/veto",
                            headers=auth_headers(mgr.id), follow_redirects=False)
     assert r1.status_code == 404 and r2.status_code == 404
     await db_session.refresh(g)
@@ -386,7 +386,7 @@ async def test_grant_and_industry_vetoes_on_a_non_pi_account_are_404(client, db_
     assert g.vetoed_at is None and e.vetoed_at is None
 
 
-async def test_orcid_veto_refuses_on_a_lock_timeout(engine, tmp_path, monkeypatch):
+async def test_orcid_veto_refuses_on_a_lock_timeout(engine, tmp_path, monkeypatch, asgi_app):
     """A refresh holding the funding row: the veto gives up after lock_timeout instead of
     waiting behind it. Committing sessions: the holder must be another connection."""
     monkeypatch.setattr(manager_routes, "ORCID_VETO_LOCK_TIMEOUT", "200ms")
@@ -404,8 +404,8 @@ async def test_orcid_veto_refuses_on_a_lock_timeout(engine, tmp_path, monkeypatc
                 text("SELECT 1 FROM pi_orcid_fundings WHERE id = :i FOR UPDATE"), {"i": f.id}
             )
             async with factory() as s2:
-                resp = await asyncio.wait_for(manager_routes.manager_veto_orcid_funding(
-                    pi.id, f.id, request=SimpleNamespace(session={}), db=s2, current_user=mgr,
+                resp = await asyncio.wait_for(manager_routes.workspace_veto_orcid_funding(
+                    pi.id, f.id, request=SimpleNamespace(session={}, app=asgi_app), db=s2, current_user=mgr,
                 ), timeout=10)
             assert "error=orcid_busy" in resp.headers["location"]
             await holder.rollback()
@@ -422,7 +422,7 @@ async def test_orcid_veto_refuses_on_a_lock_timeout(engine, tmp_path, monkeypatc
 
 
 async def test_grant_veto_refuses_while_a_pipeline_holds_the_persona_lock(
-    engine, tmp_path, monkeypatch
+    engine, tmp_path, monkeypatch, asgi_app
 ):
     """A profile pipeline holds the PI's persona lock for minutes: the veto gives up after
     PERSONA_LOCK_TIMEOUT with error=persona_busy and vetoes nothing."""
@@ -440,8 +440,8 @@ async def test_grant_veto_refuses_while_a_pipeline_holds_the_persona_lock(
         async with factory() as holder:
             await lock_persona_writer(holder, pi.id)
             async with factory() as s2:
-                resp = await asyncio.wait_for(manager_routes.manager_veto_grant(
-                    pi.id, g.id, request=SimpleNamespace(session={}), db=s2, current_user=mgr,
+                resp = await asyncio.wait_for(manager_routes.workspace_veto_grant(
+                    pi.id, g.id, request=SimpleNamespace(session={}, app=asgi_app), db=s2, current_user=mgr,
                 ), timeout=10)
             assert "error=persona_busy" in resp.headers["location"]
             await holder.rollback()
@@ -459,7 +459,7 @@ async def test_grant_veto_refuses_while_a_pipeline_holds_the_persona_lock(
 
 
 async def test_none_route_waiting_behind_an_account_deletion_is_404(
-    engine, tmp_path, monkeypatch
+    engine, tmp_path, monkeypatch, asgi_app
 ):
     """A route that waited on the persona lock while the account was deleted gets a 404,
     not a foreign-key IntegrityError from the identity-row insert."""
@@ -478,8 +478,8 @@ async def test_none_route_waiting_behind_an_account_deletion_is_404(
             )
             await lock_agent_persona(deleter, pi.id)
             async with factory() as s2:
-                route = asyncio.create_task(manager_routes.manager_confirm_no_reporter_profile(
-                    pi.id, request=SimpleNamespace(session={}), db=s2, current_user=mgr,
+                route = asyncio.create_task(manager_routes.workspace_confirm_no_reporter_profile(
+                    pi.id, request=SimpleNamespace(session={}, app=asgi_app), db=s2, current_user=mgr,
                 ))
                 await asyncio.sleep(0.5)
                 assert not route.done()

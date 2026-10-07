@@ -26,7 +26,7 @@ async def test_manager_visiting_onboarding_is_bounced_to_the_manager_view(
         "/onboarding", headers=auth_headers(mgr.id), follow_redirects=False
     )
     assert r.status_code == 302
-    assert r.headers["location"] == "/manager/pis"
+    assert r.headers["location"] == "/workspace/pis"
 
 
 async def test_manager_visiting_onboarding_enqueues_no_profile_job(client, db_session):
@@ -70,12 +70,12 @@ async def test_a_non_manager_visiting_onboarding_still_gets_the_self_heal(
 async def test_an_admin_with_incomplete_onboarding_is_not_locked_out(client, db_session):
     """templates/base.html still offers admins the My Profile link, and
     /profile bounces anyone with onboarding_complete=False to /onboarding. A
-    `user_role != 'pi'` bounce there therefore sent admins on to /manager/pis
+    `user_role != 'pi'` bounce there therefore sent admins on to /workspace/pis
     forever: the page whose form is the ONLY writer of onboarding_complete was
     unreachable, so the state could never be cleared.
 
     Both hops are asserted. /onboarding must render (not deflect), and the
-    /profile entry point must arrive there rather than at /manager/pis — a fix
+    /profile entry point must arrive there rather than at /workspace/pis — a fix
     applied to only one of the two would still leave the link in the nav
     broken.
     """
@@ -98,7 +98,7 @@ async def test_an_admin_with_incomplete_onboarding_is_not_locked_out(client, db_
 
 
 async def test_manager_profile_url_bounce_terminates(client, db_session):
-    """manager -> /profile -> /manager/pis in one hop (M-08), with no loop."""
+    """manager -> /profile -> /workspace/pis in one hop (M-08), with no loop."""
     mgr = await factories.make_user(
         db_session, user_role=USER_ROLE_MANAGER, onboarding_complete=False
     )
@@ -112,16 +112,16 @@ async def test_manager_profile_url_bounce_terminates(client, db_session):
     client.cookies.set(session_cookie_name(), cookie_value)
     r = await client.get("/profile", follow_redirects=True)
     assert r.status_code == 200
-    assert str(r.url).endswith("/manager/pis")
+    assert str(r.url).endswith("/workspace/pis")
 
 
 async def test_manager_nav_hides_the_pi_surfaces(client, db_session):
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
-    body = (await client.get("/manager/pis", headers=auth_headers(mgr.id))).text
+    body = (await client.get("/workspace/pis", headers=auth_headers(mgr.id))).text
     assert "My Agent" not in body
     assert "My Profile" not in body
     assert "Settings" in body       # email preferences stay available to everyone
-    assert "Manager" in body
+    assert 'href="/workspace"' in body
 
 
 async def test_pi_nav_is_unchanged(client, db_session):

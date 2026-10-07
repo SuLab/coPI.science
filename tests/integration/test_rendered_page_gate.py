@@ -73,19 +73,24 @@ PAGES: dict[str, Callable[[GateWorld], str]] = {
     "/admin/access-requests": lambda w: "/admin/access-requests",
     "/admin/activity": lambda w: "/admin/activity",
     "/admin/activity/{run_id}": lambda w: f"/admin/activity/{w.run.id}",
+    "/workspace/activity": lambda w: "/workspace/activity",
+    "/workspace/activity/{run_id}": lambda w: f"/workspace/activity/{w.run.id}",
     "/admin/activity/{run_id}/llm-calls": lambda w: f"/admin/activity/{w.run.id}/llm-calls",
     "/admin/agents": lambda w: "/admin/agents",
     "/admin/agents/{agent_id}": lambda w: f"/admin/agents/{w.agent.id}",
     "/admin/assessments": lambda w: "/admin/assessments",
     "/admin/assessments/{assessment_id}": lambda w: f"/admin/assessments/{w.assessment_id}",
+    "/workspace/assessments": lambda w: "/workspace/assessments",
+    "/workspace/assessments/{assessment_id}": lambda w: f"/workspace/assessments/{w.assessment_id}",
     "/admin/cohorts": lambda w: "/admin/cohorts",
     "/admin/cohorts/topology": lambda w: "/admin/cohorts/topology",
     "/admin/cohorts/{cohort_id}": lambda w: f"/admin/cohorts/{w.cohort.id}",
+    "/workspace/discussions": lambda w: "/workspace/discussions",
     "/admin/discussions": lambda w: "/admin/discussions",
     "/admin/jobs": lambda w: "/admin/jobs",
     "/admin/simulation": lambda w: "/admin/simulation",
     "/admin/users": lambda w: "/admin/users",
-    "/admin/users/{user_id}": lambda w: f"/admin/users/{w.users['pi'].id}",
+    "/admin/users/{user_id}": lambda w: f"/admin/users/{w.users['manager'].id}",
     "/agent": lambda w: "/agent",
     "/agent/{agent_id}/conversations": lambda w: f"/agent/{w.agent.agent_id}/conversations",
     "/agent/{agent_id}/dashboard": lambda w: f"/agent/{w.agent.agent_id}/dashboard",
@@ -105,6 +110,12 @@ PAGES: dict[str, Callable[[GateWorld], str]] = {
     "/manager/prompt-suggestions": lambda w: "/manager/prompt-suggestions",
     "/manager/prompt-suggestions/{suggestion_id}": lambda w: f"/manager/prompt-suggestions/{w.suggestion.id}",
     "/manager/slack-bots": lambda w: "/manager/slack-bots",
+    "/workspace": lambda w: "/workspace",
+    "/workspace/pis": lambda w: "/workspace/pis",
+    "/workspace/pis/{user_id}": lambda w: f"/workspace/pis/{w.users['pi'].id}",
+    "/workspace/prompt-suggestions": lambda w: "/workspace/prompt-suggestions",
+    "/workspace/prompt-suggestions/{suggestion_id}": lambda w: f"/workspace/prompt-suggestions/{w.suggestion.id}",
+    "/workspace/slack-bots": lambda w: "/workspace/slack-bots",
     "/onboarding": lambda w: "/onboarding",
     "/profile": lambda w: "/profile",
     "/profile/delete-account": lambda w: "/profile/delete-account",
@@ -125,10 +136,18 @@ SKIPPED: dict[str, str] = {
 #: redirect or an error page, so the "something rendered 200" control skips them.
 NO_200_EXPECTED: dict[str, str] = {
     "/": "redirects to /profile or /login",
-    "/manager": "redirects to /manager/pis",
+    "/manager": "redirects to /workspace/pis",
+    "/workspace": "effective staff and reviewers redirect to their canonical landing page",
     "/onboarding": "an onboarded user is redirected to /profile; anonymous to /login",
     "/invite/{token}": "accepting needs the invitee's own verified address (spec §6.6); no gate role is the invitee",
 }
+
+for _legacy_route in PAGES:
+    if _legacy_route.startswith("/manager/") or _legacy_route in {
+        "/admin/activity", "/admin/activity/{run_id}", "/admin/assessments",
+        "/admin/assessments/{assessment_id}", "/admin/discussions",
+    }:
+        NO_200_EXPECTED[_legacy_route] = "guarded compatibility endpoint redirects to workspace"
 
 _SKIP_INPUT_TYPES = frozenset({"hidden", "submit", "button", "reset", "image"})
 _LOW_CONTRAST = re.compile(r"(?<![\w-])text-gray-[34]00(?![\w-])")
@@ -413,14 +432,15 @@ async def _render_structure_pages(client, db_session) -> dict[str, str]:
     await factories.make_llm_call_log(db_session, run=run)
     pages = [
         (None, "/login"),
-        (admin, "/admin/users"), (admin, f"/admin/users/{pi.id}"), (admin, f"/admin/users/{uuid.uuid4()}"),
-        (admin, "/admin/jobs"), (admin, "/admin/activity"), (admin, f"/admin/activity/{run.id}"),
-        (admin, f"/admin/activity/{run.id}/llm-calls"), (admin, "/admin/discussions"),
+        (admin, "/admin/users"), (admin, f"/admin/users/{manager.id}"),
+        (admin, f"/workspace/pis/{pi.id}"), (admin, f"/admin/users/{uuid.uuid4()}"),
+        (admin, "/admin/jobs"), (admin, "/workspace/activity"), (admin, f"/workspace/activity/{run.id}"),
+        (admin, f"/admin/activity/{run.id}/llm-calls"), (admin, "/workspace/discussions"),
         (admin, "/admin/agents"), (admin, f"/admin/agents/{agent.id}"), (admin, "/admin/cohorts"),
         (admin, "/admin/access-requests"), (admin, "/admin/simulation"),
-        (manager, "/manager/pis"), (manager, f"/manager/pis/{pi.id}"), (manager, "/manager/discussions"),
-        (manager, "/manager/activity"), (manager, "/manager/slack-bots"),
-        (manager, "/manager/prompt-suggestions"), (manager, "/manager/assessments"),
+        (manager, "/workspace/pis"), (manager, f"/workspace/pis/{pi.id}"), (manager, "/workspace/discussions"),
+        (manager, "/workspace/activity"), (manager, "/workspace/slack-bots"),
+        (manager, "/workspace/prompt-suggestions"), (manager, "/workspace/assessments"),
         (pi, "/settings"), (pi, "/profile"),
     ]
     rendered: dict[str, str] = {}

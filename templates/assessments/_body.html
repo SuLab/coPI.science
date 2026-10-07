@@ -1,0 +1,664 @@
+{# Shared workspace assessment list: panel legend, run-wide dropped-verdict
+   warnings, rendered-row summary and verdict cards.
+
+   workspace/assessments.html defines assessment_link(a), assessment_chat_link(a)
+   and pi_link(a) before including this body. Its list_surface is the bare
+   workspace-list token, not a destination supplied by the browser. Feedback
+   commands remain on the role-neutral review router, which validates return
+   state and sends callers to the canonical list after applying business rules.
+   Effective-role page projections remove privileged fields before rendering. #}
+{# Whether this session may open the assessment chat, computed the same way
+   assessments/_detail_body.html computes it: the app-state flag set by
+   create_app from `settings.assessment_chat_enabled`, and no impersonation
+   (every chat route 403s an impersonated session, so a live-looking control
+   would be a dead one). The shared page context supplies request and the
+   safe impersonation banner without exposing an ORM account. #}
+{% set card_chat_available = request is defined and request.app is defined
+     and request.app.state.assessment_chat_enabled is sameas true
+     and not impersonation_banner %}
+{# The legend stays here, but the glyphs it explains now live ONE CLICK DOWN
+   inside each card's "Rubric scores &amp; gating" disclosure (Task C2 of
+   docs/plans/2026-09-14-assessment-ux-and-prompt-suggestions-implementation-plan.md,
+   operator request 2026-09-14) rather than on the card face. Saying so is the
+   point of the reworded sentence: a legend for symbols a reader cannot see is
+   worse than no legend. #}
+<p class="text-xs text-gray-600 mb-6">
+    Gating: <span class="text-green-700 font-medium">&#9989; met</span> &middot;
+    <span class="text-red-600 font-medium">&#10060; not met</span> &middot;
+    <span class="text-blue-600 font-medium">&#10067; unconfirmed</span>
+    (the rubric question was never answered — distinct from a gate that failed).
+    These glyphs are inside each card's &ldquo;Rubric scores &amp; gating&rdquo;
+    disclosure, one click down, alongside that row's per-dimension scores.
+</p>
+
+{# Lost verdicts. Without this an empty page is ambiguous: "nothing screened
+   yet" and "everything screened and every verdict discarded" look identical.
+   Each reason has a different fix, so they are broken out rather than summed
+   into one number. #}
+{% if drops_total %}
+<div class="rounded-xl border border-amber-300 bg-amber-50 p-4 mb-6">
+    <div class="flex items-start gap-3">
+        <span class="text-amber-700 text-xl leading-none">&#9888;</span>
+        <div class="text-sm text-amber-900">
+            <div class="font-semibold mb-1">
+                {{ drops_total }} verdict{{ '' if drops_total == 1 else 's' }}
+                lost &mdash; generated and never stored, or never produced at
+                all{% if not show_all_runs %} in this run{% else %} across all runs{% endif %}, across all labs and assignments.
+            </div>
+            <ul class="list-disc list-inside space-y-0.5">
+                {% for reason, n in drop_counts %}
+                <li>
+                    <span class="font-mono text-xs">{{ reason }}</span> &times; {{ n }}
+                    {% if reason == 'specialist_floor' %}
+                        &mdash; an advance/conditional verdict whose required specialist
+                        panel was never convened, so it was refused.
+                    {% elif reason == 'unparseable_sidecar' %}
+                        &mdash; the <code>&lt;assessment_json&gt;</code> sidecar was present
+                        but could not be read (commonly a max-tokens truncation that ate
+                        the closing tag).
+                    {% elif reason == 'missing_sidecar' %}
+                        &mdash; the interview concluded without declining, but carried no
+                        sidecar at all.
+                    {% elif reason == 'empty_reply' %}
+                        &mdash; the model returned no usable reply twice in a row,
+                        so the interview was abandoned before any verdict could be
+                        written. Nothing was posted to Slack for these turns.
+                    {% elif reason == 'unwritable_row' %}
+                        &mdash; the verdict was fully formed but the database
+                        refused to store it, even individually after the batch it
+                        belonged to failed. This row is its only surviving trace.
+                    {% elif reason == 'reply_failed' %}
+                        &mdash; the model call for this interview's reply failed twice in a
+                        row with an error specific to the request, while other calls
+                        succeeded, so the interview was abandoned. Nothing was posted for
+                        these turns.
+                    {% endif %}
+                </li>
+                {% endfor %}
+            </ul>
+            <div class="mt-2 text-xs text-amber-700">
+                Except for <code>empty_reply</code> and <code>reply_failed</code>, the Slack reply for each of
+                these was posted normally &mdash; only the machine-readable verdict
+                was lost. None of them can be recovered from a later turn.
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{# Verdicts whose specialist panel is not VERIFIED complete. Distinct from the
+   dropped-verdict banner above: nothing was lost here, but nothing was fully
+   vetted either, and a triage queue that renders the two identically is how
+   an unvetted verdict gets acted on.
+
+   Three states, one number (src/services/directory.py::list_assessments): a
+   demonstrated gap, a floor that could not be checked, and a row that does not
+   record whether a panel was owed at all. This used to count only the first,
+   which left the other two looking unremarkable here while the detail page one
+   click away called them verified. The per-row panel badge says which
+   state a given row is in — see each card's footer row below. #}
+{% if incomplete_panel_count %}
+<div class="rounded-xl border border-orange-300 bg-orange-50 p-4 mb-6">
+    <div class="flex items-start gap-3">
+        <span class="text-orange-600 text-xl leading-none">&#9873;</span>
+        <div class="text-sm text-orange-900">
+            {# All THREE classes named in the BOLD line, not two with the third
+               left to the unstyled sentence below. Every one of the 64 rows
+               production holds today is in the third one (`panel_owed IS NULL`,
+               deliberately never backfilled), so a headline reading "incomplete
+               or unverified" would describe all of them as something none of
+               them is known to be. #}
+            <span class="font-semibold">
+                {{ incomplete_panel_count }} verdict{{ '' if incomplete_panel_count == 1 else 's' }}
+                with an incomplete, unverified or unrecorded specialist panel{% if not show_all_runs %} in this run{% else %} across all runs{% endif %}, across all labs and assignments.
+            </span>
+            Either the required domains were never consulted, the floor could not
+            be checked at all, or the row does not record whether a panel was
+            owed. The verdict is recorded but not fully vetted — treat the score
+            as provisional, and read each row's panel badge for which of the
+            three it is.
+            {# Scope, stated. This count follows the RUN, never lab or assignment:
+               under-warning is the dangerous direction, and an unvetted verdict
+               is the run's problem to fix, not the filtered lab's — so with a
+               lab selected the number can legitimately exceed what the card list
+               below shows (src/services/directory.py::list_assessments). #}
+            {% if lab_filter or assignment == 'mine' %}
+            <span class="block mt-1 text-xs">
+                Counted across every lab and assignment{% if not show_all_runs %} in this run{% else %} across all runs{% endif %}{% if lab_filter %}, not just
+                <span class="font-mono">{{ lab_filter }}</span>{% endif %} — a warning is not
+                narrowed by a display filter, so the row it refers to may not be
+                in the table below.
+            </span>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{# These five cards summarize the rows actually rendered below (bounded by
+   assessments_limit), not total_count (the true count of the current
+   filter, which may exceed what's shown). They count by RECOMMENDATION —
+   the model's own verdict — not by computed band: for an incubation-stage
+   population route-to-incubation is the designed positive outcome and it
+   lives inside the <3.0 band, so band-only cards read "everything failed"
+   even when half the verdicts are positive routings. The band distribution
+   still renders inside the "Dimension distribution" panel below. "Total"
+   equals the four cards + rows with no/unknown recommendation. #}
+<div class="grid grid-cols-2 sm:grid-cols-5 gap-4 mb-8">
+    <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
+        <div class="text-3xl font-bold text-gray-900">{{ assessments | length }}</div>
+        <div class="text-sm text-gray-500 mt-1">Total</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
+        <div class="text-3xl font-bold text-green-700">
+            {{ assessments | selectattr("recommendation", "equalto", "advance") | list | length }}
+        </div>
+        <div class="text-sm text-gray-500 mt-1">Advance</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
+        <div class="text-3xl font-bold text-amber-700">
+            {{ assessments | selectattr("recommendation", "equalto", "conditional") | list | length }}
+        </div>
+        <div class="text-sm text-gray-500 mt-1">Conditional</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
+        <div class="text-3xl font-bold text-teal-600">
+            {{ assessments | selectattr("recommendation", "equalto", "route-to-incubation") | list | length }}
+        </div>
+        <div class="text-sm text-gray-500 mt-1">Route-to-incubation</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4 text-center">
+        <div class="text-3xl font-bold text-gray-600">
+            {{ assessments | selectattr("recommendation", "equalto", "pass") | list | length }}
+        </div>
+        <div class="text-sm text-gray-500 mt-1">Decline</div>
+    </div>
+</div>
+
+{# Per-dimension distribution. A dimension whose max never rises is not
+   discriminating, and at 15% weight that is worth seeing: across run
+   1787010946 every one of 18 verdicts banded 'pass' and four dimensions
+   never exceeded 2. `specialist` names who to ask when one scores badly. #}
+{% if dimension_stats %}
+<details class="mb-6 rounded-xl border border-gray-200 bg-white p-4">
+    <summary class="cursor-pointer text-sm font-semibold text-gray-700">
+        Dimension distribution
+        {# Scoped to the ACTIVE TAB, not the run, since the review filter
+           applies before these are computed (2026-09-21). Saying so matters:
+           one reviewer writing one comment moves a row out of the default tab
+           and the band line silently drops it, which looks like a data
+           change rather than a filter. #}
+        {% if review != 'all' %}
+        <span class="ml-1 font-normal text-gray-600">({{ review }} only)</span>
+        {% endif %}
+        {% if band_counts %}
+        <span class="ml-2 font-normal text-gray-600">
+            bands: {% for b, n in band_counts %}{{ b }}&times;{{ n }}{{ ", " if not loop.last }}{% endfor %}
+        </span>
+        {% endif %}
+    </summary>
+    {% if off_rubric_count %}
+    <p class="mt-2 text-xs text-amber-700">
+        {{ off_rubric_count }} displayed row{{ '' if off_rubric_count == 1 else 's' }}
+        carr{{ 'ies' if off_rubric_count == 1 else 'y' }} scores from another rubric
+        revision and contribute nothing to this table (and pool
+        differently-thresholded bands above) — compare across revisions on the
+        detail pages, not here.
+    </p>
+    {% endif %}
+    <div class="overflow-x-auto">
+    <table class="mt-3 w-full text-xs">
+        <thead class="text-gray-600 text-left">
+            <tr><th>Dimension</th><th>Weight</th><th>Specialist</th><th>n</th><th>Mean</th><th>Min</th><th>Max</th></tr>
+        </thead>
+        <tbody>
+        {% for d in dimension_stats %}
+            <tr class="border-t border-gray-100 {% if d.max is not none and d.max <= 2 %}bg-amber-50{% endif %}">
+                <td class="py-1 font-mono">{{ d.dimension }}</td>
+                <td>{{ d.weight }}</td>
+                <td class="text-gray-500">{{ d.specialist or "&mdash;"|safe }}</td>
+                <td>{{ d.n }}</td>
+                <td>{{ d.mean if d.mean is not none else "&mdash;"|safe }}</td>
+                <td>{{ d.min if d.min is not none else "&mdash;"|safe }}</td>
+                <td>{{ d.max if d.max is not none else "&mdash;"|safe }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+</details>
+{% endif %}
+
+{% if assessments %}
+{# Card list, both surfaces (design N7). Replaced the eleven-column triage
+   table 2026-09-09: the Project cell was a truncated wall of jargon and the
+   page could not be read, only scanned.
+
+   STILL SCAN-ONLY in the sense the 2026-08-27 pin means: `rationale`, red-flag
+   TEXT and `derisking_milestones` are detail-page content and appear nowhere
+   here. `key_points` is the one addition, and it is a purpose-built 3-5 bullet
+   summary rather than dense evidence — see design §4.1 and the narrowed
+   test_admin_assessments_page_renders_no_inline_detail_rows.
+
+   NO NEW CONTEXT KEY may be introduced here. `admin_assessments` allowlists
+   every key it forwards while `manager_assessments` splats, so a top-level key
+   added to list_assessments and not to that allowlist renders as silently-falsy
+   Jinja Undefined on the admin surface ONLY. Everything below is either an
+   attribute of `a`, one of the two wrapper macros, or one of the handful of
+   top-level keys already forwarded to both surfaces: `list_surface`,
+   `show_all_runs`, `selected_run_id`, `runs`, `runs_by_id`, `banding`, `sort`,
+   `lab_filter`, and — since
+   2026-09-21 — `review` plus `review_counts` for the review sub-tabs, both of
+   which `admin_assessments` forwards explicitly. #}
+{# Contract C6's hidden inputs — FIVE since 2026-09-21 — defined ONCE rather
+   than written out on each of up to 500 cards: `surface` is the bare
+   `list_surface` token (never a path — see the CONTRACT note at the top of
+   this file) and the other four carry this page's own filter state, review
+   sub-tab included, so src/routers/reviews.py can send the writer back to the
+   list they were reading, at this card's anchor. #}
+{% macro qs_filters() %}<input type="hidden" name="surface" value="{{ list_surface }}"><input type="hidden" name="run_id" value="{{ 'all' if show_all_runs else selected_run_id }}"><input type="hidden" name="sort" value="{{ sort }}"><input type="hidden" name="lab" value="{{ lab_filter or '' }}"><input type="hidden" name="review" value="{{ review }}"><input type="hidden" name="assignment" value="{{ assignment }}">{% endmacro %}
+<div class="space-y-4">
+{% for a in assessments %}
+    {% set next_card = loop.nextitem %}
+    {# `id` BEFORE `class` (contract C13): the quick-scoring forms post a
+       `surface` token that src/routers/reviews.py turns into
+       `.../assessments?...#a-<id>`, so every card needs a fragment target.
+       tests/integration/test_assessment_queue_controls.py's `_row_slice`
+       locates `class="assessment-card "` and then the PRECEDING div open
+       tag, so
+       this ordering is safe — its two guard tests pin that behaviour. #}
+    <div id="a-{{ a.id }}" class="assessment-card bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+        <div class="flex items-start justify-between gap-4 flex-wrap">
+            <div class="min-w-0">
+                {# The story headline leads. NULL on every row written before
+                   0043 and never backfilled, so the fallback is the COMMON
+                   case today, not an edge one — it must render exactly what
+                   the old Project cell rendered. #}
+                <div class="assessment-card-headline text-base font-semibold text-gray-900">
+                    {{ a.headline or a.company_or_project or "—" }}
+                    {% if a.confidence %}
+                        {# Strip any brackets the value already carries before
+                           re-wrapping: the prompt shows the label bracketed in
+                           the Slack body but bare in the sidecar, and
+                           "[[High]]" is nobody's label. #}
+                        <span class="text-xs font-normal text-gray-600">[{{ a.confidence.strip("[]") }}]</span>
+                    {% endif %}
+                </div>
+                {% if a.headline and a.company_or_project %}
+                <div class="assessment-card-label text-xs text-gray-500 mt-0.5">{{ a.company_or_project }}</div>
+                {% endif %}
+                <div class="text-xs text-gray-500 mt-1">
+                    Lab: <span class="font-medium text-gray-700">{{ pi_link(a) }}</span>
+                    &middot; {{ a.created_at | ts }}
+                    &middot;
+                    {% if a.rubric_version %}
+                        rubric <span class="font-mono"{% if a.rubric_content_hash %} title="content hash {{ a.rubric_content_hash }}"{% endif %}>{{ a.rubric_version }}</span>
+                    {% else %}
+                        <span title="written before rubric stamping (migration 0030)">rubric unstamped</span>
+                    {% endif %}
+                    {% if show_all_runs %}
+                        {% set src_run = runs_by_id.get(a.simulation_run_id) %}
+                        &middot;
+                        {% if src_run %}
+                            run {{ src_run.started_at | ts }}{% if runs and src_run.id == runs[0].id %} (current){% endif %}
+                        {% else %}
+                            run unknown
+                        {% endif %}
+                    {% endif %}
+                </div>
+            </div>
+            <div class="text-right shrink-0">
+                {# Score and band moved into the collapsed "Why this score"
+                   disclosure below (2026-09-21, operator request). The
+                   recommendation — the model's own call — stays here; the
+                   computed band is one click down, which is an accepted
+                   accessibility regression recorded in the design doc. #}
+                {% if a.recommendation %}
+                    {% set rec_chip = {
+                        'advance': 'bg-green-100 text-green-700',
+                        'conditional': 'bg-amber-100 text-amber-700',
+                        'route-to-incubation': 'bg-teal-100 text-teal-700',
+                        'pass': 'bg-gray-100 text-gray-600',
+                    } %}
+                    <span class="px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap {{ rec_chip.get(a.recommendation, 'bg-gray-100 text-gray-600') }}">{{ banding.pass_label if a.recommendation == 'pass' else a.recommendation }}</span>
+                {% else %}<span class="text-xs text-gray-600">no recommendation</span>{% endif %}
+            </div>
+        </div>
+
+        {# Two columns, mirroring the detail page's brief (Task C1 of the
+           2026-09-14 assessment-UX plan): the pitch reads LEFT, the key
+           points RIGHT, so the two surfaces cannot put the
+           same two fields in two different orders. Either half may be absent —
+           EVERY row in production today has `headline IS NULL` and
+           `key_points IS NULL` — so the grid collapses to one column rather
+           than leaving an empty cell, and the whole grid (and each tinted box
+           inside it) is skipped when its field is missing. An unconditional
+           box would fail on the entire current corpus, not on an edge case;
+           test_a_row_with_no_headline_falls_back_to_the_short_label asserts
+           `assessment-card-points` is absent for such a row.
+
+           `key_point_sections` (src/services/assessment_detail.py) returns only
+           non-empty groups, under the row's own labels (current or legacy), so
+           "has points" is a CONTENT check: a mapping of only empty lists, or
+           of groups nothing renders, shows no box rather than an empty one. #}
+        {% set kp_sections = key_point_sections(a.key_points) %}
+        {% set has_points = kp_sections | length > 0 %}
+        {% if a.elevator_pitch or has_points %}
+        <div class="mt-3 grid grid-cols-1 {% if a.elevator_pitch and has_points %}md:grid-cols-2{% else %}md:grid-cols-1{% endif %} gap-4">
+            {% if a.elevator_pitch %}
+            <div class="assessment-card-pitch rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <div class="text-xs font-semibold uppercase tracking-wide text-gray-500">In one minute</div>
+                {# Rendered in full, never clamped or truncated: pitches run
+                   1200-1400 chars, and a `line-clamp-6` here (removed
+                   2026-09-14) hid two thirds of every one with no visible
+                   fold — the value is in the DOM either way, so showing it
+                   costs vertical space, not bytes. #}
+                <div class="assessment-prose max-w-none mt-1">
+                {# Same write-time `prose_format` stamp and the same safe
+                   fallback as the detail page: NULL means legacy plain text,
+                   which may carry a literal `*` in a scientific identifier
+                   that a markdown pass would read as emphasis. #}
+                {% if a.prose_format == 'markdown' %}
+                <div class="assessment-card-pitch-body md-content" data-markdown="{{ md_citations(a.elevator_pitch) | e }}"></div>
+                {% else %}
+                <p class="assessment-card-pitch-body whitespace-pre-line">{{ plain_citations(a.elevator_pitch) }}</p>
+                {% endif %}
+                </div>
+                {# The card's way through to the verdict (D7, 2026-09-21):
+                   a button at the foot of "In one minute", not a text link in
+                   the footer row, joined since 2026-09-28 by a second button
+                   that opens the same page with the chat drawer up. Both
+                   macros live in each wrapper so the hrefs stay literal
+                   /admin or /manager paths. #}
+                <div class="assessment-card-open mt-3 flex flex-wrap items-center gap-2">{{ assessment_link(a) }}{% if card_chat_available %}{{ assessment_chat_link(a) }}{% endif %}</div>
+            </div>
+            {% endif %}
+            {% if has_points %}
+            <div class="assessment-card-points rounded-lg border border-gray-200 bg-white p-3">
+                <div class="text-xs font-semibold uppercase tracking-wide text-gray-500">Key points</div>
+                {# One point renders as text and several as bullets, with
+                   `doi 10.…` references linked; a group whose extras all carry a
+                   known label (`Risk:`/`Companies:`, scout_hub >= 1.10.0) renders
+                   its main point as text and each extra on its own line with the
+                   label in bold. The same rules as the detail page's key points
+                   (assessments/_detail_body.html). #}
+                {% if kp_sections[0][0] is none %}
+                {% set flat_points = kp_sections[0][1] %}
+                {% if flat_points | length == 1 %}
+                <p class="mt-1 text-sm text-gray-700">{{ plain_citations(flat_points[0], link_doi_references=True) }}</p>
+                {% else %}
+                <ul class="mt-1 list-disc list-inside text-sm text-gray-700 space-y-0.5">
+                    {% for point in flat_points %}<li>{{ plain_citations(point, link_doi_references=True) }}</li>{% endfor %}
+                </ul>
+                {% endif %}
+                {% else %}
+                <div class="mt-1 space-y-2">
+                    {% for section in kp_sections %}
+                    <div><span class="font-semibold text-gray-800">{{ section.label }}</span>
+                        {% if section.points | length == 1 %}
+                        <p class="text-sm text-gray-700">{{ plain_citations(section.points[0], link_doi_references=True) }}</p>
+                        {% elif section.extras %}
+                        <p class="text-sm text-gray-700">{{ plain_citations(section.points[0], link_doi_references=True) }}</p>
+                        {% for extra in section.extras %}<p class="key-point-extra key-point-{{ extra.kind }} text-sm text-gray-700"><span class="font-semibold">{{ extra.label }}</span> {{ plain_citations(extra.body, link_doi_references=True) }}</p>{% endfor %}
+                        {% else %}
+                        <ul class="list-disc list-inside text-sm text-gray-700">
+                        {% for point in section.points %}<li>{{ plain_citations(point, link_doi_references=True) }}</li>{% endfor %}
+                        </ul>
+                        {% endif %}</div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+            </div>
+            {% endif %}
+        </div>
+        {% endif %}
+        {% if not a.elevator_pitch %}
+        {# The button lives at the foot of the pitch box (D7). 12 of 22
+           production rows have no pitch, so without this branch the commonest
+           card on the page would have no way through to the verdict. #}
+        <div class="assessment-card-open mt-3 flex flex-wrap items-center gap-2">{{ assessment_link(a) }}{% if card_chat_available %}{{ assessment_chat_link(a) }}{% endif %}</div>
+        {% endif %}
+
+        {# The score, the band and the hub's own account of why it scored that
+           way (column `score_rationale`, contract C11 / migration 0048), one
+           click down — operator request 2026-09-21, spec §8/D8.
+
+           UNCONDITIONAL (D9), unlike the old box: it now carries the score
+           itself, so a pre-0048 row that omitted it would show no score
+           anywhere. CLOSED by default, and the class carries a trailing space
+           in the attribute because _details_open_tag/_details_slice match
+           `class="{klass} ` literally.
+
+           The eyebrow is the SAME label the detail page uses — "Why this
+           score" — so the two surfaces do not name one field two ways, and it
+           reads distinctly from the other disclosure's "Rubric scores &
+           gating". This is not the `rationale` field the 2026-08-27 removal
+           keeps off this page; that one stays on the detail page.
+
+           Whitespace-controlled for the measured reason the scores block
+           below gives: rendered once per card, up to 500 cards. #}
+        <details class="assessment-card-score-rationale rounded-lg border border-amber-200 bg-amber-50 p-3 mt-3">
+            <summary class="cursor-pointer text-xs font-semibold uppercase tracking-wide text-amber-800">Why this score</summary>
+            {#- "pass" renders as "decline": it is the PDF's deal vocabulary
+                (pass ON the deal), and unlabelled it reads as the opposite of
+                what it means. Always visible text, never colour alone. #}
+            {%- if a.weighted_score is not none %}
+            <div class="mt-2"><span class="text-xl font-bold {{ band_class(a.band, 700, 600) }}">{{ "%.2f"|format(a.weighted_score) }}</span><span class="band-label ml-1.5 text-xs font-medium uppercase tracking-wide align-middle {{ band_class(a.band, 700, 600) }}">{{ band_label(a.band, banding.pass_label) or '—' }}</span></div>
+            {%- else %}
+            <div class="mt-2"><span class="text-xl font-bold text-gray-600">&mdash;</span><span class="band-label ml-1.5 text-xs font-medium uppercase tracking-wide align-middle text-gray-600">{{ band_label(a.band, banding.pass_label) or '—' }}</span></div>
+            {%- endif %}
+            {%- if a.score_rationale %}
+            <div class="assessment-prose max-w-none mt-2">
+            {% if a.prose_format == 'markdown' %}
+            <div class="assessment-card-score-rationale-body md-content" data-markdown="{{ md_citations(a.score_rationale) | e }}"></div>
+            {% else %}
+            <p class="assessment-card-score-rationale-body whitespace-pre-line">{{ plain_citations(a.score_rationale) }}</p>
+            {% endif %}
+            </div>
+            {%- else %}
+            <p class="mt-2 text-xs text-gray-600">The hub recorded no score rationale for this verdict. Rows written before migration 0048 were never asked for one, and none was backfilled.</p>
+            {%- endif %}
+        </details>
+
+        <div class="mt-3 pt-3 border-t border-gray-100 flex items-center gap-x-4 gap-y-1 flex-wrap text-xs">
+            {# The gating glyph row moved (VERBATIM) into the collapsed
+               "Rubric scores &amp; gating" disclosure below — Task C2 of the
+               2026-09-14 assessment-UX plan, operator request 2026-09-14. What stays in this row: flag
+               count, panel badge, review status chip, Assigned, Reviewed by.
+               The detail link left it on 2026-09-21 — it is now a button at
+               the foot of the pitch box (D7). #}
+            {% if a.red_flags %}
+                <span class="text-amber-700 font-medium whitespace-nowrap">{{ a.red_flags | length }} flag{{ '' if a.red_flags | length == 1 else 's' }}</span>
+            {% else %}<span class="text-gray-600">no flags</span>{% endif %}
+
+            {# The panel finding, in the same five states the detail page uses.
+               BEING UNBADGED IS A CLAIM, so `verified` and `not_owed` are
+               enumerated and the terminal {% else %} is a badge — a sixth state
+               must never fall off the end reading like a verified panel.
+               Pinned by test_an_unknown_panel_state_is_never_left_unbadged. #}
+            {% if a.panel_state == 'gap' %}
+            <span class="font-medium text-orange-700" title="Missing: {{ (a.missing_domains or [])|join(', ') }}">&#9873; panel incomplete</span>
+            {% elif a.panel_state == 'unverified' %}
+            <span class="font-medium text-gray-600" title="The specialist floor could not be checked for this verdict (no consult was recorded for anyone, or it named no lab). Not a gap, and not a verification.">panel unverified</span>
+            {% elif a.panel_state == 'unrecorded' %}
+            <span class="font-medium text-amber-700" title="This row does not record whether a specialist panel was owed, so nothing can be said about one either way.">panel not recorded</span>
+            {% elif a.panel_state in ('verified', 'not_owed') %}
+            {% else %}
+            <span class="font-medium text-amber-700" title="This row's panel finding is not one this page knows how to read, so nothing can be said about it either way. Not a verification.">panel state unknown</span>
+            {% endif %}
+
+            {# The chip is the only place a card may print the words
+               "Approved"/"Disapproved" (test_list_pages_show_reviewer_columns
+               row-scopes that). The control that used to set it was removed
+               2026-09-21; this renders history only, and nothing in the app
+               can now write a new status. #}
+            {% if a.review_cols.status == 'approved' %}
+                <span class="px-2 py-0.5 rounded-full font-medium whitespace-nowrap bg-green-100 text-green-700">Approved</span>
+            {% elif a.review_cols.status == 'disapproved' %}
+                <span class="px-2 py-0.5 rounded-full font-medium whitespace-nowrap bg-red-100 text-red-700">Disapproved</span>
+            {% elif a.review_cols.status is none %}
+            {% else %}
+                <span class="px-2 py-0.5 rounded-full font-medium whitespace-nowrap bg-amber-100 text-amber-800" title="Unrecognized review status: {{ a.review_cols.status }}">review status unknown</span>
+            {% endif %}
+
+            <span class="text-gray-500">Assigned: {{ a.review_cols.assigned_names | join(", ") if a.review_cols.assigned_names else "—" }}</span>
+            <span class="text-gray-500">Reviewed by: {{ a.review_cols.reviewed_by_names | join(", ") if a.review_cols.reviewed_by_names else "—" }}</span>
+        </div>
+
+        {# Per-dimension scores + the gating glyphs, one click down (Task C2
+           of the 2026-09-14 assessment-UX plan).
+           CLOSED by default — no `open` attribute — because the card face is a
+           triage surface and six bars per row is what made the old table
+           unreadable.
+
+           `a.dimension_rows` and `a.revision_view` are attached per ROW by
+           src/services/directory.py (contract C4), never as a top-level
+           context key, and they are built from the ROW'S OWN stamped revision:
+           a row stamped with an archived revision must render that revision's
+           titles and weights, not today's. A row whose revision is not in the
+           registry (`revision_view is None`) gets no bars and no weights, and
+           says the scale is unknown rather than implying a scale it cannot
+           name; its dimension titles are the humanised score keys, matching
+           what build_assessment_detail does for an unnamed key. #}
+        <details class="assessment-card-scores mt-3 border-t border-gray-100 pt-3">
+            <summary class="cursor-pointer text-sm font-medium text-gray-700">Rubric scores &amp; gating</summary>
+            {# WHITESPACE-CONTROLLED, and not as a matter of taste. This block is
+               rendered once per card and the page renders up to
+               `assessments_limit` (500) of them, so every space of indentation
+               inside the loop is multiplied by 3000. Measured 2026-09-14: the
+               pretty-printed form of exactly this markup cost 6,676 bytes per
+               card against 2,415 for the whole card face, i.e. the indentation
+               alone was the single largest item on the page, and the 500-row
+               "All Runs" render came to 8.67 MB. The `{%-`/`-%}` trims and the
+               one-line row below take the same markup to ~2 KB with byte-
+               identical rendered output. Do not "tidy" this back into an
+               indented block without re-measuring
+               test_the_list_page_stays_under_a_size_ceiling. #}
+            {%- if a.dimension_rows %}
+            <div class="mt-2 space-y-1">
+                {%- for d in a.dimension_rows %}
+                <div class="assessment-card-score-row flex items-center gap-2 text-xs"><span class="w-32 sm:w-48 shrink-0 text-gray-700">{{ d.title }}</span><span class="w-8 shrink-0 text-right font-semibold text-gray-800">{% if d.score is none %}&mdash;{% else %}{{ "%g"|format(d.score) }}{% endif %}</span><span class="flex-1 h-1.5 bg-gray-100 rounded-full overflow-hidden">{% if d.pct is not none %}<span class="block h-1.5 rounded-full {% if d.weight and d.weight >= 10 %}bg-indigo-500{% else %}bg-indigo-300{% endif %}" style="width: {{ "%.0f"|format(d.pct) }}%"></span>{% endif %}</span><span class="w-24 shrink-0 text-gray-600">{% if d.weight_note %}{{ d.weight_note }} weight{% else %}&mdash;{% endif %}{% if d.score is none %} &middot; not scored{% endif %}</span></div>
+                {%- endfor %}
+                {# The bar carried a `title` attribute repeating this row's own
+                   title and weight note. Dropped: unlike the detail page, every
+                   one of those facts is already VISIBLE text in the row beside
+                   it, so the tooltip added nothing a reader could not read, and
+                   it cost ~120 bytes x 6 dimensions x 500 rows. #}
+                <p class="text-xs text-gray-600">{% if a.revision_view %}Bars are the score on the {{ a.revision_view.scale_min }}&ndash;{{ a.revision_view.scale_max }} scale, from rubric {{ a.revision_view.version }} — the revision that scored this row.{% else %}This row's rubric revision is not in the registry, so its scale is unknown: no weights and no bars are shown.{% endif %}</p>
+            </div>
+            {%- else %}
+            <p class="mt-2 text-xs text-gray-600">No per-dimension scores were stored for this verdict.</p>
+            {%- endif %}
+
+            {# One line per gate (hub 1.10.0, spec §5.2): glyph, the gate's
+               rubric title, then the hub's stored reason (`gating_rationales`,
+               0058) or, when there is none, "Rubric definition: …". The glyphs,
+               their `title`s and the `gating-row gating-*` classes are kept from
+               the card face (Task C2 of the 2026-09-14 assessment-UX plan) —
+               test_the_card_keeps_gating_panel_flags_and_rubric_on_its_face and
+               _gating_state_for both read them, and the latter needs each row to
+               stay a `<span>` whose class attribute is its last.
+               Definitions come from the ROW'S OWN revision (`a.revision_view.gating`:
+               the live document's for a live row, the registry's
+               [revision.gating.*] for an archived one), and only for a STAMPED
+               row: `revision_view` is the live view for an unstamped row too (for
+               its dimension titles), and the detail page shows no definition
+               there (`assessment_detail._gating_definitions`), so neither does
+               this. A stamped row with a `revision_view` is exactly a live or
+               archived one. Reasons are looked up by the row's own key; the
+               write path stores them lower-cased. #}
+            {%- if a.gating %}
+            {%- set gate_defs = a.revision_view.gating if (a.revision_view and (a.rubric_version or a.rubric_content_hash)) else {} %}
+            {%- set gate_reasons = a.gating_rationales if a.gating_rationales is mapping else {} %}
+            <span class="mt-2 block space-y-1 text-xs">
+                {%- for key, gate_state in a.gating.items() %}
+                {%- set gate_meta = gate_defs.get(key) %}
+                {%- set gate_reason = gate_reasons.get(key) %}
+                <span class="gating-row gating-{{ gate_state if gate_state in ('met', 'not_met', 'unconfirmed') else 'unknown' }} block text-gray-600">{% if gate_state == 'met' %}<span class="text-green-700" title="Met">&#9989;</span>{% elif gate_state == 'not_met' %}<span class="text-red-600" title="Not met">&#10060;</span>{% elif gate_state == 'unconfirmed' %}<span class="text-blue-600" title="Unconfirmed — never asked">&#10067;</span>{% else %}<span class="text-gray-600" title="Unrecognized gating value: {{ gate_state }}">&bull;</span>{% endif %} {{ gate_meta.title if gate_meta else key.replace("_", " ") }}{% if gate_reason is string and gate_reason.strip() %}<span class="gating-reason block ml-6">{{ gate_reason.strip() }}</span>{% elif gate_meta %}<span class="gating-definition block ml-6">Rubric definition: {{ gate_meta.description }}</span>{% endif %}</span>
+                {%- endfor %}
+            </span>
+            {%- endif %}
+        </details>
+
+        {# Quick scoring (Task C3 of the 2026-09-14 assessment-UX plan,
+           operator request 4): the narrow review write
+           a triage reader actually wants from the queue — an overall rating, a
+           comment and a feedback mode — without a trip to the detail page.
+
+           Deliberately NOT here:
+             * `dim_*` fields. _parse_dimension_scores then returns `{}`, which
+               _normalized_dimension_scores stores as SQL NULL — the already
+               supported path (test_posting_no_dimension_fields_at_all_still_
+               works). Per-dimension scoring stays on the detail page.
+             * an EDIT form. `edit_feedback` REPLACES `dimension_scores` from
+               the posted form, so a dimension-free edit posted from here would
+               silently WIPE scores a reviewer entered on the detail page.
+             * delete, assign and unassign — queue-side bulk management is not
+               in scope, and assignment is staff-only whereas this card is
+               visible to reviewers too.
+             * approve/disapprove/clear. Those three buttons were removed
+               2026-09-21 on operator request; the route survives with no
+               caller (see the ROUTE_ALLOWLIST entry in
+               tests/unit/test_reachability.py). #}
+        {% set qs = 'qs-' ~ a.id ~ '-' %}
+        <details class="assessment-card-quickscore mt-3 border-t border-gray-100 pt-3" open>
+            <summary class="cursor-pointer text-sm font-medium text-indigo-700">Quick scoring</summary>
+            {# Whitespace-controlled for the same measured reason as the scores
+               block above: once per card, up to 500 cards. #}
+            <p class="mt-2 text-sm text-gray-600 max-w-[68ch]">Rates the PROPOSAL's own merit, not the bot's performance. Per-dimension rubric scoring is on the detail page.</p>
+            {%- if impersonation_banner %}
+            <p class="mt-1 text-sm text-gray-600 max-w-[68ch]">Reviewing as <strong>{{ impersonation_banner.name }}</strong>; your own account is recorded as the person who entered it.</p>
+            {%- endif %}
+            {# The five hidden inputs are contract C6: `surface` is the bare
+               `list_surface` token and the other four carry this page's own
+               filter state — run, sort, lab and review sub-tab — so
+               src/routers/reviews.py can send the writer back to the list they
+               were reading, at this card's anchor. `next_id` names the following
+               card ("" on the last): a score from the Unreviewed tab moves this
+               card off the list, so the redirect lands there instead (B-03). #}
+            <form method="post" action="/reviews/assessments/{{ a.id }}/feedback" class="mt-2 space-y-2">
+                {{ qs_filters() }}
+                <input type="hidden" name="next_id" value="{{ next_card.id if next_card else '' }}">
+                <label for="{{ qs }}score" class="block text-sm font-medium text-gray-600 mb-1">Overall rating (1 = weak … 5 = strong)</label>
+                <select id="{{ qs }}score" name="score" required class="border rounded px-1 py-0.5 text-sm"><option value="" disabled selected>&mdash;</option>{% for n in range(1, 6) %}<option value="{{ n }}">{{ n }}</option>{% endfor %}</select>
+                <label for="{{ qs }}comment" class="block text-sm font-medium text-gray-600 mb-1 mt-3">Comment</label>
+                <textarea id="{{ qs }}comment" name="comment" maxlength="10000" rows="2" placeholder="Comment" class="w-full border rounded px-2 py-1 text-sm"></textarea>
+                <label for="{{ qs }}mode" class="block text-sm font-medium text-gray-600 mb-1 mt-3">Feedback mode</label>
+                <select id="{{ qs }}mode" name="feedback_mode" required class="border rounded px-1 py-0.5 text-sm"><option value="" disabled selected>&mdash;</option><option value="learn">Learn</option><option value="log_only">Don't learn — log only</option></select>
+                <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Submit feedback</button>
+                <p class="text-sm text-gray-600">Adds a new note; edit or remove one on the detail page.</p>
+            </form>
+        </details>
+    </div>
+{% endfor %}
+</div>
+{% else %}
+{# Tab-aware (2026-09-21): "no assessments stored for this run" is false on
+   an empty sub-tab — the rows exist, they are on the other tab, and the run
+   menu on the same screen prints a count that contradicts it. #}
+<div class="bg-white rounded-xl border border-gray-200 p-8 text-center text-gray-500">
+    {# "No assessments AT ALL" is tested FIRST. It is the state of every fresh
+       run and every new deployment, and the reader lands on the Unreviewed
+       tab — so ordering the tab branches ahead of it made the commonest empty
+       page read "all 0 have review feedback. Nothing is owed here", which is
+       both false and reassuring. (2026-09-21 audit.) #}
+    {% if review_counts.all == 0 %}
+    {% if assignment == 'mine' or lab_filter %}
+    No assessments match the current run, lab and assignment filters &mdash;
+    the run menu shows stored counts across all labs and assignments.
+    {% else %}
+    No assessments stored for {{ 'any run' if show_all_runs else 'this run' }} &mdash;
+    the run menu shows each run's stored count.
+    {% endif %}
+    {% elif review == 'reviewed' %}
+    No <strong>reviewed</strong> assessments{{ '' if show_all_runs else ' in this run' }} &mdash;
+    {{ review_counts.unreviewed }} still await review on the Unreviewed tab.
+    {% elif review == 'unreviewed' %}
+    No <strong>unreviewed</strong> assessments{{ '' if show_all_runs else ' in this run' }} &mdash;
+    all {{ review_counts.reviewed }} have review feedback. Nothing is owed here.
+    {% else %}
+    No assessments stored for {{ 'any run' if show_all_runs else 'this run' }} &mdash;
+    the run menu shows each run's stored count.
+    {% endif %}
+</div>
+{% endif %}

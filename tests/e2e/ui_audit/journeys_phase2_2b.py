@@ -13,7 +13,7 @@ _AXE = Path(__file__).with_name("axe.min.js")
 
 
 def _detail_path(ids: dict) -> str:
-    return f"/admin/assessments/{ids['assessments'][0]}"
+    return f"/workspace/assessments/{ids['assessments'][0]}"
 
 
 def _history_payload(streaming: bool) -> dict:
@@ -79,18 +79,18 @@ def _routes(ids: dict) -> dict[str, list[str]]:
         "anon": ["/login"],
         "admin": [
             "/admin/users", f"/admin/users/{ids['pi']}", f"/admin/users/{BAD_UUID}", "/admin/jobs",
-            "/admin/activity", f"/admin/activity/{run}", f"/admin/activity/{run}/llm-calls",
-            "/admin/discussions", "/admin/agents", "/admin/assessments",
-            *[f"/admin/assessments/{a}" for a in ids["assessments"]],
+            "/workspace/activity", f"/workspace/activity/{run}", f"/admin/activity/{run}/llm-calls",
+            "/workspace/discussions", "/admin/agents", "/workspace/assessments",
+            *[f"/workspace/assessments/{a}" for a in ids["assessments"]],
             "/admin/cohorts", "/admin/cohorts/topology", "/admin/access-requests",
-            "/admin/simulation", "/manager/prompt-suggestions",
+            "/admin/simulation", "/workspace/prompt-suggestions",
         ],
         "manager": [
-            "/manager/pis", f"/manager/pis/{ids['pi']}", "/manager/assessments",
-            f"/manager/assessments/{first}", "/manager/discussions", "/manager/activity",
-            f"/manager/activity/{run}", "/manager/slack-bots", "/manager/prompt-suggestions",
+            "/workspace/pis", f"/workspace/pis/{ids['pi']}", "/workspace/assessments",
+            f"/workspace/assessments/{first}", "/workspace/discussions", "/workspace/activity",
+            f"/workspace/activity/{run}", "/workspace/slack-bots", "/workspace/prompt-suggestions",
         ],
-        "reviewer": ["/manager/pis", "/manager/assessments", f"/manager/assessments/{first}"],
+        "reviewer": ["/workspace/pis", "/workspace/assessments", f"/workspace/assessments/{first}"],
         "pi": ["/profile", "/profile/edit", "/settings", "/agent"],
     }
 
@@ -265,7 +265,7 @@ async def journey_enforced_csp_crawl_has_no_violations(h) -> dict:
         if url.endswith("/llm-calls") and await page.locator("details summary").count():
             await page.locator("details summary").first.click()
             await page.wait_for_timeout(800)
-        if "/admin/assessments/" in url and await page.locator("[data-chat-bubble]").count():
+        if "/workspace/assessments/" in url and await page.locator("[data-chat-bubble]").count():
             await page.locator("[data-chat-bubble]").click()
             await page.wait_for_timeout(800)
         problems += await page.evaluate("window.__cspViolations || []")

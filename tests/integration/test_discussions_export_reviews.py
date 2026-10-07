@@ -37,7 +37,7 @@ async def _world(db_session):
 async def test_the_export_carries_historical_proposal_reviews(client, db_session):
     admin, run = await _world(db_session)
     txt = await client.get(
-        f"/admin/discussions?run_id={run.id}&export=true", headers=auth_headers(admin.id)
+        f"/workspace/discussions?run_id={run.id}&export=true", headers=auth_headers(admin.id)
     )
     assert txt.status_code == 200
     assert "REVIEW-COMMENT-XYZ" in txt.text
@@ -45,7 +45,7 @@ async def test_the_export_carries_historical_proposal_reviews(client, db_session
     assert "2026-08-01 09:30 UTC" in txt.text
 
     html = await client.get(
-        f"/admin/discussions?run_id={run.id}&export=html", headers=auth_headers(admin.id)
+        f"/workspace/discussions?run_id={run.id}&export=html", headers=auth_headers(admin.id)
     )
     assert html.status_code == 200
     assert "REVIEW-COMMENT-XYZ" in html.text
@@ -54,7 +54,7 @@ async def test_the_export_carries_historical_proposal_reviews(client, db_session
 
 async def test_the_discussions_page_renders_no_review_rows(client, db_session):
     admin, run = await _world(db_session)
-    page = await client.get(f"/admin/discussions?run_id={run.id}", headers=auth_headers(admin.id))
+    page = await client.get(f"/workspace/discussions?run_id={run.id}", headers=auth_headers(admin.id))
     assert page.status_code == 200
     assert "REVIEW-COMMENT-XYZ" not in page.text
     assert "PI Reviews" not in page.text
@@ -86,7 +86,7 @@ async def test_the_html_export_renders_summaries_on_the_server(client, db_sessio
     )
     await db_session.flush()
     r = await client.get(
-        f"/admin/discussions?run_id={run.id}&export=html", headers=auth_headers(admin.id)
+        f"/workspace/discussions?run_id={run.id}&export=html", headers=auth_headers(admin.id)
     )
     assert r.status_code == 200
     assert "<strong>Bold plan</strong>" in r.text

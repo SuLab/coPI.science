@@ -1,5 +1,5 @@
 """F2: a manager may install a PI's Slack bot and activate the agent from
-/manager/pis/{id}, without an admin round-trip.
+/workspace/pis/{id}, without an admin round-trip.
 
 The Slack redirect URI ``/admin/agents/slack/callback`` is baked into every
 Slack app manifest already issued, so the path does not move — only its gate
@@ -53,9 +53,9 @@ async def test_manager_can_start_provisioning_for_a_pending_pi(
         seen["initiated_by"] = initiated_by.id
         return "https://slack.test/authorize?x=1"
 
-    monkeypatch.setattr("src.routers.manager.start_provisioning", fake_start)
+    monkeypatch.setattr("src.routers.workspace.pi_bots.start_provisioning", fake_start)
     r = await client.post(
-        f"/manager/pis/{pi.id}/slack/provision",
+        f"/workspace/pis/{pi.id}/slack/provision",
         headers=auth_headers(manager.id), follow_redirects=False,
     )
     assert r.status_code == 302
@@ -74,13 +74,13 @@ async def test_provisioning_failure_returns_to_the_manager_page(
     async def fake_start(db, a, *, initiated_by):
         raise ProvisioningError("Could not create the Slack app: boom")
 
-    monkeypatch.setattr("src.routers.manager.start_provisioning", fake_start)
+    monkeypatch.setattr("src.routers.workspace.pi_bots.start_provisioning", fake_start)
     r = await client.post(
-        f"/manager/pis/{pi.id}/slack/provision",
+        f"/workspace/pis/{pi.id}/slack/provision",
         headers=auth_headers(manager.id), follow_redirects=False,
     )
     assert r.status_code == 302
-    assert r.headers["location"] == f"/manager/pis/{pi.id}"
+    assert r.headers["location"] == f"/workspace/pis/{pi.id}"
     assert session_flashes(r) == [{
         "text": "Slack provisioning failed: Could not create the Slack app: boom",
         "kind": "error",
@@ -91,7 +91,7 @@ async def test_reviewer_is_refused_and_impersonating_admin_is_admitted(
     client, db_session, monkeypatch
 ):
     """Operator decision 2026-09-11: the PI-management controls on
-    /manager/pis (Add-PI, Edit Profile, mute, Slack provision/activate/
+    /workspace/pis (Add-PI, Edit Profile, mute, Slack provision/activate/
     callback) are neither hidden nor refused while an admin impersonates a
     manager. An admin wearing a manager reaches both provisioning POSTs,
     attributed to the impersonated manager; a reviewer still cannot.
@@ -109,7 +109,7 @@ async def test_reviewer_is_refused_and_impersonating_admin_is_admitted(
 
     for path in ("slack/provision", "activate"):
         r = await client.post(
-            f"/manager/pis/{pi.id}/{path}",
+            f"/workspace/pis/{pi.id}/{path}",
             headers=auth_headers(reviewer.id), follow_redirects=False,
         )
         assert r.status_code == 403, path
@@ -120,10 +120,10 @@ async def test_reviewer_is_refused_and_impersonating_admin_is_admitted(
         seen["initiated_by"] = initiated_by.id
         return "https://slack.test/authorize?imp=1"
 
-    monkeypatch.setattr("src.routers.manager.start_provisioning", fake_start)
+    monkeypatch.setattr("src.routers.workspace.pi_bots.start_provisioning", fake_start)
     headers = auth_headers(admin.id, impersonate=manager.id)
     r = await client.post(
-        f"/manager/pis/{pi.id}/slack/provision", headers=headers, follow_redirects=False,
+        f"/workspace/pis/{pi.id}/slack/provision", headers=headers, follow_redirects=False,
     )
     assert r.status_code == 302
     assert r.headers["location"] == "https://slack.test/authorize?imp=1"
@@ -132,10 +132,10 @@ async def test_reviewer_is_refused_and_impersonating_admin_is_admitted(
     # activate: no token yet, so the route bounces with the "install first"
     # message rather than 403ing — it was reached.
     r = await client.post(
-        f"/manager/pis/{pi.id}/activate", headers=headers, follow_redirects=False,
+        f"/workspace/pis/{pi.id}/activate", headers=headers, follow_redirects=False,
     )
     assert r.status_code == 302
-    assert r.headers["location"] == f"/manager/pis/{pi.id}"
+    assert r.headers["location"] == f"/workspace/pis/{pi.id}"
     assert "Install" in session_flashes(r)[0]["text"]
 
 
@@ -160,7 +160,7 @@ async def test_callback_completes_for_the_initiating_manager(
         headers=auth_headers(manager.id), follow_redirects=False,
     )
     assert r.status_code == 302
-    assert r.headers["location"] == f"/manager/pis/{pi.id}"
+    assert r.headers["location"] == f"/workspace/pis/{pi.id}"
     await db_session.refresh(agent)
     assert agent.slack_bot_token == "xoxb-manager"
 
@@ -209,7 +209,7 @@ async def test_callback_refuses_a_different_user(client, db_session, monkeypatch
         headers=auth_headers(other.id), follow_redirects=False,
     )
     assert r.status_code == 302
-    assert r.headers["location"] == "/manager/pis"
+    assert r.headers["location"] == "/workspace/pis"
     assert session_flashes(r)[0]["text"].startswith("Slack provisioning failed: ")
     await db_session.refresh(agent)
     assert agent.slack_bot_token is None
@@ -222,21 +222,21 @@ async def test_manager_activate_is_gated_and_has_no_override(client, db_session)
     )
 
     r = await client.post(
-        f"/manager/pis/{pi.id}/activate",
+        f"/workspace/pis/{pi.id}/activate",
         headers=auth_headers(manager.id), follow_redirects=False,
     )
     assert r.status_code == 302
-    assert r.headers["location"] == f"/manager/pis/{pi.id}?activation_blocked=1"
+    assert r.headers["location"] == f"/workspace/pis/{pi.id}?activation_blocked=1"
     await db_session.refresh(agent)
     assert agent.status == "pending"
 
     # The override an admin has is deliberately not offered here: a manager
     # only gets past the gate by fixing the profile.
     r = await client.post(
-        f"/manager/pis/{pi.id}/activate", data={"override": "on"},
+        f"/workspace/pis/{pi.id}/activate", data={"override": "on"},
         headers=auth_headers(manager.id), follow_redirects=False,
     )
-    assert r.headers["location"] == f"/manager/pis/{pi.id}?activation_blocked=1"
+    assert r.headers["location"] == f"/workspace/pis/{pi.id}?activation_blocked=1"
     await db_session.refresh(agent)
     assert agent.status == "pending"
 
@@ -246,10 +246,10 @@ async def test_manager_activate_is_gated_and_has_no_override(client, db_session)
     write_persona(agent.agent_id)  # R2: the persona-file gate (spec 2026-10-05 §6.4)
     await db_session.flush()
     r = await client.post(
-        f"/manager/pis/{pi.id}/activate",
+        f"/workspace/pis/{pi.id}/activate",
         headers=auth_headers(manager.id), follow_redirects=False,
     )
-    assert r.headers["location"] == f"/manager/pis/{pi.id}?activated=1"
+    assert r.headers["location"] == f"/workspace/pis/{pi.id}?activated=1"
     await db_session.refresh(agent)
     assert agent.status == "active"
     assert agent.approved_by == manager.id
@@ -264,11 +264,11 @@ async def test_activate_without_a_slack_token_is_refused(client, db_session):
     await db_session.flush()
 
     r = await client.post(
-        f"/manager/pis/{pi.id}/activate",
+        f"/workspace/pis/{pi.id}/activate",
         headers=auth_headers(manager.id), follow_redirects=False,
     )
     assert r.status_code == 302
-    assert r.headers["location"] == f"/manager/pis/{pi.id}"
+    assert r.headers["location"] == f"/workspace/pis/{pi.id}"
     assert session_flashes(r) == [
         {"text": "Slack provisioning failed: Install the Slack bot first.", "kind": "error"}
     ]
@@ -288,7 +288,7 @@ async def test_a_non_pending_agent_is_not_provisionable_from_the_manager_page(
     await db_session.flush()
     for path in ("slack/provision", "activate"):
         r = await client.post(
-            f"/manager/pis/{pi.id}/{path}",
+            f"/workspace/pis/{pi.id}/{path}",
             headers=auth_headers(manager.id), follow_redirects=False,
         )
         assert r.status_code == 404, path
@@ -310,7 +310,7 @@ async def test_a_non_pi_lab_agent_is_not_reachable_from_the_manager_page(
     await db_session.flush()
     for path in ("slack/provision", "activate"):
         r = await client.post(
-            f"/manager/pis/{pi.id}/{path}",
+            f"/workspace/pis/{pi.id}/{path}",
             headers=auth_headers(manager.id), follow_redirects=False,
         )
         assert r.status_code == 404, path
@@ -342,7 +342,7 @@ async def test_the_callback_admits_an_impersonated_session(
         headers=headers, follow_redirects=False,
     )
     assert r.status_code == 302
-    assert r.headers["location"] == f"/manager/pis/{pi.id}"
+    assert r.headers["location"] == f"/workspace/pis/{pi.id}"
     await db_session.refresh(agent)
     assert agent.slack_bot_token == "xoxb-imp-token"
 
@@ -376,7 +376,7 @@ async def test_callback_refuses_a_null_initiator_row_for_a_non_admin(
         headers=auth_headers(manager.id), follow_redirects=False,
     )
     assert r.status_code == 302
-    assert r.headers["location"] == "/manager/pis"
+    assert r.headers["location"] == "/workspace/pis"
     assert session_flashes(r)[0]["text"].startswith("Slack provisioning failed: ")
     await db_session.refresh(agent)
     assert agent.slack_bot_token is None
@@ -417,15 +417,15 @@ async def test_callback_completes_a_null_initiator_row_for_an_admin(
 
 
 async def test_the_pi_directory_renders_the_callbacks_flashed_error(client, db_session):
-    """The callback's manager-surface errors land on /manager/pis as a flash; a
+    """The callback's manager-surface errors land on /workspace/pis as a flash; a
     ?slack_error= query string no longer puts any text on the page (A-14)."""
     manager = await _manager(db_session)
     r = await client.get(
         "/admin/agents/slack/callback?error=access_denied",
         headers=auth_headers(manager.id), follow_redirects=False,
     )
-    assert r.status_code == 302 and r.headers["location"] == "/manager/pis"
-    page = await client.get("/manager/pis", headers=session_cookie_header(r))
+    assert r.status_code == 302 and r.headers["location"] == "/workspace/pis"
+    page = await client.get("/workspace/pis", headers=session_cookie_header(r))
     assert "Slack provisioning failed: the installation was cancelled in Slack" in page.text
 
     crafted = await client.get(
@@ -436,7 +436,7 @@ async def test_the_pi_directory_renders_the_callbacks_flashed_error(client, db_s
     assert "Slack reported an error" in flashed and "evil" not in flashed
 
     forged = await client.get(
-        "/manager/pis?slack_error=Forged+text", headers=auth_headers(manager.id)
+        "/workspace/pis?slack_error=Forged+text", headers=auth_headers(manager.id)
     )
     assert "Forged text" not in forged.text
 
@@ -449,7 +449,7 @@ async def test_a_reviewer_cannot_render_a_fake_success_banner(client, db_session
     reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
     pi, _agent = await _pending_pi(db_session, agent_id="revbanner")
     r = await client.get(
-        f"/manager/pis/{pi.id}?slack_ok=1&activated=1"
+        f"/workspace/pis/{pi.id}?slack_ok=1&activated=1"
         "&slack_error=nope&activation_blocked=1",
         headers=auth_headers(reviewer.id),
     )
@@ -468,7 +468,7 @@ async def _grounded(db_session, pi):
 
 
 async def test_activate_does_not_overwrite_a_concurrent_suspend(client, db_session, monkeypatch):
-    import src.routers.manager as manager_routes
+    import src.routers.workspace.pi_bots as manager_routes
 
     manager = await _manager(db_session)
     pi, agent = await _pending_pi(db_session, agent_id="raced", slack_bot_token="xoxb-raced")
@@ -492,10 +492,10 @@ async def test_activate_does_not_overwrite_a_concurrent_suspend(client, db_sessi
     # session, and an expired attribute read here would be sync IO.
     pi_id = pi.id
     r = await client.post(
-        f"/manager/pis/{pi_id}/activate", headers=auth_headers(manager.id), follow_redirects=False,
+        f"/workspace/pis/{pi_id}/activate", headers=auth_headers(manager.id), follow_redirects=False,
     )
     assert r.status_code == 302
-    assert r.headers["location"] == f"/manager/pis/{pi_id}"
+    assert r.headers["location"] == f"/workspace/pis/{pi_id}"
     await db_session.refresh(agent)
     assert agent.status == "suspended"
     assert agent.approved_by is None
@@ -513,9 +513,9 @@ async def test_activate_accepts_an_env_only_bot_token(client, db_session, monkey
     await _grounded(db_session, pi)
     write_persona(agent.agent_id)  # R2: the persona-file gate (spec 2026-10-05 §6.4)
     r = await client.post(
-        f"/manager/pis/{pi.id}/activate", headers=auth_headers(manager.id), follow_redirects=False,
+        f"/workspace/pis/{pi.id}/activate", headers=auth_headers(manager.id), follow_redirects=False,
     )
-    assert r.headers["location"] == f"/manager/pis/{pi.id}?activated=1"
+    assert r.headers["location"] == f"/workspace/pis/{pi.id}?activated=1"
     await db_session.refresh(agent)
     assert agent.status == "active"
 
@@ -527,9 +527,9 @@ async def test_pi_detail_offers_activate_for_an_env_only_token(client, db_sessio
     )
     manager = await _manager(db_session)
     pi, _agent = await _pending_pi(db_session, agent_id="envdetail")
-    r = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))
-    assert f'action="/manager/pis/{pi.id}/activate"' in r.text
-    assert f'action="/manager/pis/{pi.id}/slack/provision"' not in r.text
+    r = await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(manager.id))
+    assert f'action="/workspace/pis/{pi.id}/activate"' in r.text
+    assert f'action="/workspace/pis/{pi.id}/slack/provision"' not in r.text
 
 
 async def test_unmute_accepts_an_env_only_bot_token(client, db_session, monkeypatch):
@@ -543,8 +543,8 @@ async def test_unmute_accepts_an_env_only_bot_token(client, db_session, monkeypa
     await _grounded(db_session, pi)
     write_persona(agent.agent_id)  # R2: the persona-file gate (spec 2026-10-05 §6.4)
     r = await client.post(
-        f"/manager/pis/{pi.id}/unmute", headers=auth_headers(manager.id), follow_redirects=False,
+        f"/workspace/pis/{pi.id}/unmute", headers=auth_headers(manager.id), follow_redirects=False,
     )
-    assert r.headers["location"] == f"/manager/pis/{pi.id}"
+    assert r.headers["location"] == f"/workspace/pis/{pi.id}"
     await db_session.refresh(agent)
     assert agent.status == "active"

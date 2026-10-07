@@ -694,7 +694,7 @@ async def test_pi_facing_thread_view_is_never_cohort_filtered(
     await db_session.flush()
     # Name the run: without run_id the page shows the newest run, which need not
     # be this one.
-    r = await client.get(f"/admin/discussions?run_id={run.id}", headers=_auth(admin.id))
+    r = await client.get(f"/workspace/discussions?run_id={run.id}", headers=_auth(admin.id))
     assert r.status_code == 200
     assert "Showing 2 threads" in r.text
     assert "SuBot" in r.text and "CravattBot" in r.text

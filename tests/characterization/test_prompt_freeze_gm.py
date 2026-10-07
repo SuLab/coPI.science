@@ -845,7 +845,7 @@ async def test_export_via_manager_edit_gm(snapshot, client, db_session, export_d
         db_session, name="Golden Export Manager", orcid="0000-0000-0000-9290",
         email="golden-export-manager@example.org", user_role=USER_ROLE_MANAGER,
     )
-    resp = await client.post(f"/manager/pis/{user.id}/profile", data={
+    resp = await client.post(f"/workspace/pis/{user.id}/profile", data={
         **_EXPORT_FORM, "name": user.name, "email": user.email,
         "institution": user.institution, "department": user.department,
         "jhu_tenure_start": "",
@@ -864,7 +864,7 @@ async def test_export_via_grant_veto_gm(snapshot, client, db_session, export_dir
         PiGrant.user_id == user.id, PiGrant.core_project_num == "R01GM000001",
     ))).scalar_one()
     resp = await client.post(
-        f"/manager/pis/{user.id}/grants/{grant.id}/veto", headers=auth_headers(manager.id),
+        f"/workspace/pis/{user.id}/grants/{grant.id}/veto", headers=auth_headers(manager.id),
     )
     assert resp.status_code == 302
     assert _exported(export_dir, agent) == snapshot

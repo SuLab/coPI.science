@@ -353,7 +353,7 @@ async def test_each_tier_record_carries_only_what_its_page_renders(
     role, surface, tier = PAGES[page]
     assessment_id = await _seed(db_session, fixture_rubric, prose_format=prose_format)
     viewer = await factories.make_user(db_session, user_role=role)
-    resp = await client.get(f"/{surface}/assessments/{assessment_id}", headers=auth_headers(viewer.id))
+    resp = await client.get(f"/workspace/assessments/{assessment_id}", headers=auth_headers(viewer.id))
     assert resp.status_code == 200
     page = _parse_page(resp.text)
 
@@ -416,7 +416,7 @@ async def test_an_unknown_revision_row_quotes_only_dimension_reasons_its_page_re
         db_session, fixture_rubric, prose_format=prose_format, stamp=UNKNOWN_STAMP
     )
     viewer = await factories.make_user(db_session, user_role=role)
-    resp = await client.get(f"/{surface}/assessments/{assessment_id}", headers=auth_headers(viewer.id))
+    resp = await client.get(f"/workspace/assessments/{assessment_id}", headers=auth_headers(viewer.id))
     assert resp.status_code == 200
     page = _parse_page(resp.text)
 

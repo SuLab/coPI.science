@@ -5,7 +5,6 @@ only safe if the page says so — otherwise that change turns a loud refusal
 into a silent, ordinary-looking row.
 """
 
-import pathlib
 
 import pytest
 
@@ -578,21 +577,18 @@ async def test_the_view_returns_no_new_top_level_context_key(db_session):
         "off_rubric_count",
     }
 
-    # Every key above must be named in `admin_assessments`' allowlisted
-    # context, or it silently becomes Jinja Undefined on the admin surface
-    # while rendering fine on the manager one (which splats `**view`).
-    # `assessments_limit` and friends are passed as `key=view["key"]`, so the
-    # key's own name appears in the source either way.
-    admin_src = (
-        pathlib.Path(__file__).resolve().parents[2] / "src" / "routers" / "admin" / "assessments.py"
-    ).read_text()
-    handler = admin_src[admin_src.index("async def admin_assessments") :]
-    handler = handler[: handler.index("\n@router.")]
-    missing = sorted(k for k in view if f'view["{k}"]' not in handler)
-    assert missing == [], (
-        "every key list_assessments returns must be forwarded explicitly by "
-        f"admin_assessments as view[...]; these are not: {missing}"
-    )
+    # The one canonical renderer projects this unchanged business read model.
+    # All page-level state must survive the boundary for every review role.
+    from src.models import User
+    from src.services.web_permissions import capabilities_for
+    from src.web.presentation import project_workspace
+
+    for role in ('admin', 'manager', 'reviewer'):
+        viewer = User(user_role=role)
+        page = project_workspace('assessments', view, capabilities_for(viewer))
+        assert set(page) == set(view)
+        assert page['assessments'][0].id == view['assessments'][0].id
+        assert len(page['assessments'][0].dimension_rows) == len(view['assessments'][0].dimension_rows)
 
 
 async def test_a_row_with_no_scores_yields_the_same_rows_as_the_detail_page(db_session):

@@ -406,7 +406,7 @@ def _drawer(body: str) -> str:
 
 async def _page(client, user, aid, surface="manager", **headers_kw):
     resp = await client.get(
-        f"/{surface}/assessments/{aid}", headers=auth_headers(user.id, **headers_kw)
+        f"/workspace/assessments/{aid}", headers=auth_headers(user.id, **headers_kw)
     )
     assert resp.status_code == 200
     return _main(resp.text)

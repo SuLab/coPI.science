@@ -29,6 +29,48 @@ from tests.e2e.ui_audit.harness import AXE_PATH, AXE_SHA256, AXE_URL, Harness
 from tests.e2e.ui_audit.postgres import ThrowawayPostgres, free_port
 
 
+def _phase5_regressions(report: dict, baseline_path: Path) -> dict:
+    """Compare observable UI failures; a baseline is not an allowlist."""
+    if not baseline_path.exists():
+        return {"ok": False, "error": f"missing baseline: {baseline_path}", "new": ["baseline"]}
+    baseline = json.loads(baseline_path.read_text())
+    current_crawl = report.get("crawl", {})
+    baseline_crawl = baseline.get("crawl", {})
+
+    def canonical(value: object) -> str:
+        return (str(value).replace("/manager/", "/workspace/")
+                .replace("/admin/assessments", "/workspace/assessments")
+                .replace("/admin/activity", "/workspace/activity")
+                .replace("/admin/discussions", "/workspace/discussions"))
+
+    current = {
+        "violations": {canonical(row) for row in current_crawl.get("violations", [])},
+        "overflow": {tuple(canonical(item) for item in row)
+                     for row in current_crawl.get("overflow_375", [])},
+        "axe": current_crawl.get("axe", {}),
+    }
+    previous = {
+        "violations": {canonical(row) for row in baseline_crawl.get("violations", [])},
+        "overflow": {tuple(canonical(item) for item in row)
+                     for row in baseline_crawl.get("overflow_375", [])},
+        "axe": baseline_crawl.get("axe", {}),
+    }
+    # An aggregate baseline cannot identify individual nodes/pages. Requiring
+    # no WCAG findings avoids masking new defects behind removed old findings.
+    # A tool failure must fail even if a legacy report recorded zero nodes.
+    added_axe = {rule: count for rule, count in current["axe"].items()
+                 if count > 0 or rule == "axe-error"}
+    new = {
+        "violations": sorted(current["violations"] - previous["violations"]),
+        "overflow": sorted(current["overflow"] - previous["overflow"]),
+        "axe": added_axe,
+    }
+    hard_network = sorted(value for value in current["violations"]
+                          if "request failed" in value or "unexpected network" in value)
+    return {"ok": not any(new.values()) and not hard_network,
+            "new": new, "hard_network": hard_network}
+
+
 def load_axe() -> str:
     """The pinned axe-core bundle, downloaded to AXE_PATH on first use."""
     import hashlib
@@ -81,7 +123,9 @@ class Stack:
         subprocess.run([py, "-m", "alembic", "upgrade", "head"], cwd=self.work,
                        env=self.env(), check=True, capture_output=True)
         seeded = subprocess.run([py, "-m", "tests.e2e.ui_audit.seed"], cwd=self.work,
-                                env=self.env(), check=True, capture_output=True, text=True)
+                                env=self.env(), capture_output=True, text=True)
+        if seeded.returncode:
+            raise RuntimeError(f"isolated browser seed failed:\n{seeded.stderr}")
         self.ids = json.loads(seeded.stdout.strip().splitlines()[-1])
         self.server = subprocess.Popen(
             [py, "-m", "tests.e2e.ui_audit.serve", "--port", str(self.port)],
@@ -140,14 +184,50 @@ async def _run(stack: Stack, args) -> dict:
                         await h.browser.close()
                     except Exception:  # noqa: BLE001 - already gone
                         pass
-            if args.phase == 4:
+        if args.phase == 4:
                 audit = subprocess.run(
                     [sys.executable, str(REPO_ROOT / "scripts/persona_file_audit.py"), "--check"],
                     cwd=Path.cwd(), env=h.env, capture_output=True, text=True,
                 )
                 report["persona_audit"] = {"ok": audit.returncode == 0,
                                             "output": audit.stdout + audit.stderr}
+        if args.phase == 5:
+            report["baseline_comparison"] = _phase5_regressions(
+                report, Path(args.baseline))
     return report
+
+
+def _run_with_exception_capture(stack: Stack, args) -> dict:
+    """Fail the gate on orphaned tasks, including errors during loop shutdown."""
+    errors = []
+    with asyncio.Runner() as runner:
+        loop = runner.get_loop()
+        previous_handler = loop.get_exception_handler()
+
+        def record_error(event_loop, context):
+            error = context.get("exception")
+            errors.append({"message": context.get("message", "asyncio error"),
+                           "exception": repr(error) if error is not None else None})
+            if previous_handler is not None:
+                previous_handler(event_loop, context)
+            else:
+                event_loop.default_exception_handler(context)
+
+        loop.set_exception_handler(record_error)
+        report = runner.run(_run(stack, args))
+    report["asyncio_errors"] = errors
+    return report
+
+
+def _failures(report: dict) -> list:
+    failed = list(report.get("crawl", {}).get("violations", [])) + [
+        name for name, result in report.get("journeys", {}).items() if not result.get("ok")]
+    for gate in ("persona_audit", "baseline_comparison"):
+        if report.get(gate, {}).get("ok") is False:
+            failed.append(gate)
+    if report.get("asyncio_errors"):
+        failed.append("asyncio_errors")
+    return failed
 
 
 def main() -> None:
@@ -160,6 +240,8 @@ def main() -> None:
                         help="run only this journey (repeatable), e.g. journey_raw_html_shapes")
     parser.add_argument("--out", default=str(Path(tempfile.gettempdir())
                                              / f"uiaudit-{int(time.time())}.json"))
+    parser.add_argument("--baseline", default="/tmp/workspace-ui-baseline.json",
+                        help="phase-5 baseline report; new failures always fail")
     args = parser.parse_args()
     os.chdir(REPO_ROOT)
     # SIGTERM (a `timeout`, a closed terminal) must still reach the finally below,
@@ -173,14 +255,11 @@ def main() -> None:
                               "secret_key": stack.secret}), flush=True)
             stack.server.wait()
             return
-        report = asyncio.run(_run(stack, args))
+        report = _run_with_exception_capture(stack, args)
     finally:
         stack.down()
     Path(args.out).write_text(json.dumps(report, indent=1))
-    failed = report.get("crawl", {}).get("violations", []) + [
-        name for name, r in report.get("journeys", {}).items() if not r.get("ok")]
-    if report.get("persona_audit", {}).get("ok") is False:
-        failed.append("persona_audit")
+    failed = _failures(report)
     print(json.dumps({"report": args.out, "failed": failed}, indent=1))
     sys.exit(1 if failed else 0)
 

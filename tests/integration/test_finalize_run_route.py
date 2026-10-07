@@ -43,7 +43,7 @@ async def test_held_counts_match_a_fixture(db_session):
 async def test_run_page_shows_the_button_and_counts(client, db_session):
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN, email="fin-a@example.org")
     run = await _stopped_run(db_session)
-    resp = await client.get(f"/admin/activity/{run.id}", headers=auth_headers(admin.id))
+    resp = await client.get(f"/workspace/activity/{run.id}", headers=auth_headers(admin.id))
     assert resp.status_code == 200
     assert "Finalize run" in resp.text
     assert "2 open interviews" in resp.text and "1 ended" in resp.text
@@ -59,7 +59,7 @@ async def test_run_page_lists_in_doubt_claims(client, db_session):
                                   summary_claimed_at=datetime.now(UTC) - timedelta(minutes=30))
     db_session.add(stuck)
     await db_session.commit()
-    resp = await client.get(f"/admin/activity/{run.id}", headers=auth_headers(admin.id))
+    resp = await client.get(f"/workspace/activity/{run.id}", headers=auth_headers(admin.id))
     assert "Headlines in doubt (1)" in resp.text and str(stuck.id) in resp.text
 
 
@@ -91,7 +91,7 @@ async def test_finalize_is_refused_while_an_engine_is_alive(client, db_session, 
     run = await _stopped_run(db_session)
     resp = await client.post("/admin/simulation/finalize-run", data={"run_id": str(run.id), "confirm_run": str(run.id)[:8]},
                              headers=auth_headers(admin.id), follow_redirects=False)
-    assert resp.status_code == 302 and resp.headers["location"] == f"/admin/activity/{run.id}"
+    assert resp.status_code == 302 and resp.headers["location"] == f"/workspace/activity/{run.id}"
     assert session_flashes(resp) == [{
         "text": "An engine is running — Finalize run applies to a stopped run.", "kind": "error",
     }]

@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Workspace — Assessment — CoPI{% endblock %}
+{% block extra_head %}{% include "assessments/_head.html" %}{% endblock %}
+{% block content %}<div class="max-w-5xl mx-auto">
+<a href="{{ page_url(request, 'workspace_assessments', query={'run_id': run_id, 'sort': sort, 'lab': lab_filter or '', 'review': review, 'assignment': assignment}) }}" class="text-sm text-indigo-700 hover:underline">&larr; Opportunity Assessments</a>
+<h1 class="text-2xl font-bold text-gray-900 mt-1 mb-4">Assessment detail</h1>
+{% macro pi_link(a) %}{% if a.subject_agent_id and pi_user_id %}<a class="underline text-indigo-600 hover:text-indigo-800" href="{{ page_url(request, 'workspace_pi_detail', user_id=pi_user_id) }}">{{ a.subject_agent_id }}</a>{% else %}{{ a.subject_agent_id or "—" }}{% endif %}{% endmacro %}
+{% if permissions.admin %}<div class="mb-4"><a href="/admin/activity/{{ assessment.simulation_run_id }}/llm-calls?agent={{ assessment.agent_id | urlencode }}&amp;channel={{ assessment.channel_name | urlencode }}" class="inline-flex items-center px-3 py-1.5 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700">LLM calls for this interview</a></div>{% endif %}
+{% include "assessments/_detail_body.html" %}
+{% if permissions.admin %}    <details class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+        <summary class="cursor-pointer text-sm font-semibold text-gray-700 uppercase">
+            Raw verdict JSON
+        </summary>
+        {% if assessment.raw_verdict %}
+        <pre class="raw-verdict mt-3 text-sm bg-gray-50 p-3 rounded-lg overflow-x-auto max-h-96 overflow-y-auto whitespace-pre-wrap">{{ assessment.raw_verdict | tojson(indent=2) }}</pre>
+        <p class="text-sm text-gray-600 mt-2">
+            As emitted. <span class="font-mono">weighted_score</span> here is the
+            model's own arithmetic and is deliberately NOT what the page shows —
+            that number is recomputed from the dimension scores and the rubric
+            weights (src/services/blackbird_rubric.py).
+        </p>
+        {% else %}
+        <p class="text-sm text-gray-600 mt-3">
+            No raw verdict stored for this assessment.
+        </p>
+        {% endif %}
+    </details>{% endif %}</div>{% endblock %}

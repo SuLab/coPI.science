@@ -10,15 +10,15 @@ docs/plans/2026-08-28-human-review-feedback-implementation-plan.md):
     it — a reviewer must never reach manager writes, discussions, activity).
   - `get_pi_user` now also refuses a reviewer, alongside the existing manager
     denial (additive denylist — admins keep every PI write).
-  - Login/onboarding/profile GETs bounce a reviewer to /manager/assessments
+  - Login/onboarding/profile GETs bounce a reviewer to /workspace/assessments
     rather than rendering a PI page it can never complete.
   - Task 3 (below): the manager router actually admits a reviewer to exactly
     five read routes — GET /manager, /manager/pis, /manager/pis/{id},
-    /manager/assessments, /manager/assessments/{id} — and refuses it
+    /workspace/assessments, /workspace/assessments/{id} — and refuses it
     everywhere else on that router, and the manager templates render
     read-only for a reviewer (and for an admin impersonating one).
 
-The full follow-the-chain-to-200 assertion on /manager/assessments, deferred
+The full follow-the-chain-to-200 assertion on /workspace/assessments, deferred
 from Task 2 because the manager router did not yet admit a reviewer, is
 `test_reviewer_full_login_chain_terminates` below.
 """
@@ -197,7 +197,7 @@ async def test_reviewer_visiting_onboarding_is_bounced_and_enqueues_no_job(
         "/onboarding", headers=auth_headers(rev.id), follow_redirects=False
     )
     assert r.status_code == 302
-    assert r.headers["location"] == "/manager/assessments"
+    assert r.headers["location"] == "/workspace/assessments"
 
     count = await db_session.scalar(
         select(func.count(Job.id)).where(
@@ -216,23 +216,23 @@ async def test_reviewer_profile_and_edit_pages_redirect(client, db_session):
         "/profile", headers=auth_headers(rev.id), follow_redirects=False
     )
     assert r1.status_code == 302
-    assert r1.headers["location"] == "/manager/assessments"
+    assert r1.headers["location"] == "/workspace/assessments"
 
     r2 = await client.get(
         "/profile/edit", headers=auth_headers(rev.id), follow_redirects=False
     )
     assert r2.status_code == 302
-    assert r2.headers["location"] == "/manager/assessments"
+    assert r2.headers["location"] == "/workspace/assessments"
 
 
 # --- Task 3: the manager router's reviewer-visible read slice --------------
 
 REVIEWER_MANAGER_EXPECTATIONS = {
     ("GET", "/manager"): 302,
-    ("GET", "/manager/pis"): 200,
-    ("GET", "/manager/pis/{user_id}"): 200,
-    ("GET", "/manager/assessments"): 200,
-    ("GET", "/manager/assessments/{assessment_id}"): 200,
+    ("GET", "/manager/pis"): 302,
+    ("GET", "/manager/pis/{user_id}"): 302,
+    ("GET", "/manager/assessments"): 302,
+    ("GET", "/manager/assessments/{assessment_id}"): 302,
     ("GET", "/manager/discussions"): 403,
     ("GET", "/manager/activity"): 403,
     ("GET", "/manager/activity/{run_id}"): 403,
@@ -371,7 +371,7 @@ async def test_reviewer_nav_shows_review_link_and_nothing_else(client, db_sessio
     rev = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
     r = await client.get("/settings", headers=auth_headers(rev.id))
     assert r.status_code == 200
-    assert 'href="/manager/assessments"' in r.text
+    assert 'href="/workspace"' in r.text
     assert "My Profile" not in r.text
     assert "My Agent" not in r.text
     assert 'href="/admin/users"' not in r.text
@@ -379,9 +379,9 @@ async def test_reviewer_nav_shows_review_link_and_nothing_else(client, db_sessio
 
 async def test_reviewer_subnav_hides_staff_items(client, db_session):
     rev = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
-    body = (await client.get("/manager/pis", headers=auth_headers(rev.id))).text
-    assert 'href="/manager/pis"' in body
-    assert 'href="/manager/assessments"' in body
+    body = (await client.get("/workspace/pis", headers=auth_headers(rev.id))).text
+    assert 'href="/workspace/pis"' in body
+    assert 'href="/workspace/assessments"' in body
     assert "/manager/discussions" not in body
     assert "/manager/activity" not in body
 
@@ -397,8 +397,8 @@ async def test_reviewer_pi_detail_is_read_only(client, db_session):
     await set_tenure_start(pi.id, 2015, "manual", db=db_session)
     await db_session.flush()
 
-    body = (await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(rev.id))).text
-    assert 'action="/manager/pis/' not in body
+    body = (await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(rev.id))).text
+    assert 'action="/workspace/pis/' not in body
     assert ">Mute<" not in body
     assert ">Unmute<" not in body
     assert "gene-editing" in body
@@ -409,8 +409,8 @@ async def test_manager_still_sees_the_edit_form(client, db_session):
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)
     await factories.make_profile(db_session, user=pi)
-    body = (await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(mgr.id))).text
-    assert f'action="/manager/pis/{pi.id}/profile"' in body
+    body = (await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(mgr.id))).text
+    assert f'action="/workspace/pis/{pi.id}/profile"' in body
     assert 'name="jhu_tenure_start"' in body
 
 
@@ -425,14 +425,14 @@ async def test_admin_impersonating_a_reviewer_sees_no_staff_forms(client, db_ses
     await factories.make_agent(db_session, user=pi, status="active")
     headers = auth_headers(admin.id, impersonate=rev.id)
 
-    pis_body = (await client.get("/manager/pis", headers=headers)).text
+    pis_body = (await client.get("/workspace/pis", headers=headers)).text
     assert pis_body  # sanity: the page actually rendered (200, not a redirect body)
     # The Add-PI write form; the GET filter form (FN-04 Apply button) is a read.
-    assert '<form method="post" action="/manager/pis"' not in pis_body
-    assert '<form method="get" action="/manager/pis"' in pis_body
+    assert '<form method="post" action="/workspace/pis"' not in pis_body
+    assert '<form method="get" action="/workspace/pis"' in pis_body
 
-    detail_body = (await client.get(f"/manager/pis/{pi.id}", headers=headers)).text
-    assert 'action="/manager/pis/' not in detail_body
+    detail_body = (await client.get(f"/workspace/pis/{pi.id}", headers=headers)).text
+    assert 'action="/workspace/pis/' not in detail_body
     assert ">Mute<" not in detail_body
     assert ">Unmute<" not in detail_body
 
@@ -456,9 +456,9 @@ async def test_reviewer_is_denied_every_admin_route(client, db_session):
 
 
 async def test_reviewer_full_login_chain_terminates(client, db_session):
-    """reviewer -> /profile -> /manager/assessments, with no loop. Task 2
+    """reviewer -> /profile -> /workspace/assessments, with no loop. Task 2
     stopped at the 302 (test_reviewer_profile_and_edit_pages_redirect above);
-    now that Task 3 admits a reviewer to /manager/assessments, the full chain
+    now that Task 3 admits a reviewer to /workspace/assessments, the full chain
     is assertable. Mirrors
     test_manager_onboarding.py::test_manager_profile_url_bounce_terminates,
     including its cookie-jar seeding comment trick: httpx strips a
@@ -472,14 +472,14 @@ async def test_reviewer_full_login_chain_terminates(client, db_session):
     client.cookies.set(session_cookie_name(), cookie_value)
     r = await client.get("/profile", follow_redirects=True)
     assert r.status_code == 200
-    assert str(r.url).endswith("/manager/assessments")
+    assert str(r.url).endswith("/workspace/assessments")
 
 
 async def test_reviewer_sees_the_review_columns_on_manager_assessments(
     client, db_session
 ):
     """Task 7: the Assigned/Reviewed-by columns and the approval-status chip
-    are not staff-only — a reviewer reaches the same /manager/assessments
+    are not staff-only — a reviewer reaches the same /workspace/assessments
     page (Task 3) and must see the same names and chip a manager/admin does.
     Clone of test_assessment_queue_controls.py::test_list_pages_show_reviewer_columns,
     for the one role that page doesn't already parametrize over."""
@@ -491,7 +491,7 @@ async def test_reviewer_sees_the_review_columns_on_manager_assessments(
     # fixture carries feedback, so it lives on the Reviewed tab now.
     html = (
         await client.get(
-            f"/manager/assessments?run_id={run.id}&review=all",
+            f"/workspace/assessments?run_id={run.id}&review=all",
             headers=auth_headers(rev.id),
         )
     ).text

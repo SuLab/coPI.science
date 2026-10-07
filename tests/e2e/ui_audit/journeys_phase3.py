@@ -26,9 +26,6 @@ from tests.e2e.ui_audit.seed import (
     P3_SUGGESTED_COMPANY,
 )
 
-ADMIN_SECTIONS = ["Users", "Jobs", "Activity", "Discussions", "Agents", "Assessments",
-                  "Cohorts", "Access", "Simulation", "Prompt Suggestions"]
-
 _CSP_COLLECTOR_JS = (
     "window.__cspViolations = [];\n"
     "document.addEventListener('securitypolicyviolation', (e) => {\n"
@@ -101,49 +98,42 @@ _NAV_STATE_JS = """() => {
       text: a.textContent.trim(),
       highlighted: a.classList.contains('text-indigo-600') && a.classList.contains('font-semibold')}))
     : null;
-  const topAdmin = [...document.querySelectorAll('nav a[href="/admin/users"]')]
-    .find((a) => a.textContent.trim() === 'Admin');
+  const topWorkspace = [...document.querySelectorAll('nav[aria-label="Main"] a')]
+    .find((a) => a.textContent.trim() === 'Workspace');
   return {
     admin: links(document.querySelector('nav[aria-label="Admin sections"]')),
-    manager: links(document.querySelector('nav[aria-label="Manager sections"]')),
-    top_admin_highlighted: topAdmin ? topAdmin.classList.contains('text-indigo-600') : null,
+    workspace: links(document.querySelector('nav[aria-label="Workspace sections"]')),
+    top_workspace_highlighted: topWorkspace ? topWorkspace.classList.contains('text-indigo-600') : null,
   };
 }"""
 
 
 def _admin_nav_ok(state: dict) -> bool:
-    admin = state["admin"]
+    workspace = state["workspace"]
     return (
-        admin is not None
-        and [a["text"] for a in admin] == ADMIN_SECTIONS
-        and [a["text"] for a in admin if a["highlighted"]] == ["Prompt Suggestions"]
-        and state["manager"] is None
-        and state["top_admin_highlighted"] is True
+        workspace is not None
+        and [a["text"] for a in workspace if a["highlighted"]] == ["Prompt Suggestions"]
+        and state["top_workspace_highlighted"] is True
     )
 
 
 def _manager_nav_ok(state: dict) -> bool:
-    manager = state["manager"]
-    return (
-        state["admin"] is None
-        and manager is not None
-        and [a["text"] for a in manager if a["highlighted"]] == ["Prompt Suggestions"]
-    )
+    return _admin_nav_ok(state)
 
 
 async def journey_admin_nav_round_trip(h) -> dict:
-    """Spec §4: an admin who follows the admin sub-nav to Prompt Suggestions keeps the
-    admin sub-nav (all ten sections, Prompt Suggestions highlighted, top-bar Admin
-    highlighted) and gets no manager sub-nav, on the list and on a suggestion's detail
-    page. A manager on the same two URLs sees the manager sub-nav only."""
-    detail_path = f"/manager/prompt-suggestions/{h.ids['p3_prompt_suggestion']}"
+    """An admin and manager retain the shared Workspace navigation on prompt pages."""
+    detail_path = f"/workspace/prompt-suggestions/{h.ids['p3_prompt_suggestion']}"
     states: dict[str, dict] = {}
     ctx, page, log, csp = await _open(h, "admin")
     try:
         await _goto(h, page, "/admin/users", csp)
-        link = page.locator('nav[aria-label="Admin sections"]').get_by_role(
-            "link", name="Prompt Suggestions", exact=True)
+        link = page.locator('nav[aria-label="Main"]').get_by_role(
+            "link", name="Workspace", exact=True)
         await _submit(h, page, link, csp)
+        await _submit(h, page, page.locator(
+            'nav[aria-label="Workspace sections"]').get_by_role(
+                "link", name="Prompt Suggestions", exact=True), csp)
         states["admin list"] = {"path": page.url.replace(h.base_url, ""),
                                 **await page.evaluate(_NAV_STATE_JS)}
         await _submit(h, page, page.locator(f'main a[href="{detail_path}"]').first, csp)
@@ -154,7 +144,7 @@ async def journey_admin_nav_round_trip(h) -> dict:
         await ctx.close()
     ctx, page, log, csp = await _open(h, "manager")
     try:
-        for name, path in (("manager list", "/manager/prompt-suggestions"),
+        for name, path in (("manager list", "/workspace/prompt-suggestions"),
                            ("manager detail", detail_path)):
             await _goto(h, page, path, csp)
             states[name] = {"path": page.url.replace(h.base_url, ""),
@@ -163,7 +153,7 @@ async def journey_admin_nav_round_trip(h) -> dict:
     finally:
         await ctx.close()
     ok = (
-        states["admin list"]["path"] == "/manager/prompt-suggestions"
+        states["admin list"]["path"] == "/workspace/prompt-suggestions"
         and states["admin detail"]["path"] == detail_path
         and _admin_nav_ok(states["admin list"]) and _admin_nav_ok(states["admin detail"])
         and _manager_nav_ok(states["manager list"]) and _manager_nav_ok(states["manager detail"])
@@ -256,9 +246,9 @@ async def journey_gate_lines(h) -> dict:
     try:
         detail = {}
         for name, aid in (("gated", gated), ("ungated", ungated)):
-            await _goto(h, page, f"/admin/assessments/{aid}", csp)
+            await _goto(h, page, f"/workspace/assessments/{aid}", csp)
             detail[name] = await page.evaluate(_SIGNAL_GATES_JS)
-        await _goto(h, page, f"/admin/assessments?run_id={h.ids['run']}", csp)
+        await _goto(h, page, f"/workspace/assessments?run_id={h.ids['run']}", csp)
         card = {}
         for name, aid in (("gated", gated), ("ungated", ungated)):
             summary = page.locator(f'[id="a-{aid}"] details.assessment-card-scores > summary')
@@ -344,8 +334,8 @@ async def journey_key_point_labels_and_companies(h) -> dict:
     aid = h.ids["p3_assessment_gated"]
     results: dict[str, dict] = {}
     logs: dict[str, dict] = {}
-    for role, path in (("admin", f"/admin/assessments/{aid}"),
-                       ("manager", f"/manager/assessments/{aid}")):
+    for role, path in (("admin", f"/workspace/assessments/{aid}"),
+                       ("manager", f"/workspace/assessments/{aid}")):
         ctx, page, log, csp = await _open(h, role)
         try:
             await _goto(h, page, path, csp)
@@ -383,14 +373,14 @@ _CARD_STATE_JS = """() => {
 
 
 async def journey_companies_card(h) -> dict:
-    """Spec §7.2, as a manager on /manager/pis/{id}: a manual add appears under
+    """Spec §7.2, as a manager on /workspace/pis/{id}: a manual add appears under
     Confirmed; confirming the seeded suggestion moves it to Confirmed; a second manual
     add removed again (Delete, accepting its data-confirm dialog, the only removal a
     confirmed entry has) is gone from the card; Find companies leaves the button
     disabled with exactly one Company Discovery job row, and a second POST to the
     discover route adds none."""
     pi = h.ids["p3_pi"]
-    path = f"/manager/pis/{pi}"
+    path = f"/workspace/pis/{pi}"
     stamp = time.time_ns() % 10**8
     manual, removed = f"Manual Add Co {stamp}", f"Short Lived Co {stamp}"
     steps: dict[str, dict] = {}
@@ -399,7 +389,7 @@ async def journey_companies_card(h) -> dict:
         await _goto(h, page, path, csp)
         steps["initial"] = await page.evaluate(_CARD_STATE_JS)
 
-        add_form = page.locator(f'form[action="/manager/pis/{pi}/companies"]')
+        add_form = page.locator(f'form[action="/workspace/pis/{pi}/companies"]')
 
         async def add(name: str) -> None:
             await page.fill("#company-name", name)
@@ -411,13 +401,13 @@ async def journey_companies_card(h) -> dict:
         steps["added"] = {**await page.evaluate(_CARD_STATE_JS), "flash": await _flash(page)}
 
         confirm = page.locator(
-            f'form[action="/manager/pis/{pi}/companies/{h.ids["p3_company_suggested"]}/confirm"]'
+            f'form[action="/workspace/pis/{pi}/companies/{h.ids["p3_company_suggested"]}/confirm"]'
             " button[type=submit]")
         await _submit(h, page, confirm, csp)
         steps["confirmed"] = {**await page.evaluate(_CARD_STATE_JS), "flash": await _flash(page)}
 
         reject = page.locator(
-            f'form[action="/manager/pis/{pi}/companies/{h.ids["p3_company_to_reject"]}/reject"]'
+            f'form[action="/workspace/pis/{pi}/companies/{h.ids["p3_company_to_reject"]}/reject"]'
             " button[type=submit]")
         await _submit(h, page, reject, csp)
         steps["rejected"] = {**await page.evaluate(_CARD_STATE_JS), "flash": await _flash(page)}
@@ -431,7 +421,7 @@ async def journey_companies_card(h) -> dict:
 
         await _submit(h, page, page.locator("#find-companies"), csp)
         steps["discovery"] = {**await page.evaluate(_CARD_STATE_JS), "flash": await _flash(page)}
-        again = await page.request.post(h.base_url + f"/manager/pis/{pi}/companies/discover",
+        again = await page.request.post(h.base_url + f"/workspace/pis/{pi}/companies/discover",
                                         headers={"Origin": h.base_url})
         await _goto(h, page, path, csp)
         steps["discovery_again"] = {**await page.evaluate(_CARD_STATE_JS),
@@ -471,23 +461,23 @@ async def journey_companies_card(h) -> dict:
 async def journey_corpus_and_draft_review(h) -> dict:
     """Staff can resolve all seeded review cards, while a reviewer sees none of them."""
     pi = h.ids["p3_pi"]
-    path = f"/manager/pis/{pi}"
+    path = f"/workspace/pis/{pi}"
     steps: dict[str, str] = {}
     ctx, page, log, csp = await _open(h, "manager")
     try:
         await _goto(h, page, path, csp)
         steps["initial"] = await page.locator("body").inner_text()
         await _submit(h, page, page.locator(
-            f'form[action="/manager/pis/{pi}/persona/reexport"] button'), csp)
+            f'form[action="/workspace/pis/{pi}/persona/reexport"] button'), csp)
         steps["reexported"] = await page.locator("body").inner_text()
         await _submit(h, page, page.locator(
-            f'form[action="/manager/pis/{pi}/candidates/{h.ids["p3_candidate"]}/accept"] button'), csp)
+            f'form[action="/workspace/pis/{pi}/candidates/{h.ids["p3_candidate"]}/accept"] button'), csp)
         steps["accepted"] = await page.locator("body").inner_text()
         await _submit(h, page, page.locator(
-            f'form[action="/manager/pis/{pi}/publications/{h.ids["p3_unanchored"]}/exclude"] button'), csp)
+            f'form[action="/workspace/pis/{pi}/publications/{h.ids["p3_unanchored"]}/exclude"] button'), csp)
         steps["excluded"] = await page.locator("body").inner_text()
         await _submit(h, page, page.locator(
-            f'form[action="/manager/pis/{pi}/draft/discard"] button'), csp)
+            f'form[action="/workspace/pis/{pi}/draft/discard"] button'), csp)
         steps["discarded"] = await page.locator("body").inner_text()
         manager_clean = _clean(log, csp)
     finally:
@@ -501,7 +491,7 @@ async def journey_corpus_and_draft_review(h) -> dict:
         await ctx.close()
     checks = {
         "initial_cards": all(text in steps["initial"] for text in (
-            "P3 candidate paper", "P3 unanchored paper", "P3 draft summary.",
+            "P3 candidate paper", "P3 unanchored paper", h.ids["phase5_private"]["draft"],
             "Persona file out of date")),
         "candidate_accepted": "Paper added to the corpus." in steps["accepted"]
         and "P3 candidate paper" not in steps["accepted"],

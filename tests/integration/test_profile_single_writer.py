@@ -88,7 +88,7 @@ async def test_each_route_exports_the_same_bytes_as_the_export_function(
         route, actor, form, summary = _routes(user, agent)[which]
     else:
         full = {"name": user.name, "email": user.email, "institution": "JHU", "department": "Bio", **_POSTED}
-        route, actor, form, summary = f"/manager/pis/{user.id}/profile", manager, full, None
+        route, actor, form, summary = f"/workspace/pis/{user.id}/profile", manager, full, None
     r = await client.post(route, data={**form, "profile_version": "1"},
                           headers=auth_headers(actor.id), follow_redirects=False)
     assert r.status_code == 302

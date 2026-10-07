@@ -131,7 +131,7 @@ async def journey_chat_sanitizer_vendored(h) -> dict:
     context, page, _log = await h.page("admin")
     try:
         await page.goto(
-            h.base_url + _seed_path("/admin/assessments/{a0}", h.ids), wait_until="networkidle"
+            h.base_url + _seed_path("/workspace/assessments/{a0}", h.ids), wait_until="networkidle"
         )
         srcs = await page.evaluate(
             "() => [...document.scripts].map((s) => s.getAttribute('src')).filter(Boolean)"
@@ -187,11 +187,12 @@ async def journey_ui_behaviours(h) -> dict:
     out: dict = {}
     try:
         await page.goto(f"{base}/admin/users", wait_until="networkidle")
-        row = page.locator("tr[data-row-href]").first
+        row = page.locator(f'tr[data-row-href="/admin/users/{h.ids["pi"]}"]')
         want = await row.get_attribute("data-row-href")
+        expected = f'{base}/workspace/pis/{h.ids["pi"]}#account'
         await row.locator("td").first.click()
-        await page.wait_for_url(f"{base}{want}")
-        out["row_href"] = page.url == f"{base}{want}"
+        await page.wait_for_url(expected)
+        out["row_href"] = want == f'/admin/users/{h.ids["pi"]}' and page.url == expected
 
         await page.goto(f"{base}/admin/users", wait_until="networkidle")
         async with context.expect_page() as popup_info:
@@ -215,7 +216,7 @@ async def journey_ui_behaviours(h) -> dict:
         hidden = not await page.locator("#new-cohort-form").is_visible()
         out["toggle"] = shown and hidden and expanded == "true"
 
-        await page.goto(f"{base}/admin/assessments", wait_until="networkidle")
+        await page.goto(f"{base}/workspace/assessments", wait_until="networkidle")
         sort = page.locator("#assessments-sort-select")
         current = await sort.input_value()
         values = await sort.locator("option").evaluate_all("(os) => os.map((o) => o.value)")
@@ -240,26 +241,26 @@ CSP_PAGES: tuple[tuple[str, str], ...] = (
     ("admin", "/admin/users"),
     ("admin", "/admin/users/{pi}"),
     ("admin", "/admin/jobs"),
-    ("admin", "/admin/activity"),
-    ("admin", "/admin/activity/{run}"),
-    ("admin", "/admin/discussions"),
+    ("admin", "/workspace/activity"),
+    ("admin", "/workspace/activity/{run}"),
+    ("admin", "/workspace/discussions"),
     ("admin", "/admin/agents"),
-    ("admin", "/admin/assessments"),
-    ("admin", "/admin/assessments/{a0}"),
+    ("admin", "/workspace/assessments"),
+    ("admin", "/workspace/assessments/{a0}"),
     ("admin", "/admin/cohorts"),
     ("admin", "/admin/cohorts/topology"),
     ("admin", "/admin/access-requests"),
     ("admin", "/admin/simulation"),
     ("admin", "/admin/simulation?run={run}"),
-    ("admin", "/manager/prompt-suggestions"),
-    ("manager", "/manager/pis"),
-    ("manager", "/manager/pis/{pi}"),
-    ("manager", "/manager/assessments"),
-    ("manager", "/manager/assessments/{a0}"),
-    ("manager", "/manager/discussions"),
-    ("manager", "/manager/activity"),
-    ("manager", "/manager/activity/{run}"),
-    ("reviewer", "/manager/assessments/{a0}"),
+    ("admin", "/workspace/prompt-suggestions"),
+    ("manager", "/workspace/pis"),
+    ("manager", "/workspace/pis/{pi}"),
+    ("manager", "/workspace/assessments"),
+    ("manager", "/workspace/assessments/{a0}"),
+    ("manager", "/workspace/discussions"),
+    ("manager", "/workspace/activity"),
+    ("manager", "/workspace/activity/{run}"),
+    ("reviewer", "/workspace/assessments/{a0}"),
     ("pi", "/profile"),
     ("pi", "/profile/edit"),
     ("pi", "/settings"),
@@ -323,15 +324,15 @@ JOURNEYS += [journey_csp_report_only]
 PARITY_PAGES: tuple[tuple[str, str], ...] = (
     ("admin", "/admin/users"),
     ("admin", "/admin/jobs"),
-    ("admin", "/admin/activity"),
-    ("admin", "/admin/discussions"),
+    ("admin", "/workspace/activity"),
+    ("admin", "/workspace/discussions"),
     ("admin", "/admin/agents"),
-    ("admin", "/admin/assessments"),
-    ("admin", "/admin/assessments/{a0}"),
+    ("admin", "/workspace/assessments"),
+    ("admin", "/workspace/assessments/{a0}"),
     ("admin", "/admin/cohorts"),
     ("admin", "/admin/cohorts/topology"),
-    ("manager", "/manager/pis"),
-    ("manager", "/manager/assessments/{a0}"),
+    ("manager", "/workspace/pis"),
+    ("manager", "/workspace/assessments/{a0}"),
     ("pi", "/profile"),
     ("pi", "/settings"),
 )
@@ -573,7 +574,7 @@ async def journey_confirm_review_delete(h) -> dict:
     context, page, log = await h.page("admin", answer_dialogs=False)
     dialogs = _Dialogs(page)
     marker = f"journey-delete-{int(time.time())}"
-    url = f"{h.base_url}/admin/assessments/{h.ids['assessments'][0]}"
+    url = f"{h.base_url}/workspace/assessments/{h.ids['assessments'][0]}"
     await page.goto(url)
     await page.select_option("#add-score", "3")
     await page.select_option("#add-mode", "learn")
@@ -640,7 +641,7 @@ async def journey_chat_focus_after_answer(h) -> dict:
     """B-06: the question box is read-only (not disabled) while answering and holds focus
     once the answer finishes."""
     context, page, log = await h.page("admin")
-    await page.goto(f"{h.base_url}/admin/assessments/{h.ids['assessments'][0]}")
+    await page.goto(f"{h.base_url}/workspace/assessments/{h.ids['assessments'][0]}")
     opener = page.locator("[data-chat-open]").first
     if await opener.count() == 0:
         await context.close()
@@ -672,14 +673,14 @@ async def journey_contrast_zero(h) -> dict:
     run, pi = h.ids["run"], h.ids["pi"]
     routes = [
         "/login", "/access-pending", "/settings", "/profile", "/profile/edit", "/agent",
-        "/admin/users", f"/admin/users/{pi}", "/admin/jobs", "/admin/activity",
-        f"/admin/activity/{run}", f"/admin/activity/{run}/llm-calls", "/admin/discussions",
-        "/admin/agents", "/admin/assessments", "/admin/cohorts", "/admin/cohorts/topology",
-        "/admin/access-requests", "/admin/simulation", "/manager/pis", f"/manager/pis/{pi}",
-        "/manager/assessments", "/manager/discussions", "/manager/activity",
-        f"/manager/activity/{run}", "/manager/slack-bots", "/manager/prompt-suggestions",
-        *[f"/admin/assessments/{a}" for a in h.ids["assessments"]],
-        *[f"/manager/assessments/{a}" for a in h.ids["assessments"]],
+        "/admin/users", f"/admin/users/{pi}", "/admin/jobs", "/workspace/activity",
+        f"/workspace/activity/{run}", f"/admin/activity/{run}/llm-calls", "/workspace/discussions",
+        "/admin/agents", "/workspace/assessments", "/admin/cohorts", "/admin/cohorts/topology",
+        "/admin/access-requests", "/admin/simulation", "/workspace/pis", f"/workspace/pis/{pi}",
+        "/workspace/assessments", "/workspace/discussions", "/workspace/activity",
+        f"/workspace/activity/{run}", "/workspace/slack-bots", "/workspace/prompt-suggestions",
+        *[f"/workspace/assessments/{a}" for a in h.ids["assessments"]],
+        *[f"/workspace/assessments/{a}" for a in h.ids["assessments"]],
     ]
     violations: list[str] = []
     for role in _ROLES:
@@ -714,7 +715,7 @@ async def journey_confirm_finalize(h) -> dict:
     context, page, log = await h.page("admin", answer_dialogs=False)
     dialogs = _Dialogs(page)
     posts = _posts(page, "/admin/simulation/finalize-run")
-    url = f"{h.base_url}/admin/activity/{run_id}"
+    url = f"{h.base_url}/workspace/activity/{run_id}"
     button = page.locator('form[action="/admin/simulation/finalize-run"] button')
 
     await page.goto(url)

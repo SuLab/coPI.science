@@ -88,7 +88,7 @@ async def test_a_live_row_with_reasons_shows_each_reason_under_its_rubric_title(
     user = admin
     if surface == "manager":
         user = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
-    body = await _body(client, f"/{surface}/assessments/{row.id}", user)
+    body = await _body(client, f"/workspace/assessments/{row.id}", user)
     columns = _signal_columns(body)
     live = load_rubric().gating
     for key, reason in REASONS.items():
@@ -105,7 +105,7 @@ async def test_a_live_row_with_reasons_shows_each_reason_under_its_rubric_title(
 
 async def test_gate_rows_carry_no_tooltip_and_no_info_glyph(client, db_session, admin):
     _run, row = await _seed(db_session, LIVE)
-    body = await _body(client, f"/admin/assessments/{row.id}", admin)
+    body = await _body(client, f"/workspace/assessments/{row.id}", admin)
     tags = re.findall(r'<li class="[^"]*signal-source-gating[^"]*"([^>]*)>', _signals_card(body))
     assert len(tags) == 3
     assert all(extra.strip() == "" for extra in tags), tags
@@ -117,7 +117,7 @@ async def test_gate_rows_carry_no_tooltip_and_no_info_glyph(client, db_session, 
 
 async def test_a_live_row_without_reasons_shows_every_rubric_definition(client, db_session, admin):
     _run, row = await _seed(db_session, LIVE)
-    body = await _body(client, f"/admin/assessments/{row.id}", admin)
+    body = await _body(client, f"/workspace/assessments/{row.id}", admin)
     columns = _signal_columns(body)
     live = load_rubric().gating
     for key in GATING:
@@ -129,7 +129,7 @@ async def test_a_live_row_without_reasons_shows_every_rubric_definition(client, 
 @pytest.mark.parametrize("stamp", [V340, V320], ids=["3.4.0", "3.2.0"])
 async def test_an_archived_row_shows_its_registry_definitions(client, db_session, admin, stamp):
     _run, row = await _seed(db_session, stamp)
-    body = await _body(client, f"/admin/assessments/{row.id}", admin)
+    body = await _body(client, f"/workspace/assessments/{row.id}", admin)
     registry = resolve_revision(*stamp)[0].gating
     assert registry, "the registry entry must carry gate tables (Task B1)"
     columns = _signal_columns(body)
@@ -144,7 +144,7 @@ async def test_an_unrecognised_revision_keeps_bare_labels_and_still_shows_reason
     client, db_session, admin
 ):
     _run, row = await _seed(db_session, UNKNOWN, {"credible_science": REASONS["credible_science"]})
-    body = await _body(client, f"/admin/assessments/{row.id}", admin)
+    body = await _body(client, f"/workspace/assessments/{row.id}", admin)
     assert "Rubric definition:" not in body
     _strengths, risks, unestablished = _signal_columns(body)
     assert "credible science" in risks
@@ -159,7 +159,7 @@ async def test_a_malformed_stored_reason_map_falls_back_to_the_definitions(
     client, db_session, admin
 ):
     _run, row = await _seed(db_session, LIVE, {"credible_science": 5, "life_sciences_domain": "  "})
-    body = await _body(client, f"/admin/assessments/{row.id}", admin)
+    body = await _body(client, f"/workspace/assessments/{row.id}", admin)
     strengths, risks, _unestablished = _signal_columns(body)
     live = load_rubric().gating
     assert _definition_line(live["credible_science"]["description"]) in risks
@@ -169,7 +169,7 @@ async def test_a_malformed_stored_reason_map_falls_back_to_the_definitions(
 async def test_the_list_card_gives_each_gate_its_own_line(client, db_session, admin):
     run, _row = await _seed(db_session, V340, {"credible_science": REASONS["credible_science"]})
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
     scores = _details_slice(html, "assessment-card-scores")
     registry = resolve_revision(*V340)[0].gating
@@ -194,7 +194,7 @@ async def test_an_unstamped_list_card_keeps_bare_labels_and_no_definition(
 ):
     run, _row = await _seed(db_session, (None, None))
     html = (await client.get(
-        f"/admin/assessments?run_id={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/assessments?run_id={run.id}", headers=auth_headers(admin.id)
     )).text
     scores = _details_slice(html, "assessment-card-scores")
     assert _gating_state_for(html, "life sciences domain") == "met"

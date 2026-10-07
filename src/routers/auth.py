@@ -28,6 +28,7 @@ from src.services.session_epoch import (
 )
 from src.services.user_email import assign_user_email
 from src.web.templating import make_templates
+from src.web.urls import page_url
 
 templates = make_templates()
 
@@ -301,9 +302,9 @@ def _post_login_redirect(request: Request, user: User) -> RedirectResponse:
     if next_url:
         return RedirectResponse(url=next_url, status_code=302)
     if user.is_manager:
-        return RedirectResponse(url="/manager/pis", status_code=302)
+        return RedirectResponse(url=page_url(request, "workspace_pis"), status_code=302)
     if user.is_reviewer:
-        return RedirectResponse(url="/manager/assessments", status_code=302)
+        return RedirectResponse(url=page_url(request, "workspace_assessments"), status_code=302)
     return RedirectResponse(url="/profile", status_code=302)
 
 

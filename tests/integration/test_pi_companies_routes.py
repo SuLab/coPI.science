@@ -1,4 +1,4 @@
-"""The Companies card on /manager/pis/{id} and its five routes (spec 2026-10-02 §7.2): add,
+"""The Companies card on /workspace/pis/{id} and its five routes (spec 2026-10-02 §7.2): add,
 delete, confirm, reject and discover, each staff-only, each flashing on a refused write and
 returning to the card. Review Focus #5: two Find companies presses, or a press behind a
 pending bulk job, leave exactly one job row, at interactive priority."""
@@ -22,7 +22,7 @@ from src.models import (
     PiCompany,
 )
 from src.models.job import BULK_PRIORITY, INTERACTIVE_PRIORITY
-from src.routers import manager as manager_routes
+from src.routers.workspace import pi_evidence as manager_routes
 from src.services.company_discovery import DISCOVERY_DONE_STEP
 from tests import factories
 from tests.flash_support import session_flashes
@@ -61,7 +61,7 @@ async def _pi_agent_manager(db_session):
 
 def _back_to_the_card(r, pi) -> None:
     assert r.status_code == 302, r.status_code
-    assert r.headers["location"] == f"/manager/pis/{pi.id}#companies"
+    assert r.headers["location"] == f"/workspace/pis/{pi.id}#companies"
 
 
 def _card(body: str) -> str:
@@ -77,7 +77,7 @@ async def _discovery_jobs(db_session, pi) -> list[Job]:
 
 async def test_add_confirms_at_once_and_writes_the_hub_file(client, db_session, _companies_dir):
     pi, agent, manager = await _pi_agent_manager(db_session)
-    r = await client.post(f"/manager/pis/{pi.id}/companies", data=_ADD,
+    r = await client.post(f"/workspace/pis/{pi.id}/companies", data=_ADD,
                           headers=auth_headers(manager.id), follow_redirects=False)
     _back_to_the_card(r, pi)
     row = (await db_session.execute(select(PiCompany).where(PiCompany.user_id == pi.id))).scalar_one()
@@ -100,7 +100,7 @@ async def test_a_refused_add_flashes_and_writes_nothing(
     client, db_session, _companies_dir, field, value, message
 ):
     pi, agent, manager = await _pi_agent_manager(db_session)
-    r = await client.post(f"/manager/pis/{pi.id}/companies", data={**_ADD, field: value},
+    r = await client.post(f"/workspace/pis/{pi.id}/companies", data={**_ADD, field: value},
                           headers=auth_headers(manager.id), follow_redirects=False)
     _back_to_the_card(r, pi)
     flash = session_flashes(r)[-1]
@@ -115,7 +115,7 @@ async def test_a_refused_add_flashes_and_writes_nothing(
 async def test_a_name_already_suggested_is_refused_by_name(client, db_session):
     pi, _agent, manager = await _pi_agent_manager(db_session)
     await seed_company(db_session, pi, company_name="Delfi Diagnostics, Inc.")
-    r = await client.post(f"/manager/pis/{pi.id}/companies",
+    r = await client.post(f"/workspace/pis/{pi.id}/companies",
                           data={**_ADD, "company_name": "DELFI Diagnostics"},
                           headers=auth_headers(manager.id), follow_redirects=False)
     _back_to_the_card(r, pi)
@@ -126,25 +126,25 @@ async def test_delete_asks_first_then_rejects_the_row_and_removes_the_file(
     client, db_session, _companies_dir
 ):
     pi, agent, manager = await _pi_agent_manager(db_session)
-    await client.post(f"/manager/pis/{pi.id}/companies", data=_ADD,
+    await client.post(f"/workspace/pis/{pi.id}/companies", data=_ADD,
                       headers=auth_headers(manager.id), follow_redirects=False)
     row = (await db_session.execute(select(PiCompany).where(PiCompany.user_id == pi.id))).scalar_one()
-    page = (await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))).text
+    page = (await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(manager.id))).text
     assert re.search(
-        rf'action="/manager/pis/{pi.id}/companies/{row.id}/delete"\s+data-confirm="Remove ', page)
+        rf'action="/workspace/pis/{pi.id}/companies/{row.id}/delete"\s+data-confirm="Remove ', page)
 
-    r = await client.post(f"/manager/pis/{pi.id}/companies/{row.id}/delete",
+    r = await client.post(f"/workspace/pis/{pi.id}/companies/{row.id}/delete",
                           headers=auth_headers(manager.id), follow_redirects=False)
     _back_to_the_card(r, pi)
     assert "discovery will not suggest it again" in session_flashes(r)[-1]["text"]
     row = await db_session.get(PiCompany, row.id, populate_existing=True)
     assert row.status == "rejected" and row.reviewed_by_user_id == manager.id
     assert not (_companies_dir / f"{agent.agent_id}.md").exists()
-    card = _card((await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))).text)
+    card = _card((await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(manager.id))).text)
     assert f"/companies/{row.id}/" not in card and "Belay Diagnostics" not in card
 
 
-async def test_find_companies_refuses_on_a_lock_timeout(engine, monkeypatch):
+async def test_find_companies_refuses_on_a_lock_timeout(engine, monkeypatch, asgi_app):
     """A generation's step 10 holding the pending discovery job (request_job): Find
     companies gives up after DISCOVERY_ENQUEUE_LOCK_TIMEOUT and queues nothing."""
     monkeypatch.setattr(manager_routes, "DISCOVERY_ENQUEUE_LOCK_TIMEOUT", "200ms")
@@ -161,8 +161,8 @@ async def test_find_companies_refuses_on_a_lock_timeout(engine, monkeypatch):
             await holder.execute(text("SELECT 1 FROM jobs WHERE id = :i FOR UPDATE"), {"i": job.id})
             session = {}
             async with factory() as s2:
-                resp = await asyncio.wait_for(manager_routes.manager_discover_companies(
-                    pi.id, request=SimpleNamespace(session=session), db=s2, current_user=mgr,
+                resp = await asyncio.wait_for(manager_routes.workspace_discover_companies(
+                    pi.id, request=SimpleNamespace(session=session, app=asgi_app), db=s2, current_user=mgr,
                 ), timeout=10)
             assert resp.status_code == 302 and "try again" in session["_flashes"][-1]["text"]
             await holder.rollback()
@@ -178,12 +178,12 @@ async def test_find_companies_refuses_on_a_lock_timeout(engine, monkeypatch):
 
 async def test_a_deleted_company_can_be_added_back(client, db_session, _companies_dir):
     pi, agent, manager = await _pi_agent_manager(db_session)
-    await client.post(f"/manager/pis/{pi.id}/companies", data=_ADD,
+    await client.post(f"/workspace/pis/{pi.id}/companies", data=_ADD,
                       headers=auth_headers(manager.id), follow_redirects=False)
     row = (await db_session.execute(select(PiCompany).where(PiCompany.user_id == pi.id))).scalar_one()
-    await client.post(f"/manager/pis/{pi.id}/companies/{row.id}/delete",
+    await client.post(f"/workspace/pis/{pi.id}/companies/{row.id}/delete",
                       headers=auth_headers(manager.id), follow_redirects=False)
-    r = await client.post(f"/manager/pis/{pi.id}/companies", data=_ADD,
+    r = await client.post(f"/workspace/pis/{pi.id}/companies", data=_ADD,
                           headers=auth_headers(manager.id), follow_redirects=False)
     _back_to_the_card(r, pi)
     again = (await db_session.execute(
@@ -199,11 +199,11 @@ async def test_a_delete_under_impersonation_logs_the_real_session_holder(
 ):
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     pi, _agent, manager = await _pi_agent_manager(db_session)
-    await client.post(f"/manager/pis/{pi.id}/companies", data=_ADD,
+    await client.post(f"/workspace/pis/{pi.id}/companies", data=_ADD,
                       headers=auth_headers(manager.id), follow_redirects=False)
     row = (await db_session.execute(select(PiCompany).where(PiCompany.user_id == pi.id))).scalar_one()
     with caplog.at_level("WARNING"):
-        await client.post(f"/manager/pis/{pi.id}/companies/{row.id}/delete",
+        await client.post(f"/workspace/pis/{pi.id}/companies/{row.id}/delete",
                           headers=impersonation_headers(admin.id, manager.id),
                           follow_redirects=False)
     row = await db_session.get(PiCompany, row.id, populate_existing=True)
@@ -219,7 +219,7 @@ async def test_a_deferred_discovery_says_until_when(client, db_session):
                                   "the daily COI extraction budget is spent",
                        payload={"user_id": str(pi.id)}))
     await db_session.flush()
-    card = _card((await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))).text)
+    card = _card((await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(manager.id))).text)
     assert "waiting for the daily COI extraction budget until 2026-10-07 09:30 UTC" in card
 
 
@@ -227,7 +227,7 @@ async def test_confirm_takes_the_corrections_from_the_form(client, db_session, _
     pi, agent, manager = await _pi_agent_manager(db_session)
     row = await seed_company(db_session, pi)
     r = await client.post(
-        f"/manager/pis/{pi.id}/companies/{row.id}/confirm",
+        f"/workspace/pis/{pi.id}/companies/{row.id}/confirm",
         data={"pi_role": "co_founder", "funding_usd": "250000000", "funding_as_of": "2025-06-30"},
         headers=auth_headers(manager.id), follow_redirects=False,
     )
@@ -243,7 +243,7 @@ async def test_confirm_with_the_prefilled_values_keeps_the_form_d_floor(client, 
     pi, agent, manager = await _pi_agent_manager(db_session)
     row = await seed_company(db_session, pi)
     r = await client.post(
-        f"/manager/pis/{pi.id}/companies/{row.id}/confirm",
+        f"/workspace/pis/{pi.id}/companies/{row.id}/confirm",
         data={"pi_role": "founder", "funding_usd": "224999876", "funding_as_of": "2022-03-15"},
         headers=auth_headers(manager.id), follow_redirects=False,
     )
@@ -256,7 +256,7 @@ async def test_confirm_with_the_prefilled_values_keeps_the_form_d_floor(client, 
 async def test_a_replayed_confirm_flashes_and_changes_nothing(client, db_session):
     pi, _agent, manager = await _pi_agent_manager(db_session)
     row = await seed_company(db_session, pi, status="confirmed")
-    r = await client.post(f"/manager/pis/{pi.id}/companies/{row.id}/confirm",
+    r = await client.post(f"/workspace/pis/{pi.id}/companies/{row.id}/confirm",
                           headers=auth_headers(manager.id), follow_redirects=False)
     _back_to_the_card(r, pi)
     flash = session_flashes(r)[-1]
@@ -266,11 +266,11 @@ async def test_a_replayed_confirm_flashes_and_changes_nothing(client, db_session
 async def test_reject_keeps_the_row_unlisted_and_out_of_the_file(client, db_session, _companies_dir):
     pi, agent, manager = await _pi_agent_manager(db_session)
     row = await seed_company(db_session, pi)
-    r = await client.post(f"/manager/pis/{pi.id}/companies/{row.id}/reject",
+    r = await client.post(f"/workspace/pis/{pi.id}/companies/{row.id}/reject",
                           headers=auth_headers(manager.id), follow_redirects=False)
     _back_to_the_card(r, pi)
     assert (row.status, row.reviewed_by_user_id) == ("rejected", manager.id)
-    page = (await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))).text
+    page = (await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(manager.id))).text
     assert "DELFI Diagnostics" not in page
     assert not (_companies_dir / f"{agent.agent_id}.md").exists()
 
@@ -281,7 +281,7 @@ async def test_another_pis_company_and_an_unknown_one_are_404(client, db_session
     row = await seed_company(db_session, other)
     for company_id in (row.id, uuid.uuid4()):
         for action in ("delete", "confirm", "reject"):
-            r = await client.post(f"/manager/pis/{pi.id}/companies/{company_id}/{action}",
+            r = await client.post(f"/workspace/pis/{pi.id}/companies/{company_id}/{action}",
                                   headers=auth_headers(manager.id), follow_redirects=False)
             assert r.status_code == 404, (company_id, action)
     assert row.status == "suggested"
@@ -290,8 +290,8 @@ async def test_another_pis_company_and_an_unknown_one_are_404(client, db_session
 async def test_a_staff_account_is_not_a_pi_target(client, db_session):
     manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
-    for path, data in ((f"/manager/pis/{admin.id}/companies", _ADD),
-                       (f"/manager/pis/{admin.id}/companies/discover", None)):
+    for path, data in ((f"/workspace/pis/{admin.id}/companies", _ADD),
+                       (f"/workspace/pis/{admin.id}/companies/discover", None)):
         r = await client.post(path, data=data, headers=auth_headers(manager.id), follow_redirects=False)
         assert r.status_code == 404, path
 
@@ -300,8 +300,8 @@ async def test_a_reviewer_reaches_none_of_the_five_routes(client, db_session):
     reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
     pi = await factories.make_user(db_session, user_role=USER_ROLE_PI)
     row = await seed_company(db_session, pi)
-    for path in (f"/manager/pis/{pi.id}/companies", f"/manager/pis/{pi.id}/companies/discover",
-                 *(f"/manager/pis/{pi.id}/companies/{row.id}/{a}" for a in ("delete", "confirm", "reject"))):
+    for path in (f"/workspace/pis/{pi.id}/companies", f"/workspace/pis/{pi.id}/companies/discover",
+                 *(f"/workspace/pis/{pi.id}/companies/{row.id}/{a}" for a in ("delete", "confirm", "reject"))):
         r = await client.post(path, data=_ADD, headers=auth_headers(reviewer.id), follow_redirects=False)
         assert r.status_code == 403, path
     assert row.status == "suggested"
@@ -311,7 +311,7 @@ async def test_a_reviewer_reaches_none_of_the_five_routes(client, db_session):
 async def test_an_admin_wearing_a_manager_adds_as_that_manager(client, db_session):
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     pi, _agent, manager = await _pi_agent_manager(db_session)
-    r = await client.post(f"/manager/pis/{pi.id}/companies", data=_ADD,
+    r = await client.post(f"/workspace/pis/{pi.id}/companies", data=_ADD,
                           headers=impersonation_headers(admin.id, manager.id), follow_redirects=False)
     _back_to_the_card(r, pi)
     row = (await db_session.execute(select(PiCompany).where(PiCompany.user_id == pi.id))).scalar_one()
@@ -323,7 +323,7 @@ async def test_two_find_companies_presses_leave_one_interactive_job(client, db_s
     pi, _agent, manager = await _pi_agent_manager(db_session)
     flashes = []
     for _ in range(2):
-        r = await client.post(f"/manager/pis/{pi.id}/companies/discover",
+        r = await client.post(f"/workspace/pis/{pi.id}/companies/discover",
                               headers=auth_headers(manager.id), follow_redirects=False)
         _back_to_the_card(r, pi)
         flashes.append(session_flashes(r)[-1])
@@ -341,7 +341,7 @@ async def test_a_press_behind_a_pending_bulk_job_raises_it_to_interactive(client
                priority=BULK_PRIORITY, payload={"user_id": str(pi.id)})
     db_session.add(bulk)
     await db_session.flush()
-    r = await client.post(f"/manager/pis/{pi.id}/companies/discover",
+    r = await client.post(f"/workspace/pis/{pi.id}/companies/discover",
                           headers=auth_headers(manager.id), follow_redirects=False)
     _back_to_the_card(r, pi)
     jobs = await _discovery_jobs(db_session, pi)
@@ -382,7 +382,7 @@ async def test_the_card_shows_both_lists_with_their_evidence_and_the_last_run(cl
     ))
     await db_session.flush()
 
-    body = (await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))).text
+    body = (await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(manager.id))).text
     card = _card(body)
     assert "Belay Diagnostics" in card and "$5,000,000 raised as of 2024-01-02" in card
     assert "Egret Therapeutics" not in body
@@ -397,9 +397,9 @@ async def test_the_card_shows_both_lists_with_their_evidence_and_the_last_run(cl
     assert "javascript:" not in body
     assert 'href="https://pubmed.ncbi.nlm.nih.gov/10000001/"' in card
     for row in (delfi, example):
-        assert f'action="/manager/pis/{pi.id}/companies/{row.id}/confirm"' in card
-        assert f'action="/manager/pis/{pi.id}/companies/{row.id}/reject"' in card
-    assert f'action="/manager/pis/{pi.id}/companies"' in card
+        assert f'action="/workspace/pis/{pi.id}/companies/{row.id}/confirm"' in card
+        assert f'action="/workspace/pis/{pi.id}/companies/{row.id}/reject"' in card
+    assert f'action="/workspace/pis/{pi.id}/companies"' in card
     assert "Last run 2026-10-02 09:30 UTC: 2 suggested, funding lookup unavailable." in card
     assert not _DISABLED_FIND.search(card)
 
@@ -409,7 +409,7 @@ async def test_find_companies_is_disabled_while_a_job_is_pending(client, db_sess
     db_session.add(Job(type="company_discovery", user_id=pi.id, status="pending",
                        payload={"user_id": str(pi.id)}))
     await db_session.flush()
-    card = _card((await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))).text)
+    card = _card((await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(manager.id))).text)
     assert _DISABLED_FIND.search(card)
     assert "Discovery is queued" in card
 
@@ -419,7 +419,7 @@ async def test_a_failed_discovery_run_shows_its_error_and_can_run_again(client, 
     db_session.add(Job(type="company_discovery", user_id=pi.id, status="dead",
                        last_error="NCBI answered 500", payload={"user_id": str(pi.id)}))
     await db_session.flush()
-    card = _card((await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))).text)
+    card = _card((await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(manager.id))).text)
     assert "failed (NCBI answered 500)" in card
     assert not _DISABLED_FIND.search(card)
 
@@ -429,12 +429,12 @@ async def test_a_reviewer_sees_the_confirmed_list_only(client, db_session):
     pi, _agent, _manager = await _pi_agent_manager(db_session)
     await seed_company(db_session, pi, company_name="Belay Diagnostics", status="confirmed")
     await seed_company(db_session, pi, company_name="Acme Bio")
-    r = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(reviewer.id))
+    r = await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(reviewer.id))
     assert r.status_code == 200
     card = _card(r.text)
     assert "Belay Diagnostics" in card
     assert "Acme Bio" not in r.text
-    assert f"/manager/pis/{pi.id}/companies" not in r.text
+    assert f"/workspace/pis/{pi.id}/companies" not in r.text
     assert "find-companies" not in r.text
 
 
@@ -451,7 +451,7 @@ async def test_the_card_passes_the_rendered_page_gate(client, db_session, role):
                        completed_at=datetime(2026, 10, 2, tzinfo=UTC),
                        payload={"progress": [{"step": DISCOVERY_DONE_STEP, "detail": "1 suggested"}]}))
     await db_session.flush()
-    r = await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(viewer.id))
+    r = await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(viewer.id))
     assert r.status_code == 200
     assert page_problems(r.text) == []
 
@@ -460,10 +460,10 @@ async def test_confirm_with_clear_funding_drops_the_prefilled_figure(client, db_
     """The form posts the stored Form D figure prefilled; the checkbox clears it anyway."""
     pi, agent, manager = await _pi_agent_manager(db_session)
     row = await seed_company(db_session, pi)
-    page = (await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))).text
+    page = (await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(manager.id))).text
     assert f'name="clear_funding" value="1" id="company-clear-funding-{row.id}"' in _card(page)
     r = await client.post(
-        f"/manager/pis/{pi.id}/companies/{row.id}/confirm",
+        f"/workspace/pis/{pi.id}/companies/{row.id}/confirm",
         data={"pi_role": "founder", "funding_usd": "224999876", "funding_as_of": "2022-03-15",
               "clear_funding": "1"},
         headers=auth_headers(manager.id), follow_redirects=False,
@@ -479,7 +479,7 @@ async def test_clear_funding_ignores_an_unparseable_figure(client, db_session):
     pi, _agent, manager = await _pi_agent_manager(db_session)
     row = await seed_company(db_session, pi)
     r = await client.post(
-        f"/manager/pis/{pi.id}/companies/{row.id}/confirm",
+        f"/workspace/pis/{pi.id}/companies/{row.id}/confirm",
         data={"funding_usd": "12abc", "clear_funding": "1"},
         headers=auth_headers(manager.id), follow_redirects=False,
     )
@@ -490,7 +490,7 @@ async def test_clear_funding_ignores_an_unparseable_figure(client, db_session):
 async def test_find_companies_for_a_pi_without_an_orcid_says_so_and_queues_nothing(client, db_session):
     pi = await factories.make_user(db_session, user_role=USER_ROLE_PI, orcid="")
     manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
-    r = await client.post(f"/manager/pis/{pi.id}/companies/discover",
+    r = await client.post(f"/workspace/pis/{pi.id}/companies/discover",
                           headers=auth_headers(manager.id), follow_redirects=False)
     _back_to_the_card(r, pi)
     assert session_flashes(r)[-1] == {
@@ -506,6 +506,6 @@ async def test_the_card_shows_the_note_of_an_ambiguous_funding_lookup(client, db
         evidence={**DISCOVERED_EVIDENCE, "form_d": {
             "status": "ambiguous", "funding_usd": None, "filings": [], "note": note}},
     )
-    card = _card((await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(manager.id))).text)
+    card = _card((await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(manager.id))).text)
     assert note in card
     assert "clear_funding" not in card      # no figure, nothing to clear

@@ -1,14 +1,8 @@
-"""HTTP-free read queries behind the admin and manager directory pages.
+"""HTTP-free read queries shared by workspace, account and business callers.
 
-These six query bodies used to live directly inside the admin router's
-handlers (now the `src/routers/admin/` package). They move here verbatim (Task 3 of
-docs/plans/2026-08-17-user-account-types-plan.md) so
-the `/manager` router can call the exact same code — most of it
-by way of the `roles=` filter on `list_pi_directory` — instead of
-carrying a second copy of a ~280-line discussions query. Nothing here knows
-about `Request`, `HTTPException`, or Jinja2 templates: callers (routers) own
-the HTTP concerns (404s, template rendering, query-param parsing) and pass in
-already-parsed values.
+Routers own validation, authorization and HTTP responses. Workspace renderers
+project these internal read models into role-specific allowlisted page records;
+business and chat callers retain the original model contracts.
 """
 
 from __future__ import annotations
@@ -21,13 +15,15 @@ from typing import Any
 from sqlalchemy import String, Text, and_, case, cast, func, literal_column, or_, select, union_all
 from sqlalchemy import true as sa_true
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased, selectinload
+from sqlalchemy.orm import aliased, load_only, selectinload
 
 from src.agent.specialists import SPECIALIST_DOMAINS
 from src.models import (
     AgentChannel,
     AgentMessage,
+    AgentRegistry,
     AssessmentDrop,
+    AssessmentReviewAssignment,
     Job,
     OpportunityAssessment,
     PiGrant,
@@ -175,7 +171,7 @@ def _assessment_order_by(sort: str) -> list[Any]:
     return [score_desc, created_desc, id_desc]
 
 
-def _pi_directory_query(*, status_filter, institution_filter, claimed_filter, roles):
+def _pi_directory_query(*, status_filter, institution_filter, claimed_filter, roles, research_only=False):
     """One row per user, ``(User, profile_status)``, every filter applied in SQL.
 
     ``profile_status`` mirrors the Python rules it replaced: no profile row ->
@@ -207,6 +203,11 @@ def _pi_directory_query(*, status_filter, institution_filter, claimed_filter, ro
         (active_job, literal_column("'generating'")),
         else_=literal_column("'no_profile'"),
     )
+    if research_only:
+        # Operational status/claim predicates must not become a reviewer
+        # inference channel through row membership or counts.
+        status_filter = claimed_filter = None
+        status_expr = literal_column("NULL")
     query = select(User, status_expr.label("profile_status")).outerjoin(
         ResearcherProfile, ResearcherProfile.user_id == User.id
     )
@@ -231,11 +232,12 @@ async def count_pi_directory(
     institution_filter: str | None = None,
     claimed_filter: str | None = None,
     roles: tuple[str, ...] | None = None,
+    research_only: bool = False,
 ) -> int:
     """How many rows `list_pi_directory` returns over all pages for the same filters."""
     query = _pi_directory_query(
         status_filter=status_filter, institution_filter=institution_filter,
-        claimed_filter=claimed_filter, roles=roles,
+        claimed_filter=claimed_filter, roles=roles, research_only=research_only,
     )
     return (await db.execute(select(func.count()).select_from(query.subquery()))).scalar_one()
 
@@ -248,6 +250,7 @@ async def list_pi_directory(
     claimed_filter: str | None = None,
     roles: tuple[str, ...] | None = None,
     page: int | None = None,
+    research_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Admin users overview / manager PI directory, by name (C-15: filtered and paged
     in SQL). ``page=None`` returns every row; otherwise one page of
@@ -259,11 +262,20 @@ async def list_pi_directory(
     query = (
         _pi_directory_query(
             status_filter=status_filter, institution_filter=institution_filter,
-            claimed_filter=claimed_filter, roles=roles,
+            claimed_filter=claimed_filter, roles=roles, research_only=research_only,
         )
         .options(selectinload(User.profile), selectinload(User.agent))
         .order_by(User.name, User.id)
     )
+    if research_only:
+        query = query.options(
+            load_only(User.id, User.name, User.user_role, User.orcid, User.institution, User.department),
+            selectinload(User.profile).load_only(
+                ResearcherProfile.id, ResearcherProfile.user_id, ResearcherProfile.profile_version,
+                ResearcherProfile.research_summary,
+            ),
+            selectinload(User.agent).load_only(AgentRegistry.id, AgentRegistry.agent_id),
+        )
     if page is not None:
         query = query.limit(PI_DIRECTORY_PAGE_SIZE).offset((page - 1) * PI_DIRECTORY_PAGE_SIZE)
     pairs = (await db.execute(query)).unique().all()
@@ -287,7 +299,9 @@ async def list_pi_directory(
         # `pub_count` is the SCOPED (in-tenure) count, not the full-career count;
         # `pub_scope` carries the split for the templates that explain the number.
         pub_count = pub_scope.in_tenure if pub_scope else 0
-        if not user.agent:
+        if research_only:
+            agent_status = None
+        elif not user.agent:
             agent_status = "not_requested"
         elif user.agent.status == "pending":
             agent_status = "awaiting_token"
@@ -339,15 +353,29 @@ async def industry_views(
     }
 
 
-async def load_user_detail(db: AsyncSession, user_id: uuid.UUID) -> dict[str, Any] | None:
+async def load_user_detail(
+    db: AsyncSession, user_id: uuid.UUID, *, staff: bool = True, pi_evidence: bool = True, pi_only: bool = False,
+) -> dict[str, Any] | None:
     """Admin user detail page. Returns None when the row is absent (the
     router turns that into its own 404 — this module stays HTTP-free)."""
-    result = await db.execute(
-        select(User)
-        .where(User.id == user_id)
-        .options(selectinload(User.profile), selectinload(User.jobs), selectinload(User.agent))
-        .execution_options(populate_existing=True)
-    )
+    options = [selectinload(User.profile), selectinload(User.agent)]
+    if staff:
+        options.append(selectinload(User.jobs))
+    else:
+        options = [
+            load_only(User.id, User.name, User.user_role, User.orcid, User.institution, User.department),
+            selectinload(User.profile).load_only(
+                ResearcherProfile.id, ResearcherProfile.user_id, ResearcherProfile.research_summary,
+                ResearcherProfile.techniques, ResearcherProfile.experimental_models,
+                ResearcherProfile.disease_areas, ResearcherProfile.key_targets,
+                ResearcherProfile.keywords, ResearcherProfile.profile_version,
+            ),
+            selectinload(User.agent).load_only(AgentRegistry.id, AgentRegistry.agent_id),
+        ]
+    query = select(User).where(User.id == user_id).options(*options)
+    if pi_only:
+        query = query.where(User.user_role == "pi")
+    result = await db.execute(query.execution_options(populate_existing=True))
     user = result.scalar_one_or_none()
     if not user:
         return None
@@ -372,6 +400,14 @@ async def load_user_detail(db: AsyncSession, user_id: uuid.UUID) -> dict[str, An
     pub_scope = await scoped_publications_for(
         db, user_id, agent_id, publications=publications
     )
+
+    detail = {
+        "user": user, "profile": user.profile, "publications": pub_scope.publications,
+        "pub_scope": pub_scope,
+        "jobs": sorted(user.jobs, key=lambda j: j.enqueued_at, reverse=True) if staff else [],
+    }
+    if not pi_evidence:
+        return detail
 
     grants = (await db.execute(
         select(PiGrant).where(PiGrant.user_id == user_id)
@@ -399,6 +435,7 @@ async def load_user_detail(db: AsyncSession, user_id: uuid.UUID) -> dict[str, An
     )).scalars().all()
 
     return {
+        **detail,
         "user": user,
         "profile": user.profile,
         # Now the IN-TENURE rows, not the full career. The rows the
@@ -407,7 +444,7 @@ async def load_user_detail(db: AsyncSession, user_id: uuid.UUID) -> dict[str, An
         # `scripts/audit_tenure_scope.py` to see what a tenure year excludes.
         "publications": pub_scope.publications,
         "pub_scope": pub_scope,
-        "jobs": sorted(user.jobs, key=lambda j: j.enqueued_at, reverse=True),
+        "jobs": detail["jobs"],
         "grants": grants,
         "grant_identity": grant_identity,
         "orcid_fundings": orcid_fundings,
@@ -415,6 +452,23 @@ async def load_user_detail(db: AsyncSession, user_id: uuid.UUID) -> dict[str, An
         "industry": industry,
         "industry_evidence": industry_evidence,
     }
+
+
+async def load_pi_detail(db: AsyncSession, user_id: uuid.UUID, *, staff: bool) -> dict[str, Any] | None:
+    return await load_user_detail(db, user_id, staff=staff, pi_only=True)
+
+
+async def load_account_detail(db: AsyncSession, user_id: uuid.UUID) -> dict[str, Any] | None:
+    return await load_user_detail(db, user_id, pi_evidence=False)
+
+
+async def load_pi_target(db: AsyncSession, user_id: uuid.UUID) -> dict[str, Any] | None:
+    """Minimal write target; commands retain their own locks and validation."""
+    user = (await db.execute(
+        select(User).where(User.id == user_id)
+        .options(selectinload(User.profile), selectinload(User.agent))
+    )).scalar_one_or_none()
+    return {"user": user, "profile": user.profile} if user is not None else None
 
 
 def _assessment_dimension_rows(
@@ -472,11 +526,18 @@ async def _filtered_assessment_query(
     show_all_runs: bool,
     lab: str | None,
     review_key: str,
+    assignee_user_id: uuid.UUID | None = None,
 ) -> tuple[Any, Any, list[str], str | None]:
     """``(query, scope_query, lab_options, lab_filter)``: the assessment query
     narrowed by run, lab and review tab, plus the run+lab scope the tab counts
     are taken from and the lab dropdown's options."""
     query = select(OpportunityAssessment)
+    assigned = select(AssessmentReviewAssignment.id).where(
+        AssessmentReviewAssignment.assessment_id == OpportunityAssessment.id,
+        AssessmentReviewAssignment.assignee_user_id == assignee_user_id,
+    ).exists()
+    if assignee_user_id is not None:
+        query = query.where(assigned)
     if not show_all_runs and selected_run_id:
         query = query.where(OpportunityAssessment.simulation_run_id == selected_run_id)
 
@@ -489,6 +550,8 @@ async def _filtered_assessment_query(
     lab_options_query = select(OpportunityAssessment.subject_agent_id).where(
         OpportunityAssessment.subject_agent_id.is_not(None)
     )
+    if assignee_user_id is not None:
+        lab_options_query = lab_options_query.where(assigned)
     if not show_all_runs and selected_run_id:
         lab_options_query = lab_options_query.where(
             OpportunityAssessment.simulation_run_id == selected_run_id
@@ -589,34 +652,13 @@ async def _annotate_rows(
 ) -> dict[str, str]:
     """Attach ``panel_state``, ``review_cols`` and the dimension rows to each row
     and return the ``agent_id -> user_id`` map of the rows' subject labs."""
-    # The five-state panel finding, per row, computed by the ONE definition the
-    # detail page uses. Attached to each row rather than returned as a separate
-    # context key on purpose: `_assessments_body.html` is included by an admin
-    # template whose router allowlists every context key it forwards
-    # (src/routers/admin/assessments.py) and by a manager template whose router splats the
-    # whole view — so a new key would reach one surface and be Jinja `Undefined`
-    # (silently falsy, never an error) on the other. Riding on `assessments`,
-    # which both already forward, is the only shape that cannot half-arrive.
-    #
-    # `panel_state` is not a mapped column, so this writes an ordinary instance
-    # attribute and persists nothing; these rows are read-only and are handed
-    # straight to a template.
-    #
-    # Re-deriving the state in Jinja from the three columns was the alternative
-    # and is exactly the drift this whole change exists to end: two copies of
-    # the rule, one of which nobody updates.
+    # Transient annotations preserve the internal per-assessment read contract.
+    # The page boundary copies them into allowlisted records; nothing is persisted.
+    # Use the detail page's panel rule rather than re-deriving it in Jinja.
     for _row in assessments:
         _row.panel_state = panel_state(_row)
 
-    # Batched Assigned/Reviewed-by/status-chip columns (Task 7 of
-    # docs/plans/2026-08-28-human-review-feedback-implementation-plan.md) — the exact
-    # same attach-to-row pattern as `panel_state` above, and for the exact
-    # same reason: `_assessments_body.html` is included by an admin template
-    # that allowlists every context key it forwards (`src/routers/admin/assessments.py`)
-    # and by a manager template that splats the whole view, so a new
-    # top-level key would reach one surface and render as silently-falsy
-    # Jinja `Undefined` on the other. Riding on `assessments` is the only
-    # shape that reaches both.
+    # Batch assignments, reviewer names and status chips for the displayed rows.
     review_cols = await review_columns_for(db, [a.id for a in assessments])
     for _row in assessments:
         _row.review_cols = review_cols.get(_row.id, EMPTY_REVIEW_COLUMNS)
@@ -639,16 +681,8 @@ async def _annotate_rows(
             r.agent_id: str(r.user_id) for r in rows if r.user_id is not None
         }
 
-    # Per-dimension score rows for the card's collapsed disclosure (2026-09-14)
-    # — the exact same attach-to-row pattern as `panel_state` above, and for
-    # the exact same reason: a new top-level key would reach the admin
-    # template (which allowlists every key it forwards,
-    # `src/routers/admin/assessments.py`) or the manager template (which splats the whole
-    # view) but not both, and would render as silently-falsy Jinja `Undefined`
-    # on whichever it missed. Riding on `assessments` is the only shape that
-    # reaches both. Each row resolves its OWN rubric revision (an archived one
-    # for a stamped row, the live one for an unstamped row), so the titles and
-    # weights shown here always match the revision that actually scored it.
+    # Each row resolves its own rubric revision, so displayed dimensions and
+    # weights match the archived scoring revision rather than today's rubric.
     for _row in assessments:
         _row.dimension_rows, _row.revision_view = _assessment_dimension_rows(_row)
     return pi_user_ids
@@ -744,6 +778,7 @@ async def list_assessments(
     sort: str | None = None,
     lab: str | None = None,
     review: str | None = None,
+    assignee_user_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """BlackbirdBot's screening verdicts against the Blackbird investment rubric.
 
@@ -782,11 +817,12 @@ async def list_assessments(
 
     ``review`` splits the queue into the reviewed and unreviewed sub-tabs and
     narrows ``total_count``, the rendered rows and everything derived from them.
-    It deliberately does NOT narrow ``incomplete_panel_count``, the drop counts,
-    ``lab_options`` or ``assessment_counts_by_run`` — the first two are warnings
-    and the failure mode of a warning is under-warning, and the last two are the
-    controls' own option sets, which are computed pre-filter so a reader always
-    has a way back. Like ``sort`` and ``lab`` it is unvalidated query-string
+    ``assignee_user_id`` narrows rows/counts before the cap. Lab options follow
+    run and assignment before lab/review; tab counts follow run, assignment and
+    lab before review. Display filters never narrow ``incomplete_panel_count``
+    or the drop counts (run-wide warnings), nor ``assessment_counts_by_run``
+    (all stored rows, across assignments). Like ``sort`` and ``lab``, ``review``
+    is unvalidated query-string
     input and falls back to ``ASSESSMENT_REVIEW_DEFAULT`` silently.
     """
     runs = await runs_ordered(db)
@@ -808,7 +844,7 @@ async def list_assessments(
     )
 
     query, scope_query, lab_options, lab_filter = await _filtered_assessment_query(
-        db, selected_run_id, show_all_runs, lab, review_key
+        db, selected_run_id, show_all_runs, lab, review_key, assignee_user_id
     )
 
     # Counts the current filter — run AND lab AND the review tab — so the

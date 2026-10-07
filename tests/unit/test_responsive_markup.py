@@ -20,8 +20,8 @@ def test_no_table_sits_in_a_clipping_wrapper():
 
 
 def test_summary_tiles_stack_on_a_phone():
-    assert '<div class="grid grid-cols-2 sm:grid-cols-5 gap-4 mb-8">' in (T / "admin/_assessments_body.html").read_text()
-    for name in ("admin/agents.html", "admin/access_requests.html", "admin/_run_detail_body.html"):
+    assert '<div class="grid grid-cols-2 sm:grid-cols-5 gap-4 mb-8">' in (T / "assessments/_body.html").read_text()
+    for name in ("admin/agents.html", "admin/access_requests.html", "activity/_detail_body.html"):
         assert not re.search(r'class="grid grid-cols-[3-5] gap', (T / name).read_text()), name
 
 

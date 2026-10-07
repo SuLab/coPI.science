@@ -1254,7 +1254,7 @@ async def test_reply_suppressed_post_persists_nothing_and_does_not_count(
         await _delete_run(factory, run_id)
 
 
-# --- /admin/assessments (task 12) -------------------------------------------
+# --- /workspace/assessments (task 12) -------------------------------------------
 
 
 def _band_label(html: str) -> str:
@@ -1318,7 +1318,7 @@ async def test_admin_assessments_page_lists_verdicts(client, db_session, admin):
     ))
     await db_session.flush()
 
-    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    resp = await client.get("/workspace/assessments", headers=_auth(admin.id))
     assert resp.status_code == 200
     assert "DBT / BCAA-autophagy axis" in resp.text
     assert "route-to-incubation" in resp.text
@@ -1358,7 +1358,7 @@ async def test_admin_assessments_page_does_not_double_wrap_confidence(
     ))
     await db_session.flush()
 
-    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    resp = await client.get("/workspace/assessments", headers=_auth(admin.id))
     assert resp.status_code == 200
     assert "[[High]]" not in resp.text
     assert "[High]" in resp.text
@@ -1396,7 +1396,7 @@ async def test_admin_assessments_page_renders_band_as_text_not_just_colour(
     ))
     await db_session.flush()
 
-    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    resp = await client.get("/workspace/assessments", headers=_auth(admin.id))
     assert resp.status_code == 200
     html = resp.text
     assert "route-to-incubation" in html  # the model's own call, unchanged
@@ -1416,7 +1416,7 @@ async def test_admin_assessments_page_renders_band_as_text_not_just_colour(
 async def test_admin_assessments_page_requires_admin(client, db_session):
     plain = await factories.make_user(db_session, user_role=USER_ROLE_PI, email="plain-assess@example.org")
     await db_session.flush()
-    resp = await client.get("/admin/assessments", headers=_auth(plain.id))
+    resp = await client.get("/workspace/assessments", headers=_auth(plain.id))
     assert resp.status_code == 403
 
 
@@ -1445,7 +1445,7 @@ async def test_admin_assessments_page_distinguishes_gating_tri_state(client, db_
     ))
     await db_session.flush()
 
-    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    resp = await client.get("/workspace/assessments", headers=_auth(admin.id))
     assert resp.status_code == 200
     html = resp.text
 
@@ -1489,7 +1489,7 @@ async def test_admin_assessments_page_handles_null_and_unrecognized_gating(
     ))
     await db_session.flush()
 
-    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    resp = await client.get("/workspace/assessments", headers=_auth(admin.id))
     assert resp.status_code == 200
     assert _gating_state_for(resp.text, "baltimore commitment") == "unknown"
 
@@ -1539,7 +1539,7 @@ async def test_admin_assessments_page_renders_no_inline_detail_rows(
     db_session.add(assessment)
     await db_session.flush()
 
-    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    resp = await client.get("/workspace/assessments", headers=_auth(admin.id))
     assert resp.status_code == 200
     html = resp.text
     assert "Rich verdict fixture" in html
@@ -1614,7 +1614,7 @@ async def test_admin_assessments_page_defaults_to_the_current_run(
     construction, without deleting it."""
     await _two_runs_with_one_assessment_each(db_session)
 
-    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    resp = await client.get("/workspace/assessments", headers=_auth(admin.id))
     assert resp.status_code == 200
     assert "Current verdict" in resp.text
     assert "Stale pre-fresh verdict" not in resp.text
@@ -1628,7 +1628,7 @@ async def test_admin_assessments_page_all_runs_reaches_the_stale_verdict(
     unreachable — ?run_id=all is the escape hatch back to everything."""
     await _two_runs_with_one_assessment_each(db_session)
 
-    resp = await client.get("/admin/assessments?run_id=all", headers=_auth(admin.id))
+    resp = await client.get("/workspace/assessments?run_id=all", headers=_auth(admin.id))
     assert resp.status_code == 200
     assert "Current verdict" in resp.text
     assert "Stale pre-fresh verdict" in resp.text
@@ -1643,7 +1643,7 @@ async def test_admin_assessments_page_can_select_a_specific_older_run(
     old_run, _new_run = await _two_runs_with_one_assessment_each(db_session)
 
     resp = await client.get(
-        f"/admin/assessments?run_id={old_run.id}", headers=_auth(admin.id)
+        f"/workspace/assessments?run_id={old_run.id}", headers=_auth(admin.id)
     )
     assert resp.status_code == 200
     assert "Stale pre-fresh verdict" in resp.text
@@ -1682,7 +1682,7 @@ async def test_admin_assessments_page_bounds_the_query_and_says_so(
     ))
     await db_session.flush()
 
-    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    resp = await client.get("/workspace/assessments", headers=_auth(admin.id))
     assert resp.status_code == 200
     html = resp.text
     assert "Highest scoring" in html
@@ -1752,7 +1752,7 @@ async def test_engine_known_subject_overrides_the_models_guess(engine):
             )).scalars().all()
 
         assert len(rows) == 1, "a row must be stored regardless of which id it lands under"
-        # Stored under the real agent_id, so /admin/assessments and every join
+        # Stored under the real agent_id, so /workspace/assessments and every join
         # against `agents` resolves.
         assert rows[0].subject_agent_id == "wang"
         # raw_verdict stays byte-for-byte what the model sent.
@@ -1929,7 +1929,7 @@ async def test_admin_page_warns_about_dropped_verdicts(client, db_session, admin
     ))
     await db_session.flush()
 
-    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    resp = await client.get("/workspace/assessments", headers=_auth(admin.id))
     assert resp.status_code == 200
     # Collapse whitespace: the banner's sentence is wrapped across source lines,
     # and this test is about what it SAYS, not how the markup is folded.
@@ -1956,7 +1956,7 @@ async def test_admin_page_has_no_drop_banner_on_a_clean_run(client, db_session, 
     ))
     await db_session.flush()
 
-    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    resp = await client.get("/workspace/assessments", headers=_auth(admin.id))
     assert resp.status_code == 200
     assert "generated but not stored" not in resp.text
 
@@ -2426,7 +2426,7 @@ async def test_admin_assessments_page_triage_restructure(client, db_session, adm
     ))
     await db_session.flush()
 
-    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    resp = await client.get("/workspace/assessments", headers=_auth(admin.id))
     assert resp.status_code == 200
     html = resp.text
 
@@ -2466,7 +2466,7 @@ async def test_admin_assessments_cards_count_recommendation_not_band(
         ))
     await db_session.flush()
 
-    resp = await client.get("/admin/assessments", headers=_auth(admin.id))
+    resp = await client.get("/workspace/assessments", headers=_auth(admin.id))
     assert resp.status_code == 200
     html = resp.text
 

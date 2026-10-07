@@ -14,7 +14,7 @@ from src.models import (
     PiIndustryEvidence,
     PiIndustryScore,
 )
-from src.routers import manager as manager_routes
+from src.routers.workspace import pi_evidence as manager_routes
 from src.services import directory
 from src.services.industry_score import SCORER_VERSION
 from src.services.jhu_rules import set_tenure_start
@@ -31,7 +31,7 @@ async def test_unscored_pi_shows_reason_not_zero(client, db_session):
         user_id=pi.id, components={}, coverage={}, scorer_version=SCORER_VERSION,
     ))
     await db_session.commit()
-    html = (await client.get(f"/manager/pis/{pi.id}", headers=auth_headers(mgr.id))).text
+    html = (await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(mgr.id))).text
     assert "Unscored" in html and "no JHU tenure start" in html and ">0.0<" not in html
 
 
@@ -53,7 +53,7 @@ async def test_veto_evidence_rescored_and_hidden(client, db_session):
     await db_session.commit()
 
     r = await client.post(
-        f"/manager/pis/{pi.id}/industry/{e.id}/veto", data={}, headers=auth_headers(mgr.id),
+        f"/workspace/pis/{pi.id}/industry/{e.id}/veto", data={}, headers=auth_headers(mgr.id),
         follow_redirects=False,
     )
     assert r.status_code == 302
@@ -89,7 +89,7 @@ async def test_veto_is_idempotent_on_replay(client, db_session):
 
     for _ in range(2):
         r = await client.post(
-            f"/manager/pis/{pi.id}/industry/{e.id}/veto", data={}, headers=auth_headers(mgr.id),
+            f"/workspace/pis/{pi.id}/industry/{e.id}/veto", data={}, headers=auth_headers(mgr.id),
             follow_redirects=False,
         )
         assert r.status_code == 302
@@ -113,7 +113,7 @@ async def test_veto_evidence_belonging_to_another_pi_is_404(client, db_session):
     await db_session.commit()
 
     r = await client.post(
-        f"/manager/pis/{pi.id}/industry/{e.id}/veto", data={}, headers=auth_headers(mgr.id),
+        f"/workspace/pis/{pi.id}/industry/{e.id}/veto", data={}, headers=auth_headers(mgr.id),
         follow_redirects=False,
     )
     assert r.status_code == 404
@@ -139,7 +139,7 @@ async def test_veto_attribution_under_impersonation(client, db_session, caplog):
     headers = auth_headers(admin.id, impersonate=mgr.id)
     with caplog.at_level("WARNING"):
         r = await client.post(
-            f"/manager/pis/{pi.id}/industry/{e.id}/veto", data={}, headers=headers,
+            f"/workspace/pis/{pi.id}/industry/{e.id}/veto", data={}, headers=headers,
             follow_redirects=False,
         )
     assert r.status_code == 302
@@ -158,11 +158,11 @@ async def test_pi_list_has_industry_column(client, db_session):
             tenure_start_used=2015, coverage={"openalex": "ok"},
         ))
     await db_session.commit()
-    html = (await client.get("/manager/pis", headers=auth_headers(mgr.id))).text
+    html = (await client.get("/workspace/pis", headers=auth_headers(mgr.id))).text
     assert "Industry interest" in html and "100.0" in html and "75.0" in html
 
 
-async def test_the_veto_refuses_on_a_lock_timeout(engine, monkeypatch):
+async def test_the_veto_refuses_on_a_lock_timeout(engine, monkeypatch, asgi_app):
     """An industry_evidence job holding the row: the veto gives up after
     INDUSTRY_VETO_LOCK_TIMEOUT instead of waiting, and vetoes nothing."""
     monkeypatch.setattr(manager_routes, "INDUSTRY_VETO_LOCK_TIMEOUT", "200ms")
@@ -183,8 +183,8 @@ async def test_the_veto_refuses_on_a_lock_timeout(engine, monkeypatch):
                 text("SELECT 1 FROM pi_industry_evidence WHERE id = :i FOR UPDATE"), {"i": e.id}
             )
             async with factory() as s2:
-                resp = await asyncio.wait_for(manager_routes.manager_veto_industry_evidence(
-                    pi.id, e.id, request=SimpleNamespace(session={}), db=s2, current_user=mgr,
+                resp = await asyncio.wait_for(manager_routes.workspace_veto_industry_evidence(
+                    pi.id, e.id, request=SimpleNamespace(session={}, app=asgi_app), db=s2, current_user=mgr,
                 ), timeout=10)
             assert "error=industry_busy" in resp.headers["location"]
             await holder.rollback()

@@ -11,12 +11,12 @@
 module.exports = {
   content: ["./templates/**/*.html", "./static/js/**/*.js", "./src/**/*.py"],
   safelist: [
-    // R1, R2: discussions status cards (templates/{admin,manager}/discussions.html);
+    // R1, R2: discussions status cards (templates/workspace/discussions.html);
     // their count text is text-<colour>-700, listed under R3
     "hover:border-gray-300", "hover:border-blue-300", "hover:border-green-300",
     "hover:border-amber-300", "hover:border-red-300",
     "ring-gray-400", "ring-blue-400", "ring-green-400", "ring-amber-400", "ring-red-400",
-    // R3: thread status chips (templates/admin/_discussions_threads.html)
+    // R3: thread status chips (templates/discussions/_threads.html)
     "bg-gray-100", "bg-blue-100", "bg-green-100", "bg-amber-100", "bg-red-100",
     "text-gray-700", "text-blue-700", "text-green-700", "text-amber-700", "text-red-700",
     // R4: job status counts (templates/admin/jobs.html); the other colours are under R3

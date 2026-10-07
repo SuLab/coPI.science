@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Workspace — Assessments — CoPI{% endblock %}
+{% block extra_head %}{% include "assessments/_head.html" %}{% endblock %}
+{% block content %}
+<div class="flex flex-wrap items-center justify-between mb-2 gap-4">
+    <h1 class="text-2xl font-bold text-gray-900">Opportunity Assessments</h1>
+    {% if runs %}
+    <form method="GET" action="{{ page_url(request, 'workspace_assessments') }}" class="flex flex-wrap items-center gap-2 justify-end min-w-0 max-w-full">
+        <label for="assessments-run-select" class="text-sm text-gray-500">Run:</label>
+        <select id="assessments-run-select" name="run_id" class="min-w-0 max-w-full text-sm border-gray-300 rounded-md shadow-sm">
+            {% for run in runs %}<option value="{{ run.id }}" {% if not show_all_runs and run.id == selected_run_id %}selected{% endif %}>{{ run.started_at | ts }} ({{ run.status }}, {{ assessment_counts_by_run.get(run.id, 0) }} stored across all labs and assignments{% if run.config and run.config.get('rubric_version') %}, rubric {{ run.config.get('rubric_version') }}{% endif %}){% if run.id == runs[0].id %} — current{% endif %}</option>{% endfor %}
+            <option value="all" {% if show_all_runs %}selected{% endif %}>All Runs</option>
+        </select>
+        <label for="assessments-sort-select" class="text-sm text-gray-500">Sort:</label>
+        <select id="assessments-sort-select" name="sort" class="assessment-sort-select text-sm border-gray-300 rounded-md shadow-sm">{% for value, label in sort_options %}<option value="{{ value }}" {% if sort == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+        <label for="assessments-assignment-select" class="text-sm text-gray-500">Assignment:</label>
+        <select id="assessments-assignment-select" name="assignment" class="text-sm border-gray-300 rounded-md shadow-sm"><option value="all" {% if assignment == 'all' %}selected{% endif %}>All</option><option value="mine" {% if assignment == 'mine' %}selected{% endif %}>Assigned to me</option></select>
+        {% if lab_options %}<label for="assessments-lab-select" class="text-sm text-gray-500">Lab:</label><select id="assessments-lab-select" name="lab" class="assessment-lab-select text-sm border-gray-300 rounded-md shadow-sm"><option value="">All labs</option>{% for option in lab_options %}<option value="{{ option }}" {% if lab_filter == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select>{% endif %}
+        <input type="hidden" name="review" value="{{ review }}"><button type="submit" class="px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">Apply</button>
+    </form>
+    {% endif %}
+</div>
+<p class="text-sm text-gray-500 mb-2">BlackbirdBot's screening verdicts against the Blackbird investment rubric{% if rubric_version %} (<span class="font-mono text-xs">{{ rubric_version }}</span>){% endif %}. Weighted score is computed from the six dimension scores — not taken from the model. Bands: &ge;{{ banding.advance_min }} advance, {{ banding.conditional_min }}&ndash;&lt;{{ banding.advance_min }} conditional, &lt;{{ banding.conditional_min }} {{ banding.pass_label }}.</p>
+<p class="text-xs text-gray-600 mb-2">{% if show_all_runs %}Showing every run on record.{% else %}Showing the {{ 'latest' if runs and selected_run_id == runs[0].id else 'selected' }} run only — verdict rows survive restarts. <a class="underline" href="{{ page_url(request, 'workspace_assessments', query={'run_id': 'all', 'sort': sort, 'lab': lab_filter or '', 'review': review, 'assignment': assignment}) }}">view all runs</a>.{% endif %}{% if total_count > assessments_limit %} Displaying the top {{ assessments_limit }} of {{ total_count }} matching assessments in the current sort order; the rest sit further down that order — not excluded by the run, lab, assignment or review filter.{% endif %}</p>
+<nav class="assessment-review-tabs mb-4 flex flex-wrap items-center gap-2 border-b border-gray-200" aria-label="Review status">
+{% for value, label in [('unreviewed', 'Unreviewed'), ('reviewed', 'Reviewed'), ('all', 'All')] %}<a href="{{ page_url(request, 'workspace_assessments', query={'run_id': 'all' if show_all_runs else selected_run_id, 'sort': sort, 'lab': lab_filter or '', 'review': value, 'assignment': assignment}) }}" {% if review == value %}aria-current="page" class="border-b-2 border-indigo-600 px-3 py-2 text-sm font-semibold text-indigo-700"{% else %}class="px-3 py-2 text-sm text-gray-600 hover:text-gray-900"{% endif %}>{{ label }} ({{ review_counts[value] }})</a>{% endfor %}
+<span class="ml-2 text-xs text-gray-500">Tab counts follow the selected run, lab and assignment filters. Reviewed means written feedback, not assignment.</span>
+</nav>
+{% macro assessment_link(a) %}<a class="assessment-open-link inline-flex items-center gap-1 rounded bg-indigo-600 px-2 py-1 text-sm font-medium text-white hover:bg-indigo-700 whitespace-nowrap" href="{{ page_url(request, 'workspace_assessment_detail', query={'run_id': 'all' if show_all_runs else selected_run_id, 'sort': sort, 'lab': lab_filter or '', 'review': review, 'assignment': assignment}, assessment_id=a.id) }}" title="Full verdict and interview timeline">detail &rarr;</a>{% endmacro %}
+{% macro assessment_chat_link(a) %}<a class="assessment-chat-link inline-flex items-center gap-1 rounded border border-indigo-300 px-2 py-1 text-sm font-medium text-indigo-700 hover:bg-indigo-50 whitespace-nowrap" href="{{ page_url(request, 'workspace_assessment_detail', query={'run_id': 'all' if show_all_runs else selected_run_id, 'sort': sort, 'lab': lab_filter or '', 'review': review, 'assignment': assignment}, fragment='chat', assessment_id=a.id) }}" title="Open this assessment and ask about it">chat</a>{% endmacro %}
+{% macro pi_link(a) %}{% if a.subject_agent_id and pi_user_ids.get(a.subject_agent_id) %}<a class="underline text-indigo-600 hover:text-indigo-800" href="{{ page_url(request, 'workspace_pi_detail', user_id=pi_user_ids[a.subject_agent_id]) }}">{{ a.subject_agent_id }}</a>{% else %}{{ a.subject_agent_id or "—" }}{% endif %}{% endmacro %}
+{% set list_surface = 'workspace-list' %}
+{% include "assessments/_body.html" %}
+{% endblock %}

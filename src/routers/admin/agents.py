@@ -35,6 +35,7 @@ from src.services.persona_lifecycle import export_after_lifecycle, rename_person
 from src.services.pi_companies import move_companies_file
 from src.services.star_topology import ensure_lab_spoke
 from src.web.flash import flash
+from src.web.urls import page_url
 
 logger = logging.getLogger("src.routers.admin")
 
@@ -522,7 +523,7 @@ async def admin_provision_slack_callback(
     def surface_error(msg: str) -> RedirectResponse:
         flash(request, f"Slack provisioning failed: {msg[:200]}", "error")
         return RedirectResponse(
-            url="/admin/agents" if is_admin else "/manager/pis", status_code=302
+            url="/admin/agents" if is_admin else page_url(request, "workspace_pis"), status_code=302
         )
 
     if error:
@@ -559,8 +560,8 @@ async def admin_provision_slack_callback(
         "success",
     )
     if agent.user_id is None:
-        return RedirectResponse(url="/manager/pis", status_code=302)
-    return RedirectResponse(url=f"/manager/pis/{agent.user_id}", status_code=302)
+        return RedirectResponse(url=page_url(request, "workspace_pis"), status_code=302)
+    return RedirectResponse(url=page_url(request, "workspace_pi_detail", user_id=agent.user_id), status_code=302)
 
 
 

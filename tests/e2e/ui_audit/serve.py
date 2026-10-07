@@ -20,7 +20,7 @@ def main() -> None:
     import uvicorn
 
     from src.main import create_app
-    from src.routers import manager
+    from src.routers.workspace import pi_profile
     from src.services import assessment_chat, profile_publish
     from tests.assessment_chat_support import PITCH_TEXT, RECORD_URL, citation
     from tests.fakes import ChatScript, FakeAsyncAnthropic
@@ -45,7 +45,7 @@ def main() -> None:
             for pmid in pmids
         ]
 
-    manager.fetch_pubmed_records = fake_pubmed_records
+    pi_profile.fetch_pubmed_records = fake_pubmed_records
     real_export = profile_publish.export_profile_to_markdown
     failed_slugs: set[str] = set()
 

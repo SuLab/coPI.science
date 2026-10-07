@@ -212,7 +212,7 @@ async def test_a_manager_cannot_save_a_pi_profile(client, db_session):
     the field delegate-invitation acceptance is bound to.
 
     Managers keep their own legitimate route to the same service function,
-    ``POST /manager/pis/{user_id}/profile``; nothing here narrows that.
+    ``POST /workspace/pis/{user_id}/profile``; nothing here narrows that.
     """
     mgr = await factories.make_user(
         db_session, user_role=USER_ROLE_MANAGER, name="Mona Manager"
