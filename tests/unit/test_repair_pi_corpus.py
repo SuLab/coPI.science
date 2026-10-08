@@ -265,6 +265,30 @@ def test_a_clean_full_name_match_survives_to_the_duplicate_title_pass():
     assert survivors[0][0].id == "a"
 
 
+def test_an_orcid_bearing_author_survives_only_when_the_pi_orcid_is_given():
+    # "Wilson, D Scott" for "Scott Wilson": the forename disagrees, but the
+    # author carries the PI's ORCID, which the pipeline's ORCID-first pass accepts.
+    orcid = "0000-0002-1825-0097"
+    author = _author("Wilson", "D Scott", "DS")
+    author["orcid"] = orcid
+    stored = [_pub("a", "1")]
+    refetched = {"1": _record(1, authors=[author])}
+
+    removals, review, survivors = classify_stored_publications(
+        stored, refetched, "Scott Wilson", orcid
+    )
+    assert removals == []
+    assert review == []
+    assert [p.id for p, _ in survivors] == ["a"]
+
+    removals, review, survivors = classify_stored_publications(
+        stored, refetched, "Scott Wilson"
+    )
+    assert removals == []
+    assert [r.reason for r in review] == ["forename_mismatch"]
+    assert survivors == []
+
+
 # ---------------------------------------------------------------------------
 # find_duplicate_title_removals — resolve_corpus's own rule
 # ---------------------------------------------------------------------------

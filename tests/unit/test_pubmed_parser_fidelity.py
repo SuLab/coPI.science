@@ -171,6 +171,7 @@ def test_authors_are_parsed_with_names_affiliations_and_collectives():
                 "Johns Hopkins University School of Medicine",
                 "HHMI",
             ],
+            "orcid": None,
         },
         {
             "last": None,
@@ -178,9 +179,83 @@ def test_authors_are_parsed_with_names_affiliations_and_collectives():
             "initials": None,
             "collective": "N3C Consortium",
             "affiliations": [],
+            "orcid": None,
         },
     ]
     assert record["author_count"] == 2
+
+
+def _orcid_xml(*identifiers: str, corrections: str = "") -> str:
+    idents = "".join(
+        f'<Identifier Source="ORCID">{text}</Identifier>' for text in identifiers
+    )
+    return f"""<?xml version="1.0"?>
+<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>333</PMID><Article>
+<ArticleTitle>T</ArticleTitle>
+<AuthorList><Author><LastName>Lee</LastName><ForeName>A</ForeName>{idents}</Author></AuthorList>
+</Article>{corrections}</MedlineCitation></PubmedArticle></PubmedArticleSet>
+"""
+
+
+def _author_orcid(*identifiers: str) -> str | None:
+    (record,) = pubmed._parse_pubmed_xml(_orcid_xml(*identifiers))
+    return record["authors"][0]["orcid"]
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("0000-0001-8029-1036", "0000-0001-8029-1036"),
+        ("https://orcid.org/0000-0002-1825-0097", "0000-0002-1825-0097"),
+        ("0000000218250097", "0000-0002-1825-0097"),
+        ("0000-0002-9079-593x", "0000-0002-9079-593X"),
+    ],
+)
+def test_author_orcid_is_normalized(raw, expected):
+    assert _author_orcid(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "0000-0002-1825-009",  # truncated to 15 digits
+        "0000-0002-1825-0098",  # bad check digit
+        "",
+    ],
+)
+def test_invalid_author_orcid_is_none(raw):
+    assert _author_orcid(raw) is None
+
+
+def test_author_without_orcid_identifier_has_none():
+    assert _author_orcid() is None
+
+
+def test_first_valid_orcid_identifier_wins():
+    assert (
+        _author_orcid("0000-0002-1825-009", "0000-0001-8029-1036")
+        == "0000-0001-8029-1036"
+    )
+
+
+def test_update_links_are_parsed_from_comments_corrections():
+    corrections = """<CommentsCorrectionsList>
+<CommentsCorrections RefType="UpdateIn"><PMID Version="1">901</PMID></CommentsCorrections>
+<CommentsCorrections RefType="UpdateIn"><PMID>901</PMID></CommentsCorrections>
+<CommentsCorrections RefType="UpdateOf"><PMID> 800 </PMID></CommentsCorrections>
+<CommentsCorrections RefType="UpdateOf"><RefSource>no pmid</RefSource></CommentsCorrections>
+<CommentsCorrections RefType="Cites"><PMID>700</PMID></CommentsCorrections>
+<CommentsCorrections RefType="UpdateIn"><PMID>902</PMID></CommentsCorrections>
+</CommentsCorrectionsList>"""
+    (record,) = pubmed._parse_pubmed_xml(_orcid_xml(corrections=corrections))
+    assert record["updated_in"] == ["901", "902"]
+    assert record["update_of"] == ["800"]
+
+
+def test_update_links_are_empty_lists_when_absent():
+    (record,) = pubmed._parse_pubmed_xml(_orcid_xml())
+    assert record["updated_in"] == []
+    assert record["update_of"] == []
 
 
 # ---------------------------------------------------------------------------

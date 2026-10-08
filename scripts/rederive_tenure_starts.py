@@ -24,8 +24,9 @@ recorded (``src/services/profile_pipeline.py``, the tenure block):
 2. ``derive_employment_start`` — a year here wins, source ``orcid_employment``;
 3. otherwise ``resolve_corpus`` with the pipeline's arguments (an empty
    ``users.name``/``users.institution`` filled from ORCID, as the pipeline
-   does), then ``derive_start_from_papers`` over ``ranked`` — the whole
-   identity-gated corpus, not the ``CORPUS_CAP``-capped ``kept``, whose newest
+   does), then ``derive_start_from_papers`` over ``ranked`` plus
+   ``superseded_records`` (an anchored preprint the resolver dropped for its published
+   version can be the earliest paper) — the whole identity-gated corpus, not the ``CORPUS_CAP``-capped ``kept``, whose newest
    50 can miss the earliest Hopkins paper — source ``earliest_hopkins_paper``;
    any corpus exception skips the PI, no write, and so does a corpus that
    returned with ``permanently_dropped`` records or a search that stopped at its
@@ -304,8 +305,9 @@ async def rederive(candidate: Candidate) -> Outcome:
         return outcome
 
     # ``ranked``, not ``kept``: the cap keeps the newest CORPUS_CAP records,
-    # which can exclude the earliest Hopkins paper of a prolific PI.
-    year = derive_start_from_papers(corpus.ranked)
+    # which can exclude the earliest Hopkins paper of a prolific PI; superseded
+    # records are included because a dropped preprint can be the earliest.
+    year = derive_start_from_papers([*corpus.ranked, *corpus.superseded_records])
     if year is None:
         outcome.skip_reason = "no_rederived_year (row left as it is)"
         return outcome

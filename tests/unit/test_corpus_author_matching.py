@@ -176,3 +176,77 @@ def test_particle_splice_is_not_applied_when_it_would_not_help():
     record = _rec(4, [_author("Ostrander", "Kim Mc", "KM")])
     kind, _ = match_pi_author(record, "Anya O'Neal")
     assert kind == "no_match"
+
+
+# ---------------------------------------------------------------------------
+# ORCID on the author: identity by iD, with the surname still required.
+# ---------------------------------------------------------------------------
+
+_WILSON_ORCID = "0000-0001-8029-1036"
+
+
+def _orcid_author(last, fore, orcid, initials=None, affs=()):
+    return {**_author(last, fore, initials, affs), "orcid": orcid}
+
+
+def test_an_author_carrying_the_pi_orcid_matches_despite_a_different_forename():
+    record = _rec(
+        1, [_orcid_author("Wilson", "D Scott", _WILSON_ORCID, "DS", ["Johns Hopkins"])]
+    )
+    assert match_pi_author(record, "Scott Wilson")[0] == "no_match"
+    kind, affs = match_pi_author(record, "Scott Wilson", _WILSON_ORCID)
+    assert kind == "individual"
+    assert affs == ["Johns Hopkins"]
+
+
+def test_the_orcid_pass_compares_case_insensitively():
+    record = _rec(1, [_orcid_author("Wilson", "D Scott", "0000-0002-1825-009X")])
+    assert match_pi_author(record, "Scott Wilson", "0000-0002-1825-009x")[0] == "individual"
+
+
+def test_an_orcid_match_still_needs_the_surname():
+    record = _rec(1, [_orcid_author("Smith", "Scott", _WILSON_ORCID)])
+    assert match_pi_author(record, "Scott Wilson", _WILSON_ORCID)[0] == "no_match"
+
+
+def test_the_orcid_authors_affiliations_win_over_an_earlier_namesake():
+    record = _rec(
+        1,
+        [
+            _author("Wilson", "Scott", "S", affs=["Elsewhere University"]),
+            _orcid_author("Wilson", "D Scott", _WILSON_ORCID, affs=["Johns Hopkins"]),
+        ],
+    )
+    kind, affs = match_pi_author(record, "Scott Wilson", _WILSON_ORCID)
+    assert kind == "individual"
+    assert affs == ["Johns Hopkins"]
+
+
+def test_an_orcid_like_name_matches_nobody_even_with_an_orcid():
+    record = _rec(1, [_orcid_author("0097", "0000-0002-1825", "0000-0002-1825-0097")])
+    kind, _ = match_pi_author(record, "0000-0002-1825-0097", "0000-0002-1825-0097")
+    assert kind == "no_match"
+
+
+# ---------------------------------------------------------------------------
+# A stored initial-only first name ("D. Scott Wilson") against a spelled-out
+# PubMed forename ("David S"): a bare-initial match the gate must corroborate.
+# PMIDs 18787098 / 26631690 index him as "Wilson, David S".
+# ---------------------------------------------------------------------------
+
+
+def test_a_stored_initial_matches_a_spelled_out_forename_as_a_bare_initial():
+    from src.services.corpus import _match_pi_author_detail
+
+    record = _rec(18787098, [_author("Wilson", "David S", "DS")])
+    assert _match_pi_author_detail(record, "D. Scott Wilson") == ("individual", [], True)
+
+
+def test_a_stored_initial_rejects_a_forename_with_another_initial():
+    record = _rec(1, [_author("Wilson", "Scott", "S")])
+    assert match_pi_author(record, "D. Scott Wilson")[0] == "no_match"
+
+
+def test_a_second_forename_initial_that_contradicts_the_stored_middle_name_rejects():
+    record = _rec(1, [_author("Wilson", "Daniel R", "DR")])
+    assert match_pi_author(record, "D. Scott Wilson")[0] == "no_match"

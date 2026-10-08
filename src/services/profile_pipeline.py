@@ -393,8 +393,11 @@ async def _derive_tenure_start(run: PipelineRun) -> None:
             )
     if tenure_start is None:
         # The UNCAPPED list: the earliest Hopkins-affiliated paper of a PI
-        # with more than the cap's worth of papers lies outside ``kept``.
-        tenure_start = derive_start_from_papers(corpus_result.ranked)
+        # with more than the cap's worth of papers lies outside ``kept``, and a
+        # superseded anchored preprint (dropped from ``ranked``) can be the earliest.
+        tenure_start = derive_start_from_papers(
+            [*corpus_result.ranked, *corpus_result.superseded_records]
+        )
         if run.step1_failed:
             unrecorded_because = "ORCID profile unavailable"
         elif corpus_result.permanently_dropped:
@@ -472,6 +475,19 @@ async def _store_corpus_publications(run: PipelineRun) -> None:
             "corpus_candidates_accepted",
             f"Stored {len(outcome.candidates_accepted)} pending candidates now found with an "
             "ORCID anchor: " + ", ".join(outcome.candidates_accepted[:10]),
+        )
+    if outcome.superseded_excluded:
+        await run.progress(
+            "corpus_superseded_excluded",
+            f"Excluded {len(outcome.superseded_excluded)} earlier versions (preprints) "
+            "superseded by their published versions; Restore on the manager PI page undoes "
+            "it: " + ", ".join(outcome.superseded_excluded[:10]),
+        )
+    if outcome.candidates_superseded:
+        await run.progress(
+            "corpus_candidates_superseded",
+            f"Rejected {len(outcome.candidates_superseded)} pending candidates superseded "
+            "by a published version: " + ", ".join(outcome.candidates_superseded[:10]),
         )
     if outcome.refreshed:
         await run.progress(

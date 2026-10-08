@@ -5,7 +5,8 @@ plus the corpus advisory lock both writers take around publication writes (SC-6)
 Storage reads the resolver's uncapped ``ranked`` list (the 50-cap bounds only the
 reported ``kept`` set): only ORCID-anchored records (stage s1 or s3) are stored, first
 ingest included; unanchored ones are held as pending ``publication_candidates`` for
-staff review. Nothing is ever deleted (D15)."""
+staff review. Nothing is ever deleted (D15); a stored earlier version (preprint) that a
+stored published version supersedes is excluded, which keeps the row."""
 
 from __future__ import annotations
 
@@ -118,7 +119,69 @@ class CorpusStoreOutcome:
     refreshed: list[str] = field(default_factory=list)            # PMIDs whose metadata changed
     year_changes: list[tuple[str, int | None, int | None]] = field(default_factory=list)
     provenance_set: int = 0                                        # rows whose provenance changed
+    superseded_excluded: list[str] = field(default_factory=list)  # PMIDs excluded as superseded
+    #: pending candidates settled as rejected because the resolver dropped them as superseded
+    candidates_superseded: list[str] = field(default_factory=list)
     first_ingest: bool = False
+
+
+def _row_anchored(row: Publication) -> bool:
+    """The stored row's provenance names an anchor stage (s1 or s3)."""
+    return bool(set((row.provenance or "").split(",")) & ANCHOR_STAGES)
+
+
+def _superseded_pairs(result: CorpusResult) -> list[tuple[str, str]]:
+    """(earlier PMID, successor PMID): the resolver's own drops (``result.superseded``, which
+    includes a preprint whose ``updated_in`` names its successor) plus every ``update_of``
+    link of a ranked record."""
+    pairs = list(result.superseded)
+    for rec in result.ranked:
+        pmid = rec.get("pmid")
+        pairs.extend((old, pmid) for old in rec.get("update_of") or [] if pmid)
+    return pairs
+
+
+def _exclude_superseded(
+    result: CorpusResult, by_pmid: Mapping[str, Publication], outcome: CorpusStoreOutcome,
+) -> None:
+    """Exclude each stored earlier version whose strong stored successor supersedes it
+    (``_superseded_pairs``). Strong: the successor's ranked record is ORCID-anchored, or its
+    row is ``manual`` (a person vouched for it), or, when it is not in ``ranked``, its row's
+    provenance is anchored. A ``manual`` earlier version is never touched, since a person
+    kept it. An anchored earlier version yields only to a strong successor, never to an
+    unanchored one (a review candidate at most); a ``manual`` successor counts, so a staff
+    Accept of a journal version retires its anchored preprint at the next run.
+    ``excluded_by_user_id`` stays NULL: the system decided, and a staff Restore undoes it
+    (and turns the row ``manual``, so later runs leave it alone)."""
+    ranked = {r["pmid"]: r for r in result.ranked if r.get("pmid")}
+    for old_pmid, new_pmid in _superseded_pairs(result):
+        new = by_pmid.get(new_pmid)
+        old = by_pmid.get(old_pmid)
+        if new is None or new.excluded_at is not None or old is None or old_pmid == new_pmid:
+            continue
+        rec = ranked.get(new_pmid)
+        new_anchored = is_anchored(rec) if rec is not None else _row_anchored(new)
+        strong = new_anchored or new.provenance == PROVENANCE_MANUAL
+        if not strong or old.excluded_at is not None or old.provenance == PROVENANCE_MANUAL:
+            continue
+        old.excluded_at = datetime.now(UTC)
+        outcome.superseded_excluded.append(old_pmid)
+
+
+def _settle_superseded_candidates(
+    result: CorpusResult, by_pmid: Mapping[str, Publication],
+    candidates: Mapping[str, PublicationCandidate], outcome: CorpusStoreOutcome,
+) -> None:
+    """A pending candidate for a PMID the resolver dropped as superseded, and not stored, is
+    rejected by the system (no deciding user) so it is never re-offered."""
+    for old_pmid, _ in result.superseded:
+        cand = candidates.get(old_pmid)
+        if (
+            cand is not None and cand.status == "pending" and old_pmid not in by_pmid
+        ):
+            cand.status = "rejected"
+            cand.decided_at = datetime.now(UTC)
+            outcome.candidates_superseded.append(old_pmid)
 
 
 def _stages_text(rec: Mapping[str, Any]) -> str | None:
@@ -203,7 +266,10 @@ async def apply_corpus_result(
     db: AsyncSession, user_id: uuid.UUID, result: CorpusResult,
 ) -> CorpusStoreOutcome:
     """Apply one resolve to the PI's stored rows, in the caller's transaction. The caller
-    holds ``lock_persona_writer`` and ``lock_corpus``. Never deletes. First ingest (no
+    holds ``lock_persona_writer`` and ``lock_corpus``. Never deletes, but a stored earlier
+    version that a stored published version supersedes (see
+    ``_exclude_superseded``) is excluded by the system; staff Restore undoes it. A pending
+    candidate the resolver dropped as superseded is rejected by the system. First ingest (no
     stored row) and later runs alike store only anchored records of ``result.ranked``;
     unanchored ones become pending candidates unless a candidate row for the PMID is
     accepted or rejected; a pending candidate now anchored is stored and marked accepted
@@ -239,6 +305,9 @@ async def apply_corpus_result(
             by_pmid[pmid] = _insert_row(db, user_id, rec, result.orcid_dois, outcome)
         else:
             _hold_for_review(db, user_id, rec, cand, outcome)
+
+    _exclude_superseded(result, by_pmid, outcome)
+    _settle_superseded_candidates(result, by_pmid, candidates, outcome)
 
     # A pending candidate whose PMID is now stored (by this run or by another path, such
     # as a script) is settled by the system, whether or not this resolve returned it.

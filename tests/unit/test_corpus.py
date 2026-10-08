@@ -593,3 +593,157 @@ def test_aff_match_accepts_in_order_tokens_with_gaps_or_a_hopkins_affiliation(
 ])
 def test_aff_match_still_rejects_mismatches(institution, paper_aff):
     assert not corpus._aff_match(institution, paper_aff)
+
+
+# ---------------------------------------------------------------------------
+# New excluded types and superseded-version dedupe
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("label", [
+    "Retraction Notice", "Retracted Publication", "Expression of Concern",
+])
+def test_the_gate_drops_the_new_excluded_types(label):
+    rec = _rec(1, pub_types=["Journal Article", label], authors=[_PI])
+    kept, _flagged, dropped = corpus._gate_records(
+        [rec], {"1": {"s1"}}, "Rachel Green", "Johns Hopkins University"
+    )
+    assert kept == []
+    assert dropped["excluded_type"] == 1
+
+
+def _dedupe(*recs):
+    dropped = {"consortium": 0, "excluded_type": 0, "identity": 0, "duplicate_title": 0}
+    ranked = corpus._dedupe_and_rank(list(recs), dropped)
+    return [r["pmid"] for r in ranked], dropped
+
+
+def _linked(pmid, year, stages, **extra):
+    return {**_rec(pmid, year=year, authors=[_PI]), "stages": list(stages), **extra}
+
+
+def test_an_unanchored_preprint_is_dropped_for_its_anchored_journal_version():
+    preprint = _linked(1, 2020, ["s4"], pub_types=["Preprint"], updated_in=["2"])
+    journal = _linked(2, 2021, ["s1"])
+    pmids, dropped = _dedupe(preprint, journal)
+    assert pmids == ["2"]
+    assert dropped["duplicate_title"] == 1
+
+
+def test_an_anchored_preprint_is_dropped_for_an_anchored_journal_version():
+    preprint = _linked(1, 2020, ["s1"], pub_types=["preprint"], updated_in=["2"])
+    journal = _linked(2, 2021, ["s3"])
+    pmids, dropped = _dedupe(preprint, journal)
+    assert pmids == ["2"]
+    assert dropped["duplicate_title"] == 1
+
+
+def test_an_anchored_preprint_is_kept_when_its_successor_is_unanchored():
+    # The successor would only be a review candidate; dropping the preprint
+    # would leave the work unstored.
+    preprint = _linked(1, 2020, ["s1"], pub_types=["Preprint"], updated_in=["2"])
+    journal = _linked(2, 2021, ["s4"])
+    pmids, dropped = _dedupe(preprint, journal)
+    assert pmids == ["2", "1"]
+    assert dropped["duplicate_title"] == 0
+
+
+def test_a_journal_records_update_of_drops_the_named_survivor():
+    old = _linked(1, 2020, ["s1"])
+    new = _linked(2, 2021, ["s1"], update_of=["1"])
+    pmids, dropped = _dedupe(old, new)
+    assert pmids == ["2"]
+    assert dropped["duplicate_title"] == 1
+
+
+def test_a_mutual_link_keeps_exactly_one_record():
+    a = _linked(1, 2020, ["s1"], pub_types=["Preprint"], updated_in=["2"], update_of=["2"])
+    b = _linked(2, 2021, ["s1"], pub_types=["Preprint"], updated_in=["1"], update_of=["1"])
+    pmids, dropped = _dedupe(a, b)
+    assert len(pmids) == 1
+    assert dropped["duplicate_title"] == 1
+
+
+def test_a_link_to_a_record_that_is_not_a_survivor_changes_nothing():
+    rec = _linked(1, 2020, ["s1"], pub_types=["Preprint"], updated_in=["99"])
+    pmids, dropped = _dedupe(rec)
+    assert pmids == ["1"]
+    assert dropped["duplicate_title"] == 0
+
+
+def test_records_without_link_keys_rank_as_before_and_the_title_winner_is_unchanged():
+    a = _linked(100, 2020, ["s1"], title="Same Result!")
+    b = _linked(200, 2021, ["s1"], title="same result")
+    c = _linked(300, 2019, ["s1"])
+    pmids, dropped = _dedupe(a, b, c)
+    assert pmids == ["200", "300"]
+    assert dropped["duplicate_title"] == 1
+
+
+def test_a_chain_of_superseded_versions_keeps_only_the_last_and_points_at_it():
+    a = _linked(9000000, 2019, ["s1"], pub_types=["Preprint"], updated_in=["10000000"])
+    b = _linked(10000000, 2020, ["s1"], pub_types=["Preprint"], updated_in=["10000001"])
+    c = _linked(10000001, 2021, ["s1"], update_of=["10000000"])
+    dropped = {"consortium": 0, "excluded_type": 0, "identity": 0, "duplicate_title": 0}
+    out: list = []
+    # Feed B's link first in the input; the result must not depend on input order.
+    ranked = corpus._dedupe_and_rank([b, c, a], dropped, out)
+    assert [r["pmid"] for r in ranked] == ["10000001"]
+    assert dropped["duplicate_title"] == 2
+    assert sorted((r["pmid"], succ) for r, succ in out) == [
+        ("10000000", "10000001"),
+        ("9000000", "10000001"),
+    ]
+    assert out[0][0] is a and out[1][0] is b  # drop order
+
+
+def test_a_mutual_link_reports_exactly_one_superseded_pair():
+    a = _linked(1, 2020, ["s1"], pub_types=["Preprint"], updated_in=["2"], update_of=["2"])
+    b = _linked(2, 2021, ["s1"], pub_types=["Preprint"], updated_in=["1"], update_of=["1"])
+    dropped = {"consortium": 0, "excluded_type": 0, "identity": 0, "duplicate_title": 0}
+    out: list = []
+    ranked = corpus._dedupe_and_rank([a, b], dropped, out)
+    assert len(ranked) == 1
+    assert len(out) == 1
+    assert out[0][1] == ranked[0]["pmid"]
+
+
+def test_records_without_links_leave_the_superseded_out_param_empty():
+    dropped = {"consortium": 0, "excluded_type": 0, "identity": 0, "duplicate_title": 0}
+    out: list = []
+    corpus._dedupe_and_rank(
+        [_linked(1, 2020, ["s1"]), _linked(2, 2021, ["s1"])], dropped, out
+    )
+    assert out == []
+
+
+_ORCID = "0000-0001-2345-6789"
+
+
+def _orcid_variant_record():
+    # The PI appears as "D Scott Wilson"; the name on file is "Scott Wilson".
+    author = {**_author("Wilson", "D Scott", "DS", affs=["Johns Hopkins University"]),
+              "orcid": _ORCID}
+    return _rec(1, authors=[author])
+
+
+def test_the_gate_keeps_a_name_variant_only_through_the_orcid():
+    kept, _f, _d = corpus._gate_records(
+        [_orcid_variant_record()], {"1": {"s1"}}, "Scott Wilson",
+        "Johns Hopkins University", _ORCID,
+    )
+    assert len(kept) == 1
+    assert kept[0]["authorship"] == "individual"
+
+    kept, _f, dropped = corpus._gate_records(
+        [_orcid_variant_record()], {"1": {"s1"}}, "Scott Wilson",
+        "Johns Hopkins University",
+    )
+    assert kept == []
+    assert dropped["identity"] == 1
+
+
+async def test_resolve_corpus_passes_the_orcid_to_the_identity_gate(monkeypatch):
+    _wire(monkeypatch, orcid_works=[{"pmid": "1"}], records=[_orcid_variant_record()])
+    result = await resolve_corpus(_ORCID, "Scott Wilson", "Johns Hopkins University")
+    assert [r["pmid"] for r in result.kept] == ["1"]

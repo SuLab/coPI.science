@@ -48,7 +48,14 @@ a generation for any profile (not while one runs, nor within an hour of the last
 the post-commit persona write fails (`agents.persona_export_failed_at`) or the file differs
 from a fresh render, the page says "Persona file out of date" and offers Re-export. Stored
 rows' title, abstract, journal, year and PMCID follow PubMed on every run, except `manual`
-rows. The export links a DOI only when it matches PubMed's record for the PMID
+rows. An author whose PubMed record carries the PI's ORCID is the PI when the surname
+matches, whatever the forename spelling. The resolver keeps one version of a work: a preprint
+PubMed links to its published version (UpdateIn/UpdateOf) is dropped unless it is
+ORCID-anchored and the published version is not. When a run stores a published version that is
+ORCID-anchored or that staff accepted (`manual`), the stored preprint it supersedes is excluded by the system (no deciding user) and Restore undoes
+it; a restored system exclusion becomes `manual`, so later runs leave it alone. A pending
+candidate the resolver drops as superseded is rejected by the system. Retraction notices, retracted publications and expressions of concern are refused like
+errata. The export links a DOI only when it matches PubMed's record for the PMID
 (`publications.doi_verified`), else the PubMed page.
 
 **The manager's whole path, 2026-10-05.** On `/manager/pis/{id}` a manager then

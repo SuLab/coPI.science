@@ -12,13 +12,21 @@ and nothing else was ever asked. Stages here:
 Identity gates, per the 2026-08-13 rehearsal's matcher (ported from
 the retired sparse-data seeding script): every record must carry the PI as a
 named INDIVIDUAL author (surname + forename discrimination — "R Lara Green" is
-not "Rachel Green"); S4-only candidates, and bare-initial matches with no
+not "Rachel Green"), OR as the author carrying the PI's ORCID iD (publisher-supplied
+``author["orcid"]``) whose surname still matches — a name variant such as "Wilson, D
+Scott" for "Scott Wilson" is then identity-correct, while the surname requirement
+keeps a mis-tagged ORCID on someone else's name from attributing the paper. S4-only candidates, and bare-initial matches with no
 S1/S3 anchor, additionally need the PI's OWN affiliation to match the searched
 institution (or, from S4, to be absent — see ``resolve_corpus``). Consortium-only papers
 (CollectiveName, no individual match) are identity-correct but are not
 individual lab output and cannot consume cap slots (R1); records with neither
 an individual match nor a collective are withheld AND flagged, never silently
 added or removed.
+
+A preprint and its journal version carry different titles or years at times, so
+the title dedupe alone misses them; PubMed's own links (``update_of`` on the journal
+record, ``updated_in`` on the preprint) drop the superseded version (see
+``_dedupe_and_rank``).
 
 Ranking is year DESC / PMID DESC; ``EXCLUDED_TYPES`` are skipped pre-cap (R3);
 the cap is applied LAST. The cap bounds only the reported ``kept`` set; every
@@ -33,6 +41,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.services.corpus_additions import is_anchored
 from src.services.jhu_rules import is_hopkins_affiliation
 from src.services.job_queue import JobDeferred
 from src.services.openalex import _MAX_PAGES as _OPENALEX_MAX_PAGES
@@ -74,7 +83,12 @@ EXCLUDED_TYPES = {
     "letter",
     "news",
     "published erratum",
+    # MeSH D016440 was renamed "Retraction Notice"; "Retraction of Publication" is now
+    # an entry term, so both labels can appear in PubMed records.
+    "retraction notice",
     "retraction of publication",
+    "retracted publication",
+    "expression of concern",
     "correction",
     "biography",
 }
@@ -206,6 +220,18 @@ def _author_first_name_matches(
 
         fore_lower = fore.lower()
         if len(fore.replace(".", "").replace(" ", "")) > 1:
+            if expected_first_is_initial:
+                # A stored initial ("D. Scott Wilson") against a spelled-out forename
+                # ("David S"): "david s".startswith("d.") would always reject it, but the
+                # initial is the only evidence either way, so it is a bare-initial match
+                # the caller must corroborate (item 5/D3). A second forename token whose
+                # initial contradicts the stored middle name ("Daniel R") is evidence
+                # against, and rejects.
+                if expected_middle and len(stripped_tokens) > 1 and (
+                    stripped_tokens[1][:1].lower() != expected_middle.strip()[:1].lower()
+                ):
+                    return False, False
+                return fore_lower.startswith(expected_initial), True
             return fore_lower.startswith(expected_first.lower()), False
         if fore_lower.startswith(expected_initial):
             return True, True
@@ -338,7 +364,9 @@ def build_pubmed_query(name: str, affiliations: list[str]) -> str:
     return author_term
 
 
-def _match_pi_author_detail(record: dict, name: str) -> tuple[str, list[str], bool]:
+def _match_pi_author_detail(
+    record: dict, name: str, orcid: str | None = None
+) -> tuple[str, list[str], bool]:
     """Locate the PI in a record's author list (full detail).
 
     Returns ``(kind, pi_affiliations, bare_initial)``. ``kind`` is
@@ -352,7 +380,14 @@ def _match_pi_author_detail(record: dict, name: str) -> tuple[str, list[str], bo
     using.
 
     The name is parsed with ``person_names.parse_person_name``; an ORCID-iD name
-    matches nobody.
+    matches nobody, even when ``orcid`` is given.
+
+    When ``orcid`` is given, an author whose ``author["orcid"]`` equals it
+    (case-insensitive) is the PI regardless of forename ("Wilson, D Scott" for "Scott
+    Wilson"); that pass runs first and returns that author's own affiliations with
+    ``bare_initial`` False. The surname must still match: publishers occasionally tag
+    the wrong author with an ORCID, and the surname is the check that keeps such a
+    paper out. With no ORCID-bearing match the name pass below runs unchanged.
     """
     tokens = parse_person_name(name).full.split()
     if is_orcid_like(name):
@@ -365,26 +400,44 @@ def _match_pi_author_detail(record: dict, name: str) -> tuple[str, list[str], bo
     first_name = tokens[0] if len(tokens) > 1 else ""
     middle_name = tokens[1] if len(tokens) > 2 else None
 
+    def _surname_and_fore(author: dict) -> tuple[str, str] | None:
+        """The author's (surname, forename) as compared, or None when it has no
+        surname. Item 4b: a particle stranded at the end of ForeName is spliced onto
+        the surname only if that actually turns into a surname match — a ForeName
+        that merely ends in a particle-like token for an unrelated reason must
+        change nothing."""
+        last = (author.get("last") or "").strip()
+        if not last:
+            return None
+        fore = (author.get("fore") or "").strip()
+        splice = _split_particle_splice(fore) if fore else None
+        if splice:
+            particle, remainder = splice
+            spliced_last = f"{particle}{last}"
+            if any(_surname_matches(spliced_last, s) for s in surnames):
+                return spliced_last, remainder
+        return last, fore
+
+    if orcid and surnames:
+        wanted = orcid.strip().upper()
+        for author in record.get("authors") or []:
+            if author.get("collective"):
+                continue
+            if (author.get("orcid") or "").strip().upper() != wanted:
+                continue
+            pair = _surname_and_fore(author)
+            if pair and any(_surname_matches(pair[0], s) for s in surnames):
+                return "individual", list(author.get("affiliations") or []), False
+
     saw_collective = False
     for author in record.get("authors") or []:
         if author.get("collective"):
             saw_collective = True
             continue
-        last = (author.get("last") or "").strip()
-        if not last:
+        pair = _surname_and_fore(author)
+        if pair is None:
             continue
-        fore = (author.get("fore") or "").strip()
-
-        candidate_last, candidate_fore = last, fore
-        splice = _split_particle_splice(fore) if fore else None
-        if splice:
-            particle, remainder = splice
-            spliced_last = f"{particle}{last}"
-            # Item 4b: only adopt the splice if it actually turns into a
-            # surname match — a ForeName that merely ends in a particle-like
-            # token for an unrelated reason must change nothing.
-            if any(_surname_matches(spliced_last, s) for s in surnames):
-                candidate_last, candidate_fore = spliced_last, remainder
+        candidate_last, candidate_fore = pair
 
         if not any(_surname_matches(candidate_last, s) for s in surnames):
             continue
@@ -402,7 +455,9 @@ def _match_pi_author_detail(record: dict, name: str) -> tuple[str, list[str], bo
     return "no_match", [], False
 
 
-def match_pi_author(record: dict, name: str) -> tuple[str, list[str]]:
+def match_pi_author(
+    record: dict, name: str, orcid: str | None = None
+) -> tuple[str, list[str]]:
     """Locate the PI in a record's author list.
 
     Returns ``(kind, pi_affiliations)`` where kind is ``"individual"``
@@ -410,9 +465,10 @@ def match_pi_author(record: dict, name: str) -> tuple[str, list[str]]:
     never a co-author's, finding H2), ``"consortium"`` (no individual match
     but a CollectiveName is present), or ``"no_match"``. See
     ``_match_pi_author_detail`` for the bare-initial corroboration flag
-    ``resolve_corpus`` needs and this wrapper drops.
+    ``resolve_corpus`` needs and this wrapper drops, and for how ``orcid`` (the
+    PI's iD, optional) identifies an author whose forename differs from ``name``.
     """
-    kind, affs, _bare_initial = _match_pi_author_detail(record, name)
+    kind, affs, _bare_initial = _match_pi_author_detail(record, name, orcid)
     return kind, affs
 
 
@@ -446,6 +502,14 @@ class CorpusResult:
     # SEARCH_RETMAX PMIDs), so the corpus may be missing older records. A paper-derived
     # tenure start from such a corpus is kept provisionally, never recorded (spec §6.3).
     truncated_stages: list[str] = field(default_factory=list)
+    # (superseded PMID, surviving successor PMID) for every record the superseded-version
+    # dedupe dropped; chains resolve to the final survivor. corpus_additions excludes
+    # stored superseded rows and settles their pending candidates from these pairs.
+    superseded: list[tuple[str, str]] = field(default_factory=list)
+    # The dropped records themselves (as gated, with "stages"), in drop order. Tenure
+    # derivation reads ``ranked`` plus these so a dropped preprint still dates tenure;
+    # scripts/unanchored_publications_report.py must not relabel them.
+    superseded_records: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         # Constructors that predate ``ranked`` pass only ``kept``; storage and tenure read
@@ -470,6 +534,7 @@ def _gate_records(
     stages: dict[str, set[str]],
     name: str,
     institution: str | None,
+    orcid: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
     """Identity and type gates over EFetch records: returns (kept, flagged, dropped).
     Every flagged entry's "reason" literal lives here (tests/unit/test_corpus.py)."""
@@ -485,7 +550,7 @@ def _gate_records(
     for rec in records:
         rec_stages = stages.get(str(rec.get("pmid")), set())
         rec["stages"] = sorted(rec_stages)
-        kind, pi_affs, bare_initial = _match_pi_author_detail(rec, name)
+        kind, pi_affs, bare_initial = _match_pi_author_detail(rec, name, orcid)
         rec["authorship"] = kind
         rec["pi_affiliations"] = pi_affs
 
@@ -572,11 +637,67 @@ def _gate_records(
     return kept, flagged, dropped
 
 
-def _dedupe_and_rank(
-    kept: list[dict[str, Any]], dropped: dict[str, int]
+def _drop_superseded(
+    survivors: list[dict[str, Any]],
+    dropped: dict[str, int],
+    superseded: list[tuple[dict[str, Any], str]] | None,
 ) -> list[dict[str, Any]]:
-    """Title dedupe and newest-first ranking (pre-cap); counts the duplicates it
-    drops into ``dropped["duplicate_title"]``."""
+    """Drop superseded versions from ``survivors``; counts each into
+    ``dropped["duplicate_title"]`` and, when ``superseded`` is a list, appends
+    (dropped record, PMID of its final surviving successor) in drop order."""
+    # X is superseded by Y when Y's ``update_of`` names X's PMID, or X is a Preprint whose
+    # ``updated_in`` names Y's PMID. These links survive title and year differences the
+    # title dedupe cannot see. An anchored X is never dropped for an unanchored Y: Y is
+    # only a review candidate (corpus_additions), so dropping X would leave the work
+    # unstored. Pairs run in numeric PMID order. A pair is skipped when X is already
+    # dropped, or when Y's chain of successors already leads back to X (a mutual link or
+    # longer cycle), so a cycle keeps one record rather than none; a chain A->B->C keeps
+    # only C whatever order its links are met in.
+    by_pmid = {str(r.get("pmid")): r for r in survivors if r.get("pmid")}
+    pairs: set[tuple[str, str]] = set()  # (superseded pmid, superseding pmid)
+    for y_pmid, y in by_pmid.items():
+        for x_pmid in y.get("update_of") or []:
+            pairs.add((str(x_pmid), y_pmid))
+    for x_pmid, x in by_pmid.items():
+        if "preprint" in {str(t).lower() for t in x.get("pub_types") or []}:
+            for y_pmid in x.get("updated_in") or []:
+                pairs.add((x_pmid, str(y_pmid)))
+
+    dropped_by: dict[str, str] = {}  # superseded pmid -> the pmid that superseded it
+
+    def survivor_of(pmid: str) -> str:
+        while pmid in dropped_by:
+            pmid = dropped_by[pmid]
+        return pmid
+
+    for x_pmid, y_pmid in sorted(
+        pairs, key=lambda p: (_pmid_sort_key(p[0]), _pmid_sort_key(p[1]))
+    ):
+        x, y = by_pmid.get(x_pmid), by_pmid.get(y_pmid)
+        if x is None or y is None or x_pmid == y_pmid:
+            continue
+        if x_pmid in dropped_by or survivor_of(y_pmid) == x_pmid:
+            continue
+        if is_anchored(x) and not is_anchored(y):
+            continue
+        dropped_by[x_pmid] = y_pmid
+        dropped["duplicate_title"] += 1
+    if not dropped_by:
+        return survivors
+    if superseded is not None:
+        superseded.extend((by_pmid[x], survivor_of(x)) for x in dropped_by)
+    return [r for r in survivors if str(r.get("pmid")) not in dropped_by]
+
+
+def _dedupe_and_rank(
+    kept: list[dict[str, Any]],
+    dropped: dict[str, int],
+    superseded: list[tuple[dict[str, Any], str]] | None = None,
+) -> list[dict[str, Any]]:
+    """Title dedupe, superseded-version dedupe and newest-first ranking (pre-cap);
+    counts every record it drops into ``dropped["duplicate_title"]``. When
+    ``superseded`` is a list it receives (record, final surviving successor PMID) for
+    each superseded-version drop (not title drops), in drop order."""
     # Dedupe by normalized title (PMID dedupe fell out of the stages map).
     # Preprint/journal pairs share a title; keep the later year (the journal
     # version), tiebreak higher PMID. Errata never reach here (EXCLUDED_TYPES).
@@ -594,8 +715,10 @@ def _dedupe_and_rank(
             )
             by_title[key] = winner
 
+    survivors = _drop_superseded(list(by_title.values()), dropped, superseded)
+
     ranked = sorted(
-        by_title.values(),
+        survivors,
         key=lambda r: (r.get("year") or 0, _pmid_sort_key(r.get("pmid"))),
         reverse=True,
     )
@@ -765,8 +888,11 @@ async def resolve_corpus(
         if item not in doi_pool or _doi_fold(item) not in fetched_dois
     ]
 
-    kept, flagged, dropped = _gate_records(records, stages, name, institution)
-    ranked = _dedupe_and_rank(kept, dropped)
+    kept, flagged, dropped = _gate_records(
+        records, stages, name, institution, orcid
+    )
+    superseded_pairs: list[tuple[dict[str, Any], str]] = []
+    ranked = _dedupe_and_rank(kept, dropped, superseded_pairs)
     kept = ranked[:cap]  # the cap is applied LAST
 
     logger.info(
@@ -784,4 +910,6 @@ async def resolve_corpus(
         ranked=ranked,
         permanently_dropped=permanently_dropped,
         truncated_stages=truncated,
+        superseded=[(str(r.get("pmid")), succ) for r, succ in superseded_pairs],
+        superseded_records=[r for r, _succ in superseded_pairs],
     )

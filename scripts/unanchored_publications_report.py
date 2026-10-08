@@ -93,13 +93,21 @@ class PiReport(Comparison):
 
 def compare(rows: Sequence[Publication], result: CorpusResult) -> Comparison:
     """Pure: the stored ``rows`` of one PI against one resolve's uncapped ``ranked``.
-    ``rows`` may be ``Publication`` rows or ``_snapshot``s of them."""
+    ``rows`` may be ``Publication`` rows or ``_snapshot``s of them. A row whose PMID the
+    resolver dropped as superseded (``result.superseded``) by a strong successor (anchored
+    in ``ranked``, or a stored ``manual`` row) is not unanchored: the pipeline excludes it
+    on purpose, so ``--apply`` must not relabel it. A row superseded by a weak successor
+    (a review candidate at most) stays reportable, since the pipeline keeps it."""
+    manual_pmids = {row.pmid for row in rows if row.pmid and row.provenance == PROVENANCE_MANUAL}
     returned: dict[str, dict] = {}
     for rec in result.ranked:
         pmid = rec.get("pmid")
         if pmid and pmid not in returned:
             returned[pmid] = rec
     anchored = {pmid: rec for pmid, rec in returned.items() if is_anchored(rec)}
+    superseded = {
+        old for old, new in result.superseded if new in anchored or new in manual_pmids
+    }
     stored_pmids = {row.pmid for row in rows if row.pmid}
     out = Comparison()
     out.unstored_anchored = [
@@ -116,7 +124,8 @@ def compare(rows: Sequence[Publication], result: CorpusResult) -> Comparison:
                 out.metadata_refresh.append((row.pmid, list(changes)))
             if "year" in changes:
                 out.year_changes.append((row.pmid, row.year, changes["year"]))
-        if row.excluded_at is None and (row.pmid is None or row.pmid not in anchored):
+        if row.excluded_at is None and (row.pmid is None or row.pmid not in anchored) \
+                and row.pmid not in superseded:
             out.unanchored.append((row.id, row.pmid, row.title or ""))
     return out
 

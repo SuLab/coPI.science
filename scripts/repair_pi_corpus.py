@@ -274,10 +274,15 @@ def classify_stored_publications(
     stored: Sequence[StoredPublication],
     refetched: dict[str, dict[str, Any]],
     pi_name: str,
+    pi_orcid: str | None = None,
 ) -> tuple[list[RemovalCandidate], list[ReviewCandidate], list[tuple[StoredPublication, dict[str, Any]]]]:
     """Partition (already PMID-deduped) stored rows into removals, review
     items, and survivors — rows that pass identity + pub-type checks and
-    proceed to the duplicate-title pass."""
+    proceed to the duplicate-title pass.
+
+    ``pi_orcid`` is passed to the matcher so rows the pipeline stored through its
+    ORCID-first pass (an author carrying the PI's ORCID, surname matching) classify
+    the same way here; None means name-only matching."""
     removals: list[RemovalCandidate] = []
     review: list[ReviewCandidate] = []
     survivors: list[tuple[StoredPublication, dict[str, Any]]] = []
@@ -327,7 +332,7 @@ def classify_stored_publications(
         # declines to ADD one (R1, not individual lab output), which is a very
         # different act from deleting one somebody already verified.
         authors = record.get("authors") or []
-        kind, _ = match_pi_author(record, pi_name)
+        kind, _ = match_pi_author(record, pi_name, pi_orcid)
         if kind != "individual":
             if not authors:
                 reason = "unverifiable_no_authors"
@@ -388,7 +393,7 @@ def classify_stored_publications(
             )
             continue
 
-        if _match_pi_author_detail(record, pi_name)[2]:
+        if _match_pi_author_detail(record, pi_name, pi_orcid)[2]:
             review.append(
                 ReviewCandidate(
                     publication_id=pub.id,
@@ -411,9 +416,11 @@ def classify_stored_publications(
 def find_duplicate_title_removals(
     survivors: Sequence[tuple[StoredPublication, dict[str, Any]]],
 ) -> tuple[list[RemovalCandidate], list[tuple[StoredPublication, dict[str, Any]]]]:
-    """``resolve_corpus``'s own dedupe rule, applied to the survivor set:
+    """``resolve_corpus``'s title dedupe rule, applied to the survivor set:
     group by normalized title, keep the later record (higher year, tiebreak
-    higher PMID), and remove the rest of the group."""
+    higher PMID), and remove the rest of the group. The title rule only: the
+    superseded-version rule of ``resolve_corpus`` (``update_of``/``updated_in``)
+    is not applied here."""
     groups: dict[str, list[tuple[StoredPublication, dict[str, Any]]]] = {}
     for pub, record in survivors:
         title = record.get("title") or pub.title
@@ -456,12 +463,13 @@ def build_removal_and_review_plan(
     stored: Sequence[StoredPublication],
     refetched: dict[str, dict[str, Any]],
     pi_name: str,
+    pi_orcid: str | None = None,
 ) -> tuple[list[RemovalCandidate], list[ReviewCandidate]]:
     """The whole pure pipeline: dedupe PMIDs, classify, collapse duplicate
     titles. Runs entirely on fixtures in tests; no DB, no network."""
     dup_pmid_removals, canonical = partition_duplicate_pmids(stored)
     id_removals, review, survivors = classify_stored_publications(
-        canonical, refetched, pi_name
+        canonical, refetched, pi_name, pi_orcid
     )
     title_removals, _kept = find_duplicate_title_removals(survivors)
     return dup_pmid_removals + id_removals + title_removals, review
@@ -530,7 +538,7 @@ async def build_plan_for_pi(
         )
         refetched = await refetch_pmids(pmids)
         plan.removals, plan.review = build_removal_and_review_plan(
-            stored, refetched, user.name
+            stored, refetched, user.name, user.orcid
         )
 
     if only in (None, "additions"):

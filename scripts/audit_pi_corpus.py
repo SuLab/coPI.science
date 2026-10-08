@@ -74,7 +74,7 @@ async def _classify_pi(db, user: User, *, skip_resolve: bool = False) -> dict:
             unrefetchable += 1
             continue
 
-        kind, _, bare_initial = _match_pi_author_detail(record, user.name)
+        kind, _, bare_initial = _match_pi_author_detail(record, user.name, user.orcid)
         if kind in ("no_match", "consortium"):
             identity_counts["no_surname_author"] += 1
         elif bare_initial:

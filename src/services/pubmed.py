@@ -18,7 +18,33 @@ from src.services.http_pacing import Pacer
 
 logger = logging.getLogger(__name__)
 
-EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+_API_KEY_QUERY = re.compile(r"(?i)(\bapi_key=)[^&\s\"']+")
+
+
+class _RedactApiKey(logging.Filter):
+    """Redact ``api_key=`` query values from log lines: httpx's INFO request lines log
+    the full URL, and ``_ncbi_get`` puts the NCBI key there. Only arguments whose text
+    contains a key are rewritten (to str), so a ``%d`` status code still formats; the
+    lines themselves are kept because operators grep them."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str) and "api_key=" in record.msg:
+            record.msg = _API_KEY_QUERY.sub(r"\1REDACTED", record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                _API_KEY_QUERY.sub(r"\1REDACTED", str(arg))
+                if not isinstance(arg, int | float) and "api_key=" in str(arg)
+                else arg
+                for arg in record.args
+            )
+        return True
+
+
+# httpx's own request lines, and this module's lines that log an exception or URL.
+for _name in ("httpx", __name__):
+    logging.getLogger(_name).addFilter(_RedactApiKey())
+
+EUTILS_BASE ="https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 # The trailing slash is load-bearing: without it NCBI answers 301 to the same path
 # WITH one (live-verified 2026-08-22), so every lookup cost two requests. That was
 # 388 requests for 194 lookups in run 8b64a0e0 — 32% of all our NCBI traffic — and
@@ -220,7 +246,16 @@ async def _ncbi_attempts(
         if resp.status_code in (429, 500, 502, 503) and attempt < 2:
             await asyncio.sleep(1.0 * (2 ** attempt))
             continue
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # httpx puts the request URL, which carries the NCBI api_key, into the message;
+            # callers log and store str(exc) (job errors), so it is redacted here. The
+            # request and response stay attached for status checks (_per_item_4xx).
+            raise httpx.HTTPStatusError(
+                _API_KEY_QUERY.sub(r"\1REDACTED", str(exc)),
+                request=exc.request, response=exc.response,
+            ) from None
         return resp
 
 
@@ -304,7 +339,11 @@ async def fetch_pubmed_records(
     """
     Batch fetch PubMed records for a list of PMIDs.
     Returns list of dicts with: pmid, doi, pmcid, title, abstract, journal, year,
-    pub_types, authors, author_count, coi_statement.
+    pub_types, authors, author_count, coi_statement, updated_in, update_of.
+    Each ``authors`` entry has last, fore, initials, collective, affiliations
+    and orcid (hyphenated ``0000-0000-0000-000X``, or None when absent or
+    invalid). ``updated_in`` / ``update_of`` are PMID lists from the record's
+    UpdateIn / UpdateOf CommentsCorrections links (empty when none).
 
     ``strict`` decides what one failed batch costs:
 
@@ -467,6 +506,49 @@ class PubMedParseError(ValueError):
     """
 
 
+def _normalize_author_orcid(text: str | None) -> str | None:
+    """Return ``text`` as a hyphenated ORCID iD, or None if it is not a valid one.
+
+    Accepts bare, hyphenless and ``http(s)://orcid.org/`` forms. The ISO 7064
+    MOD 11-2 check digit is validated because PubMed carries some truncated
+    and hyphenless iDs that must not be compared against a PI's iD.
+    """
+    if not text:
+        return None
+    chars = "".join(c for c in text if c.isdigit() or c in "Xx").upper()
+    if len(chars) != 16 or "X" in chars[:-1] or not chars[:15].isdigit():
+        return None
+    total = 0
+    for ch in chars[:15]:
+        total = (total + int(ch)) * 2
+    result = (12 - total % 11) % 11
+    if chars[15] != ("X" if result == 10 else str(result)):
+        return None
+    return "-".join(chars[i : i + 4] for i in range(0, 16, 4))
+
+
+def _author_orcid(author: ET.Element) -> str | None:
+    """The first of the author's ``Identifier Source="ORCID"`` children that is a
+    valid iD (``_normalize_author_orcid``), else None."""
+    for ident in author.findall("Identifier"):
+        if ident.get("Source") == "ORCID" and (orcid := _normalize_author_orcid(ident.text)):
+            return orcid
+    return None
+
+
+def _linked_pmids(article: ET.Element, ref_type: str) -> list[str]:
+    """PMIDs of the record's ``CommentsCorrections`` links of ``ref_type`` ("UpdateIn",
+    "UpdateOf"), in document order, without duplicates."""
+    linked: list[str] = []
+    for cc in article.findall("./MedlineCitation/CommentsCorrectionsList/CommentsCorrections"):
+        if cc.get("RefType") != ref_type:
+            continue
+        linked_pmid = (cc.findtext("PMID") or "").strip()
+        if linked_pmid and linked_pmid not in linked:
+            linked.append(linked_pmid)
+    return linked
+
+
 def _parse_pubmed_xml(xml_text: str) -> list[dict[str, Any]]:
     """Parse PubMed XML efetch response.
 
@@ -602,12 +684,16 @@ def _parse_pubmed_xml(xml_text: str) -> list[dict[str, Any]]:
                     "initials": init_el.text if init_el is not None else None,
                     "collective": coll_el.text if coll_el is not None else None,
                     "affiliations": affiliations,
+                    "orcid": _author_orcid(author),
                 }
             )
         record["authors"] = authors
         record["author_count"] = len(authors)
 
         record["coi_statement"] = article.findtext(".//CoiStatement")
+
+        record["updated_in"] = _linked_pmids(article, "UpdateIn")
+        record["update_of"] = _linked_pmids(article, "UpdateOf")
 
         results.append(record)
 

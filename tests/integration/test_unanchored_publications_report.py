@@ -136,3 +136,27 @@ async def test_exhaustion_during_resolve_leaves_rows_unchanged_and_marks_the_run
     marker = await db_session.get(AppSetting, rep.APPLIED_KEY)
     assert marker is not None and pi.orcid in marker.value and '"rows_marked": 0' in marker.value
     await ob.check_request_budget()  # The script's task-local guard was restored.
+
+
+async def test_compare_skips_a_row_the_resolver_dropped_as_superseded(db_session):
+    import scripts.unanchored_publications_report as rep
+
+    pi, result = await _seed(db_session)
+    result.superseded = [("2", "1")]
+    rows = (await db_session.execute(
+        select(Publication).where(Publication.user_id == pi.id))).scalars().all()
+    report = rep.compare(rows, result)
+    assert sorted(pmid for _i, pmid, _t in report.unanchored) == ["5"]
+
+
+def test_a_row_superseded_by_a_weak_successor_stays_reportable():
+    from types import SimpleNamespace
+
+    from scripts.unanchored_publications_report import compare
+    from src.services.corpus import CorpusResult
+
+    row = SimpleNamespace(id="r1", pmid="1", provenance="unanchored", excluded_at=None,
+                          title="Preprint", year=2024, journal=None, abstract=None, pmcid=None)
+    weak = {"pmid": "2", "stages": ["s4"], "title": "Journal", "year": 2025}
+    result = CorpusResult(kept=[weak], flagged=[], ranked=[weak], superseded=[("1", "2")])
+    assert [pmid for _id, pmid, _t in compare([row], result).unanchored] == ["1"]

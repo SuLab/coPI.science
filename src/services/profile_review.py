@@ -222,7 +222,10 @@ async def restore_publication(
     db: AsyncSession, user_id: uuid.UUID, publication_id: uuid.UUID,
 ) -> Publication | None:
     """Undo an Exclude (D71): clear ``excluded_at`` and ``excluded_by_user_id`` on an
-    excluded row of this PI. None when there is no such row. Takes ``lock_corpus``;
+    excluded row of this PI. A row the system excluded (``excluded_by_user_id`` NULL, a
+    superseded earlier version) becomes ``manual``: a person re-included it, and later runs
+    never exclude a ``manual`` row. A staff-excluded row keeps its provenance. None when
+    there is no such row. Takes ``lock_corpus``;
     flushes. The caller records the acting user on the revision."""
     await lock_corpus(db, user_id)
     row = (await db.execute(
@@ -236,6 +239,8 @@ async def restore_publication(
     )).scalar_one_or_none()
     if row is None:
         return None
+    if row.excluded_by_user_id is None:
+        row.provenance = PROVENANCE_MANUAL
     row.excluded_at = None
     row.excluded_by_user_id = None
     await db.flush()
