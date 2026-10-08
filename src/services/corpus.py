@@ -15,10 +15,10 @@ named INDIVIDUAL author (surname + forename discrimination — "R Lara Green" is
 not "Rachel Green"), OR as the author carrying the PI's ORCID iD (publisher-supplied
 ``author["orcid"]``) whose surname still matches — a name variant such as "Wilson, D
 Scott" for "Scott Wilson" is then identity-correct, while the surname requirement
-keeps a mis-tagged ORCID on someone else's name from attributing the paper. S4-only candidates, and bare-initial matches with no
-S1/S3 anchor, additionally need the PI's OWN affiliation to match the searched
-institution (or, from S4, to be absent — see ``resolve_corpus``). Consortium-only papers
-(CollectiveName, no individual match) are identity-correct but are not
+keeps a mis-tagged ORCID on someone else's name from attributing the paper. S4-only
+candidates, and bare-initial matches with no S1/S3 anchor, additionally need the PI's
+OWN affiliation to match the searched institution (or, from S4, to be absent — see
+``resolve_corpus``). Consortium-only papers (CollectiveName, no individual match) are identity-correct but are not
 individual lab output and cannot consume cap slots (R1); records with neither
 an individual match nor a collective are withheld AND flagged, never silently
 added or removed.
@@ -205,8 +205,8 @@ def _author_first_name_matches(
         stripped_tokens = [t.replace(".", "") for t in fore_tokens]
         # A stored initial-first name ("D. Scott Wilson", "J. Marie Hardwick") is known by
         # its middle name, so a ForeName must carry a second token whose initial agrees
-        # with it: "D A", "Deborah" and "Daniel R" are other people. (Names whose first
-        # name is spelled out are unaffected.)
+        # with it: "D A", "Deborah" and "Daniel R" are other people. A lone "D" stays a
+        # bare-initial match. Names whose first name is spelled out are unaffected.
         middle_contradicted = bool(
             expected_first_is_initial and expected_middle and (
                 len(stripped_tokens) < 2
@@ -236,8 +236,8 @@ def _author_first_name_matches(
                 # A stored initial ("D. Scott Wilson") against a spelled-out forename
                 # ("David S"): "david s".startswith("d.") would always reject it, but the
                 # initial is the only evidence either way, so it is a bare-initial match
-                # the caller must corroborate (item 5/D3) — unless the middle name is
-                # contradicted or missing (above).
+                # the caller must corroborate (item 5/D3) — unless the ForeName's second
+                # token contradicts the stored middle name or is absent (above).
                 if middle_contradicted:
                     return False, False
                 return fore_lower.startswith(expected_initial), True

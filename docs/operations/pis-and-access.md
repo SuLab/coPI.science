@@ -49,17 +49,18 @@ the post-commit persona write fails (`agents.persona_export_failed_at`) or the f
 from a fresh render, the page says "Persona file out of date" and offers Re-export. Stored
 rows' title, abstract, journal, year and PMCID follow PubMed on every run, except `manual`
 rows. An author whose PubMed record carries the PI's ORCID is the PI when the surname
-matches, whatever the forename spelling; an author carrying a different ORCID iD is never the
-PI. A PI stored with an initial first name ("D. Scott Wilson") is matched through the middle
-name: a ForeName whose second initial is missing or differs ("Deborah", "D A") is someone else.
-The resolver keeps one version of a work: a preprint
-PubMed links to its published version (UpdateIn/UpdateOf) is dropped unless it is
-ORCID-anchored and the published version is not (a same-title pair is still decided by the title
-rule, which keeps the later year). When a run stores a published version that is
-ORCID-anchored or that staff accepted (`manual`), the stored preprint it supersedes is excluded by the system (no deciding user) and Restore undoes
-it; a restored system exclusion becomes `manual` (its stage provenance is not kept), so later runs
-leave it alone. A pending
-candidate the resolver drops as superseded is rejected by the system. Retraction notices, retracted publications and expressions of concern are refused like
+matches, whatever the forename spelling; when the PI has an ORCID on file, an author carrying
+a different ORCID iD is never the PI. A PI stored with an initial first name
+("D. Scott Wilson") is matched through the middle name: a ForeName whose second token is
+missing or whose initial differs ("Deborah", "D A") is someone else.
+The resolver keeps one version of a work: a preprint PubMed links to its published version
+(UpdateIn/UpdateOf) is dropped unless it is ORCID-anchored and the published version is not
+(a same-title pair is still decided by the title rule, which keeps the later year). When a
+run stores a published version that is ORCID-anchored or that staff accepted (`manual`), the
+stored preprint it supersedes is excluded by the system (no deciding user) and Restore undoes
+it; a restored system exclusion becomes `manual` (its stage provenance is not kept), so later
+runs leave it alone. A pending candidate the resolver drops as superseded is rejected by the
+system. Retraction notices, retracted publications and expressions of concern are refused like
 errata. The export links a DOI only when it matches PubMed's record for the PMID
 (`publications.doi_verified`), else the PubMed page.
 

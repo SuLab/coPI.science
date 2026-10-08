@@ -26,8 +26,9 @@ recorded (``src/services/profile_pipeline.py``, the tenure block):
    ``users.name``/``users.institution`` filled from ORCID, as the pipeline
    does), then ``derive_start_from_papers`` over ``ranked`` plus
    ``superseded_records`` (an anchored preprint the resolver dropped for its published
-   version can be the earliest paper) — the whole identity-gated corpus, not the ``CORPUS_CAP``-capped ``kept``, whose newest
-   50 can miss the earliest Hopkins paper — source ``earliest_hopkins_paper``;
+   version can be the earliest paper) — the whole identity-gated corpus, not the
+   ``CORPUS_CAP``-capped ``kept``, whose newest 50 can miss the earliest Hopkins
+   paper — source ``earliest_hopkins_paper``;
    any corpus exception skips the PI, no write, and so does a corpus that
    returned with ``permanently_dropped`` records or a search that stopped at its
    cap (``truncated_stages``; reason ``incomplete_corpus``: any missing record

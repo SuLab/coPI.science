@@ -44,7 +44,7 @@ class _RedactApiKey(logging.Filter):
 for _name in ("httpx", __name__):
     logging.getLogger(_name).addFilter(_RedactApiKey())
 
-EUTILS_BASE ="https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 # The trailing slash is load-bearing: without it NCBI answers 301 to the same path
 # WITH one (live-verified 2026-08-22), so every lookup cost two requests. That was
 # 388 requests for 194 lookups in run 8b64a0e0 — 32% of all our NCBI traffic — and
