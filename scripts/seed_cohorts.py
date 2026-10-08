@@ -11,8 +11,9 @@ target regardless of --prune.
 This does NOT enable the interaction gate. `cohort_isolation_enabled` is a
 separate setting, default False, read by a running `agent-run` through an
 lru_cached get_settings(); flipping it needs the container recreated, not just
-restarted. Enabling it before every agent in the roster has a cohort assigned
-would gate nothing.
+restarted. Under the default policy ("open") an agent with no cohort stays
+unrestricted in both directions, so enabling it gates only agents that sit in
+different cohorts from each other.
 
 `scripts/` and `cohorts.json` are baked into the app image, not bind-mounted, so
 a code or manifest change needs a rebuild before a container can see it — and
@@ -136,7 +137,7 @@ async def _run_with_session(
         f"{len(plan.memberships_to_add)} membership(s) added"
         + (f", {len(plan.extra_memberships)} pruned." if prune else ".")
     )
-    print("The interaction gate is unchanged (isolation stays off).")
+    print("The interaction gate setting is unchanged (seeding never toggles cohort_isolation_enabled).")
     return 0
 
 

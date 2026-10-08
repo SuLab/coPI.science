@@ -18,6 +18,18 @@ CLAUDE="${AUDIT_CLAUDE_BIN:-/home/ubuntu/.local/bin/claude}"
 cd "$REPO" || { echo "$(date -u +%FT%TZ) FATAL: cannot cd to $REPO" >&2; exit 1; }
 mkdir -p "$REPO/logs"
 
+# Prefer the API key over the interactive OAuth login: /logout (2026-09-16) and
+# token expiry (2026-08-23..09-03) have both silenced the audit before. The CLI
+# honors ANTHROPIC_API_KEY and it does not expire. Read from .env, never committed.
+if [[ -z "${ANTHROPIC_API_KEY:-}" && -f "$REPO/.env" ]]; then
+    ANTHROPIC_API_KEY=$(grep -E '^ANTHROPIC_API_KEY=' "$REPO/.env" | tail -n1 | cut -d= -f2- | tr -d "\"' \r")
+    [[ -n "$ANTHROPIC_API_KEY" ]] && export ANTHROPIC_API_KEY
+fi
+# The API org is HIPAA-regulated without Zero Data Retention; the CLI otherwise
+# sends the context_management beta and gets 400. Verified 2026-09-17: with this
+# unset the call fails, with it set opus[1m] at xhigh answers normally.
+export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
+
 # Count MessageId lines before the run so we can tell this run's send from any
 # earlier one. A failed run that logs nothing leaves the count unchanged.
 before=$(grep -c 'MessageId' "$LOG" 2>/dev/null || echo 0)

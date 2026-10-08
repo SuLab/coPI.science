@@ -52,6 +52,18 @@
             <option value="unclaimed" {% if claimed_filter == 'unclaimed' %}selected{% endif %}>Unclaimed</option>
         </select>
     </div>
+    <div>
+        <label for="cohort-filter" class="text-sm font-medium text-gray-600 block mb-1">Cohort</label>
+        <select onchange="applyFilter()" id="cohort-filter"
+                class="min-h-11 sm:min-h-6 border border-gray-300 rounded-sm px-2 py-1 text-sm">
+            <option value="">All</option>
+            {% for c in all_cohorts %}
+            <option value="{{ c.id }}" {% if cohort_filter == c.id|string %}selected{% endif %}>{{ c.name }}</option>
+            {% endfor %}
+            <option value="{{ cohort_filter_no_cohort }}" {% if cohort_filter == cohort_filter_no_cohort %}selected{% endif %}>Agent, no cohort</option>
+            <option value="{{ cohort_filter_no_agent }}" {% if cohort_filter == cohort_filter_no_agent %}selected{% endif %}>No agent</option>
+        </select>
+    </div>
 </div>
 
 <!-- Users table -->
@@ -64,6 +76,7 @@
         <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Access</th>
         <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
         <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden md:table-cell">Agent</th>
+        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden md:table-cell">Cohorts</th>
         <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden md:table-cell">Pubs</th>
         <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden lg:table-cell">Version</th>
         <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden lg:table-cell">Claimed</th>
@@ -123,6 +136,19 @@
                 {{ item.agent_status | replace('_', ' ') | title }}
             </span>
         </td>
+        <td class="px-4 py-3 hidden md:table-cell">
+            {% if not item.user.agent %}
+            <span class="text-sm text-gray-400">No agent</span>
+            {% elif item.cohorts %}
+            <div class="flex flex-wrap gap-1">
+                {% for c in item.cohorts %}
+                <a href="/admin/cohorts/{{ c.id }}" class="relative z-10">{{ ui.badge(c.name, 'brand' if item.user.agent.status == 'active' else 'neutral') }}</a>
+                {% endfor %}
+            </div>
+            {% else %}
+            <span class="text-sm text-gray-400">—</span>
+            {% endif %}
+        </td>
         <td class="px-4 py-3 text-sm text-gray-600 hidden md:table-cell">{{ item.pub_count }}</td>
         <td class="px-4 py-3 text-sm text-gray-600 hidden lg:table-cell">
             {{ (item.profile.profile_version or '—') if item.profile else '—' }}
@@ -147,7 +173,7 @@
     </tr>
     {% else %}
     <tr>
-        <td colspan="11" class="px-4 py-8 text-center text-gray-400 text-sm">No users found</td>
+        <td colspan="12" class="px-4 py-8 text-center text-gray-400 text-sm">No users found</td>
     </tr>
     {% endfor %}
 </tbody>
@@ -158,10 +184,12 @@ function applyFilter() {
     const status = document.getElementById('status-filter').value;
     const claimed = document.getElementById('claimed-filter').value;
     const access = document.getElementById('access-filter').value;
+    const cohort = document.getElementById('cohort-filter').value;
     const params = new URLSearchParams();
     if (status) params.set('status_filter', status);
     if (claimed) params.set('claimed_filter', claimed);
     if (access) params.set('access_filter', access);
+    if (cohort) params.set('cohort_filter', cohort);
     location.href = '/admin/users?' + params.toString();
 }
 </script>
