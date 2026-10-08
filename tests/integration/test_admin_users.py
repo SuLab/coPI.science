@@ -69,8 +69,8 @@ async def admin(db_session):
 # the access column rendered the wrong colour (or never rendered at all).
 # ---------------------------------------------------------------------------
 
-_COLUMN_COUNT = 11  # Name, Institution, ORCID, Access, Status, Agent, Pubs,
-                    # Version, Claimed, Joined, Last Login
+_COLUMN_COUNT = 12  # Name, Institution, ORCID, Access, Status, Agent, Cohorts,
+                    # Pubs, Version, Claimed, Joined, Last Login
 
 
 def _row_for(html: str, name: str) -> str:
@@ -261,8 +261,8 @@ async def test_an_unknown_access_filter_value_matches_nothing_rather_than_500ing
     # This is the only page state that renders the empty-state row, and its
     # colspan is the one place the column count is hard-coded in the template —
     # so it is also the only place a stale count is observable. Left behind by an
-    # added column, "No users found" renders inside the Name column with ten
-    # blank cells beside it; _access_cell's per-row count never sees this row.
+    # added column, "No users found" renders inside the Name column with blank
+    # cells beside it; _access_cell's per-row count never sees this row.
     assert f'colspan="{_COLUMN_COUNT}"' in r.text
 
 

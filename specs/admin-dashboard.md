@@ -23,6 +23,7 @@ Default landing page. Table of all users.
 - Profile status: `no_profile` | `generating` | `complete`
   (`pending_update` was removed: `pending_profile` has no writer — issue #22 V6-pend)
 - Agent status: `not_requested` | `awaiting_token` | `active` | `suspended`
+- Cohorts: the owned agent's cohorts (display-only; muted when the agent is not active; "No agent" / "—")
 - Publication count
 - Profile version
 - Claimed (date or "No")
@@ -32,6 +33,7 @@ Default landing page. Table of all users.
 - Profile status
 - Institution
 - Claimed vs. unclaimed
+- Cohort (a cohort, "Agent, no cohort", or "No agent")
 
 **Row click** → user detail page.
 
@@ -44,6 +46,7 @@ Full view of a single user's data.
 **Account:**
 - Name, email, ORCID, institution, department
 - Admin status, onboarding complete, claimed_at
+- Agent (link + status) and Cohorts, with whether the membership is in effect
 
 **Profile:**
 - Research summary

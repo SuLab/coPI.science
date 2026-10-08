@@ -60,6 +60,12 @@ router = APIRouter()
 # runs status=='active' agents (others are parked/excluded, reversibly).
 VALID_AGENT_STATUSES = ("active", "inactive", "suspended", "pending")
 
+# /admin/users cohort_filter values besides a cohort's UUID. Neither a UUID nor a cohort
+# name (^[a-z0-9-]{1,48}$) can contain "_", so these cannot collide with a real cohort —
+# a cohort may legally be named "none".
+COHORT_FILTER_NO_COHORT = "__none__"
+COHORT_FILTER_NO_AGENT = "__no_agent__"
+
 
 def _template_context(
     request: Request, current_user: User, active_admin: str = "", **kwargs
@@ -74,6 +80,28 @@ def _template_context(
     return ctx
 
 
+async def _cohorts_by_agent(
+    db: AsyncSession, agent_id: str | None = None
+) -> dict[str, list[Cohort]]:
+    """Map agent slug -> its cohorts, each list ordered by cohort name.
+
+    Display-only lookup for the admin user pages. Membership is keyed by the
+    AgentRegistry slug, so a user's cohorts are those of the agent they OWN
+    (``User.agent``); a delegated agent's cohorts are not the delegate's.
+    """
+    query = (
+        select(CohortMembership.agent_id, Cohort)
+        .join(Cohort, CohortMembership.cohort_id == Cohort.id)
+        .order_by(Cohort.name)
+    )
+    if agent_id is not None:
+        query = query.where(CohortMembership.agent_id == agent_id)
+    out: dict[str, list[Cohort]] = {}
+    for aid, cohort in (await db.execute(query)).all():
+        out.setdefault(aid, []).append(cohort)
+    return out
+
+
 @router.get("", response_class=HTMLResponse)
 @router.get("/users", response_class=HTMLResponse)
 async def admin_users(
@@ -82,6 +110,7 @@ async def admin_users(
     institution_filter: str | None = None,
     claimed_filter: str | None = None,
     access_filter: str | None = None,
+    cohort_filter: str | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
@@ -92,6 +121,10 @@ async def admin_users(
     page surfaces ``access_status`` as its own column and filter rather than
     hiding them. Without it a pending/denied user is indistinguishable from a
     fully approved one here, which is how unapproved accounts went unnoticed.
+
+    The Cohorts column is display-only: it shows the memberships of the agent the
+    user owns (membership is keyed by agent slug). Membership is edited on
+    /admin/cohorts.
     """
     query = (
         select(User)
@@ -110,6 +143,9 @@ async def admin_users(
         .group_by(Publication.user_id)
     )
     pub_counts = {str(r.user_id): r.count for r in pub_counts_result}
+
+    cohorts_by_agent = await _cohorts_by_agent(db)
+    all_cohorts = (await db.execute(select(Cohort).order_by(Cohort.name))).scalars().all()
 
     user_data = []
     for user in users:
@@ -137,6 +173,16 @@ async def admin_users(
             continue
         if access_filter and user.access_status != access_filter:
             continue
+        agent_cohorts = cohorts_by_agent.get(user.agent.agent_id, []) if user.agent else []
+        if cohort_filter:
+            if cohort_filter == COHORT_FILTER_NO_AGENT:
+                if user.agent:
+                    continue
+            elif cohort_filter == COHORT_FILTER_NO_COHORT:
+                if not user.agent or agent_cohorts:
+                    continue
+            elif cohort_filter not in {str(c.id) for c in agent_cohorts}:
+                continue
 
         # Agent status
         if not user.agent:
@@ -153,6 +199,7 @@ async def admin_users(
             "access_status": user.access_status,
             "pub_count": pub_count,
             "agent_status": agent_status,
+            "cohorts": agent_cohorts,
         })
 
     return templates.TemplateResponse(
@@ -167,6 +214,10 @@ async def admin_users(
             institution_filter=institution_filter,
             claimed_filter=claimed_filter,
             access_filter=access_filter,
+            cohort_filter=cohort_filter,
+            all_cohorts=all_cohorts,
+            cohort_filter_no_cohort=COHORT_FILTER_NO_COHORT,
+            cohort_filter_no_agent=COHORT_FILTER_NO_AGENT,
         ),
     )
 
@@ -182,7 +233,7 @@ async def admin_user_detail(
     result = await db.execute(
         select(User)
         .where(User.id == user_id)
-        .options(selectinload(User.profile), selectinload(User.jobs))
+        .options(selectinload(User.profile), selectinload(User.jobs), selectinload(User.agent))
     )
     user = result.scalar_one_or_none()
     if not user:
@@ -195,6 +246,19 @@ async def admin_user_detail(
     )
     publications = pub_result.scalars().all()
 
+    # Cohort labels belong to the agent this user OWNS (membership is keyed by agent
+    # slug) and move with it if it is re-linked. Read-only; membership is edited on
+    # /admin/cohorts. The gate preview is the engine's own compute_gates, so the
+    # "unrestricted"/"isolated" wording cannot drift from behaviour.
+    owned_agent = user.agent
+    agent_cohorts: list[Cohort] = []
+    gate: dict[str, Any] | None = None
+    if owned_agent is not None:
+        agent_cohorts = (
+            await _cohorts_by_agent(db, owned_agent.agent_id)
+        ).get(owned_agent.agent_id, [])
+        gate = await _cohort_gate_context(db)
+
     return templates.TemplateResponse(
         request,
         "admin/user_detail.html",
@@ -206,6 +270,9 @@ async def admin_user_detail(
             profile=user.profile,
             publications=publications,
             jobs=sorted(user.jobs, key=lambda j: j.enqueued_at, reverse=True),
+            owned_agent=owned_agent,
+            agent_cohorts=agent_cohorts,
+            gate=gate,
         ),
     )
 

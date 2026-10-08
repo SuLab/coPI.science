@@ -34,6 +34,45 @@
             <dd class="font-medium text-sm">{{ target_user.claimed_at.strftime('%b %d, %Y %H:%M') if target_user.claimed_at else 'Unclaimed' }}</dd>
             <dt class="text-gray-500 text-sm">Joined</dt>
             <dd class="font-medium text-sm">{{ target_user.created_at.strftime('%b %d, %Y') }}</dd>
+            <dt class="text-gray-500 text-sm">Agent</dt>
+            <dd class="font-medium text-sm break-all">
+                {% if owned_agent %}
+                <a href="/admin/agents/{{ owned_agent.id }}" class="text-green-600 hover:underline">{{ owned_agent.bot_name }}</a>
+                <span class="font-normal text-gray-500">({{ owned_agent.status }})</span>
+                {% else %}—{% endif %}
+            </dd>
+            <dt class="text-gray-500 text-sm">Cohorts</dt>
+            <dd class="text-sm" id="user-cohorts">
+                {% if not owned_agent %}
+                <span class="text-gray-500">No agent — cohorts are assigned per agent</span>
+                {% elif agent_cohorts %}
+                <div class="flex flex-wrap gap-1">
+                    {% for c in agent_cohorts %}
+                    <a href="/admin/cohorts/{{ c.id }}">{{ ui.badge(c.name, 'brand' if owned_agent.status == 'active' else 'neutral') }}</a>
+                    {% endfor %}
+                </div>
+                {% if not gate.isolation_enabled %}
+                <div class="mt-1 text-gray-500">Recorded, not enforced: cohort isolation is off</div>
+                {% elif gate.preflight_error %}
+                <div class="mt-1 text-gray-500">Recorded, not enforced: isolation was forced off (<a href="/admin/cohorts" class="text-green-600 hover:underline">details</a>)</div>
+                {% elif owned_agent.status != 'active' %}
+                {# Deliberately not "not in effect": compute_gates builds cohort-mate sets
+                   from every membership row, so a non-running agent can still sit in its
+                   active mates' allowed senders. #}
+                <div class="mt-1 text-gray-500">This agent is {{ owned_agent.status }} and does not run</div>
+                {% endif %}
+                {% elif not gate.isolation_enabled %}
+                <span class="text-gray-500">None (cohort isolation is off)</span>
+                {% elif gate.preflight_error %}
+                <span class="text-gray-500">None (isolation was forced off: <a href="/admin/cohorts" class="text-green-600 hover:underline">details</a>)</span>
+                {% elif owned_agent.agent_id not in gate.preview %}
+                <span class="text-gray-500">None</span>
+                {% elif gate.preview[owned_agent.agent_id] is none %}
+                <span class="text-gray-500">None — unrestricted (acts on every agent)</span>
+                {% else %}
+                <span class="text-gray-500">None — isolated (acts on no other agent)</span>
+                {% endif %}
+            </dd>
         </dl>
     </div>
 
