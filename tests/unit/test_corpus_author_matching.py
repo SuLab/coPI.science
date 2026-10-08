@@ -250,3 +250,25 @@ def test_a_stored_initial_rejects_a_forename_with_another_initial():
 def test_a_second_forename_initial_that_contradicts_the_stored_middle_name_rejects():
     record = _rec(1, [_author("Wilson", "Daniel R", "DR")])
     assert match_pi_author(record, "D. Scott Wilson")[0] == "no_match"
+
+
+def test_a_stored_initial_first_name_needs_the_middle_initial_to_agree():
+    from src.services.corpus import _match_pi_author_detail
+
+    name = "D. Scott Wilson"
+    assert match_pi_author(_rec(1, [_author("Wilson", "Deborah", "D")]), name)[0] == "no_match"
+    assert match_pi_author(_rec(2, [_author("Wilson", "D A", "DA")]), name)[0] == "no_match"
+    assert _match_pi_author_detail(_rec(3, [_author("Wilson", "D S", "DS")]), name) == (
+        "individual", [], True,
+    )
+    # A first name that is spelled out in the stored name is unaffected.
+    assert match_pi_author(_rec(4, [_author("Rothstein", "J D", "JD")]), "Jeffrey Rothstein")[0] == "individual"
+
+
+def test_an_author_with_a_different_orcid_is_not_the_pi():
+    other = _author("Wilson", "D Scott", "DS")
+    other["orcid"] = "0000-0001-5133-7373"
+    record = _rec(5, [other])
+    assert match_pi_author(record, "D. Scott Wilson", "0000-0001-8029-1036")[0] == "no_match"
+    # Without the PI's ORCID to compare, the name pass is unchanged.
+    assert match_pi_author(record, "D. Scott Wilson")[0] == "individual"

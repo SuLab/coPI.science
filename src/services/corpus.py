@@ -203,8 +203,20 @@ def _author_first_name_matches(
     if fore:
         fore_tokens = fore.split()
         stripped_tokens = [t.replace(".", "") for t in fore_tokens]
+        # A stored initial-first name ("D. Scott Wilson", "J. Marie Hardwick") is known by
+        # its middle name, so a ForeName must carry a second token whose initial agrees
+        # with it: "D A", "Deborah" and "Daniel R" are other people. (Names whose first
+        # name is spelled out are unaffected.)
+        middle_contradicted = bool(
+            expected_first_is_initial and expected_middle and (
+                len(stripped_tokens) < 2
+                or stripped_tokens[1][:1].lower() != expected_middle.strip()[:1].lower()
+            )
+        )
         if stripped_tokens and all(len(t) <= 1 for t in stripped_tokens):
             # Item 1: spaced initials — the whole ForeName is initials.
+            if middle_contradicted and len(stripped_tokens) > 1:
+                return False, False
             return stripped_tokens[0].lower() == expected_initial, True
 
         if expected_first_is_initial and expected_middle:
@@ -224,12 +236,9 @@ def _author_first_name_matches(
                 # A stored initial ("D. Scott Wilson") against a spelled-out forename
                 # ("David S"): "david s".startswith("d.") would always reject it, but the
                 # initial is the only evidence either way, so it is a bare-initial match
-                # the caller must corroborate (item 5/D3). A second forename token whose
-                # initial contradicts the stored middle name ("Daniel R") is evidence
-                # against, and rejects.
-                if expected_middle and len(stripped_tokens) > 1 and (
-                    stripped_tokens[1][:1].lower() != expected_middle.strip()[:1].lower()
-                ):
+                # the caller must corroborate (item 5/D3) — unless the middle name is
+                # contradicted or missing (above).
+                if middle_contradicted:
                     return False, False
                 return fore_lower.startswith(expected_initial), True
             return fore_lower.startswith(expected_first.lower()), False
@@ -418,8 +427,8 @@ def _match_pi_author_detail(
                 return spliced_last, remainder
         return last, fore
 
-    if orcid and surnames:
-        wanted = orcid.strip().upper()
+    wanted = orcid.strip().upper() if orcid else ""
+    if wanted and surnames:
         for author in record.get("authors") or []:
             if author.get("collective"):
                 continue
@@ -440,6 +449,10 @@ def _match_pi_author_detail(
         candidate_last, candidate_fore = pair
 
         if not any(_surname_matches(candidate_last, s) for s in surnames):
+            continue
+        if wanted and author.get("orcid") and author["orcid"].strip().upper() != wanted:
+            # The author carries a different, checksum-valid ORCID iD: someone else with
+            # the PI's surname, whatever the forename says.
             continue
 
         bare_initial = False
