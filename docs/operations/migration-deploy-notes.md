@@ -1303,3 +1303,28 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > Rollback: the column is harmless to the old images. `alembic downgrade 0063` drops it;
 > profiles generated under the fallback then export by the tenure window until their next
 > generation.
+
+> **Deploy order for `0065_non_pubmed_publications` — migrate BEFORE the new worker serves,
+> with the worker idle; rebuild the AGENT image in the same deploy (for the abstract-tool
+> fallback, not the schema); no backfill.** `0065` widens `ck_publications_provenance` to
+> admit `'openalex'` and adds `uq_publications_user_doi_nopmid`, a unique index on
+> `(user_id, lower(doi))` WHERE `pmid IS NULL`: the non-PubMed corpus of
+> `docs/specs/2026-10-09-thin-profile-fallback-design.md` §5.
+>
+> *Old code on the new schema* is safe: it never writes `'openalex'` or a PMID-less row. *New
+> code on the old schema* is not: storing a non-PubMed work violates the CHECK and the
+> generation fails, so migrate first. The CHECK swap re-validates every `publications` row and
+> the index build scans the table; both lock `publications`, so run it with no `processing`
+> `generate_profile` job, or the chain's 10 s `lock_timeout` trips. **Agent image:** rebuild
+> with it, because `src/services/pubmed.py`'s `fetch_abstract` (which the engine imports)
+> gains the OpenAlex fallback; `$DC up -d agent` only when `/admin/simulation` shows no live
+> run.
+>
+> **No backfill:** existing rows keep their provenance; non-PubMed rows appear at each
+> PubMed-thin PI's next generation. Commit before building.
+>
+> Rollback: `alembic downgrade 0064` relabels every PMID-less row the non-PubMed corpus
+> stored (`'openalex'`, `'s1'`, `'s1,s2'`) as `'unanchored'` (the old CHECK refuses
+> `'openalex'`, and the old scripts would otherwise meet PMID-less rows labelled as
+> anchored), drops the index and restores 0062's CHECK; the rows stay and appear on the
+> manager's Unanchored papers card for Keep or Exclude.

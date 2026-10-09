@@ -4,7 +4,8 @@ Implements the pipeline from profile-ingestion.md:
 1. Fetch ORCID profile
 2. Fetch ORCID fundings into pi_orcid_fundings (soft)
 3. Resolve the publication corpus (ORCID works + OpenAlex + PubMed; corpus.py) and store it
-   (corpus_additions.apply_corpus_result)
+   (corpus_additions.apply_corpus_result); for a PubMed-thin PI also store the works PubMed
+   does not have (non_pubmed_works, corpus_additions.apply_non_pubmed_works; spec 2026-10-09)
 4. Fetch PubMed abstracts
 5. Deep mining: PMC methods sections
 6. Prepare profile record
@@ -41,14 +42,21 @@ from src.services import job_progress
 from src.services.corpus import (
     DEFAULT_CAP,
     EXCLUDED_TYPES,  # noqa: F401 — re-exported; tests and callers import it from here
+    CorpusStageError,
     resolve_corpus,
 )
-from src.services.corpus_additions import apply_corpus_result, lock_corpus
+from src.services.corpus_additions import (
+    apply_corpus_result,
+    apply_non_pubmed_works,
+    is_anchored,
+    lock_corpus,
+)
 from src.services.grant_sections import GrantSections, grant_blocks, load_grant_sections
 from src.services.jhu_rules import (
     clear_provisional_tenure_start,
     derive_employment_start,
     derive_start_from_papers,
+    export_tenure_start,
     get_tenure_start,
     set_provisional_tenure_start,
     set_tenure_start,
@@ -56,6 +64,7 @@ from src.services.jhu_rules import (
 )
 from src.services.job_queue import AfterCommit, NonRetryableJobError
 from src.services.llm import SynthesisRefused, synthesize_profile
+from src.services.non_pubmed_works import collect_non_pubmed_works
 from src.services.orcid import fetch_orcid_profile
 from src.services.orcid_fundings import fetch_orcid_fundings, store_orcid_fundings
 from src.services.person_names import is_orcid_like, name_from_machine_source
@@ -69,6 +78,7 @@ from src.services.profile_limits import (
     cap_tags,
 )
 from src.services.pubmed import (
+    _doi_fold,
     convert_pmids_to_pmcids,
     fetch_pmc_methods,
 )
@@ -79,6 +89,7 @@ from src.services.tenure_scope import (
     publication_in_use,
     publication_order_by,
     publication_sort_key,
+    pubmed_thin,
 )
 
 logger = logging.getLogger(__name__)
@@ -168,6 +179,8 @@ class PipelineRun:
     step1_failed: bool = False
     agent_reg: AgentRegistry | None = None
     corpus_result: Any = None
+    #: Phase B (spec 2026-10-09 §5.2): the resolve's storable non-PubMed works.
+    non_pubmed_works: list[dict] = field(default_factory=list)
     tenure_start: int | None = None
     #: The records in scope: the tenure window, or the full career under the fallback.
     in_tenure: list[dict] = field(default_factory=list)
@@ -216,6 +229,7 @@ async def run_profile_pipeline(
     await _lock_persona(run)
     await _derive_tenure_start(run)
     await _store_corpus_publications(run)
+    await _store_non_pubmed_works(run)
     await _load_synthesis_inputs(run)
     await _step5_methods(run)
     await _step6_profile_record(run)
@@ -333,6 +347,10 @@ async def _steps3_4_resolve_corpus(run: PipelineRun) -> None:
         run.orcid_id, user.name, user.institution, cap=CORPUS_CAP
     )
     corpus_result = run.corpus_result
+    if await _may_be_pubmed_thin(run):
+        run.non_pubmed_works = await _collect_non_pubmed(
+            corpus_result, await _enriched_non_pubmed_dois(run)
+        )
     await run.progress(
         "step4",
         f"Corpus resolved: kept {len(corpus_result.kept)} "
@@ -384,6 +402,63 @@ async def _lock_persona(run: PipelineRun) -> None:
         select(AgentRegistry).where(AgentRegistry.user_id == run.user_id)
         .execution_options(populate_existing=True)
     )).scalar_one_or_none()
+
+
+async def _may_be_pubmed_thin(run: PipelineRun) -> bool:
+    """Phase B's trigger as far as it is known before the locks (spec 2026-10-09 §5.1): the
+    PI's in-use stored PubMed papers plus the anchored ones this resolve returned, counted in
+    the window of the best tenure year known so far (recorded or provisional, else the
+    current Hopkins ORCID employment). Storage re-checks the exact rule under the lock; this
+    only spares a PubMed-rich PI the OpenAlex lookups and their failure modes (security and
+    semantic review 2026-10-09). Reads only."""
+    agent_id = run.agent_reg.agent_id if run.agent_reg else None
+    result = run.corpus_result
+    tenure = await export_tenure_start(run.db, run.user_id, agent_id)
+    if tenure is None:
+        tenure = derive_employment_start(run.orcid_profile.get("employments") or [])
+    if tenure is None:
+        # As _derive_tenure_start falls back: the earliest Hopkins paper the PI wrote.
+        tenure = derive_start_from_papers([*result.ranked, *result.superseded_records])
+    stored = (await run.db.execute(
+        select(Publication.pmid, Publication.year, Publication.excluded_at).where(
+            Publication.user_id == run.user_id, Publication.pmid.isnot(None),
+        )
+    )).all()
+    excluded = {pmid for pmid, _year, excluded_at in stored if excluded_at is not None}
+    years = {pmid: year for pmid, year, excluded_at in stored if excluded_at is None}
+    for rec in result.ranked:
+        pmid = str(rec.get("pmid") or "")
+        if pmid and pmid not in excluded and is_anchored(rec):
+            years.setdefault(pmid, rec.get("year"))
+    for old, _successor in result.superseded:  # storage excludes these earlier versions
+        years.pop(old, None)
+    return pubmed_thin(years.values(), tenure)
+
+
+async def _enriched_non_pubmed_dois(run: PipelineRun) -> frozenset[str]:
+    """Folded DOIs of the PI's PMID-less rows that already carry an abstract: the lookups
+    are spent on the rest first, so older works are not starved by the cap (semantic
+    review 2026-10-09). Reads only."""
+    dois = (await run.db.execute(
+        select(Publication.doi).where(
+            Publication.user_id == run.user_id, Publication.pmid.is_(None),
+            Publication.doi.isnot(None), Publication.abstract.isnot(None),
+            Publication.abstract != "",
+        )
+    )).scalars().all()
+    return frozenset(_doi_fold(doi) for doi in dois)
+
+
+async def _collect_non_pubmed(
+    result: Any, enriched: frozenset[str] = frozenset(),
+) -> list[dict[str, Any]]:
+    """Phase B collection (spec 2026-10-09 §5.2), before any lock: network only (free OpenAlex
+    singleton lookups). A failure is a corpus stage failure, so the job retries rather than
+    storing less."""
+    try:
+        return await collect_non_pubmed_works(result, enriched_dois=enriched)
+    except Exception as exc:
+        raise CorpusStageError(f"corpus stage non_pubmed_lookup failed: {exc}") from exc
 
 
 async def _derive_tenure_start(run: PipelineRun) -> None:
@@ -524,11 +599,43 @@ async def _store_corpus_publications(run: PipelineRun) -> None:
             f"Rejected {len(outcome.candidates_superseded)} pending candidates superseded "
             "by a published version: " + ", ".join(outcome.candidates_superseded[:10]),
         )
+    if outcome.non_pubmed_superseded:
+        await run.progress(
+            "non_pubmed_superseded",
+            f"Excluded {len(outcome.non_pubmed_superseded)} works stored without a PMID that "
+            "PubMed now has; Restore on the manager PI page undoes it: "
+            + ", ".join(outcome.non_pubmed_superseded[:10]),
+        )
     if outcome.refreshed:
         await run.progress(
             "corpus_metadata_refreshed",
             f"Refreshed {len(outcome.refreshed)} stored publications from PubMed "
             f"({len(outcome.year_changes)} year changes)",
+        )
+
+
+async def _store_non_pubmed_works(run: PipelineRun) -> None:
+    """Phase B storage (spec 2026-10-09 §5.1, §5.3): a PubMed-thin PI gets the works PubMed
+    does not have, PMID-less. Runs under the corpus lock ``_store_corpus_publications`` took
+    (a transaction lock, held to the job's commit), so it takes none of its own."""
+    if not run.non_pubmed_works:
+        return
+    pubmed_years = (await run.db.execute(
+        select(Publication.year).where(
+            Publication.user_id == run.user_id, Publication.pmid.isnot(None),
+            publication_in_use(),
+        )
+    )).scalars().all()
+    if not pubmed_thin(pubmed_years, run.tenure_start):
+        return
+    outcome = await apply_non_pubmed_works(run.db, run.user_id, run.non_pubmed_works)
+    if outcome.stored or outcome.refreshed:
+        await run.progress(
+            "non_pubmed_works",
+            f"Stored {len(outcome.stored)} works PubMed does not have "
+            f"({outcome.stored_openalex_only} found only by OpenAlex); "
+            f"refreshed {len(outcome.refreshed)} "
+            f"({outcome.refreshed_openalex_only} found only by OpenAlex).",
         )
 
 
@@ -1055,8 +1162,9 @@ def _build_synthesis_context(
     if selected_pubs:
         parts.append("\n## Publications")
         for pub in selected_pubs:
-            year = pub.get("year", "")
-            journal = pub.get("journal", "")
+            # `or ""`: a PMID-less row often has no venue, and None must not print.
+            year = pub.get("year") or ""
+            journal = pub.get("journal") or ""
             title = pub.get("title", "")
             parts.append(f"\n### {title} ({journal}, {year})")
             if pub.get("abstract"):

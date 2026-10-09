@@ -119,3 +119,32 @@ async def test_a_kept_stored_profile_keeps_its_flag_and_exports_by_it(
 
     assert profile.research_summary == "Stored." and profile.full_career_fallback is False
     assert "Postdoc paper" not in (wired.export_dir / f"{agent.agent_id}.md").read_text()
+
+
+async def test_a_provisional_tenure_year_drives_the_fallback_too(db_session, wired, monkeypatch):  # noqa: F811
+    # ORCID down: the paper-derived year is used for this run only (provisional), and the
+    # thin-record rule reads it like a recorded one.
+    async def orcid_profile_down(orcid):
+        raise ConnectionError("simulated ORCID outage")
+
+    monkeypatch.setattr(profile_pipeline, "fetch_orcid_profile", orcid_profile_down)
+    user, _agent, job = await _make_pi(db_session)
+    wired.corpus = _uncapped([
+        _rec(1, 2015, "First Hopkins paper", hopkins_pi=True),
+        _rec(2, 2005, "Elsewhere paper"),
+    ])
+    profile = await run_profile_pipeline(user.id, db_session, job.id)
+    assert profile.full_career_fallback is True
+    assert "Elsewhere paper" in wired.contexts[0]
+
+
+async def test_a_later_reexport_follows_the_flag(db_session, wired):  # noqa: F811
+    from src.services.profile_publish import reexport_persona
+
+    user, _agent, job = await _make_pi(db_session)
+    wired.profile["employments"] = _HOPKINS_2018
+    wired.corpus = _uncapped([*_window(2), _rec(1, 2010, "Postdoc paper")])
+    await run_profile_pipeline(user.id, db_session, job.id)
+    # The sweep, vetoes, pins and enrich_grants all re-render through reexport_persona.
+    text = await reexport_persona(db_session, user.id, mechanism=None)
+    assert "Postdoc paper" in text

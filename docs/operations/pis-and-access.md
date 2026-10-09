@@ -21,7 +21,7 @@ deliberate: the job and the agent row commit together, so the worker can never
 run the pipeline before the row exists — the old seed-then-create-row order
 lost the markdown export and revision every time. The profile job runs the **corpus
 pipeline** (`src/services/corpus.py`: ORCID + OpenAlex + PubMed-by-ORCID +
-name-affiliation search, identity-gated, consortium-excluded, year-ranked; every ORCID-anchored find (ORCID works or PubMed's ORCID field) is stored, uncapped, while finds from OpenAlex or the name+affiliation search alone wait as candidates for staff review) and the synthesis/export are tenure-filtered
+name-affiliation search, identity-gated, consortium-excluded, year-ranked; every ORCID-anchored find (ORCID works or PubMed's ORCID field) is stored, uncapped, while finds from OpenAlex or the name+affiliation search alone wait as candidates for staff review; a PubMed-thin PI — at most 10 non-excluded PubMed papers in the tenure window — also gets the works PubMed does not have, listed on their ORCID or attributed to it by OpenAlex, stored without a PMID and without review, with abstracts from OpenAlex (spec `docs/specs/2026-10-09-thin-profile-fallback-design.md` §5)) and the synthesis/export are tenure-filtered
 (`src/services/jhu_rules.py`; per-user `app_settings` keys, with the legacy
 agent_id map still read as fallback — its 62 curated entries were migrated in
 2026-08). A wrong or missing tenure year is correctable on the manager

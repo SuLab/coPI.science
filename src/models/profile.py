@@ -134,9 +134,12 @@ class ResearcherProfile(Base):
                                 itself failed so the identifier count is unknown.
                                 Ungrounded and worth regenerating.
           no_evidence_available nothing to fetch in the first place (a genuinely
-                                publication-less or non-PubMed-indexed
-                                researcher). Ungrounded, but nothing was lost and
-                                regenerating will not change it.
+                                publication-less researcher; since spec
+                                2026-10-09 §5 a PubMed-thin PI's non-PubMed works
+                                are stored, so a non-PubMed-indexed researcher
+                                reads grounded once ORCID or OpenAlex lists an
+                                abstract-bearing work). Ungrounded, but nothing
+                                was lost and regenerating will not change it.
           identity_unmatched    nothing in scope, but the identity gates withheld
                                 records (evidence_flagged_count > 0): the name
                                 matched papers whose author lists did not confirm

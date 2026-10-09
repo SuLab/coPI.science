@@ -95,7 +95,8 @@ async def test_container_is_migrated(engine):
         # 0063 thread_outcome_enum 'abandoned', opportunity_assessments.served_by_model,
         #      assessment_drops.refusal_category (drain-hang + refusal provenance)
         # 0064 researcher_profiles.full_career_fallback (thin-record fallback)
-        assert v == "0064"
+        # 0065 'openalex' provenance, uq_publications_user_doi_nopmid (non-PubMed corpus)
+        assert v == "0065"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

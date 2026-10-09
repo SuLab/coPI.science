@@ -26,8 +26,8 @@ misses, so this module owns the rule instead:
 * :func:`publication_order_by` / :func:`publication_sort_key` — the one
   publication order (spec 2026-10-05 §6.1), in SQL and in Python.
 * :data:`THIN_RECORD_MAX_PAPERS`, :func:`papers_in_window`,
-  :func:`full_career_fallback_applies` — the thin-record rule of
-  ``docs/specs/2026-10-09-thin-profile-fallback-design.md`` (§4.1).
+  :func:`full_career_fallback_applies`, :func:`pubmed_thin` — the thin-record rule of
+  ``docs/specs/2026-10-09-thin-profile-fallback-design.md`` (§4.1, §5.1).
 
 Three rules, stated once so no surface invents its own:
 
@@ -125,6 +125,14 @@ def full_career_fallback_applies(years: Iterable[int | None], tenure_start: int 
         tenure_start is not None
         and papers_in_window(years, tenure_start) <= THIN_RECORD_MAX_PAPERS
     )
+
+
+def pubmed_thin(pubmed_years: Iterable[int | None], tenure_start: int | None) -> bool:
+    """Phase B of spec 2026-10-09 (§5.1): at most ``THIN_RECORD_MAX_PAPERS`` of the PI's
+    non-excluded PubMed papers (``pubmed_years``: rows with a PMID only) fall in the window,
+    every one counting when no tenure year is set. Counting PubMed rows only keeps a
+    non-PubMed PI receiving new works however many of them accumulate."""
+    return papers_in_window(pubmed_years, tenure_start) <= THIN_RECORD_MAX_PAPERS
 
 
 @dataclass(frozen=True)

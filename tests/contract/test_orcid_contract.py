@@ -169,7 +169,8 @@ async def test_fetch_orcid_works_parses_ids_and_year():
     respx.get(f"{BASE}/{OID}/works").mock(return_value=httpx.Response(200, json=data))
     works = await orcid.fetch_orcid_works(OID)
     assert works == [
-        {"title": "A Paper", "year": 2019, "pmid": "31000000", "doi": "10.1/abc", "type": "journal-article"}
+        {"title": "A Paper", "year": 2019, "pmid": "31000000", "doi": "10.1/abc",
+         "type": "journal-article", "journal": None}
     ]
 
 

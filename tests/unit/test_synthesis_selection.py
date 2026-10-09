@@ -26,3 +26,15 @@ def test_offered_is_the_newest_window_that_carries_an_abstract():
     records = [_r(2024, abstract="")] + [_r(2023)] * (SYNTHESIS_WINDOW + 5)
     sel = select_synthesis_inputs(records, None)
     assert len(sel.offered) == SYNTHESIS_WINDOW - 1
+
+
+def test_a_missing_venue_or_year_prints_nothing_rather_than_none():
+    from src.services.grant_sections import EMPTY_GRANT_SECTIONS
+    from src.services.profile_pipeline import _build_synthesis_context
+
+    context = _build_synthesis_context(
+        orcid_profile={"name": "Haimin Hu"}, grants=EMPTY_GRANT_SECTIONS,
+        publications=[{"title": "SHARP", "journal": None, "year": None, "abstract": "A."}],
+        methods_by_pmid={},
+    )
+    assert "### SHARP (, )" in context and "None" not in context

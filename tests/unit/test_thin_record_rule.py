@@ -1,10 +1,11 @@
-"""The thin-record rule (spec 2026-10-09 §4.1): ``tenure_scope.papers_in_window`` and
-``full_career_fallback_applies``."""
+"""The thin-record rule (spec 2026-10-09 §4.1, §5.1): ``tenure_scope.papers_in_window``,
+``full_career_fallback_applies`` and ``pubmed_thin``."""
 
 from src.services.tenure_scope import (
     THIN_RECORD_MAX_PAPERS,
     full_career_fallback_applies,
     papers_in_window,
+    pubmed_thin,
 )
 
 
@@ -36,3 +37,11 @@ def test_undated_and_pre_tenure_papers_do_not_count_toward_the_jhu_era_record():
 
 def test_a_tenure_year_with_no_papers_at_all_is_thin():
     assert full_career_fallback_applies([], 2026) is True
+
+
+def test_pubmed_thin_counts_the_window_or_every_paper_without_a_tenure_year():
+    assert pubmed_thin([2020] * 10, 2020) is True
+    assert pubmed_thin([2020] * 11, 2020) is False
+    assert pubmed_thin([2001] * 11, 2020) is True
+    assert pubmed_thin([2001] * 11, None) is False
+    assert pubmed_thin([], None) is True
