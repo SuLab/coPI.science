@@ -27,6 +27,9 @@ class Draft:
     base_profile_version: int
     job_id: str | None
     created_at: datetime | None
+    #: The text was generated under the thin-record fallback (spec 2026-10-09 §4.3);
+    #: accept_draft writes it with the text. False for a payload written before 0064.
+    full_career_fallback: bool = False
 
 
 def edited_since_generation(profile: ResearcherProfile) -> bool:
@@ -42,7 +45,7 @@ def edited_since_generation(profile: ResearcherProfile) -> bool:
 def build_draft_payload(
     *, fields: Mapping[str, Any], synthesis_validated: bool, evidence_pmid_count: int,
     evidence_pub_count: int, evidence_flagged_count: int, base_profile_version: int,
-    job_id: uuid.UUID | None,
+    job_id: uuid.UUID | None, full_career_fallback: bool = False,
 ) -> dict[str, Any]:
     """The JSON stored in researcher_profiles.pending_profile (DRAFT_FIELDS only)."""
     return {
@@ -53,6 +56,7 @@ def build_draft_payload(
         "evidence_flagged_count": int(evidence_flagged_count),
         "base_profile_version": int(base_profile_version),
         "job_id": str(job_id) if job_id is not None else None,
+        "full_career_fallback": bool(full_career_fallback),
     }
 
 
@@ -81,6 +85,7 @@ def read_draft(profile: ResearcherProfile) -> Draft | None:
         base_profile_version=base,
         job_id=job_id if isinstance(job_id, str) else None,
         created_at=profile.pending_profile_created_at,
+        full_career_fallback=payload.get("full_career_fallback") is True,
     )
 
 

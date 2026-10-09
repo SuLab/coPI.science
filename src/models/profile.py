@@ -58,9 +58,10 @@ class ResearcherProfile(Base):
     synthesis_validated: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # How much evidence the STORED profile is grounded in. Written together with
     # the synthesized fields, so they always describe the same synthesis. Both None means "no synthesis stored / pre-0023 row".
-    #   evidence_pmid_count — in-tenure corpus records (len(in_tenure) in
-    #                         profile_pipeline), i.e. what the pipeline had in scope
-    #   evidence_pub_count  — PubMed records that were in-tenure AND carried an
+    #   evidence_pmid_count — corpus records in scope (len(in_tenure) in
+    #                         profile_pipeline): the tenure window, or the whole stored
+    #                         career when full_career_fallback is set
+    #   evidence_pub_count  — records that were in scope AND carried an
     #                         abstract, i.e. the set offered to the synthesis prompt
     #                         (len(pubs_for_synthesis) at profile_pipeline.py step 9).
     #                         Read it as what was offered to the synthesis step — an
@@ -76,6 +77,13 @@ class ResearcherProfile(Base):
     #: Records the identity gates withheld in the run that wrote the counts above
     #: (len(CorpusResult.flagged); migration 0062). NULL on rows written before 0062.
     evidence_flagged_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: The stored text was generated under the thin-record fallback (spec 2026-10-09 §4.3,
+    #: migration 0064): the PI had a tenure year and at most THIN_RECORD_MAX_PAPERS papers
+    #: dated in it, so synthesis used the whole stored career and every persona export
+    #: does too (tenure_scope.scoped_publications_for_export). Written only together with
+    #: generated text (the pipeline's store, a draft accept). NULL = generated before 0064,
+    #: read as False.
+    full_career_fallback: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # A regeneration's synthesis staged for staff review because a human edited the profile
     # since its last generation (spec 2026-10-05 §6.3, D19): src/services/profile_drafts.py
     # writes it, the manager PI page's Pending draft card accepts or discards it. NULL means

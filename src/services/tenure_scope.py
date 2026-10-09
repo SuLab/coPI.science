@@ -25,6 +25,9 @@ misses, so this module owns the rule instead:
   ``publication_in_use()`` to their own ``where``.
 * :func:`publication_order_by` / :func:`publication_sort_key` — the one
   publication order (spec 2026-10-05 §6.1), in SQL and in Python.
+* :data:`THIN_RECORD_MAX_PAPERS`, :func:`papers_in_window`,
+  :func:`full_career_fallback_applies` — the thin-record rule of
+  ``docs/specs/2026-10-09-thin-profile-fallback-design.md`` (§4.1).
 
 Three rules, stated once so no surface invents its own:
 
@@ -52,7 +55,7 @@ from sqlalchemy import BigInteger, case, cast, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
-from src.models import AppSetting, Publication
+from src.models import AppSetting, Publication, ResearcherProfile
 from src.services.jhu_rules import LEGACY_TENURE_KEY, TENURE_KEY_PREFIX, export_tenure_start
 
 logger = logging.getLogger(__name__)
@@ -97,6 +100,30 @@ def publication_sort_key(pub: Publication | Mapping[str, Any]) -> tuple:
     return (
         year is None, -(year or 0), pmid_n is None, -(pmid_n or 0),
         doi is None, doi or "", "" if ident is None else str(ident),
+    )
+
+
+#: Spec 2026-10-09 D3/D7: a record this small inside its window is "thin".
+THIN_RECORD_MAX_PAPERS = 10
+
+
+def papers_in_window(years: Iterable[int | None], tenure_start: int | None) -> int:
+    """How many of ``years`` (one per non-excluded paper) fall in the window: every paper when
+    no tenure year is set, else those dated ``>= tenure_start``. An undated paper never counts
+    once a year is set, as in ``partition_publications``."""
+    if tenure_start is None:
+        return sum(1 for _ in years)
+    return sum(1 for year in years if year is not None and year >= tenure_start)
+
+
+def full_career_fallback_applies(years: Iterable[int | None], tenure_start: int | None) -> bool:
+    """Phase A of spec 2026-10-09 (§4.1): a tenure year is set and at most
+    ``THIN_RECORD_MAX_PAPERS`` of the PI's non-excluded papers (``years``, PubMed and non-PubMed
+    alike) are dated in or after it, so the profile uses the full career. With no tenure year
+    the profile is full-career already (D20), so this is False."""
+    return (
+        tenure_start is not None
+        and papers_in_window(years, tenure_start) <= THIN_RECORD_MAX_PAPERS
     )
 
 
@@ -364,8 +391,25 @@ async def scoped_publications_for_export(
     ``export_profile_to_markdown``. An unfiltered top-20 in a persona file is
     exactly how pre-tenure papers reached nine agents' prompts on 2026-08-14
     (audit H3), and the engine reloads that file within one main-loop tick.
+
+    The one exception is a profile generated under the thin-record fallback
+    (``researcher_profiles.full_career_fallback``, spec 2026-10-09 §4.4): its export
+    is the full career, so every re-export matches the text it goes with.
     """
-    scoped = await scoped_publications_for(db, user_id, agent_id)
+    rows = (
+        (
+            await db.execute(
+                select(Publication)
+                .where(Publication.user_id == user_id, publication_in_use())
+                .order_by(*publication_order_by())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if await _profile_uses_full_career(db, user_id):
+        return TenureScopedPublications(publications=tuple(rows), tenure_start=None)
+    scoped = await scoped_publications_for(db, user_id, agent_id, publications=rows)
     if scoped.tenure_start is None:
         # No recorded year: fall back to the pipeline's provisional one, so this
         # export scopes exactly as the pipeline's last export did. With no
@@ -376,3 +420,11 @@ async def scoped_publications_for_export(
     return TenureScopedPublications(
         publications=tuple(scoped.publications), tenure_start=scoped.tenure_start
     )
+
+
+async def _profile_uses_full_career(db: AsyncSession, user_id: uuid.UUID) -> bool:
+    """The stored profile's text was generated under the thin-record fallback."""
+    return bool(await db.scalar(
+        select(ResearcherProfile.full_career_fallback)
+        .where(ResearcherProfile.user_id == user_id)
+    ))

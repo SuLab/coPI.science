@@ -756,6 +756,9 @@ For the six PIs whose tenure window leaves ≤5 abstracts (D7): accept, widen
 the window for recently-arrived faculty, or mark the profile low-grounding in
 the manager UI. No code change until decided.
 
+**Decided 2026-10-09 (owner):** widen the window — a PI with at most 10 JHU-era papers is
+profiled from the full career (`docs/specs/2026-10-09-thin-profile-fallback-design.md`).
+
 ### Task 8 — guardrails
 
 - `scripts/audit_pi_corpus.py` (read-only, the §3 classification **plus** the

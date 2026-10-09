@@ -94,7 +94,8 @@ async def test_container_is_migrated(engine):
         #      agents.persona_export_failed_at (corpus remediation)
         # 0063 thread_outcome_enum 'abandoned', opportunity_assessments.served_by_model,
         #      assessment_drops.refusal_category (drain-hang + refusal provenance)
-        assert v == "0063"
+        # 0064 researcher_profiles.full_career_fallback (thin-record fallback)
+        assert v == "0064"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

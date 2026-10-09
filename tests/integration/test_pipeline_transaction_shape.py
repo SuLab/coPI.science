@@ -124,6 +124,8 @@ async def test_new_pi_with_jhu_employment_exports_no_pre_tenure_papers(db_sessio
     wired.corpus = _uncapped([
         _rec(1, 2020, "In tenure paper", hopkins_pi=True),
         _rec(2, 2010, "Pre tenure paper"),
+        # 11 JHU-era papers keep the tenure window under test (no thin-record fallback).
+        *[_rec(10 + i, 2016 + i, f"Filler {i}") for i in range(10)],
     ])
     user, agent, job = await _make_pi(db_session)
     await run_profile_pipeline(user.id, db_session, job.id)

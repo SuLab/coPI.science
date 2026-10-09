@@ -73,6 +73,9 @@ from src.services.pubmed import (
     fetch_pmc_methods,
 )
 from src.services.tenure_scope import (
+    THIN_RECORD_MAX_PAPERS,
+    full_career_fallback_applies,
+    papers_in_window,
     publication_in_use,
     publication_order_by,
     publication_sort_key,
@@ -122,6 +125,36 @@ def _flag_reason_summary(flagged: list[dict[str, Any]]) -> str:
     )
 
 
+@dataclass(frozen=True)
+class SynthesisSelection:
+    """What one generation synthesizes from (spec 2026-10-09 §4.2). ``in_scope`` is the stored
+    records the profile covers: the JHU tenure window, or every stored record when
+    ``full_career_fallback`` is set (a tenure year with at most THIN_RECORD_MAX_PAPERS papers
+    dated in it). ``offered`` is the newest SYNTHESIS_WINDOW of them that carry an abstract.
+    ``jhu_era_papers`` counts the records dated in the tenure window."""
+
+    in_scope: list[dict[str, Any]]
+    offered: list[dict[str, Any]]
+    full_career_fallback: bool
+    jhu_era_papers: int
+
+
+def select_synthesis_inputs(
+    records: list[dict[str, Any]], tenure_start: int | None
+) -> SynthesisSelection:
+    """Pure. ``records`` are the PI's non-excluded stored rows, newest first (the shared
+    publication order). Shared with scripts/synthesis_dry_run.py."""
+    years = [r.get("year") for r in records]
+    fallback = full_career_fallback_applies(years, tenure_start)
+    in_scope = list(records) if fallback else tenure_filter(records, tenure_start)
+    return SynthesisSelection(
+        in_scope=in_scope,
+        offered=[r for r in in_scope[:SYNTHESIS_WINDOW] if r.get("abstract")],
+        full_career_fallback=fallback,
+        jhu_era_papers=papers_in_window(years, tenure_start),
+    )
+
+
 @dataclass
 class PipelineRun:
     """Everything one pipeline run carries from step to step (spec §7.4). Field names are the locals of the pre-split function, so each step body is the old code with those locals read as run.<name>."""
@@ -136,7 +169,9 @@ class PipelineRun:
     agent_reg: AgentRegistry | None = None
     corpus_result: Any = None
     tenure_start: int | None = None
+    #: The records in scope: the tenure window, or the full career under the fallback.
     in_tenure: list[dict] = field(default_factory=list)
+    full_career_fallback: bool = False
     pubs_for_synthesis: list[dict] = field(default_factory=list)
     methods_by_pmid: dict[str, str] = field(default_factory=dict)
     profile: ResearcherProfile | None = None
@@ -502,8 +537,9 @@ async def _load_synthesis_inputs(run: PipelineRun) -> None:
     user_id = run.user_id
     # Synthesis basis: the STORED corpus (both cohorts — additions included,
     # audited rows the resolver missed included too), rows staff excluded left out,
-    # tenure-filtered (R2). Newest first (the shared publication order); the newest
-    # SYNTHESIS_WINDOW in-tenure rows are offered (D14).
+    # tenure-filtered (R2) unless the JHU-era record is thin, when the whole stored
+    # career is used (spec 2026-10-09 §4.2). Newest first (the shared publication
+    # order); the newest SYNTHESIS_WINDOW in-scope rows are offered (D14).
     stored_result = await db.execute(
         select(Publication)
         .where(Publication.user_id == user_id, publication_in_use())
@@ -522,10 +558,16 @@ async def _load_synthesis_inputs(run: PipelineRun) -> None:
         }
         for p in stored_result.scalars().all()
     ]
-    run.in_tenure = tenure_filter(corpus_records, run.tenure_start)
-    run.pubs_for_synthesis = [
-        r for r in run.in_tenure[:SYNTHESIS_WINDOW] if r.get("abstract")
-    ]
+    selection = select_synthesis_inputs(corpus_records, run.tenure_start)
+    run.in_tenure = selection.in_scope
+    run.pubs_for_synthesis = selection.offered
+    run.full_career_fallback = selection.full_career_fallback
+    if selection.full_career_fallback:
+        await run.progress(
+            "full_career_fallback",
+            f"Only {selection.jhu_era_papers} JHU-era papers since {run.tenure_start} "
+            f"(at most {THIN_RECORD_MAX_PAPERS}): the profile uses the full career.",
+        )
 
 
 async def _step5_methods(run: PipelineRun) -> None:
@@ -758,6 +800,7 @@ async def _stage_draft(run: PipelineRun, evidence_pmid_count: int, evidence_pub_
         evidence_flagged_count=run.flagged_count,
         base_profile_version=run.loaded_version,
         job_id=run.job_id,
+        full_career_fallback=run.full_career_fallback,
     )
     profile.pending_profile_created_at = datetime.now(UTC)
     await run.progress(
@@ -819,6 +862,7 @@ async def _store_synthesis(
             evidence_pmid_count=evidence_pmid_count,
             evidence_pub_count=evidence_pub_count,
             evidence_flagged_count=run.flagged_count,
+            full_career_fallback=run.full_career_fallback,
             # A direct store supersedes an older draft.
             pending_profile=None,
             pending_profile_created_at=None,
@@ -938,6 +982,9 @@ async def _export_profile(run: PipelineRun) -> None:
     # pre-tenure papers reached 9 agents' prompts on 2026-08-14 (audit H3).
     # tenure_start is already resolved above, so scope the rows already
     # loaded here rather than re-querying it via scoped_publications_for_export.
+    # A profile generated under the thin-record fallback exports its full career
+    # (spec 2026-10-09 §4.4); the flag is read from the refreshed profile, so a kept
+    # or drafted run exports the way the stored text was generated.
     from src.services.profile_publish import export_and_record, schedule_persona_write
     from src.services.tenure_scope import scope_for_export
     pub_result = await db.execute(
@@ -945,7 +992,10 @@ async def _export_profile(run: PipelineRun) -> None:
         .where(Publication.user_id == user.id, publication_in_use())
         .order_by(*publication_order_by())
     )
-    user_pubs = scope_for_export(pub_result.scalars().all(), run.tenure_start)
+    user_pubs = scope_for_export(
+        pub_result.scalars().all(),
+        None if profile.full_career_fallback else run.tenure_start,
+    )
     grants = await load_grant_sections(db, user.id)
 
     # The revision records this render; the file is written after the job's commit

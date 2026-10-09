@@ -1280,3 +1280,26 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > `alembic downgrade 0062`, if wanted, runs from a one-off container off the NEW image
 > before the images are restored, and drops the two columns only — the enum value stays,
 > as `0039`'s, `0047`'s and `0058`'s do.
+
+> **Deploy order for `0064_profile_full_career_fallback` — migrate BEFORE the new web and
+> worker images serve, with the worker idle; no agent rebuild needed; no backfill.** `0064`
+> adds `researcher_profiles.full_career_fallback` (boolean, NULL): true when the stored
+> profile text was generated from the PI's full stored career because the JHU-era record was
+> thin (a tenure year and at most 10 non-excluded papers dated in it). Every persona export
+> reads it. Design: `docs/specs/2026-10-09-thin-profile-fallback-design.md` §4.
+>
+> *Old code on the new schema* is safe: nothing old reads or writes the column. *New code on
+> the old schema* is not: `ResearcherProfile` maps the column, so every profile read on the
+> web app and the worker raises `UndefinedColumn`. **Agent image:** no rebuild needed — the
+> engine imports `src.models` but never queries `researcher_profiles` (measured 2026-10-09);
+> any later agent build must run on a database at `0064` or later.
+>
+> The `ADD COLUMN` takes a brief ACCESS EXCLUSIVE lock on `researcher_profiles` and adds no
+> default. A running generation holds row locks on that table until it commits, so run the
+> migration with no `processing` `generate_profile` job, or the chain's 10 s `lock_timeout`
+> trips. **No backfill:** NULL means "generated before 0064" and reads as false; each PI's
+> next generation writes it. Commit before building.
+>
+> Rollback: the column is harmless to the old images. `alembic downgrade 0063` drops it;
+> profiles generated under the fallback then export by the tenure window until their next
+> generation.

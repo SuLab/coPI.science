@@ -25,7 +25,13 @@ name-affiliation search, identity-gated, consortium-excluded, year-ranked; every
 (`src/services/jhu_rules.py`; per-user `app_settings` keys, with the legacy
 agent_id map still read as fallback — its 62 curated entries were migrated in
 2026-08). A wrong or missing tenure year is correctable on the manager
-Edit Profile form ("JHU tenure start"). A corpus-stage failure FAILS the job
+Edit Profile form ("JHU tenure start"). A PI whose JHU-era record is thin — a tenure year
+with at most 10 non-excluded papers dated in or after it — is synthesized and exported from
+the full stored career instead (owner decision 2026-10-09,
+`docs/specs/2026-10-09-thin-profile-fallback-design.md` §4), and
+`researcher_profiles.full_career_fallback` records it so every re-export matches; grants,
+RePORTER, the industry score and the PI page's publication list stay tenure-scoped. A
+corpus-stage failure FAILS the job
 (retry ×3, waiting 4 then 16 minutes between attempts → dead, visible on /admin/jobs, the PI detail page and, with a Try Again button, the PI's onboarding page) instead of
 storing a thin ORCID-only profile. A tenure year derived from papers after an ORCID failure or with an incomplete corpus is kept provisionally (app_settings key `jhu_tenure_provisional:{user_id}`), so later profile edits export with the same scoping as the pipeline; the next healthy run replaces or deletes it. A search that hit its page cap counts as incomplete the same way, and only ORCID-anchored papers date tenure. A tenure-year change on the manager form regenerates the profile (`generate_profile`), whose step 10 refreshes grants, industry evidence and companies. A synthesis that fails, is refused or returns something unusable fails the job (retry ×3, then dead) and leaves the stored profile alone; a PI whose name is an ORCID iD is refused at once (fix the name, then Regenerate). Every enqueue goes through `src/services/profile_jobs.py`, so a double click or Add-PI followed by an approval runs one pipeline, not two. **Activation is gated**: `admin_approve_agent`
 refuses to flip a `pi_lab` agent to `active` — through the approve button OR
