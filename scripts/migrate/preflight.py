@@ -75,7 +75,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0063"
+DEFAULT_TARGET = "0065"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -110,7 +110,9 @@ DEFAULT_TARGET = "0063"
 #: unindexed ondelete-FK columns — see issue #25 P1), 0034 (two nullable columns plus
 #: one foreign-key constraint on agents), 0035 (three nullable columns across three
 #: tables, no backfill), and the 0036-0062 objects enumerated in PLANNED_OBJECTS (and
-#: PLANNED_RECREATES) below, plus 0063's two nullable columns. 0063's ADD VALUE on
+#: PLANNED_RECREATES) below, plus 0063's two nullable columns, 0064's one, and 0065's
+#: index (its CHECK swap recreates an existing constraint, which the collision check must
+#: not list). 0063's ADD VALUE on
 #: thread_outcome_enum enumerates nothing: adding a value to an existing type creates
 #: no object to collide with — the same reason 0058's job_type_enum ADD VALUE has no
 #: entry either.
@@ -119,7 +121,7 @@ SUPPORTED_START_REVISIONS = (
     "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040",
     "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
     "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060",
-    "0061", "0062",
+    "0061", "0062", "0063", "0064",
 )
 
 #: Tables whose row counts are snapshotted for postflight. Empty = every user table.
@@ -549,11 +551,16 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     # object, so only these two columns are listed — same as 0058's job_type_enum.
     PlannedObject("0063", "column", "served_by_model", "opportunity_assessments"),
     PlannedObject("0063", "column", "refusal_category", "assessment_drops"),
+    # 0064_profile_full_career_fallback (spec 2026-10-09 §4.3).
+    PlannedObject("0064", "column", "full_career_fallback", "researcher_profiles"),
+    # 0065_non_pubmed_publications (spec 2026-10-09 §5.4). The CHECK it drops and recreates
+    # under the same name is not listed: it exists before 0065 runs.
+    PlannedObject("0065", "index", "uq_publications_user_doi_nopmid", "publications"),
 )
 
 #: What ``upgrade()`` DROPS. Kept apart from PLANNED_OBJECTS because the collision check
 #: must never treat a drop's precondition (the object exists) as a collision. 0026 is
-#: the only upgrade-time ``drop_table`` in 0019-0063.
+#: the only upgrade-time ``drop_table`` in 0019-0065.
 PLANNED_DROPS: tuple[PlannedObject, ...] = (
     PlannedObject("0026", "table", "grantbot_posted_foas"),
 )
@@ -572,7 +579,7 @@ REVISION_ORDER = (
     "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039",
     "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
     "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060",
-    "0061", "0062", "0063",
+    "0061", "0062", "0063", "0064", "0065",
 )
 
 

@@ -1119,6 +1119,36 @@ _LOOKUP_FAILED = (
 )
 
 
+async def _openalex_abstract(doi: str) -> dict[str, Any] | None:
+    """A DOI PubMed cannot resolve, looked up in OpenAlex (spec 2026-10-09 §5.6): the
+    non-PubMed papers a PI's persona lists (a PubMed paper the converter missed keeps
+    OpenAlex's PMID). None when OpenAlex has no such work, gives it no title, marks it
+    retracted (the stored corpus skips those too), or the lookup fails; the caller then
+    reports the PubMed miss exactly as before, since the prompt-freeze golden pins that
+    wording. One attempt with a short timeout: the agent waits on this inside its turn."""
+    # Imported here so this NCBI module does not load the OpenAlex client (and its budget
+    # and job-queue imports) unless a DOI actually misses.
+    from src.services import openalex
+
+    try:
+        work = await openalex.fetch_work_by_doi(
+            normalize_doi(doi) or doi, attempts=1, timeout=10.0
+        )
+    except Exception as exc:  # best effort: the PubMed answer stands
+        logger.info("OpenAlex lookup for DOI %s failed: %s", doi, type(exc).__name__)
+        return None
+    if not work or not work.get("title") or work.get("is_retracted"):
+        return None
+    return {
+        "pmid": work.get("pmid"),
+        "doi": normalize_doi(doi),
+        "title": work["title"],
+        "abstract": work.get("abstract") or "",
+        "journal": work.get("venue") or "",
+        "year": work.get("year"),
+    }
+
+
 async def fetch_abstract(pmid_or_doi: str) -> dict[str, Any]:
     """
     Fetch a paper's abstract given a PMID or DOI.
@@ -1147,6 +1177,9 @@ async def fetch_abstract(pmid_or_doi: str) -> dict[str, Any]:
         mapping = await convert_dois_to_pmids([pmid])
         resolved = mapping.get(pmid)
         if not resolved:
+            found = await _openalex_abstract(pmid)
+            if found is not None:
+                return found
             return {
                 "error": (
                     f"Could not resolve DOI {pmid} to a PMID — either PubMed has no "
@@ -1186,7 +1219,15 @@ async def fetch_full_text(pmid_or_doi: str) -> dict[str, Any]:
     if "error" in abstract_data:
         return abstract_data
 
-    pmid = abstract_data["pmid"]
+    pmid = abstract_data.get("pmid")
+    if not pmid:
+        # A paper OpenAlex answered for (spec 2026-10-09 §5.6): PMC holds only PubMed papers.
+        return {
+            **abstract_data,
+            "pmcid": None,
+            "methods": None,
+            "note": "Paper is not in PubMed, so PubMed Central has no full text for it",
+        }
 
     # Resolve PMID to PMCID
     pmcid_map = await convert_pmids_to_pmcids([pmid])

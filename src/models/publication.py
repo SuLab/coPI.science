@@ -15,6 +15,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -27,10 +28,14 @@ PROVENANCE_MANUAL = "manual"
 #: The resolver does not return the row with an ORCID anchor (stage s1 or s3); listed on the
 #: manager's Unanchored papers card until staff keep or exclude it.
 PROVENANCE_UNANCHORED = "unanchored"
+#: A work PubMed does not have, stored without a PMID for a PubMed-thin PI because OpenAlex
+#: attributes it to the PI's ORCID: no ORCID anchor and no staff review (migration 0065, spec
+#: 2026-10-09 §5.4, owner decision D6). Never relabelled "unanchored".
+PROVENANCE_OPENALEX = "openalex"
 #: Any other value is the stage list of an anchored record, sorted and comma-joined ("s1,s4");
 #: the CHECK requires s1 or s3 in it, so a stage list can never mean "unanchored".
 PROVENANCE_CHECK_SQL = (
-    "provenance IS NULL OR provenance IN ('manual', 'unanchored') "
+    "provenance IS NULL OR provenance IN ('manual', 'unanchored', 'openalex') "
     "OR provenance ~ '^(s[1-4],)*s[13](,s[1-4])*$'"
 )
 #: publication_candidates.status (migration 0062).
@@ -89,6 +94,12 @@ class Publication(Base):
         Index("ix_publications_pmid", "pmid"),
         Index("ix_publications_user_id", "user_id"),
         Index("ix_publications_excluded_by_user_id", "excluded_by_user_id"),
+        # One PMID-less row per PI per DOI, case-insensitively (migration 0065, spec
+        # 2026-10-09 §5.4): the non-PubMed corpus is keyed by DOI.
+        Index(
+            "uq_publications_user_doi_nopmid", "user_id", text("lower(doi)"),
+            unique=True, postgresql_where=text("pmid IS NULL"),
+        ),
     )
 
     def __repr__(self) -> str:

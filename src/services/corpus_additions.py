@@ -6,7 +6,9 @@ Storage reads the resolver's uncapped ``ranked`` list (the 50-cap bounds only th
 reported ``kept`` set): only ORCID-anchored records (stage s1 or s3) are stored, first
 ingest included; unanchored ones are held as pending ``publication_candidates`` for
 staff review. Nothing is ever deleted (D15); a stored earlier version (preprint) that a
-stored published version supersedes is excluded, which keeps the row."""
+stored published version supersedes is excluded, which keeps the row. ``apply_non_pubmed_works``
+stores a PubMed-thin PI's non-PubMed works without a PMID and without review (spec
+2026-10-09 §5.3)."""
 
 from __future__ import annotations
 
@@ -23,12 +25,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.models.publication import (
     CANDIDATE_REASON_NO_ANCHOR,
     PROVENANCE_MANUAL,
+    PROVENANCE_OPENALEX,
     PROVENANCE_UNANCHORED,
     Publication,
     PublicationCandidate,
 )
 from src.services.advisory_locks import entity_key_sql
-from src.services.pubmed import reconcile_pub_doi
+from src.services.pubmed import normalize_doi, reconcile_pub_doi
 
 if TYPE_CHECKING:
     from src.services.corpus import CorpusResult
@@ -122,6 +125,8 @@ class CorpusStoreOutcome:
     superseded_excluded: list[str] = field(default_factory=list)  # PMIDs excluded as superseded
     #: pending candidates settled as rejected because the resolver dropped them as superseded
     candidates_superseded: list[str] = field(default_factory=list)
+    #: DOIs (else titles) of PMID-less rows excluded because a PubMed row now has the paper
+    non_pubmed_superseded: list[str] = field(default_factory=list)
     first_ingest: bool = False
 
 
@@ -308,6 +313,7 @@ async def apply_corpus_result(
 
     _exclude_superseded(result, by_pmid, outcome)
     _settle_superseded_candidates(result, by_pmid, candidates, outcome)
+    _exclude_pmid_less_duplicates(rows, by_pmid, outcome)
 
     # A pending candidate whose PMID is now stored (by this run or by another path, such
     # as a script) is settled by the system, whether or not this resolve returned it.
@@ -315,6 +321,173 @@ async def apply_corpus_result(
         if cand.status == "pending" and pmid in by_pmid:
             _accept_by_system(cand, outcome)
 
+    await db.flush()
+    return outcome
+
+
+@dataclass
+class NonPubmedOutcome:
+    stored: list[str] = field(default_factory=list)       # DOIs inserted
+    stored_openalex_only: int = 0                         # of those, provenance "openalex"
+    refreshed: list[str] = field(default_factory=list)    # DOIs of PMID-less rows changed
+    refreshed_openalex_only: int = 0                      # of those, provenance "openalex"
+    skipped: int = 0                                      # a DOI or title already stored
+
+
+#: The fields a non-PubMed refresh may write, besides provenance.
+_NON_PUBMED_FIELDS = ("title", "abstract", "journal", "year")
+
+
+def _doi_key(doi: str) -> str:
+    """A DOI as ``uq_publications_user_doi_nopmid`` compares it: prefix-stripped and
+    ``lower()``-ed (not casefolded, so two keys never differ where the index sees one)."""
+    return (normalize_doi(doi) or doi).lower()
+
+
+def _title_key(title: str | None) -> str:
+    from src.services.corpus import _normalize_title  # local: corpus imports this module
+
+    return _normalize_title(title or "")
+
+
+#: How far apart two same-titled papers' years may be and still be one paper (a preprint and
+#: its journal version), for ``_exclude_pmid_less_duplicates``.
+_SAME_PAPER_YEARS = 2
+
+
+def _exclude_pmid_less_duplicates(
+    rows: Sequence[Publication], by_pmid: Mapping[str, Publication],
+    outcome: CorpusStoreOutcome,
+) -> None:
+    """A PMID-less row (the non-PubMed corpus, spec 2026-10-09 §5) is the same paper as an
+    in-use PubMed row of the PI, indexed by PubMed since it was stored, when the two share a
+    DOI, or a normalised title with years at most _SAME_PAPER_YEARS apart (so a generic
+    title such as "Introduction" years later is not mistaken for it). It is excluded by the
+    system (no deciding user; staff Restore undoes it), as a superseded preprint is. A
+    ``manual`` row is never touched."""
+    pubmed = [p for p in by_pmid.values() if p.excluded_at is None]
+    dois = {_doi_key(p.doi) for p in pubmed if p.doi}
+    title_years: dict[str, list[int]] = {}
+    for p in pubmed:
+        if (key := _title_key(p.title)) and p.year is not None:
+            title_years.setdefault(key, []).append(p.year)
+    for row in rows:
+        if row.pmid is not None or row.excluded_at is not None:
+            continue
+        if row.provenance == PROVENANCE_MANUAL:
+            continue
+        same_title = row.year is not None and any(
+            abs(row.year - year) <= _SAME_PAPER_YEARS
+            for year in title_years.get(_title_key(row.title), ())
+        )
+        if (row.doi and _doi_key(row.doi) in dois) or same_title:
+            row.excluded_at = datetime.now(UTC)
+            outcome.non_pubmed_superseded.append(row.doi or row.title or str(row.id))
+
+
+def _refresh_non_pubmed(
+    row: Publication, work: Mapping[str, Any], *, fields: Sequence[str] = _NON_PUBMED_FIELDS,
+) -> bool:
+    """Write the work's non-empty ``fields`` and its provenance onto a PMID-less, non-manual
+    row. True when anything changed."""
+    changed = False
+    for name in (*fields, "provenance"):
+        value = work.get(name)
+        if value is None or value == "":
+            continue
+        if getattr(row, name) != value:
+            setattr(row, name, value)
+            changed = True
+    return changed
+
+
+def _replaces(row: Publication, work: Mapping[str, Any]) -> bool:
+    """``work`` is a later version of the paper an in-use, PMID-less, non-``manual`` row holds
+    by title: the published version over its stored preprint, across runs as within one."""
+    return (
+        row.pmid is None and row.provenance != PROVENANCE_MANUAL and row.excluded_at is None
+        and (work.get("year") or 0) > (row.year or 0)
+    )
+
+
+def _note_refresh(outcome: NonPubmedOutcome, work: Mapping[str, Any]) -> None:
+    outcome.refreshed.append(work["doi"])
+    outcome.refreshed_openalex_only += work["provenance"] == PROVENANCE_OPENALEX
+
+
+def _apply_non_pubmed_work(
+    db: AsyncSession, user_id: uuid.UUID, work: Mapping[str, Any],
+    by_doi: dict[str, Publication], by_title: dict[str, Publication],
+    outcome: NonPubmedOutcome,
+) -> None:
+    """One work of ``apply_non_pubmed_works``; keeps the two indexes current as it writes."""
+    key = _title_key(work["title"])
+    row = by_doi.get(_doi_key(work["doi"]))
+    if row is not None:
+        if row.pmid is not None or row.provenance == PROVENANCE_MANUAL:
+            outcome.skipped += 1
+            return
+        # A retitled work keeps its stored title when another row holds the new one, so no
+        # two of the PI's rows share a normalised title.
+        holder = by_title.get(key) if key else None
+        fields = _NON_PUBMED_FIELDS if holder in (None, row) else _NON_PUBMED_FIELDS[1:]
+        if _refresh_non_pubmed(row, work, fields=fields):
+            _note_refresh(outcome, work)
+        return
+    holder = by_title.get(key) if key else None
+    if holder is not None:
+        if not _replaces(holder, work):
+            outcome.skipped += 1
+            return
+        # The published version of a stored PMID-less preprint: the row takes its DOI.
+        if holder.doi and by_doi.get(_doi_key(holder.doi)) is holder:
+            del by_doi[_doi_key(holder.doi)]
+        holder.doi = work["doi"]
+        by_doi[_doi_key(work["doi"])] = holder
+        _refresh_non_pubmed(holder, work)
+        _note_refresh(outcome, work)
+        return
+    pub = Publication(
+        user_id=user_id, pmid=None, doi=work["doi"], title=work["title"],
+        abstract=work.get("abstract"), journal=work.get("journal"),
+        year=work.get("year"), provenance=work["provenance"], doi_verified=None,
+    )
+    db.add(pub)
+    by_doi[_doi_key(work["doi"])] = pub
+    if key:
+        by_title[key] = pub
+    outcome.stored.append(work["doi"])
+    outcome.stored_openalex_only += work["provenance"] == PROVENANCE_OPENALEX
+
+
+async def apply_non_pubmed_works(
+    db: AsyncSession, user_id: uuid.UUID, works: Sequence[Mapping[str, Any]],
+) -> NonPubmedOutcome:
+    """Store a PubMed-thin PI's non-PubMed works (spec 2026-10-09 §5.3; the records of
+    ``non_pubmed_works.collect_non_pubmed_works``) in the caller's transaction, under the
+    ``lock_corpus`` the caller already holds.
+
+    A work whose DOI a stored row carries refreshes that row when it is PMID-less and not
+    ``manual`` (keeping its title if another row holds the new one) and is skipped
+    otherwise. A work whose normalised title a stored row has is skipped (excluded rows
+    included, so a staff exclusion holds), unless that row is an in-use, PMID-less,
+    non-``manual`` earlier version, which takes the work's DOI and metadata. Anything else
+    is inserted with no PMID and ``doi_verified`` NULL. Never deletes. Flushes, never
+    commits."""
+    rows = (await db.execute(
+        select(Publication).where(Publication.user_id == user_id)
+        .order_by(Publication.created_at, Publication.id)
+    )).scalars().all()
+    by_doi: dict[str, Publication] = {}
+    by_title: dict[str, Publication] = {}
+    for row in rows:
+        if row.doi:
+            by_doi.setdefault(_doi_key(row.doi), row)
+        if key := _title_key(row.title):
+            by_title.setdefault(key, row)
+    outcome = NonPubmedOutcome()
+    for work in works:
+        _apply_non_pubmed_work(db, user_id, work, by_doi, by_title, outcome)
     await db.flush()
     return outcome
 

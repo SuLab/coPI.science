@@ -199,6 +199,7 @@ async def fetch_orcid_works(
                 "pmid": None,
                 "doi": None,
                 "type": summary.get("type"),
+                "journal": (summary.get("journal-title") or {}).get("value") or None,
             }
             # Publication year
             pub_date = summary.get("publication-date") or {}

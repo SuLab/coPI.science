@@ -14,7 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from src.models import Publication
-from src.models.publication import CANDIDATE_STATUSES, PROVENANCE_CHECK_SQL
+from src.models.publication import CANDIDATE_STATUSES
 from tests import factories
 
 pytestmark = pytest.mark.integration
@@ -55,9 +55,9 @@ async def _candidate(db_session, user_id, pmid="1", status="pending", decided_by
 
 
 def test_the_constants_equal_the_model_values():
-    mod = _m0062()
-    assert mod.PROVENANCE_CHECK_SQL == PROVENANCE_CHECK_SQL
-    assert tuple(mod.CANDIDATE_STATUSES) == CANDIDATE_STATUSES
+    # 0065 widened the provenance CHECK; tests/integration/test_migration_0065.py pins the
+    # model's PROVENANCE_CHECK_SQL against that revision.
+    assert tuple(_m0062().CANDIDATE_STATUSES) == CANDIDATE_STATUSES
 
 
 async def test_both_check_constraints_exist(db_session):

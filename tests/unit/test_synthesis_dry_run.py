@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import select
 
 from src.models import Publication, ResearcherProfile
+from src.services.jhu_rules import set_tenure_start
 from tests import factories
 from tests.characterization.test_profile_pipeline_gm import _VALID_PROFILE
 
@@ -89,3 +90,23 @@ async def test_a_reply_that_is_not_a_profile_exits_2(db_session, monkeypatch):
     monkeypatch.setattr(mod, "synthesize_profile", synth)
     user = await _seed(db_session, "0000-0002-1825-0402")
     assert await mod.run(db_session, user.orcid) == 2
+
+
+async def test_the_dry_run_applies_the_thin_record_fallback(db_session, monkeypatch):
+    mod = _load()
+    contexts = []
+
+    async def synth(context, name):
+        contexts.append(context)
+        return dict(_VALID_PROFILE)
+
+    monkeypatch.setattr(mod, "synthesize_profile", synth)
+    user = await _seed(db_session, "0000-0002-1825-0402")
+    # One stored paper (2022) in the window: thin, so the 2021 paper is in the context too.
+    await set_tenure_start(user.id, 2022, "manual", db=db_session)
+    await db_session.flush()
+
+    assert await mod.run(db_session, user.orcid) == 0
+
+    [context] = contexts
+    assert "First stored paper" in context and "Second stored paper" in context

@@ -206,7 +206,8 @@ async def test_fetch_orcid_works_survives_null_groups_types_and_bad_years(monkey
     ]}
     _serve(monkeypatch, data)
     works = await orcid.fetch_orcid_works("0000-0002-1825-0097", strict=True)
-    assert works == [{"title": "", "year": None, "pmid": "123", "doi": None, "type": None}]
+    assert works == [{"title": "", "year": None, "pmid": "123", "doi": None, "type": None,
+                      "journal": None}]
 
 
 async def test_fetch_orcid_works_reads_a_null_group_list_as_no_works(monkeypatch):

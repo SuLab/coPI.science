@@ -4,7 +4,8 @@ Implements the pipeline from profile-ingestion.md:
 1. Fetch ORCID profile
 2. Fetch ORCID fundings into pi_orcid_fundings (soft)
 3. Resolve the publication corpus (ORCID works + OpenAlex + PubMed; corpus.py) and store it
-   (corpus_additions.apply_corpus_result)
+   (corpus_additions.apply_corpus_result); for a PubMed-thin PI also store the works PubMed
+   does not have (non_pubmed_works, corpus_additions.apply_non_pubmed_works; spec 2026-10-09)
 4. Fetch PubMed abstracts
 5. Deep mining: PMC methods sections
 6. Prepare profile record
@@ -41,14 +42,21 @@ from src.services import job_progress
 from src.services.corpus import (
     DEFAULT_CAP,
     EXCLUDED_TYPES,  # noqa: F401 — re-exported; tests and callers import it from here
+    CorpusStageError,
     resolve_corpus,
 )
-from src.services.corpus_additions import apply_corpus_result, lock_corpus
+from src.services.corpus_additions import (
+    apply_corpus_result,
+    apply_non_pubmed_works,
+    is_anchored,
+    lock_corpus,
+)
 from src.services.grant_sections import GrantSections, grant_blocks, load_grant_sections
 from src.services.jhu_rules import (
     clear_provisional_tenure_start,
     derive_employment_start,
     derive_start_from_papers,
+    export_tenure_start,
     get_tenure_start,
     set_provisional_tenure_start,
     set_tenure_start,
@@ -56,6 +64,7 @@ from src.services.jhu_rules import (
 )
 from src.services.job_queue import AfterCommit, NonRetryableJobError
 from src.services.llm import SynthesisRefused, synthesize_profile
+from src.services.non_pubmed_works import collect_non_pubmed_works
 from src.services.orcid import fetch_orcid_profile
 from src.services.orcid_fundings import fetch_orcid_fundings, store_orcid_fundings
 from src.services.person_names import is_orcid_like, name_from_machine_source
@@ -69,13 +78,18 @@ from src.services.profile_limits import (
     cap_tags,
 )
 from src.services.pubmed import (
+    _doi_fold,
     convert_pmids_to_pmcids,
     fetch_pmc_methods,
 )
 from src.services.tenure_scope import (
+    THIN_RECORD_MAX_PAPERS,
+    full_career_fallback_applies,
+    papers_in_window,
     publication_in_use,
     publication_order_by,
     publication_sort_key,
+    pubmed_thin,
 )
 
 logger = logging.getLogger(__name__)
@@ -122,6 +136,36 @@ def _flag_reason_summary(flagged: list[dict[str, Any]]) -> str:
     )
 
 
+@dataclass(frozen=True)
+class SynthesisSelection:
+    """What one generation synthesizes from (spec 2026-10-09 §4.2). ``in_scope`` is the stored
+    records the profile covers: the JHU tenure window, or every stored record when
+    ``full_career_fallback`` is set (a tenure year with at most THIN_RECORD_MAX_PAPERS papers
+    dated in it). ``offered`` is the newest SYNTHESIS_WINDOW of them that carry an abstract.
+    ``jhu_era_papers`` counts the records dated in the tenure window."""
+
+    in_scope: list[dict[str, Any]]
+    offered: list[dict[str, Any]]
+    full_career_fallback: bool
+    jhu_era_papers: int
+
+
+def select_synthesis_inputs(
+    records: list[dict[str, Any]], tenure_start: int | None
+) -> SynthesisSelection:
+    """Pure. ``records`` are the PI's non-excluded stored rows, newest first (the shared
+    publication order). Shared with scripts/synthesis_dry_run.py."""
+    years = [r.get("year") for r in records]
+    fallback = full_career_fallback_applies(years, tenure_start)
+    in_scope = list(records) if fallback else tenure_filter(records, tenure_start)
+    return SynthesisSelection(
+        in_scope=in_scope,
+        offered=[r for r in in_scope[:SYNTHESIS_WINDOW] if r.get("abstract")],
+        full_career_fallback=fallback,
+        jhu_era_papers=papers_in_window(years, tenure_start),
+    )
+
+
 @dataclass
 class PipelineRun:
     """Everything one pipeline run carries from step to step (spec §7.4). Field names are the locals of the pre-split function, so each step body is the old code with those locals read as run.<name>."""
@@ -135,8 +179,12 @@ class PipelineRun:
     step1_failed: bool = False
     agent_reg: AgentRegistry | None = None
     corpus_result: Any = None
+    #: Phase B (spec 2026-10-09 §5.2): the resolve's storable non-PubMed works.
+    non_pubmed_works: list[dict] = field(default_factory=list)
     tenure_start: int | None = None
+    #: The records in scope: the tenure window, or the full career under the fallback.
     in_tenure: list[dict] = field(default_factory=list)
+    full_career_fallback: bool = False
     pubs_for_synthesis: list[dict] = field(default_factory=list)
     methods_by_pmid: dict[str, str] = field(default_factory=dict)
     profile: ResearcherProfile | None = None
@@ -181,6 +229,7 @@ async def run_profile_pipeline(
     await _lock_persona(run)
     await _derive_tenure_start(run)
     await _store_corpus_publications(run)
+    await _store_non_pubmed_works(run)
     await _load_synthesis_inputs(run)
     await _step5_methods(run)
     await _step6_profile_record(run)
@@ -298,6 +347,10 @@ async def _steps3_4_resolve_corpus(run: PipelineRun) -> None:
         run.orcid_id, user.name, user.institution, cap=CORPUS_CAP
     )
     corpus_result = run.corpus_result
+    if await _may_be_pubmed_thin(run):
+        run.non_pubmed_works = await _collect_non_pubmed(
+            corpus_result, await _enriched_non_pubmed_dois(run)
+        )
     await run.progress(
         "step4",
         f"Corpus resolved: kept {len(corpus_result.kept)} "
@@ -349,6 +402,63 @@ async def _lock_persona(run: PipelineRun) -> None:
         select(AgentRegistry).where(AgentRegistry.user_id == run.user_id)
         .execution_options(populate_existing=True)
     )).scalar_one_or_none()
+
+
+async def _may_be_pubmed_thin(run: PipelineRun) -> bool:
+    """Phase B's trigger as far as it is known before the locks (spec 2026-10-09 §5.1): the
+    PI's in-use stored PubMed papers plus the anchored ones this resolve returned, counted in
+    the window of the best tenure year known so far (recorded or provisional, else the
+    current Hopkins ORCID employment). Storage re-checks the exact rule under the lock; this
+    only spares a PubMed-rich PI the OpenAlex lookups and their failure modes (security and
+    semantic review 2026-10-09). Reads only."""
+    agent_id = run.agent_reg.agent_id if run.agent_reg else None
+    result = run.corpus_result
+    tenure = await export_tenure_start(run.db, run.user_id, agent_id)
+    if tenure is None:
+        tenure = derive_employment_start(run.orcid_profile.get("employments") or [])
+    if tenure is None:
+        # As _derive_tenure_start falls back: the earliest Hopkins paper the PI wrote.
+        tenure = derive_start_from_papers([*result.ranked, *result.superseded_records])
+    stored = (await run.db.execute(
+        select(Publication.pmid, Publication.year, Publication.excluded_at).where(
+            Publication.user_id == run.user_id, Publication.pmid.isnot(None),
+        )
+    )).all()
+    excluded = {pmid for pmid, _year, excluded_at in stored if excluded_at is not None}
+    years = {pmid: year for pmid, year, excluded_at in stored if excluded_at is None}
+    for rec in result.ranked:
+        pmid = str(rec.get("pmid") or "")
+        if pmid and pmid not in excluded and is_anchored(rec):
+            years.setdefault(pmid, rec.get("year"))
+    for old, _successor in result.superseded:  # storage excludes these earlier versions
+        years.pop(old, None)
+    return pubmed_thin(years.values(), tenure)
+
+
+async def _enriched_non_pubmed_dois(run: PipelineRun) -> frozenset[str]:
+    """Folded DOIs of the PI's PMID-less rows that already carry an abstract: the lookups
+    are spent on the rest first, so older works are not starved by the cap (semantic
+    review 2026-10-09). Reads only."""
+    dois = (await run.db.execute(
+        select(Publication.doi).where(
+            Publication.user_id == run.user_id, Publication.pmid.is_(None),
+            Publication.doi.isnot(None), Publication.abstract.isnot(None),
+            Publication.abstract != "",
+        )
+    )).scalars().all()
+    return frozenset(_doi_fold(doi) for doi in dois)
+
+
+async def _collect_non_pubmed(
+    result: Any, enriched: frozenset[str] = frozenset(),
+) -> list[dict[str, Any]]:
+    """Phase B collection (spec 2026-10-09 §5.2), before any lock: network only (free OpenAlex
+    singleton lookups). A failure is a corpus stage failure, so the job retries rather than
+    storing less."""
+    try:
+        return await collect_non_pubmed_works(result, enriched_dois=enriched)
+    except Exception as exc:
+        raise CorpusStageError(f"corpus stage non_pubmed_lookup failed: {exc}") from exc
 
 
 async def _derive_tenure_start(run: PipelineRun) -> None:
@@ -489,6 +599,13 @@ async def _store_corpus_publications(run: PipelineRun) -> None:
             f"Rejected {len(outcome.candidates_superseded)} pending candidates superseded "
             "by a published version: " + ", ".join(outcome.candidates_superseded[:10]),
         )
+    if outcome.non_pubmed_superseded:
+        await run.progress(
+            "non_pubmed_superseded",
+            f"Excluded {len(outcome.non_pubmed_superseded)} works stored without a PMID that "
+            "PubMed now has; Restore on the manager PI page undoes it: "
+            + ", ".join(outcome.non_pubmed_superseded[:10]),
+        )
     if outcome.refreshed:
         await run.progress(
             "corpus_metadata_refreshed",
@@ -497,13 +614,39 @@ async def _store_corpus_publications(run: PipelineRun) -> None:
         )
 
 
+async def _store_non_pubmed_works(run: PipelineRun) -> None:
+    """Phase B storage (spec 2026-10-09 §5.1, §5.3): a PubMed-thin PI gets the works PubMed
+    does not have, PMID-less. Runs under the corpus lock ``_store_corpus_publications`` took
+    (a transaction lock, held to the job's commit), so it takes none of its own."""
+    if not run.non_pubmed_works:
+        return
+    pubmed_years = (await run.db.execute(
+        select(Publication.year).where(
+            Publication.user_id == run.user_id, Publication.pmid.isnot(None),
+            publication_in_use(),
+        )
+    )).scalars().all()
+    if not pubmed_thin(pubmed_years, run.tenure_start):
+        return
+    outcome = await apply_non_pubmed_works(run.db, run.user_id, run.non_pubmed_works)
+    if outcome.stored or outcome.refreshed:
+        await run.progress(
+            "non_pubmed_works",
+            f"Stored {len(outcome.stored)} works PubMed does not have "
+            f"({outcome.stored_openalex_only} found only by OpenAlex); "
+            f"refreshed {len(outcome.refreshed)} "
+            f"({outcome.refreshed_openalex_only} found only by OpenAlex).",
+        )
+
+
 async def _load_synthesis_inputs(run: PipelineRun) -> None:
     db = run.db
     user_id = run.user_id
     # Synthesis basis: the STORED corpus (both cohorts — additions included,
     # audited rows the resolver missed included too), rows staff excluded left out,
-    # tenure-filtered (R2). Newest first (the shared publication order); the newest
-    # SYNTHESIS_WINDOW in-tenure rows are offered (D14).
+    # tenure-filtered (R2) unless the JHU-era record is thin, when the whole stored
+    # career is used (spec 2026-10-09 §4.2). Newest first (the shared publication
+    # order); the newest SYNTHESIS_WINDOW in-scope rows are offered (D14).
     stored_result = await db.execute(
         select(Publication)
         .where(Publication.user_id == user_id, publication_in_use())
@@ -522,10 +665,16 @@ async def _load_synthesis_inputs(run: PipelineRun) -> None:
         }
         for p in stored_result.scalars().all()
     ]
-    run.in_tenure = tenure_filter(corpus_records, run.tenure_start)
-    run.pubs_for_synthesis = [
-        r for r in run.in_tenure[:SYNTHESIS_WINDOW] if r.get("abstract")
-    ]
+    selection = select_synthesis_inputs(corpus_records, run.tenure_start)
+    run.in_tenure = selection.in_scope
+    run.pubs_for_synthesis = selection.offered
+    run.full_career_fallback = selection.full_career_fallback
+    if selection.full_career_fallback:
+        await run.progress(
+            "full_career_fallback",
+            f"Only {selection.jhu_era_papers} JHU-era papers since {run.tenure_start} "
+            f"(at most {THIN_RECORD_MAX_PAPERS}): the profile uses the full career.",
+        )
 
 
 async def _step5_methods(run: PipelineRun) -> None:
@@ -758,6 +907,7 @@ async def _stage_draft(run: PipelineRun, evidence_pmid_count: int, evidence_pub_
         evidence_flagged_count=run.flagged_count,
         base_profile_version=run.loaded_version,
         job_id=run.job_id,
+        full_career_fallback=run.full_career_fallback,
     )
     profile.pending_profile_created_at = datetime.now(UTC)
     await run.progress(
@@ -819,6 +969,7 @@ async def _store_synthesis(
             evidence_pmid_count=evidence_pmid_count,
             evidence_pub_count=evidence_pub_count,
             evidence_flagged_count=run.flagged_count,
+            full_career_fallback=run.full_career_fallback,
             # A direct store supersedes an older draft.
             pending_profile=None,
             pending_profile_created_at=None,
@@ -938,6 +1089,9 @@ async def _export_profile(run: PipelineRun) -> None:
     # pre-tenure papers reached 9 agents' prompts on 2026-08-14 (audit H3).
     # tenure_start is already resolved above, so scope the rows already
     # loaded here rather than re-querying it via scoped_publications_for_export.
+    # A profile generated under the thin-record fallback exports its full career
+    # (spec 2026-10-09 §4.4); the flag is read from the refreshed profile, so a kept
+    # or drafted run exports the way the stored text was generated.
     from src.services.profile_publish import export_and_record, schedule_persona_write
     from src.services.tenure_scope import scope_for_export
     pub_result = await db.execute(
@@ -945,7 +1099,10 @@ async def _export_profile(run: PipelineRun) -> None:
         .where(Publication.user_id == user.id, publication_in_use())
         .order_by(*publication_order_by())
     )
-    user_pubs = scope_for_export(pub_result.scalars().all(), run.tenure_start)
+    user_pubs = scope_for_export(
+        pub_result.scalars().all(),
+        None if profile.full_career_fallback else run.tenure_start,
+    )
     grants = await load_grant_sections(db, user.id)
 
     # The revision records this render; the file is written after the job's commit
@@ -1005,8 +1162,9 @@ def _build_synthesis_context(
     if selected_pubs:
         parts.append("\n## Publications")
         for pub in selected_pubs:
-            year = pub.get("year", "")
-            journal = pub.get("journal", "")
+            # `or ""`: a PMID-less row often has no venue, and None must not print.
+            year = pub.get("year") or ""
+            journal = pub.get("journal") or ""
             title = pub.get("title", "")
             parts.append(f"\n### {title} ({journal}, {year})")
             if pub.get("abstract"):

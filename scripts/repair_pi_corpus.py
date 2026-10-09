@@ -86,7 +86,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import delete, select  # noqa: E402
+from sqlalchemy import delete, or_, select  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from src.database import get_session_factory  # noqa: E402
@@ -487,7 +487,12 @@ async def load_stored_publications(
         (
             await db.execute(
                 select(Publication)
-                .where(Publication.user_id == user_id)
+                .where(
+                    Publication.user_id == user_id,
+                    # Not the non-PubMed corpus (spec 2026-10-09 §5.7): a PMID-less row with a
+                    # provenance was stored by a run on purpose, not left behind by PubMed.
+                    or_(Publication.pmid.isnot(None), Publication.provenance.is_(None)),
+                )
                 .order_by(Publication.created_at, Publication.id)
             )
         )

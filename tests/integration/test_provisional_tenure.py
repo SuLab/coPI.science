@@ -26,8 +26,12 @@ _HOPKINS_ADA = [{
     "last": "Lovelace", "fore": "Ada", "initials": "A", "collective": None,
     "affiliations": ["Johns Hopkins University School of Medicine"],
 }]
+# Eleven Hopkins papers from 2015 on: the window holds more than THIN_RECORD_MAX_PAPERS, so
+# the provisional year still scopes (no thin-record fallback, spec 2026-10-09 §4.1).
 _PAPERS = (("2001", "10.1000/h1", "Hopkins paper one", 2015),
-           ("2002", "10.1000/h2", "Hopkins paper two", 2019))
+           ("2002", "10.1000/h2", "Hopkins paper two", 2019),
+           *((str(2003 + i), f"10.1000/h{3 + i}", f"Hopkins paper {3 + i}", 2016 + i)
+             for i in range(9)))
 
 
 def _hopkins_corpus(monkeypatch):

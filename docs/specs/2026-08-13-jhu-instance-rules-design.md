@@ -51,6 +51,12 @@ Profiles are synthesized **only from papers with `year >= tenure_start`** — th
 JHU employment start. The full verified corpus stays stored; the scoping is applied at
 synthesis time. Reversal = regenerate without the tenure filter.
 
+> **Amended 2026-10-09** (`docs/specs/2026-10-09-thin-profile-fallback-design.md`, owner
+> decision): a PI with a tenure year and at most 10 non-excluded papers dated in it is
+> synthesized and exported from the full stored career, unlabelled; this rule applies again
+> once the JHU-era record passes 10. Grants, RePORTER and the industry score stay
+> tenure-scoped.
+
 - `tenure_start` source hierarchy: **ORCID `/employments`** where a Hopkins employment
   with a start year is curated (14 PIs), else **the year of the PI's earliest
   Hopkins-affiliated paper**. Map persisted in the `app_settings` KV table, key

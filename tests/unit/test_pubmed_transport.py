@@ -183,6 +183,13 @@ async def test_an_unresolvable_doi_is_not_reported_as_a_nonexistent_paper(monkey
         raise httpx.ConnectError("no route to host")
 
     monkeypatch.setattr(pubmed, "_make_client", _client_factory(handler))
+    from src.services import openalex
+
+    async def openalex_has_none(doi, **kw):
+        return None
+
+    # The fallback (spec 2026-10-09 §5.6) must not reach the real OpenAlex API here.
+    monkeypatch.setattr(openalex, "fetch_work_by_doi", openalex_has_none)
     out = await pubmed.fetch_abstract("10.1038/nature12373")
     assert "error" in out
     assert "10.1038/nature12373" in out["error"]

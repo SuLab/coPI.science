@@ -154,6 +154,9 @@ async def test_new_pi_stores_full_career_but_synthesizes_and_exports_in_tenure(
             _rec(1, 2010, "Pre-tenure paper"),
             _rec(2, 2019, "In-tenure paper A"),
             _rec(3, 2020, "In-tenure paper B"),
+            # Nine more JHU-era papers: 11 in the window, so the thin-record fallback
+            # (spec 2026-10-09 §4.1) does not apply and the window itself is under test.
+            *[_rec(20 + i, 2021, f"In-tenure filler {i}") for i in range(9)],
         ],
         flagged=[],
     )
@@ -165,7 +168,8 @@ async def test_new_pi_stores_full_career_but_synthesizes_and_exports_in_tenure(
             select(Publication).where(Publication.user_id == user.id)
         )).scalars().all()
     )
-    assert sorted(p.pmid for p in stored) == ["1", "2", "3"], (
+    expected = sorted(["1", "2", "3", *(str(20 + i) for i in range(9))])
+    assert sorted(p.pmid for p in stored) == expected, (
         "storage is full-career (cohort-consistent with the existing 62 PIs)"
     )
 
@@ -183,7 +187,7 @@ async def test_new_pi_stores_full_career_but_synthesizes_and_exports_in_tenure(
         "the export top-20 must be tenure-filtered (audit H3)"
     )
 
-    assert profile.evidence_pub_count == 2
+    assert profile.evidence_pub_count == 11
 
 
 async def test_a_duplicate_pmid_in_kept_stores_one_row_not_a_job_failure(db_session, wired):
@@ -210,6 +214,8 @@ async def test_paper_tier_dates_tenure_when_orcid_has_no_hopkins_employment(
         _rec(1, 2005, "Elsewhere paper"),
         _rec(2, 2015, "First Hopkins paper", hopkins_pi=True),
         _rec(3, 2021, "Later Hopkins paper", hopkins_pi=True),
+        # 11 JHU-era papers keep the tenure window under test (no thin-record fallback).
+        *[_rec(30 + i, 2016 + i, f"Filler {i}") for i in range(9)],
     ])
 
     await run_profile_pipeline(user.id, db_session, job.id)
@@ -287,6 +293,8 @@ async def test_a_failed_orcid_profile_fetch_persists_no_derived_tenure_start(
     wired.corpus = _uncapped([
         _rec(1, 2005, "Elsewhere paper"),
         _rec(2, 2015, "First Hopkins paper", hopkins_pi=True),
+        # 11 papers in the provisional window keep it under test (no thin-record fallback).
+        *[_rec(30 + i, 2016 + i, f"Filler {i}") for i in range(10)],
     ])
 
     await run_profile_pipeline(user.id, db_session, job.id)
@@ -400,8 +408,11 @@ async def test_existing_pi_rows_are_never_deleted_and_s4_only_adds_are_flagged(
     db_session, wired
 ):
     user, agent, job = await _make_pi(db_session)
+    # Nine stored fillers make 11 JHU-era rows with the new paper 12, so the
+    # thin-record fallback (spec 2026-10-09 §4.1) does not apply here.
+    fillers = [(30 + i, 2019, f"In-tenure filler {i}") for i in range(9)]
     for pmid, year, title in [(10, 2005, "Pre-tenure stored"),
-                              (11, 2019, "In-tenure stored")]:
+                              (11, 2019, "In-tenure stored"), *fillers]:
         db_session.add(
             Publication(user_id=user.id, pmid=str(pmid), title=title,
                         abstract=f"Abstract of {title}.", year=year)
@@ -425,7 +436,7 @@ async def test_existing_pi_rows_are_never_deleted_and_s4_only_adds_are_flagged(
             select(Publication).where(Publication.user_id == user.id)
         )).scalars().all()
     )
-    assert stored == ["10", "11", "12"], (
+    assert stored == sorted(["10", "11", "12", *(str(30 + i) for i in range(9))]), (
         "never delete; add ORCID-anchored only; S4-only goes to review"
     )
     await db_session.refresh(job)

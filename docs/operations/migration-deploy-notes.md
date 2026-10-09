@@ -1280,3 +1280,51 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > `alembic downgrade 0062`, if wanted, runs from a one-off container off the NEW image
 > before the images are restored, and drops the two columns only — the enum value stays,
 > as `0039`'s, `0047`'s and `0058`'s do.
+
+> **Deploy order for `0064_profile_full_career_fallback` — migrate BEFORE the new web and
+> worker images serve, with the worker idle; no agent rebuild needed; no backfill.** `0064`
+> adds `researcher_profiles.full_career_fallback` (boolean, NULL): true when the stored
+> profile text was generated from the PI's full stored career because the JHU-era record was
+> thin (a tenure year and at most 10 non-excluded papers dated in it). Every persona export
+> reads it. Design: `docs/specs/2026-10-09-thin-profile-fallback-design.md` §4.
+>
+> *Old code on the new schema* is safe: nothing old reads or writes the column. *New code on
+> the old schema* is not: `ResearcherProfile` maps the column, so every profile read on the
+> web app and the worker raises `UndefinedColumn`. **Agent image:** no rebuild needed — the
+> engine imports `src.models` but never queries `researcher_profiles` (measured 2026-10-09);
+> any later agent build must run on a database at `0064` or later.
+>
+> The `ADD COLUMN` takes a brief ACCESS EXCLUSIVE lock on `researcher_profiles` and adds no
+> default. A running generation holds row locks on that table until it commits, so run the
+> migration with no `processing` `generate_profile` job, or the chain's 10 s `lock_timeout`
+> trips. **No backfill:** NULL means "generated before 0064" and reads as false; each PI's
+> next generation writes it. Commit before building.
+>
+> Rollback: the column is harmless to the old images. `alembic downgrade 0063` drops it;
+> profiles generated under the fallback then export by the tenure window until their next
+> generation.
+
+> **Deploy order for `0065_non_pubmed_publications` — migrate BEFORE the new worker serves,
+> with the worker idle; rebuild the AGENT image in the same deploy (for the abstract-tool
+> fallback, not the schema); no backfill.** `0065` widens `ck_publications_provenance` to
+> admit `'openalex'` and adds `uq_publications_user_doi_nopmid`, a unique index on
+> `(user_id, lower(doi))` WHERE `pmid IS NULL`: the non-PubMed corpus of
+> `docs/specs/2026-10-09-thin-profile-fallback-design.md` §5.
+>
+> *Old code on the new schema* is safe: it never writes `'openalex'` or a PMID-less row. *New
+> code on the old schema* is not: storing a non-PubMed work violates the CHECK and the
+> generation fails, so migrate first. The CHECK swap re-validates every `publications` row and
+> the index build scans the table; both lock `publications`, so run it with no `processing`
+> `generate_profile` job, or the chain's 10 s `lock_timeout` trips. **Agent image:** rebuild
+> with it, because `src/services/pubmed.py`'s `fetch_abstract` (which the engine imports)
+> gains the OpenAlex fallback; `$DC up -d agent` only when `/admin/simulation` shows no live
+> run.
+>
+> **No backfill:** existing rows keep their provenance; non-PubMed rows appear at each
+> PubMed-thin PI's next generation. Commit before building.
+>
+> Rollback: `alembic downgrade 0064` relabels every PMID-less row the non-PubMed corpus
+> stored (`'openalex'`, `'s1'`, `'s1,s2'`) as `'unanchored'` (the old CHECK refuses
+> `'openalex'`, and the old scripts would otherwise meet PMID-less rows labelled as
+> anchored), drops the index and restores 0062's CHECK; the rows stay and appear on the
+> manager's Unanchored papers card for Keep or Exclude.

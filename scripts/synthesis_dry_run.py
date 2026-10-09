@@ -3,8 +3,10 @@
 
 Builds the synthesis context as profile_pipeline step 7 does, from what is already
 stored: the PI's stored, non-excluded publications (the corpus as of the last run, before
-any regeneration; nothing is re-resolved), tenure-filtered, the newest
-``SYNTHESIS_WINDOW``, those with an abstract; methods from the rows' stored
+any regeneration; nothing is re-resolved), selected as the pipeline does
+(``profile_pipeline.select_synthesis_inputs``: the tenure window, or the full career under
+the thin-record fallback of spec 2026-10-09), the newest ``SYNTHESIS_WINDOW``, those with an
+abstract; methods from the rows' stored
 ``methods_text`` (the first 10 with text; PMC is not fetched); the persona's grant
 sections. Then calls ``llm.synthesize_profile`` once (one Opus call, about $0.15) and
 prints the parsed reply, the type check's verdict and ``_validate_profile``'s. On a parse
@@ -34,15 +36,15 @@ from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 from src.database import get_session_factory  # noqa: E402
 from src.models import AgentRegistry, Publication, User  # noqa: E402
 from src.services.grant_sections import load_grant_sections  # noqa: E402
-from src.services.jhu_rules import export_tenure_start, tenure_filter  # noqa: E402
+from src.services.jhu_rules import export_tenure_start  # noqa: E402
 from src.services.llm import synthesize_profile  # noqa: E402
 from src.services.profile_pipeline import (  # noqa: E402
-    SYNTHESIS_WINDOW,
     SynthesisOutputError,
     _build_synthesis_context,
     _researcher_info,
     _validate_profile,
     checked_synthesis,
+    select_synthesis_inputs,
 )
 from src.services.tenure_scope import publication_in_use, publication_order_by  # noqa: E402
 
@@ -61,17 +63,16 @@ async def build_context(db: AsyncSession, user: User) -> str:
         .where(Publication.user_id == user.id, publication_in_use())
         .order_by(*publication_order_by())
     )).scalars().all()
-    by_pmid = {p.pmid: p for p in rows}
+    by_pmid = {p.pmid: p for p in rows if p.pmid}
     records: list[dict[str, Any]] = [
         {"pmid": p.pmid, "pmcid": p.pmcid, "title": p.title, "abstract": p.abstract,
          "journal": p.journal, "year": p.year, "doi": p.doi, "id": str(p.id)}
         for p in rows
     ]
-    in_tenure = tenure_filter(records, tenure_start)
-    pubs = [r for r in in_tenure[:SYNTHESIS_WINDOW] if r.get("abstract")]
+    pubs = select_synthesis_inputs(records, tenure_start).offered
     methods: dict[str, str] = {}
     for rec in pubs:
-        row = by_pmid.get(rec["pmid"])
+        row = by_pmid.get(rec["pmid"]) if rec.get("pmid") else None
         if row is not None and row.methods_text and len(methods) < METHODS_LIMIT:
             methods[rec["pmid"]] = row.methods_text
     grants = await load_grant_sections(db, user.id)

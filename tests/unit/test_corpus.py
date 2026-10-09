@@ -172,6 +172,23 @@ async def test_stages_merge_and_the_pi_gate_applies_to_non_orcid_candidates(
     assert result.orcid_dois == {"1": "10.1/orcid-curated"}
 
 
+async def test_the_result_carries_the_fetched_works_and_the_pubmed_dois(monkeypatch):
+    orcid_works = [{"pmid": "1", "doi": "10.1/Listed"}, {"pmid": None, "doi": "10.1/conf"}]
+    openalex_works = [{"pmid": None, "doi": "10.1/mapped", "year": 2021},
+                      {"pmid": None, "doi": "10.1/preprint", "year": 2022}]
+    _wire(
+        monkeypatch, orcid_works=orcid_works, openalex_works=openalex_works,
+        records=[{**_rec(1, year=2020, authors=[_PI]), "doi": "10.1/Rec"},
+                 {**_rec(2, year=2021, authors=[_PI]), "doi": "10.1/mapped"}],
+        doi_map={"10.1/mapped": "2"},
+    )
+    result = await resolve_corpus(
+        "0000-0001-2345-6789", "Rachel Green", "Johns Hopkins University"
+    )
+    assert result.orcid_works == orcid_works and result.openalex_works == openalex_works
+    assert result.pubmed_dois == frozenset({"10.1/listed", "10.1/rec", "10.1/mapped"})
+
+
 async def test_an_s4_only_candidate_needs_an_affiliation_match_too(monkeypatch):
     records = [
         # Right name, wrong institution: a different Rachel Green.

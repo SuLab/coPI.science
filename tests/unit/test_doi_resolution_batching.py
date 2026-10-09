@@ -247,9 +247,16 @@ async def _both_resolve(monkeypatch, world):
     return outcomes
 
 
+#: CorpusResult fields the frozen oracle predates (spec 2026-10-09 §5.2): inputs to the
+#: non-PubMed collection, not part of the PubMed path this oracle pins.
+_NON_PUBMED_FIELDS = frozenset({"orcid_works", "openalex_works", "pubmed_dois"})
+
+
 def _assert_same_result(new, old):
     assert isinstance(new, corpus.CorpusResult) and isinstance(old, corpus.CorpusResult), (new, old)
     for f in dataclasses.fields(corpus.CorpusResult):
+        if f.name in _NON_PUBMED_FIELDS:
+            continue
         assert _ordered(getattr(new, f.name)) == _ordered(getattr(old, f.name)), f.name
 
 

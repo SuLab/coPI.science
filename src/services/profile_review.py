@@ -284,6 +284,7 @@ async def accept_draft(db: AsyncSession, user_id: uuid.UUID) -> str | None:
             evidence_pmid_count=draft.evidence_pmid_count,
             evidence_pub_count=draft.evidence_pub_count,
             evidence_flagged_count=draft.evidence_flagged_count,
+            full_career_fallback=draft.full_career_fallback,
             profile_version=func.coalesce(ResearcherProfile.profile_version, 0) + 1,
             profile_generated_at=func.now(),
             pending_profile=None,

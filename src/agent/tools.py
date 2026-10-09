@@ -432,13 +432,20 @@ async def _execute_retrieve_profile(
     return f"{result}\n\n{fenced}"
 
 
+def _paper_id_line(result: dict) -> str:
+    """``PMID: n``, or ``DOI: d`` for a paper PubMed does not have (spec 2026-10-09 §5.6)."""
+    if result.get("pmid"):
+        return f"PMID: {result['pmid']}"
+    return f"DOI: {result.get('doi') or 'unknown'}"
+
+
 def _format_abstract(result: dict) -> str:
     """Format an already-fetched paper abstract."""
     # Title/abstract come from PubMed — untrusted external text (SEC-14).
     parts = [
         f"Title: {delimit(result['title'], 'paper_title')}",
         f"Journal: {result.get('journal', 'Unknown')} ({result.get('year', '?')})",
-        f"PMID: {result['pmid']}",
+        _paper_id_line(result),
         "",
         f"Abstract: {delimit(result.get('abstract', 'No abstract available.'), 'paper_abstract')}",
     ]
@@ -451,7 +458,7 @@ def _format_full_text(result: dict) -> str:
     parts = [
         f"Title: {delimit(result['title'], 'paper_title')}",
         f"Journal: {result.get('journal', 'Unknown')} ({result.get('year', '?')})",
-        f"PMID: {result['pmid']}",
+        _paper_id_line(result),
     ]
     if result.get("pmcid"):
         parts.append(f"PMCID: {result['pmcid']}")

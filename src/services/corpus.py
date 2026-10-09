@@ -523,6 +523,13 @@ class CorpusResult:
     # derivation reads ``ranked`` plus these so a dropped preprint still dates tenure;
     # scripts/unanchored_publications_report.py must not relabel them.
     superseded_records: list[dict[str, Any]] = field(default_factory=list)
+    # Spec 2026-10-09 §5.2: the S1 and S2 works this resolve fetched, as fetched, and the
+    # folded DOIs of every work PubMed has (a DOI resolved to a PMID, a fetched record's own
+    # DOI, a work listed with a PMID). Read only by non_pubmed_works.collect_non_pubmed_works;
+    # never stored or ranked themselves.
+    orcid_works: list[dict[str, Any]] = field(default_factory=list)
+    openalex_works: list[dict[str, Any]] = field(default_factory=list)
+    pubmed_dois: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         # Constructors that predate ``ranked`` pass only ``kept``; storage and tenure read
@@ -765,6 +772,16 @@ def _attribute_resolved_dois(
             orcid_dois[str(pmid)] = doi
 
 
+def _pubmed_dois(
+    mapping: dict[str, str], records: list[dict[str, Any]], *works: list[dict[str, Any]],
+) -> frozenset[str]:
+    """Folded DOIs this resolve ties to a PubMed record: a DOI resolved to a PMID, a fetched
+    record's own DOI, a work listed with a PMID. The non-PubMed corpus skips them."""
+    dois = [*mapping, *(r.get("doi") for r in records)]
+    dois += [w.get("doi") for group in works for w in group if w.get("pmid")]
+    return frozenset(_doi_fold(d) for d in dois if d)
+
+
 async def resolve_corpus(
     orcid: str,
     name: str,
@@ -864,6 +881,7 @@ async def resolve_corpus(
             )
             stage_counts["s4"] = 0
 
+        mapping: dict[str, str] = {}
         if doi_pool:
             mapping = await _stage(
                 "doi_resolution",
@@ -925,4 +943,7 @@ async def resolve_corpus(
         truncated_stages=truncated,
         superseded=[(str(r.get("pmid")), succ) for r, succ in superseded_pairs],
         superseded_records=[r for r, _succ in superseded_pairs],
+        orcid_works=list(orcid_works),
+        openalex_works=list(openalex_works),
+        pubmed_dois=_pubmed_dois(mapping, records, orcid_works, openalex_works),
     )

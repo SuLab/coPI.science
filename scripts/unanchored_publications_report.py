@@ -117,6 +117,10 @@ def compare(rows: Sequence[Publication], result: CorpusResult) -> Comparison:
     for row in rows:
         if row.provenance == PROVENANCE_MANUAL:
             continue
+        if row.pmid is None:
+            # The non-PubMed corpus (spec 2026-10-09 §5.7): the PubMed resolve never returns
+            # it, so its absence here says nothing about its anchor.
+            continue
         rec = returned.get(row.pmid) if row.pmid else None
         if rec is not None:
             changes = metadata_changes(row, rec)
