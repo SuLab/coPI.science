@@ -125,6 +125,20 @@ REQUIRED_MAX_THREAD_MESSAGES = 12
 # single zero-read is not enough. max_runtime is the independent backstop.
 PROPOSAL_DRAIN_SETTLE_TICKS = 3
 
+#: The ``thread_decisions.outcome`` an interview the engine GAVE UP on is closed
+#: with (migration 0063). Distinct from ``timeout``, which means the interview ran
+#: out of its ``max_thread_messages`` budget while both sides were still replying:
+#: ``outcome='timeout'`` with ``closed_by_role IS NULL`` is that close's unique
+#: signature, and ``ThreadDecision.closed_by_role`` exists to keep it unambiguous.
+#:
+#: The three abandon branches that use it are all in reply_lane.py and all
+#: terminal — nothing re-queues the pair afterwards, so without a close the
+#: thread stays ``status="active"`` in BOTH participants' ``active_threads``
+#: forever and ``_open_interview_count()`` can never reach 0. That is what
+#: hung run 652a6102 at 19 of 20 verdicts for 13.5 hours; see
+#: docs/plans/2026-10-09-sim-drain-hang-rca-and-remediation.md.
+ABANDONED_OUTCOME = "abandoned"
+
 # Distinguishes "role has no cached rate yet" from "role's cached rate is None
 # (no override)". A plain dict.get() default cannot tell those apart, so the
 # cache would re-read role.toml from disk on every tick for every default role.
@@ -180,6 +194,7 @@ REBUILD_WINDOW_S = 14 * 24 * 3600  # 14 days
 # constant is imported by name, which keeps AST checks such as
 # tests/unit/test_flush_poison_row.py's bare `_ROW_LEVEL_DB_ERRORS` valid.
 __all__ = [
+    "ABANDONED_OUTCOME",
     "ASSESSMENTS_SUMMARY_CHANNEL", "CHANNEL_POLL_INTERVAL", "CONTROL_POLL_INTERVAL",
     "HEADLINES_MAX_AT_SHUTDOWN", "MEMORY_EVENTS_MAX_AT_SHUTDOWN",
     "PERSIST_UPSERT_CHUNK_ROWS", "PER_ROW_RECOVERY_DEADLINE_S", "POLL_ERROR_LOG_INTERVAL",

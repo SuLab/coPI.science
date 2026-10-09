@@ -333,6 +333,34 @@ class Settings(BaseSettings):
     # src/services/llm_pricing.py (claude-opus-5-5 is). Opus 5.5 cannot disable
     # thinking, so the caller passes `thinking` explicitly.
     llm_coi_model: str = "claude-opus-5-5"
+
+    # The simulation engine's model calls go through the server-side refusal
+    # fallback (`llm.abeta_create`, betas=["server-side-fallback-2026-07-01"],
+    # fallbacks="default"), so a request the configured model declines is
+    # re-run on a fallback model inside the SAME call instead of coming back
+    # empty.
+    #
+    # Enabled in PRODUCTION from 2026-10-09 by operator decision, through
+    # `.env`, NOT here. A refusal used to cost an entire interview: run
+    # 652a6102's hub declined one DECIDE turn twice, the 2-strike back-off
+    # abandoned the interview, and the verdict was lost — reproducibly, on the
+    # same content, on a later resume too. Which model actually answered is
+    # recorded per verdict in `opportunity_assessments.served_by_model` (0063),
+    # because a fallback changes a verdict's provenance and that must not have
+    # to be inferred from the run config.
+    #
+    # The CODE default stays False because turning it on adds `betas` and
+    # `fallbacks` to every request, and `tests/characterization/
+    # test_prompt_freeze_gm.ambr` pins the request kwargs of the frozen prompt
+    # suite byte for byte. That suite's own rules forbid regenerating it for
+    # anything but a named, owner-approved prompt change, and an opt-in
+    # transport switch is not one. Defaulting False keeps the frozen path the
+    # default path; `.env` is where a deployment opts in, which also makes the
+    # choice visible and revertible with a container recreate.
+    #
+    # The engine never chooses the fallback model itself — `fallbacks="default"`
+    # lets the server route by refusal category.
+    engine_refusal_fallback_enabled: bool = False
     # Company discovery's COI extraction ceiling (spec docs/specs/2026-10-05-pi-profile-
     # remediation-design.md §6.2, D36): dollars per rolling 24 h, counted from
     # company_discovery_usage (a call in flight at its reservation, a settled one at its

@@ -10,6 +10,11 @@ from src.agent.engine.headlines import should_announce
     (dict(trigger="capture", already_announced=True, terminal=True), False),
     (dict(trigger="thread-close", already_announced=False), True),
     (dict(trigger="thread-close", already_announced=True), False),
+    # 0063: an abandoned interview NEVER announces, announced or not, and
+    # whatever (necessarily provisional) verdict it is still holding.
+    (dict(trigger="thread-abandon", already_announced=False), False),
+    (dict(trigger="thread-abandon", already_announced=False, terminal=True), False),
+    (dict(trigger="thread-abandon", already_announced=True), False),
     (dict(trigger="shutdown", already_announced=False, end_class="TODAY"), True),
     (dict(trigger="shutdown", already_announced=False, end_class="FINALIZE"), True),
     (dict(trigger="shutdown", already_announced=False, end_class="HOLD", interview_ended=False), False),

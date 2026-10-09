@@ -1222,3 +1222,61 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > no live run). Old code ignores provenance, exclusions and candidates, and its cap logic
 > returns. `alembic downgrade 0061`, if wanted, runs from a one-off container off the NEW
 > image before the images are restored.
+
+> **Deploy order for `0063_thread_outcome_abandoned` — migrate BEFORE the new agent
+> image runs; rebuild the AGENT image with it; no backfill.** `0063` adds the
+> `abandoned` value to `thread_outcome_enum` (`ADD VALUE IF NOT EXISTS`, so `ci.sh`'s
+> up→down→up round trip stays clean; `downgrade()` is a deliberate no-op for it, as
+> Postgres cannot drop an enum value), `opportunity_assessments.served_by_model`
+> (varchar(100), NULL: which model actually produced the verdict, now that the
+> server-side refusal fallback can answer on a different model inside the same call) and
+> `assessment_drops.refusal_category` (varchar(40), NULL: the Messages API's own
+> `stop_details.category` for a drop caused by a refusal). RCA and plan:
+> `docs/plans/2026-10-09-sim-drain-hang-rca-and-remediation.md` Phase 1.
+>
+> *Old code on the new schema* is safe: nothing old writes or compares the new enum
+> value, every reader renders `outcome` as text, and both new columns are nullable and
+> unread. *New code on the old schema* is not, in two distinct ways. A close with
+> `outcome='abandoned'` raises `InvalidTextRepresentation`, which
+> `Threads._record_decision` swallows and re-queues forever, so the run ends with
+> `LOST n thread decision(s) at shutdown` and no interview is ever durably closed; and
+> `OpportunityAssessment` / `AssessmentDrop` map the new columns, so every verdict write
+> and every drop write raises `UndefinedColumn` on the engine's best-effort paths — i.e.
+> silently, one ERROR line per lost verdict. **Agent image:** rebuild in the same deploy,
+> because the engine imports `src.models` and the three abandon branches in
+> `src/agent/engine/reply_lane.py` are what write the new outcome.
+>
+> No live-run constraint beyond the standing rule that recreating the supervisor ends a
+> live run, so `$DC up -d agent` only when `/admin/simulation` shows none. The two
+> `ADD COLUMN`s take a brief ACCESS EXCLUSIVE lock and add no default, and nothing in the
+> chain reads the new enum value, so the worker need not be stopped. **No backfill:** a
+> NULL `served_by_model` means "never recorded" and a NULL `refusal_category` means
+> "never asked" (the engine's model path did not read `stop_details` at all before this
+> change). Commit before building.
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     for s in blackbird-app worker agent; do
+>       docker image tag copi-blackbird-$s:latest copi-blackbird-$s:rollback-pre-0063
+>     done
+>     $DC build blackbird-app worker
+>     $DC --profile agent build agent
+>     ./scripts/migrate/run_migration.sh              # rehearse (writes nothing)
+>     ./scripts/migrate/run_migration.sh --apply      # dump → preflight → apply → postflight
+>     $DC run --rm blackbird-app alembic current      # must equal `alembic heads` (0063)
+>     $DC up -d blackbird-app worker
+>     $DC up -d agent                                 # ONLY when /admin/simulation shows no live run
+>
+> Nothing here starts a run. No prompt or rubric version changed, so a resume stays
+> legitimate — and the resume after this deploy is the one that decides run
+> `652a6102`'s fate (§A of the plan).
+>
+> Rollback: both columns are harmless to the old images, but a `thread_decisions` row
+> already written with `outcome='abandoned'` is not — the old `ThreadDecision` maps the
+> enum with only three values, so loading such a row raises `LookupError` (the same shape
+> as `0058`'s `company_discovery` job rows). Re-stamp them first —
+> `UPDATE thread_decisions SET outcome = 'timeout' WHERE outcome = 'abandoned'`, which
+> loses the abandon/timeout distinction but keeps the interview durably closed, so a
+> resume does not re-open a dead thread — then redeploy the `rollback-pre-0063` images.
+> `alembic downgrade 0062`, if wanted, runs from a one-off container off the NEW image
+> before the images are restored, and drops the two columns only — the enum value stays,
+> as `0039`'s, `0047`'s and `0058`'s do.

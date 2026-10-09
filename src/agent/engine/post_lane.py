@@ -67,7 +67,7 @@ class PostLane:
     _closed_thread_ids = via("_threads")
     _get_prior_threads_for_agent = via("_threads")
 
-    OWNED_STATE: tuple[str, ...] = ("max_proposals", "_proposals_posted", "_proposal_drain_streak", "_role_post_types_cache", "_post_type_rejections")
+    OWNED_STATE: tuple[str, ...] = ("max_proposals", "_proposals_posted", "_proposal_drain_streak", "_drain_block_warned", "_role_post_types_cache", "_post_type_rejections")
 
     def __init__(
         self,
@@ -103,6 +103,8 @@ class PostLane:
         self.max_proposals = max_proposals
         self._proposals_posted = 0
         self._proposal_drain_streak = 0
+        # One WARNING per blocked-drain episode, reset when the drain clears.
+        self._drain_block_warned = False
 
         # role name -> declared post_types. Same reason as the scheduler's
         # _role_rate_cache: load_role() hits the disk on every call.
@@ -732,7 +734,7 @@ class PostLane:
             )
         else:
             agent.message_count += 1
-            self._proposals_posted += 1
+            self._book_pitch(channel)
 
             # No post type reaching here ever carries an assessment
             # sidecar anymore — the hub is hard-gated out of this
@@ -798,15 +800,57 @@ class PostLane:
         self._proposals_posted = int(count or 0)
         logger.info("Rehydrated proposal count: %d pitch(es) this run", self._proposals_posted)
 
+    def _book_pitch(self, channel: str) -> None:
+        """Count one successful top-level post against the proposal cap.
+
+        Counts the SAME posts `_rehydrate_proposal_count` counts. That query
+        excludes collab_private rows; this counter used to include them, so a
+        lab that pitched into a private channel rehydrated BELOW its true count
+        and could pitch past the cap after a resume. The channel is
+        model-chosen and nothing upstream gates on visibility, so the two sides
+        have to agree here.
+        """
+        if self._channel_visibility.get(channel) != VISIBILITY_COLLAB_PRIVATE:
+            self._proposals_posted += 1
+
     def _open_interview_count(self) -> int:
         """Distinct interview threads still open across all agents. The hub is
-        in every interview thread; a distinct-set is robust even if it is not."""
+        in every interview thread; a distinct-set is robust even if it is not.
+
+        ORPHANS DO NOT COUNT. A thread whose partner is no longer on the live
+        roster can never make progress: `_sync_roster_from_db` pops a
+        deactivated or role-unavailable agent outright
+        (`roster.py`) and never touches the surviving participant's
+        `ThreadState`, so if the removed side was the one that owed the reply,
+        the survivor's copy keeps `has_pending_reply=False` and its `has_new`
+        can never become True again — nobody is left to post. Counting it would
+        block `_proposal_target_drained` forever, which is the same hang the
+        0063 abandon closes fix, reached by a different route (predicted in
+        docs/audits/2026-09-29-modularity-dry-bigo-races/raw/findings/S1.md:162).
+
+        Deliberately a READ-SIDE rule, not a durable close. Closing the
+        survivor's thread from the roster path would have to take
+        `_thread_locks` first — the roster sync runs on the main loop, outside
+        the reply lane's thread lock, so it could otherwise race a reply that
+        is mid-flight for up to ~134 s — and it would buy nothing: a resume
+        restores threads only for agents that are on the roster, so the orphan
+        comes back orphaned and this same predicate drops it again. If the
+        partner is reactivated the thread counts again, which is correct.
+        """
+        return len(self._open_interview_ids())
+
+    def _open_interview_ids(self) -> set[str]:
+        """The ids `_open_interview_count` counts. Split out so the drain-block
+        WARNING can name the threads holding the run open."""
         open_ids: set[str] = set()
         for agent in self.agents.values():
             for tid, t in agent.state.active_threads.items():
-                if t.status == "active":
-                    open_ids.add(tid)
-        return len(open_ids)
+                if t.status != "active":
+                    continue
+                if t.other_agent_id not in self.agents:
+                    continue
+                open_ids.add(tid)
+        return open_ids
 
     def _proposal_target_drained(self) -> bool:
         """True once the pitch cap is reached and no interview has been open
@@ -816,9 +860,25 @@ class PostLane:
         if self.max_proposals <= 0 or self._proposals_posted < self.max_proposals:
             self._proposal_drain_streak = 0
             return False
-        if self._open_interview_count() > 0:
+        open_now = self._open_interview_count()
+        if open_now > 0:
+            # Loud ONCE per blocked run, not per tick. Run 652a6102 sat here for
+            # 13.5 h emitting nothing at any level: the cap was reached, one
+            # leaked interview kept this above 0, and the only visible symptom
+            # was the admin panel's per-agent active_threads. Anything that
+            # blocks a drain indefinitely is an operator problem, so say so.
+            if not self._drain_block_warned:
+                self._drain_block_warned = True
+                logger.warning(
+                    "Proposal cap %d/%d reached but %d interview(s) are still "
+                    "open — the run cannot reach its natural end until they "
+                    "close. Open: %s",
+                    self._proposals_posted, self.max_proposals, open_now,
+                    ", ".join(sorted(self._open_interview_ids())) or "?",
+                )
             self._proposal_drain_streak = 0
             return False
+        self._drain_block_warned = False
         self._proposal_drain_streak += 1
         return self._proposal_drain_streak >= PROPOSAL_DRAIN_SETTLE_TICKS
 

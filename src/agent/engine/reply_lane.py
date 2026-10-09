@@ -11,7 +11,7 @@ import anthropic
 
 from src.agent.agent import Agent
 from src.agent.engine import deps
-from src.agent.engine.constants import TRUNCATION_NOTICE
+from src.agent.engine.constants import ABANDONED_OUTCOME, TRUNCATION_NOTICE
 from src.agent.engine.context import EngineContext, RunState, via
 from src.agent.engine.helpers import _thread_phase_label, _was_truncated
 from src.agent.engine.sidecar import _extract_slack_message, _reply_closes_thread
@@ -31,6 +31,27 @@ if TYPE_CHECKING:
     from src.agent.engine.verdicts import Verdicts
 
 logger = logging.getLogger("src.agent.simulation")
+
+
+def _last_refusal_category(provenance: list[dict] | None) -> str | None:
+    """The final call's ``stop_details.category``, or None.
+
+    ``on_provenance`` fires once per turn, so the list holds at most one entry;
+    the index is defensive rather than meaningful. None covers every
+    non-refusal stop reason, a refusal the API gave no category for, and a
+    caller that passed no list at all.
+    """
+    if not provenance:
+        return None
+    return provenance[-1].get("refusal_category")
+
+
+def _last_served_model(provenance: list[dict] | None) -> str | None:
+    """The model that served the final call, or None. Same shape and the same
+    defensiveness as `_last_refusal_category`."""
+    if not provenance:
+        return None
+    return provenance[-1].get("served_by")
 
 _NON_TRANSIENT_ERRORS = (
     anthropic.BadRequestError,
@@ -548,17 +569,26 @@ class ReplyLane:
         # src/agent/tools.py uses one: the callback is a plain `append`, so the
         # collection needs no closure and no nonlocal.
         stop_reasons: list[str] = []
+        # Same shape, same reason, for the two facts only llm.py can see: the
+        # refusal category (`stop_details.category`, populated on a refusal and
+        # nowhere else) and which model actually served the turn, which the
+        # server-side refusal fallback can change mid-request. One entry, the
+        # final call's — `_notify_provenance` fires once per turn.
+        provenance: list[dict] = []
         try:
             raw_response = await self._generate_reply(
                 agent, thread, system_prompt, messages, tool_executor,
                 reply_thread_phase, reply_message_ordinal, stop_reasons, settings,
+                provenance,
             )
         except Exception as exc:  # noqa: BLE001 — S1-04: back off, never spin
             await self._note_reply_failure(agent, thread, exc)
             return
         self._note_reply_success(thread)
         try:
-            await self._handle_reply_response(agent, thread, raw_response, stop_reasons)
+            await self._handle_reply_response(
+                agent, thread, raw_response, stop_reasons, provenance
+            )
         except Exception as exc:
             logger.error(
                 "[%s] Phase 4 reply to thread %s failed: %s",
@@ -618,6 +648,13 @@ class ReplyLane:
                         f"at ordinal {thread.message_count + 1}"
                     ),
                 )
+            # CLOSE IT (0063) — same leak, same reason as the empty-reply branch
+            # in `_handle_reply_response`, and outside the caps check for the
+            # same reason. This abandon is already guarded against a transient
+            # outage (two non-transient failures, some other call succeeding in
+            # between, breaker closed), so reaching here means the interview is
+            # genuinely dead, not merely unlucky.
+            await self._close_thread(agent, thread, ABANDONED_OUTCOME)
 
     async def _reply_preflight(
         self, agent: Agent, thread: ThreadState, settings: Any
@@ -774,9 +811,11 @@ class ReplyLane:
         reply_message_ordinal: int,
         stop_reasons: list[str],
         settings: Any,
+        provenance: list[dict] | None = None,
     ) -> str:
         """The Phase-4 model call. ``stop_reasons`` is filled by the call's
-        ``on_stop_reason`` callback; ``should_continue`` reads the run state live."""
+        ``on_stop_reason`` callback and ``provenance`` by its ``on_provenance``
+        one; ``should_continue`` reads the run state live."""
         raw_response = await deps.generate_with_tools(
             system_prompt=system_prompt,
             messages=messages,
@@ -868,6 +907,10 @@ class ReplyLane:
             # truncated hub replies went to Slack as complete in run
             # 8b64a0e0, mid-sentence, with the PI left to guess.
             on_stop_reason=stop_reasons.append,
+            # The refusal category and the serving model, for the drop row and
+            # the verdict's `served_by_model`. Inert when the caller passed no
+            # list (direct callers and older tests).
+            on_provenance=(provenance.append if provenance is not None else None),
             # Cooperative shutdown. `request_stop()` only flips `_running`,
             # and the durable flush runs in main.py's finally — which needs
             # the main loop to RETURN. This is the longest await in the whole
@@ -882,7 +925,8 @@ class ReplyLane:
         return raw_response
 
     async def _handle_reply_response(
-        self, agent: Agent, thread: ThreadState, raw_response: str, stop_reasons: list[str]
+        self, agent: Agent, thread: ThreadState, raw_response: str,
+        stop_reasons: list[str], provenance: list[dict] | None = None,
     ) -> None:
         """Act on the model's reply: extract the Slack text, back off on an empty or
         suppressed one, mark a truncated one, post it, capture a hub verdict and
@@ -940,6 +984,10 @@ class ReplyLane:
                         "empty_reply",
                         subject_agent_id=thread.other_agent_id,
                         thread_id=thread.thread_id,
+                        # Non-None only when the model DECLINED, which is the
+                        # commonest cause of this drop and the one the row
+                        # could not previously explain at all.
+                        refusal_category=_last_refusal_category(provenance),
                         detail=(
                             f"interview abandoned after "
                             f"{thread.empty_response_count} consecutive "
@@ -947,6 +995,15 @@ class ReplyLane:
                             f"({thread_phase}); {cause}"
                         ),
                     )
+                # CLOSE IT (0063). Outside the caps check on purpose: the drop
+                # row is a verdict-capturing role's bookkeeping, but the LEAK is
+                # every role's. Without this the thread stays status="active" in
+                # BOTH participants' active_threads forever — nothing re-queues
+                # the pair (has_pending_reply is now False and has_new can never
+                # become True again), so `_open_interview_count()` never reaches
+                # 0 and a --max-proposals run can never end. That hung run
+                # 652a6102 at 19 of 20 verdicts for 13.5 h.
+                await self._close_thread(agent, thread, ABANDONED_OUTCOME)
             return
 
         if _was_truncated(stop_reasons):
@@ -997,6 +1054,18 @@ class ReplyLane:
                     "[%s] Phase 4: Backing off thread %s after %d suppressed posts",
                     agent.agent_id, thread.thread_id, thread.suppressed_post_count,
                 )
+                # CLOSE IT (0063). This branch LOOKS recoverable and is not: a
+                # later PI reply would reset `empty_response_count`
+                # (`_pending_reply_pairs`) but never `suppressed_post_count`,
+                # which clears only after a SUCCESSFUL post, and the
+                # counterparty cannot post again anyway — its own
+                # has_pending_reply was cleared when it posted, and the
+                # suppressed text never reached the log, so its `has_new` stays
+                # False. Both sides go quiet and the thread leaks exactly as the
+                # empty-reply branch did. (`ThreadNotFound` is the one subcase
+                # that already evicted itself in `_post_message`, so it never
+                # reaches here.)
+                await self._close_thread(agent, thread, ABANDONED_OUTCOME)
             return
         agent.message_count += 1
         thread.has_pending_reply = False
@@ -1031,6 +1100,10 @@ class ReplyLane:
             await self._capture_hub_assessment(
                 agent, thread, raw_response, posted,
                 closes_thread=closes_thread,
+                # Which model actually produced this verdict (0063). Differs
+                # from the configured one when the server-side refusal fallback
+                # answered a declined call.
+                served_by_model=_last_served_model(provenance),
             )
             missing = self._warn_if_hub_conclude_missing_assessment(
                 agent, thread, response_text, raw_response,

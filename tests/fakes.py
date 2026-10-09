@@ -310,6 +310,18 @@ class _Messages:
         return self._parent._next(kwargs)
 
 
+class _Beta:
+    """``client.beta`` — only ``.messages`` exists, and it is the GA one.
+
+    The two endpoints differ on the wire (the beta one accepts `betas` and
+    `fallbacks`), not in anything this fake models, so sharing `_Messages`
+    keeps one scripted queue and one `.calls` log for both.
+    """
+
+    def __init__(self, parent: "FakeAnthropic") -> None:
+        self.messages = parent.messages
+
+
 class FakeAnthropic:
     """Scriptable stand-in for anthropic.Anthropic.
 
@@ -337,6 +349,15 @@ class FakeAnthropic:
         # Every `with_options(...)` kwargs, in call order. See with_options.
         self.options_calls: list[dict] = []
         self.messages = _Messages(self)
+        # `client.beta.messages.create`, the endpoint `llm.abeta_create` uses
+        # for any request needing a beta parameter the GA endpoint will not
+        # take — the engine's server-side refusal fallback
+        # (`fallbacks="default"`), company discovery's COI extraction and the
+        # assessment chat all go through it. The SAME `_Messages`, so a beta
+        # call is scripted from the same `responses` queue and recorded on the
+        # same `.calls` list: a test asserting on a request does not have to
+        # know, or care, which endpoint the call site chose.
+        self.beta = _Beta(self)
 
     def with_options(self, **options: Any) -> "FakeAnthropic":
         """``anthropic.Anthropic.with_options`` (both pinned SDKs have it, C25).

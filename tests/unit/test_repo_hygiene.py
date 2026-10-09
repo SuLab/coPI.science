@@ -37,7 +37,12 @@ THREADS = ROOT / "src/agent/engine/threads.py"
 
 # The only two outcomes any live code path produces. Not a wish-list: both are
 # driven for real by tests/integration/test_proposal_review.py.
-LIVE_OUTCOMES = {"timeout", "no_proposal"}
+LIVE_OUTCOMES = {"timeout", "no_proposal", "abandoned"}
+#: Module-level outcome constants `src/` may pass instead of a bare literal, and
+#: the literal each one holds. Resolved by `_outcome_arg` so this test keeps
+#: enumerating what `src/` can actually write; anything NOT in here is still
+#: reported as unenumerable rather than silently accepted.
+NAMED_OUTCOMES = {"ABANDONED_OUTCOME": "abandoned"}
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +150,13 @@ def _outcome_arg(call: ast.Call) -> str | None:
         value = call.args[2]
     if isinstance(value, ast.Constant) and isinstance(value.value, str):
         return value.value
+    # A named module constant (`ABANDONED_OUTCOME`) is as enumerable as a
+    # literal and keeps one source of truth for the string; `constants.py`
+    # carries the explanation that would otherwise be repeated at three call
+    # sites. Only the names in NAMED_OUTCOMES resolve — any other non-literal
+    # still returns None and trips the "read the call sites by hand" assertion.
+    if isinstance(value, ast.Name) and value.id in NAMED_OUTCOMES:
+        return NAMED_OUTCOMES[value.id]
     return None
 
 

@@ -360,8 +360,12 @@ class ThreadDecision(Base):
     channel: Mapped[str] = mapped_column(String(100), nullable=False)
     agent_a: Mapped[str] = mapped_column(String(50), nullable=False)
     agent_b: Mapped[str] = mapped_column(String(50), nullable=False)
+    #: ``abandoned`` (migration 0063) is an interview the engine gave up on rather
+    #: than one that concluded: two consecutive empty/unparseable replies, two
+    #: consecutive suppressed posts, or two consecutive non-transient model errors.
+    #: It carries no verdict and is NOT a ``timeout`` — see ``closed_by_role``.
     outcome: Mapped[str] = mapped_column(
-        Enum("proposal", "no_proposal", "timeout", name="thread_outcome_enum"),
+        Enum("proposal", "no_proposal", "timeout", "abandoned", name="thread_outcome_enum"),
         nullable=False,
     )
     summary_text: Mapped[str | None] = mapped_column(Text, nullable=True)

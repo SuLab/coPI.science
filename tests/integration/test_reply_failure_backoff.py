@@ -12,7 +12,7 @@ from src.agent.engine.reply_lane import reply_backoff_seconds
 from src.agent.message_log import LogEntry
 from src.agent.simulation import SimulationEngine
 from src.agent.state import ThreadState
-from src.models import AssessmentDrop, SimulationRun
+from src.models import AssessmentDrop, SimulationRun, ThreadDecision
 from tests.fakes import FakeSlackClient
 
 pytestmark = pytest.mark.integration
@@ -123,6 +123,20 @@ async def test_a_request_specific_repeat_400_abandons_one_thread(engine, monkeyp
             drops = (await db.execute(select(AssessmentDrop).where(
                 AssessmentDrop.simulation_run_id == run_id))).scalars().all()
         assert [d.reason for d in drops] == ["reply_failed"]
+        # 0063: abandoning must also CLOSE. This is the third of the three
+        # terminal abandon branches; before the fix it cleared
+        # `has_pending_reply` and left the thread `status="active"` in both
+        # participants' `active_threads`, where nothing could ever re-queue it
+        # and `_open_interview_count()` counted it forever — the drain-gate hang
+        # that stopped run 652a6102 ending (19 of 20 verdicts, 13.5 h idle).
+        assert threads["A"].thread_id not in hub.state.active_threads
+        assert sim._open_interview_count() == 0
+        async with factory() as db:
+            decisions = (await db.execute(select(ThreadDecision).where(
+                ThreadDecision.simulation_run_id == run_id))).scalars().all()
+        assert [(d.thread_id, d.outcome) for d in decisions] == [
+            (threads["A"].thread_id, "abandoned")
+        ]
     finally:
         await _cleanup(factory, run_id)
 

@@ -660,6 +660,34 @@ def _notify_stop_reason(
         )
 
 
+def _notify_provenance(
+    callback: Callable[[dict[str, Any]], None] | None, message: Any
+) -> None:
+    """Hand the FINAL call's refusal category and serving model to the call site.
+
+    Fires beside ``_notify_stop_reason`` and under the same rules: exactly once
+    per turn, synchronously, and never raising into the caller.
+
+    Two facts the engine cannot otherwise see. ``refusal_category`` is the only
+    recoverable explanation for a declined turn — ``stop_details`` is populated
+    on a refusal and nowhere else, and discarding it is why run 652a6102's lost
+    interview has no recorded reason. ``served_by`` is which model actually
+    answered, which the server-side refusal fallback can change mid-request; a
+    verdict's provenance must be recorded, not inferred from the run config.
+    """
+    if callback is None:
+        return
+    try:
+        callback({
+            "refusal_category": refusal_category(message),
+            "served_by": getattr(message, "model", None),
+        })
+    except Exception:  # noqa: BLE001 — a reporting hook must not cost the reply
+        logger.exception(
+            "on_provenance callback raised; the reply is unaffected"
+        )
+
+
 def _sum_reported(call_stats: list[dict[str, Any]], key: str) -> int | None:
     """A turn's total for one OPTIONAL per-call number, or None if none reported.
 
@@ -782,7 +810,20 @@ def _call_stat(
     rather than raising inside a logging path.
     """
     usage = getattr(message, "usage", None)
+    # Refusal provenance (0063), per-CALL rather than per-turn: one turn can have
+    # a declined round and a served final. ABSENT rather than null when there is
+    # nothing to say — a refusal category exists only on a refusal, and a serving
+    # model only when the reply reported one — so the overwhelmingly common
+    # healthy call adds no keys at all. That also keeps this record out of the
+    # frozen prompt-freeze snapshots, which pin what these fixtures produce byte
+    # for byte and may not be regenerated for an observability field.
+    provenance: dict[str, Any] = {}
+    if (category := refusal_category(message)) is not None:
+        provenance["refusal_category"] = category
+    if (served := getattr(message, "model", None)) is not None:
+        provenance["served_by"] = served
     return {
+        **provenance,
         "seq": seq,
         "kind": kind,
         "max_tokens": max_tokens,
@@ -868,10 +909,18 @@ def _log_empty_reply(
     try:
         meta = log_meta or {}
         logger.error(
-            "Empty reply from the model (stop_reason=%s block_types=%s model=%s "
+            "Empty reply from the model (stop_reason=%s refusal_category=%s "
+            "served_by=%s block_types=%s model=%s "
             "agent=%s phase=%s site=%s) — the caller will treat this as no "
             "answer, so the turn is skipped and any verdict it carried is lost.",
             getattr(message, "stop_reason", "?"),
+            # Only ever non-None on a refusal, and the whole reason this line
+            # exists: without it a declined interview leaves no recoverable
+            # explanation anywhere (run 652a6102).
+            refusal_category(message) or "-",
+            # Which model actually answered. Differs from `model` when the
+            # server-side refusal fallback re-ran the request.
+            getattr(message, "model", None) or "?",
             # The same list `_call_stat` records, in the line an operator reads
             # first. `[]` is a refusal; `['thinking', ...]` with no 'text' is the
             # unresolved end_turn shape and should be reported.
@@ -952,16 +1001,65 @@ class _CallLedger:
     recovered: tuple[str, Any] | None = None
 
 
+#: The beta header the scalar ``fallbacks="default"`` form requires. The older
+#: array form takes ``server-side-fallback-2026-06-01`` instead and pairing
+#: either header with the other form is a 400. Same constant, same value, as
+#: ``src/services/assessment_chat.py`` and ``company_sources/coi_llm.py``.
+ENGINE_FALLBACK_BETA = "server-side-fallback-2026-07-01"
+
+
+def refusal_category(message: Any) -> str | None:
+    """The Messages API's ``stop_details.category``, or None.
+
+    ``stop_details`` is populated ONLY when ``stop_reason == "refusal"`` and is
+    None for every other stop reason, so this guards before reading. The
+    category is an OPEN set (``bio``, ``cyber``, ``reasoning_extraction``,
+    ``frontier_llm``, …) and can itself be None, which is why callers store it
+    as free text rather than an enum.
+
+    This is the field that was missing when run 652a6102 lost an interview to a
+    refusal: the engine's model path read ``stop_reason`` and discarded
+    ``stop_details``, so the reason was unrecoverable afterwards.
+    """
+    if getattr(message, "stop_reason", None) != "refusal":
+        return None
+    details = getattr(message, "stop_details", None)
+    category = getattr(details, "category", None)
+    return str(category) if category is not None else None
+
+
 async def _billed_call(
     client: anthropic.Anthropic, ledger: _CallLedger, *,
     kind: str | Callable[[Any], str], max_tokens: int, accumulate_latency: bool,
     **create_kwargs: Any,
 ) -> Any:
-    """One `acreate` call, booked into `ledger`. `create_kwargs` are passed through
+    """One billed call, booked into `ledger`. `create_kwargs` are passed through
     untouched, so the request is byte-identical to the inline calls it replaces.
-    A call that raises books nothing: only completed calls are in `call_stats`."""
+    A call that raises books nothing: only completed calls are in `call_stats`.
+
+    THE one chokepoint for every billed call the three turn functions make
+    (`generate_agent_response`, `make_decision`, `generate_with_tools`, plus the
+    max_tokens retry), which is why the server-side refusal fallback is wired
+    here rather than at each call site: a refusal anywhere in a turn — a tool
+    round, the terminating call, the retry — is re-run on a fallback model
+    inside the same request instead of returning empty and costing the whole
+    interview. `engine_refusal_fallback_enabled` (default True, 2026-10-09)
+    is the only switch; the server routes by refusal category.
+
+    `abeta_create` never defaults `thinking`, while `acreate` defaults it to
+    `{"type": "disabled"}`. The setdefault below keeps the request identical on
+    both paths, so enabling the fallback changes WHO may answer and nothing
+    else.
+    """
     t0 = time.monotonic()
-    message = await acreate(client, max_tokens=max_tokens, **create_kwargs)
+    if get_settings().engine_refusal_fallback_enabled:
+        create_kwargs.setdefault("thinking", {"type": "disabled"})
+        message = await abeta_create(
+            client, max_tokens=max_tokens,
+            betas=[ENGINE_FALLBACK_BETA], fallbacks="default", **create_kwargs,
+        )
+    else:
+        message = await acreate(client, max_tokens=max_tokens, **create_kwargs)
     latency = (time.monotonic() - t0) * 1000
     ledger.latency_ms = ledger.latency_ms + latency if accumulate_latency else latency
     ledger.input_tokens += message.usage.input_tokens
@@ -1029,8 +1127,10 @@ async def _retry_if_truncated(
 def _finish_turn(
     ledger: _CallLedger, *, system_prompt: str, messages: list, response_text: str,
     model: str, log_meta, turn_t0: float, on_stop_reason, final_message: Any,
+    on_provenance=None,
 ) -> str:
-    """Write the turn's row, report the ending stop_reason once, return the text."""
+    """Write the turn's row, report the ending stop_reason and the call's
+    provenance once each, return the text."""
     _emit_call_log(
         system_prompt=system_prompt, messages=messages, response_text=response_text,
         model=model, input_tokens=ledger.input_tokens, output_tokens=ledger.output_tokens,
@@ -1038,6 +1138,7 @@ def _finish_turn(
         wall_ms=(time.monotonic() - turn_t0) * 1000,
     )
     _notify_stop_reason(on_stop_reason, final_message)
+    _notify_provenance(on_provenance, final_message)
     return response_text
 
 
@@ -1072,6 +1173,7 @@ async def generate_agent_response(
     log_meta: dict[str, str | None] | None = None,
     on_retry: Callable[[], None] | None = None,
     on_stop_reason: Callable[[str], None] | None = None,
+    on_provenance: Callable[[dict[str, Any]], None] | None = None,
 ) -> str:
     """Generate an agent response via Claude.
 
@@ -1119,6 +1221,7 @@ async def generate_agent_response(
             return _finish_turn(ledger, system_prompt=system_prompt, messages=messages,
                                 response_text="", model=model, log_meta=log_meta,
                                 turn_t0=_turn_t0, on_stop_reason=on_stop_reason,
+                                on_provenance=on_provenance,
                                 final_message=message)
         response_text = all_text(message)
         if not response_text.strip() and message.stop_reason != "max_tokens":
@@ -1136,6 +1239,7 @@ async def generate_agent_response(
         return _finish_turn(ledger, system_prompt=system_prompt, messages=messages,
                             response_text=response_text, model=model, log_meta=log_meta,
                             turn_t0=_turn_t0, on_stop_reason=on_stop_reason,
+                                on_provenance=on_provenance,
                             final_message=final_message)
     except Exception as exc:
         # Both halves of what generate_with_tools' guard does. THE RECORD: both
@@ -1174,6 +1278,7 @@ async def generate_agent_response(
             (log_meta or {}).get("phase", "?"), len(recovered_text),
         )
         _notify_stop_reason(on_stop_reason, recovered_message)
+        _notify_provenance(on_provenance, recovered_message)
         return recovered_text
 
 
@@ -1352,6 +1457,7 @@ async def generate_with_tools(
     log_meta: dict[str, str | None] | None = None,
     on_retry: Callable[[], None] | None = None,
     on_stop_reason: Callable[[str], None] | None = None,
+    on_provenance: Callable[[dict[str, Any]], None] | None = None,
     should_continue: Callable[[], bool] | None = None,
 ) -> str:
     """
@@ -1433,6 +1539,7 @@ async def generate_with_tools(
                 return _finish_turn(ledger, system_prompt=system_prompt, messages=conversation,
                                     response_text=response_text, model=model, log_meta=log_meta,
                                     turn_t0=_turn_t0, on_stop_reason=on_stop_reason,
+                                on_provenance=on_provenance,
                                     final_message=final_message)
 
             # Append the assistant message with tool_use blocks
@@ -1493,6 +1600,7 @@ async def generate_with_tools(
         return _finish_turn(ledger, system_prompt=system_prompt, messages=conversation,
                             response_text=response_text, model=model, log_meta=log_meta,
                             turn_t0=_turn_t0, on_stop_reason=on_stop_reason,
+                                on_provenance=on_provenance,
                             final_message=final_message)
     except Exception as exc:
         # ONE guard for the whole turn; ``Exception`` leaves ``CancelledError`` alone.
@@ -1527,6 +1635,7 @@ async def generate_with_tools(
         # is why callers need `is_truncated_stop` rather than a `== "refusal"`
         # test. `None` here (the forced-final case) reports "".
         _notify_stop_reason(on_stop_reason, recovered_message)
+        _notify_provenance(on_provenance, recovered_message)
         return recovered_text
 
 

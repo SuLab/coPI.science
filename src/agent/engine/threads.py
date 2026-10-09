@@ -6,7 +6,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from src.agent.agent import Agent
-from src.agent.engine.constants import PRIOR_THREADS_KEPT_PER_PAIR
+from src.agent.engine.constants import ABANDONED_OUTCOME, PRIOR_THREADS_KEPT_PER_PAIR
 from src.agent.engine.context import EngineContext, via
 from src.agent.engine.headlines import should_announce
 from src.agent.engine.helpers import _visibility_permits
@@ -205,8 +205,18 @@ class Threads:
             # last moment anything knows the interview ended — before 2026-08-29
             # nothing looked, and production lost two headlines (slusher,
             # rothstein) exactly here. QUEUE only: see `_pending_headlines`.
+            #
+            # An ABANDONED interview (0063) is the one close that publishes
+            # nothing: `thread-abandon` always answers False. The engine gave up
+            # mid-conversation, so any verdict still held here came from an
+            # ordinal the interview was still arguing with, and a headline cannot
+            # be retracted. Operator decision, 2026-10-09. The verdict itself is
+            # untouched — it stays on the row for the web UI.
+            trigger = (
+                "thread-abandon" if outcome == ABANDONED_OUTCOME else "thread-close"
+            )
             if thread.thread_id in self._assessed_threads and should_announce(
-                trigger="thread-close",
+                trigger=trigger,
                 already_announced=self._headlines.is_announced(thread.thread_id),
             ):
                 self._headlines.enqueue(thread.thread_id)

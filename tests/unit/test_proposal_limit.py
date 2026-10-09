@@ -4,12 +4,15 @@ See docs/plans/2026-09-04-assessment-ui-and-proposal-limit-design.md, Feature 4.
 
 import inspect
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.agent.agent import Agent
+from src.agent.engine.constants import ABANDONED_OUTCOME
 from src.agent.simulation import PROPOSAL_DRAIN_SETTLE_TICKS, SimulationEngine
+from src.agent.state import ThreadState
 from src.models import AgentMessage, SimulationRun
 from tests.fakes import FakeSlackClient
 
@@ -111,6 +114,65 @@ def test_drains_after_settle_window_once_cap_reached_and_no_open(monkeypatch):
     eng, _ = _engine(max_proposals=2)
     eng._proposals_posted = 2
     monkeypatch.setattr(eng, "_open_interview_count", lambda: 0)
+    results = [eng._proposal_target_drained() for _ in range(PROPOSAL_DRAIN_SETTLE_TICKS)]
+    assert results[-1] is True
+    assert results[0] is False  # not on the first drained tick
+
+
+def _engine_at_cap_with_one_open_interview():
+    """An engine at its pitch cap holding ONE real open interview, in both
+    participants' ``active_threads``. No monkeypatching of
+    ``_open_interview_count``: this is the real predicate over real state."""
+    hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+    lab = Agent("wang", "WangBot", "Wang", role="pi_lab")
+    eng = SimulationEngine(
+        agents=[hub, lab],
+        slack_clients={
+            "blackbird": FakeSlackClient(agent_id="blackbird"),
+            "wang": FakeSlackClient(agent_id="wang"),
+        },
+        max_proposals=2,
+    )
+    eng._proposals_posted = 2  # cap reached; only the drain is left
+    for agent, other in ((hub, lab), (lab, hub)):
+        agent.state.active_threads["t-open"] = ThreadState(
+            thread_id="t-open", channel="single-cell-omics",
+            other_agent_id=other.agent_id, message_count=4,
+            has_pending_reply=agent is hub,
+        )
+    return eng, hub
+
+
+async def test_an_abandoned_interview_lets_the_real_drain_gate_fire():
+    """Run 652a6102: 20 pitches, 19 verdicts, and a run that could never end.
+
+    THE regression pin for that hang. Every other drain test in this file
+    monkeypatches `_open_interview_count` to a literal (see
+    `test_not_drained_while_interviews_open`, which replaces it with
+    `lambda: 1`), so the gate had never once been exercised against a real
+    `ThreadState` — and the three terminal abandon branches in
+    `src/agent/engine/reply_lane.py` cleared `has_pending_reply` without ever
+    closing the thread. The interview stayed `status="active"` in BOTH
+    participants' `active_threads`, nothing could re-queue it,
+    `_open_interview_count()` never reached 0 and the `--max-proposals`
+    main-loop condition never exited.
+    """
+    eng, hub = _engine_at_cap_with_one_open_interview()
+
+    assert eng._open_interview_count() == 1
+    for _ in range(PROPOSAL_DRAIN_SETTLE_TICKS + 5):
+        assert eng._proposal_target_drained() is False, (
+            "an open interview blocks the drain for as long as it is open"
+        )
+
+    # The real close path, with the outcome the abandon branches now pass.
+    thread = hub.state.active_threads["t-open"]
+    await eng._close_thread(hub, thread, ABANDONED_OUTCOME)
+
+    assert eng._open_interview_count() == 0, (
+        "an abandoned interview must leave NO open thread behind in either "
+        "participant's active_threads — this is the 652a6102 hang"
+    )
     results = [eng._proposal_target_drained() for _ in range(PROPOSAL_DRAIN_SETTLE_TICKS)]
     assert results[-1] is True
     assert results[0] is False  # not on the first drained tick
@@ -221,3 +283,93 @@ def test_max_runtime_and_proposal_cap_are_independent_stop_conditions():
     assert eng2.is_within_time_limit is True
     loop_would_continue = eng2._running and eng2.is_within_time_limit and not drained
     assert loop_would_continue is False
+
+
+class _RosterResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return self._rows
+
+
+class _RosterSession:
+    """Minimal session for `_sync_roster_from_db`'s one roster query, the same
+    shim `tests/unit/test_roster_token_change.py` uses."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def execute(self, stmt):
+        return _RosterResult(self._rows)
+
+
+def _registry_row(agent_id, role):
+    return SimpleNamespace(
+        agent_id=agent_id, bot_name=f"{agent_id}Bot", pi_name=agent_id,
+        slack_bot_token=None, role=role,
+    )
+
+
+async def test_a_roster_removal_orphan_does_not_block_the_drain(monkeypatch):
+    """The same hang by a different route: the partner leaves the roster.
+
+    `_sync_roster_from_db` pops a deactivated agent and never touches the
+    surviving participant's `ThreadState`, so if the removed side owed the
+    reply the survivor's copy stays `status="active"` with
+    `has_pending_reply=False` and nothing can ever post into it again.
+    `_open_interview_count` drops a thread whose partner is not on the live
+    roster for exactly that reason.
+    """
+    hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+    lab = Agent("wang", "WangBot", "Wang", role="pi_lab")
+    rows = [_registry_row("blackbird", "scout_hub")]  # wang deactivated
+    eng = SimulationEngine(
+        agents=[hub, lab],
+        slack_clients={
+            "blackbird": FakeSlackClient(agent_id="blackbird"),
+            "wang": FakeSlackClient(agent_id="wang"),
+        },
+        session_factory=lambda: _RosterSession(rows),
+        simulation_run_id=None,
+        slack_enabled=False,
+        max_proposals=2,
+    )
+    eng._proposals_posted = 2
+    for agent, other in ((hub, lab), (lab, hub)):
+        # The lab owes the reply, so the hub's surviving copy can never
+        # progress once the lab is gone.
+        agent.state.active_threads["t-orphan"] = ThreadState(
+            thread_id="t-orphan", channel="single-cell-omics",
+            other_agent_id=other.agent_id, message_count=3,
+            has_pending_reply=agent is lab,
+        )
+    assert eng._open_interview_count() == 1
+
+    async def _noop():
+        return None
+
+    monkeypatch.setattr(eng.roster, "_recompute_allowed_sender_ids", _noop)
+    eng.roster._last_roster_poll = 0.0
+    await eng.roster._sync_roster_from_db()
+
+    assert "wang" not in eng.agents, "the removal branch did not run"
+    assert "t-orphan" in hub.state.active_threads, (
+        "the roster path deliberately leaves the survivor's ThreadState alone — "
+        "this is a read-side rule, not a durable close"
+    )
+    assert eng._open_interview_count() == 0, (
+        "a thread whose partner left the roster can never progress; counting it "
+        "blocks _proposal_target_drained forever"
+    )
+
+    # The predicate is "the partner is on the LIVE roster", so a reactivated
+    # partner makes the same thread count again.
+    eng.agents["wang"] = lab
+    assert eng._open_interview_count() == 1

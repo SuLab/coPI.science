@@ -36,6 +36,7 @@ from src.agent.engine.verdicts import Verdicts
 
 # isort: off
 from src.agent.engine.constants import (  # re-exported: tests and scripts import these from here
+    ABANDONED_OUTCOME as ABANDONED_OUTCOME,
     ASSESSMENTS_SUMMARY_CHANNEL as ASSESSMENTS_SUMMARY_CHANNEL,
     CHANNEL_POLL_INTERVAL as CHANNEL_POLL_INTERVAL,
     CONTROL_POLL_INTERVAL as CONTROL_POLL_INTERVAL,

@@ -30,7 +30,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("src.agent.simulation")
 
-ANNOUNCE_TRIGGERS = frozenset({"capture", "thread-close", "shutdown", "finalize"})
+ANNOUNCE_TRIGGERS = frozenset(
+    {"capture", "thread-close", "thread-abandon", "shutdown", "finalize"}
+)
 
 
 def should_announce(
@@ -43,6 +45,13 @@ def should_announce(
       verdict that was only queued (its row does not exist yet, P0-08);
     * ``thread-close``: the owed headline of an interview whose close wrote
       its ``ThreadDecision``;
+    * ``thread-abandon``: NEVER. An interview the engine gave up on (migration
+      0063's ``abandoned`` outcome) publishes nothing, even when it is holding a
+      verdict from an earlier ordinal. Operator decision, 2026-10-09: a
+      provisional verdict is one the interview was still arguing with, a
+      headline cannot be retracted, and an abandon is the one close where no
+      reply ever said "this is my answer". The verdict stays on the row for the
+      web UI; only the Slack headline is withheld;
     * ``shutdown``: the end-reason class decides. TODAY (the default Stop,
       SIGTERM) and FINALIZE announce every owed headline, HOLD only ended
       interviews (``interview_state.ended_thread_ids`` is the one predicate);
@@ -54,6 +63,8 @@ def should_announce(
     if trigger not in ANNOUNCE_TRIGGERS:
         raise ValueError(f"unknown announce trigger {trigger!r}")
     if already_announced:
+        return False
+    if trigger == "thread-abandon":
         return False
     if trigger == "capture":
         return terminal and not queued

@@ -179,6 +179,37 @@ async def test_a_decided_thread_is_not_reopened_by_a_rebuild(db_session):
     assert root_ts in eng._closed_thread_ids
 
 
+async def test_an_abandoned_thread_is_not_reopened_by_a_rebuild(db_session):
+    """0063: the abandon's close must survive a resume.
+
+    The interview that hung run 652a6102 still has its open `agent_messages`
+    rows, and the last of them is the partner's — so without the `abandoned`
+    ThreadDecision the rebuild would restore it with `has_pending_reply=True`
+    and the resumed run would inherit the same un-closable interview. The
+    decision is what `_restore_prior_decisions` seeds `_closed_thread_ids`
+    from.
+    """
+    run = await factories.make_simulation_run(db_session)
+    root_ts = await _stored_thread(db_session, run, replies=2)
+    await factories.make_thread_decision(
+        db_session, run=run, thread_id=root_ts, channel="general",
+        agent_a="su", agent_b="wiseman", outcome="abandoned",
+    )
+    await db_session.flush()
+
+    eng = _engine_for(db_session, run.id)
+    await eng._rebuild_state_from_db()
+    await eng._rebuild_agent_state()
+
+    for agent_id in AGENT_IDS:
+        assert eng.agents[agent_id].state.active_threads == {}, (
+            f"an abandoned interview was reopened for {agent_id}: "
+            f"{list(eng.agents[agent_id].state.active_threads)}"
+        )
+    assert root_ts in eng._closed_thread_ids
+    assert eng._open_interview_count() == 0
+
+
 async def test_a_second_rebuild_does_not_duplicate_prior_thread_context(db_session):
     """`_prior_threads` is the Phase 5 dedup context, and step 1 appends to it.
 

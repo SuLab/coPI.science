@@ -237,6 +237,13 @@ class OpportunityAssessment(Base):
     #: ``thread.message_count + 1`` at capture. A queued write with a LOWER
     #: ordinal is stale and is recorded as a drop instead of applied.
     verdict_ordinal: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: Which model actually produced this verdict (0063). Normally the run's
+    #: configured model, but the server-side refusal fallback can answer a
+    #: declined request on a DIFFERENT model inside the same call, and a
+    #: verdict's provenance must not have to be inferred from the run config.
+    #: NULL means "never recorded": every row written before 0063, and any row
+    #: whose call did not report a serving model.
+    served_by_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     # Sidecar item 5 (rubric v2.1.0): the single experiment Blackbird should
     # fund next — the line staff act on, so it is a first-class column rather
     # than a raw_verdict spelunk. NULL for every row written before 0037 (never
@@ -465,6 +472,14 @@ class AssessmentDrop(Base):
     raw_verdict: Mapped[dict | None] = mapped_column(
         JSONB(none_as_null=True), nullable=True
     )
+    #: The Messages API's own ``stop_details.category`` when this drop was caused
+    #: by a model refusal (0063) — ``bio``, ``cyber``, ``reasoning_extraction``,
+    #: … an open set, so it is stored as free text rather than an enum. NULL
+    #: means "never asked": every row written before 0063 (the engine's model
+    #: path did not read ``stop_details`` at all, which is why run 652a6102's
+    #: lost verdict has no recorded reason), and every drop that was not a
+    #: refusal.
+    refusal_category: Mapped[str | None] = mapped_column(String(40), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

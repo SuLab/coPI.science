@@ -15,6 +15,28 @@ from tests.fakes import FakeAnthropic, text_response, tool_use_response
 from tests.unit import _frozen_llm_turns as frozen
 
 
+@pytest.fixture(autouse=True)
+def _ga_endpoint(monkeypatch):
+    """Parity is a property of the REFACTOR, so compare on the GA request shape.
+
+    `_billed_call` adds `betas=[...]` and `fallbacks="default"` and routes to
+    `client.beta.messages.create` when `engine_refusal_fallback_enabled` is on
+    (the production default since 2026-10-09). That is an orthogonal transport
+    choice — it changes who may answer a refused request, not how a turn is
+    assembled — and leaving it on here would make every scenario differ from the
+    frozen baseline by the same two keys, which proves nothing and hides a real
+    divergence if one ever appears.
+
+    `test_the_fallback_adds_exactly_two_keys_and_changes_nothing_else` below is
+    the other half: it pins what turning it ON does.
+    """
+    base = llm.get_settings()
+    monkeypatch.setattr(
+        llm, "get_settings",
+        lambda: base.model_copy(update={"engine_refusal_fallback_enabled": False}),
+    )
+
+
 def _reply(item, requests):
     """A FakeAnthropic response callable that snapshots the request, then yields
     the scripted message or raises the scripted exception."""
@@ -124,3 +146,31 @@ async def test_forced_final_retry_raise_salvage_parity(monkeypatch):
     old = await _run(frozen.generate_with_tools, _TOOL_SCENARIOS["forced_final_retry_raises"](), monkeypatch, **_tools_kw())
     assert new == old
     assert new[0] == "cut"
+
+
+async def test_the_fallback_adds_exactly_two_keys_and_changes_nothing_else(monkeypatch):
+    """Turning the refusal fallback on must change the REQUEST only by the two
+    keys the beta endpoint needs — never the model, system, messages, tools,
+    max_tokens or thinking. `_billed_call` setdefaults `thinking` so the beta
+    path does not inherit `abeta_create`'s deliberate no-default."""
+    base = llm.get_settings()
+
+    async def _capture(enabled: bool) -> dict:
+        monkeypatch.setattr(
+            llm, "get_settings",
+            lambda: base.model_copy(update={"engine_refusal_fallback_enabled": enabled}),
+        )
+        fake = FakeAnthropic([text_response("hi")])
+        monkeypatch.setattr("src.services.llm.get_anthropic_client", lambda: fake)
+        await llm.generate_agent_response(
+            "SYS", [{"role": "user", "content": "hi"}], model="m", max_tokens=1000,
+        )
+        return copy.deepcopy(fake.calls[0])
+
+    off = await _capture(False)
+    on = await _capture(True)
+
+    assert set(on) - set(off) == {"betas", "fallbacks"}
+    assert on["betas"] == [llm.ENGINE_FALLBACK_BETA]
+    assert on["fallbacks"] == "default"
+    assert {k: v for k, v in on.items() if k in off} == off

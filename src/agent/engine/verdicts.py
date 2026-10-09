@@ -231,6 +231,7 @@ class Verdicts:
     async def _capture_hub_assessment(
         self, agent: Agent, thread: ThreadState, raw_response: str,
         slack_ts: str | None, *, closes_thread: bool,
+        served_by_model: str | None = None,
     ) -> None:
         """Option A relocation: extract the hub's `<assessment_json>` verdict
         sidecar from its own raw Phase-4 CONCLUDE reply and persist it.
@@ -309,6 +310,7 @@ class Verdicts:
                     agent.agent_id, thread.channel, verdict, slack_ts=slack_ts,
                     subject_agent_id_fallback=thread.other_agent_id,
                     thread=thread, write_id=write_id, ordinal=ordinal,
+                    served_by_model=served_by_model,
                 )
                 if held:
                     terminal = self._verdict_is_terminal(
@@ -486,6 +488,7 @@ class Verdicts:
         self, agent_id: str, channel: str, verdict: dict, slack_ts: str | None = None,
         *, subject_agent_id_fallback: str | None = None, thread: ThreadState | None = None,
         write_id: uuid.UUID | None = None, ordinal: int | None = None,
+        served_by_model: str | None = None,
     ) -> tuple[bool, uuid.UUID | None]:
         """Store a scouting verdict. Best-effort: a failure here must never cost
         the Slack post that already went out.
@@ -559,6 +562,7 @@ class Verdicts:
         assessment_kwargs = await self._assessment_row(
             agent_id, channel, verdict, slack_ts,
             subject_agent_id_fallback=subject_agent_id_fallback, thread=thread,
+            served_by_model=served_by_model,
         )
         if assessment_kwargs is None:
             logger.debug(
@@ -816,6 +820,7 @@ class Verdicts:
     async def _assessment_row(
         self, agent_id: str, channel: str, verdict: dict, slack_ts: str | None = None,
         *, subject_agent_id_fallback: str | None = None, thread: ThreadState | None = None,
+        served_by_model: str | None = None,
     ) -> dict | None:
         """Build the ``opportunity_assessments`` row for one verdict — exactly the
         kwargs ``_persist_assessment`` has always written (seed, floor, warnings,
@@ -868,6 +873,7 @@ class Verdicts:
         _rationales = self._normalized_dimension_rationales(agent_id, verdict, scores)
         gating_rationales = self._normalized_gating_rationales(agent_id, verdict, gating)
         return self._assessment_kwargs(
+            served_by_model=served_by_model,
             agent_id=agent_id, channel=channel, verdict=verdict, slack_ts=slack_ts,
             thread=thread, subject_agent_id=subject_agent_id,
             sidecar_columns=sidecar_columns, computed_score=computed_score,
@@ -1261,7 +1267,7 @@ class Verdicts:
         self, *, agent_id, channel, verdict, slack_ts, thread, subject_agent_id,
         sidecar_columns, computed_score, computed_band,
         gating, scores, red_flags, milestones, normalized_key_points, _rationales,
-        gating_rationales, gap, floor_verifiable, panel_owed,
+        gating_rationales, gap, floor_verifiable, panel_owed, served_by_model=None,
     ) -> dict:
         """The column values of the assessment row. Split out of
         ``_persist_assessment`` (spec §7.7)."""
@@ -1271,6 +1277,11 @@ class Verdicts:
         return dict(
             simulation_run_id=self.simulation_run_id,
             agent_id=agent_id,
+            # 0063: which model actually answered. Normally the configured one;
+            # the server-side refusal fallback can make it another, and a
+            # verdict's provenance must be recorded rather than inferred from
+            # the run config. None means "not reported for this write".
+            served_by_model=served_by_model,
             subject_agent_id=subject_agent_id,
             # Bounded like `subject_agent_id`. `channel_name` is
             # String(100) NOT NULL and was passed raw, so an over-long channel
@@ -1578,6 +1589,7 @@ class Verdicts:
         thread_id: str | None = None,
         detail: str | None = None,
         raw_verdict: dict | None = None,
+        refusal_category: str | None = None,
     ) -> None:
         """Record that a verdict was lost — generated and discarded, or, for
         ``empty_reply``, never produced at all.
@@ -1614,6 +1626,12 @@ class Verdicts:
                     reason=reason,
                     detail=detail,
                     raw_verdict=raw_verdict,
+                    # 0063. The API's own `stop_details.category`, non-None only
+                    # when the drop was caused by a refusal. NULL otherwise, and
+                    # on every row written before 0063 — the engine's model path
+                    # did not read `stop_details` at all, which is why run
+                    # 652a6102's lost interview has no recorded reason.
+                    refusal_category=refusal_category,
                 ))
                 await db.commit()
         except Exception as exc:  # noqa: BLE001 — visibility must never cost a reply

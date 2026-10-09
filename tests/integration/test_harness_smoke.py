@@ -92,7 +92,9 @@ async def test_container_is_migrated(engine):
         # 0062 publications provenance/exclusion/doi_verified, publication_candidates,
         #      researcher_profiles human_edited_at / evidence_flagged_count,
         #      agents.persona_export_failed_at (corpus remediation)
-        assert v == "0062"
+        # 0063 thread_outcome_enum 'abandoned', opportunity_assessments.served_by_model,
+        #      assessment_drops.refusal_category (drain-hang + refusal provenance)
+        assert v == "0063"
 
 
 async def test_writes_are_rolled_back_part1(db_session):
