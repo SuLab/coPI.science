@@ -1,6 +1,8 @@
 """OpenAlex-derived industry evidence: company co-authors and company funders."""
 import logging
 import re
+from functools import partial
+from urllib.parse import quote
 
 import httpx
 
@@ -10,6 +12,7 @@ from src.services.http_pacing import TRANSIENT_STATUSES, Pacer, with_retries
 from src.services.industry_sources import JHU_OPENALEX_IDS, EvidenceItem, Paged
 from src.services.industry_sources.companies import classify_company
 from src.services.jhu_rules import is_hopkins_affiliation
+from src.services.openalex import _NO_SUCH_WORK, _lookup_doi_ok
 from src.services.query_escaping import openalex_filter_value
 
 logger = logging.getLogger(__name__)
@@ -136,6 +139,38 @@ async def fetch_works_for_pmids(pmids: list[str]) -> Paged:
             count = (data.get("meta") or {}).get("count")
             truncated = truncated or (isinstance(count, int) and count > len(results))
     return Paged(out, truncated)
+
+
+async def fetch_works_for_dois(dois: list[str]) -> list[dict]:
+    """The OpenAlex works of `dois`, one singleton lookup each (`GET /works/doi:<doi>`): the
+    fallback for in-use papers the PMID filter did not return, because OpenAlex can file a
+    merged preprint and article under the preprint's PMID (2026-10-10: 216 of 6,263 in-use
+    PMIDs unreturned, hiding two PIs' company co-authors). A singleton lookup costs no
+    credit, so the request budget is not consulted. A malformed DOI (`openalex`'s check, no
+    request made) or an unknown one (400, 404, 410) yields nothing; any other failure
+    raises, so the source is unavailable for the run."""
+    out: list[dict] = []
+    contact = getattr(get_settings(), "ncbi_contact_email", None)
+    params = {"select": _SELECT, **({"mailto": contact} if contact else {})}
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        for doi in dict.fromkeys(d.strip() for d in dois):
+            if not _lookup_doi_ok(doi):
+                continue
+            resp = await with_retries(
+                partial(client.get, f"{OA}/works/doi:{quote(doi, safe='/')}", params=params),
+                attempts=4, backoff=lambda a: 2.0 * (2 ** a),
+                retry_statuses=TRANSIENT_STATUSES, retry_exceptions=(httpx.TransportError,),
+                pacer=_PACER,
+            )
+            if resp.status_code in _NO_SUCH_WORK:
+                if resp.status_code == 400:  # also what a request OpenAlex rejects would get
+                    logger.warning("OpenAlex refused DOI %s (400): %s", doi, resp.text[:200])
+                continue
+            resp.raise_for_status()
+            body = resp.json()
+            if isinstance(body, dict):
+                out.append(body)
+    return out
 
 
 async def company_funder_ids(funder_ids: set[str]) -> set[str]:

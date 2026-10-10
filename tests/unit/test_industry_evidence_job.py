@@ -134,6 +134,30 @@ async def test_the_paratek_statement_credits_nothing(db_session, monkeypatch):
     assert {r.kind for r in rows} == {"coauthor_company"}
 
 
+async def test_a_work_openalex_files_under_another_pmid_is_found_by_its_doi(db_session, monkeypatch):
+    """2026-10-10: OpenAlex filed Srinivasan's 2025 Acuitas co-authored article under its
+    preprint's PMID, which the PMID lookup never asked for; the paper's DOI finds it."""
+    u, job = await _lamichhane_job(db_session, monkeypatch, authors=[LAM], coi_statement="")
+    pub = (await db_session.execute(select(Publication).where(Publication.user_id == u.id))).scalar_one()
+    pub.doi = "10.1038/s41541-025-01089-x"
+    await db_session.flush()
+    asked = []
+
+    async def no_works(pmids):
+        return Paged([])
+
+    async def by_doi(dois):
+        asked.append(list(dois))
+        return [_PARATEK_WORK | {"ids": {"pmid": "https://pubmed.ncbi.nlm.nih.gov/39041038"}}]
+
+    monkeypatch.setattr(openalex_industry, "fetch_works_for_pmids", no_works)
+    monkeypatch.setattr(openalex_industry, "fetch_works_for_dois", by_doi)
+    await ie.execute_industry_evidence(_ctx(job), db_session)
+    rows = (await db_session.execute(select(PiIndustryEvidence).where(PiIndustryEvidence.user_id == u.id))).scalars().all()
+    assert asked == [["10.1038/s41541-025-01089-x"]]
+    assert [r.kind for r in rows] == ["coauthor_company"]
+
+
 async def test_rescore_with_no_evidence_records_a_zero_raw(db_session):
     u = await _user(db_session, "0000-0003-3333-4444", "No Evidence")
     s = await ie.rescore_user(db_session, u.id, tenure_start=2018)

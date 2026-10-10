@@ -40,6 +40,8 @@ class SourceContext:
     conditions: set[str]
     pmids: list[str]
     year_by_pmid: dict[str, int | None]
+    #: The paper's DOI per in-use PMID, for the works OpenAlex does not return by PMID.
+    doi_by_pmid: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -64,6 +66,9 @@ def _unavailable(name: str, exc: BaseException) -> SourceUnavailable:
 
 
 class OpenAlexSource:
+    """The works of the PI's in-use PMIDs; a PMID no returned work carries is looked up by
+    its paper's DOI instead (`fetch_works_for_dois`), each work counted once."""
+
     name = "openalex"
     kinds = {"coauthor_company": (3.0, 30.0), "company_funder": (4.0, 20.0)}
 
@@ -72,11 +77,21 @@ class OpenAlexSource:
             _oaid,
             company_funder_ids,
             evidence_from_work,
+            fetch_works_for_dois,
             fetch_works_for_pmids,
         )
         try:
             paged = await fetch_works_for_pmids(ctx.pmids)
-            works = paged.items
+            works = list(paged.items)
+            returned = {_oaid((w.get("ids") or {}).get("pmid")) for w in works}
+            seen = {w.get("id") for w in works}
+            by_doi: list[dict] = []
+            for w in await fetch_works_for_dois(
+                    [ctx.doi_by_pmid[p] for p in ctx.pmids if p not in returned and ctx.doi_by_pmid.get(p)]):
+                if w.get("id") not in seen:
+                    seen.add(w.get("id"))
+                    by_doi.append(w)
+            works += by_doi
             funder_ids = {_oaid(f.get("id")) for w in works for f in w.get("funders") or []}
             cfids = await company_funder_ids(funder_ids)
         except (httpx.HTTPError, ValueError) as exc:
@@ -84,8 +99,9 @@ class OpenAlexSource:
         items: list[EvidenceItem] = []
         for w in works:
             items += evidence_from_work(w, ctx.user.orcid, ctx.tenure_start, company_funder_ids=cfids)
-        return SourceResult(items, note=f"openalex works={len(works)} items={len(items)}",
-                            coverage="truncated" if paged.truncated else "ok")
+        return SourceResult(
+            items, note=f"openalex works={len(works)} items={len(items)} by_doi={len(by_doi)}",
+            coverage="truncated" if paged.truncated else "ok")
 
 
 class PubMedCoiSource:

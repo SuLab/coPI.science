@@ -88,12 +88,67 @@ def test_missing_collaborator_name_or_nct_is_skipped_not_a_crash():
     assert evidence_from_study(st2, 2018, {"lymphoma"}) == []
 
 
+def test_the_query_asks_for_given_name_and_surname_anywhere_in_the_first_inventor():
+    assert uspto_inventor.inventor_query("Justin Bailey") == (
+        'applicationMetaData.firstInventorName:("Justin" AND "Bailey") AND '
+        'applicationMetaData.applicantBag.applicantNameText:"Johns Hopkins"')
+
+
+def test_the_query_strips_accents_and_skips_a_leading_initial():
+    """ODP stores inventor names unaccented and does not fold a query's accents."""
+    assert uspto_inventor.inventor_query("Brice Ménard").startswith(
+        'applicationMetaData.firstInventorName:("Brice" AND "Menard") AND')
+    assert uspto_inventor.inventor_query("D. Scott Wilson").startswith(
+        'applicationMetaData.firstInventorName:("Scott" AND "Wilson") AND')
+
+
+@pytest.mark.parametrize("inventor, expected", [
+    ("Justin R. Bailey", True), ("JUSTIN R. BAILEY", True), ("Bailey, Justin R.", True),
+    ("Justin Bailey", True), ("Bailey Surtees", False), ("Vasudev Bailey", False),
+    ("Justine Bailey", False), (None, False),
+])
+def test_the_first_inventor_must_carry_the_pis_given_name_and_surname(inventor, expected):
+    name = uspto_inventor.inventor_name("Justin Bailey")
+    assert uspto_inventor.is_pi_first_inventor(inventor, name) is expected
+
+
+def test_an_initial_only_given_name_needs_a_word_with_that_initial():
+    name = uspto_inventor.inventor_name("J. Smith")
+    assert uspto_inventor.is_pi_first_inventor("John A. Smith", name)
+    assert not uspto_inventor.is_pi_first_inventor("Adam Smith", name)
+
+
+def test_apostrophe_and_hyphenated_surnames_match_word_by_word_or_joined():
+    obrien = uspto_inventor.inventor_name("Evan O'Brien")
+    assert uspto_inventor.is_pi_first_inventor("EVAN M. O'BRIEN", obrien)
+    assert uspto_inventor.is_pi_first_inventor("OBRIEN, EVAN", obrien)
+    assert not uspto_inventor.is_pi_first_inventor("Devin O'Brien-Coon", obrien)
+    assert uspto_inventor.is_pi_first_inventor(
+        "Bipasha Mukherjee-Clavin", uspto_inventor.inventor_name("Bipasha Mukherjee-Clavin"))
+
+
+def test_packed_initials_are_an_initial_not_a_given_name():
+    name = uspto_inventor.inventor_name("D.J. Smith")
+    assert name == uspto_inventor.InventorName("", "d", "Smith")
+    assert uspto_inventor.is_pi_first_inventor("SMITH, DAVID J.", name)
+
+
+def test_letters_nfkd_keeps_are_spelled_in_ascii():
+    name = uspto_inventor.inventor_name("Søren Brønd")
+    assert name == uspto_inventor.InventorName("Soren", "s", "Brond")
+    assert '("Soren" AND "Brond")' in uspto_inventor.inventor_query("Søren Brønd")
+    assert uspto_inventor.is_pi_first_inventor("BROND, SOREN", name)
+
+
 def _odp_pages(total: int):
-    """An ODP stand-in answering each offset/limit from `total` numbered applications."""
+    """An ODP stand-in answering each offset/limit from `total` numbered applications, each
+    first-invented by "Jane Q. Wang"."""
     def answer(request: httpx.Request) -> httpx.Response:
         page = json.loads(request.content)["pagination"]
         start, limit = page["offset"], page["limit"]
-        bag = [{"applicationNumberText": f"{n:08d}"} for n in range(start, min(start + limit, total))]
+        bag = [{"applicationNumberText": f"{n:08d}",
+                "applicationMetaData": {"firstInventorName": "Jane Q. Wang"}}
+               for n in range(start, min(start + limit, total))]
         if not bag and total == 0:
             return httpx.Response(404, json={"error": "no matches"})
         return httpx.Response(200, json={"count": total, "patentFileWrapperDataBag": bag})
@@ -141,6 +196,17 @@ async def test_a_uspto_404_is_no_applications(_odp_key):
     respx.post(uspto_inventor.SEARCH_URL).mock(side_effect=_odp_pages(0))
     paged = await uspto_inventor.fetch_jhu_applications("Jane Wang")
     assert paged.items == [] and paged.truncated is False
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_keeps_only_the_pis_own_applications(_odp_key):
+    bag = [{"applicationNumberText": n, "applicationMetaData": {"firstInventorName": who}}
+           for n, who in (("1", "JUSTIN R. BAILEY"), ("2", "BAILEY SURTEES"), ("3", "Justin Bailey"))]
+    respx.post(uspto_inventor.SEARCH_URL).mock(return_value=httpx.Response(
+        200, json={"count": 3, "patentFileWrapperDataBag": bag}))
+    paged = await uspto_inventor.fetch_jhu_applications("Justin Bailey")
+    assert [a["applicationNumberText"] for a in paged.items] == ["1", "3"]
 
 
 @pytest.mark.asyncio

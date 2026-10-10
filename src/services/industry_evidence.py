@@ -224,7 +224,8 @@ async def execute_industry_evidence(ctx: JobContext, db: AsyncSession) -> None:
         Publication.user_id == user_id, Publication.pmid.isnot(None), publication_in_use(),
     ))).scalars().all()
     sctx = SourceContext(user=user, tenure_start=tenure_start, keywords=keywords, conditions=conditions,
-                         pmids=[p.pmid for p in pubs], year_by_pmid={p.pmid: p.year for p in pubs})
+                         pmids=[p.pmid for p in pubs], year_by_pmid={p.pmid: p.year for p in pubs},
+                         doi_by_pmid={p.pmid: p.doi for p in pubs if p.doi})
 
     items, coverage = await _collect(ctx, sctx)
     items = _deduped(items)

@@ -121,7 +121,12 @@ The second scores industry interest from OpenAlex, PubMed competing-interest, US
 ClinicalTrials.gov evidence and writes nothing a prompt or a profile export reads
 (`tests/unit/test_enrichment_isolation.py` walks the imports). A competing-interest
 statement credits a company to the PI only when the run of named persons nearest before
-it names the PI, or says "all/each author(s)" (`src/services/coi_attribution.py`). USPTO
+it names the PI, or says "all/each author(s)" (`src/services/coi_attribution.py`).
+OpenAlex works come from the PI's in-use PMIDs; a paper OpenAlex does not return by PMID
+(it can file a merged preprint and article under the preprint's PMID) is looked up by its
+DOI, a free singleton lookup. USPTO keeps the Johns Hopkins applications whose first
+inventor carries the PI's given name and surname, whatever middle names or initials sit
+between, with accents stripped because ODP stores names unaccented. USPTO
 and ClinicalTrials.gov are paged; each score row records what every source covered
 (`ok`, `truncated` or `unavailable:<reason>`), and the manager pages show "partial" when a
 source is not `ok` (its stored rows are kept, and scored only from the tenure start on).
