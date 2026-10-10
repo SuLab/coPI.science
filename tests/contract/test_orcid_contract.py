@@ -79,6 +79,7 @@ async def test_fetch_orcid_profile_parses_all_fields():
         "employments": [
             {"organization": "Brown University", "start_year": None, "current": True},
         ],
+        "organizations": ["Brown University"],
     }
 
 
@@ -121,6 +122,34 @@ async def test_fetch_orcid_profile_extracts_every_employment_with_start_years():
         {"organization": "Stanford University", "start_year": 2004, "current": False},
         {"organization": "HHMI", "start_year": None, "current": True},
     ]
+
+
+@respx.mock
+async def test_fetch_orcid_profile_lists_every_affiliation_organization_once():
+    """The non-PubMed corpus ties an OpenAlex work to the PI through these names
+    (non_pubmed_works._attributed): employments, educations, qualifications and invited
+    positions, in record order, each once; malformed entries are skipped."""
+    def section(summary_key, *names, malformed=True):
+        groups = [{"summaries": [{summary_key: {"organization": {"name": name}}}]}
+                  for name in names]
+        if malformed:  # the employments parser above reads every group as a dict
+            groups += [None, {"summaries": [None, {summary_key: {"organization": None}}]}]
+        return {"affiliation-group": groups}
+
+    record = {"activities-summary": {
+        "employments": section("employment-summary", "Johns Hopkins University",
+                               "Stanford University", malformed=False),
+        "educations": section("education-summary", "University of Pennsylvania",
+                              "Stanford University"),
+        "qualifications": section("qualification-summary", " Board of Medicine "),
+        "invited-positions": section("invited-position-summary", "Santa Fe Institute"),
+        "memberships": section("membership-summary", "American Chemical Society"),
+    }}
+    respx.get(f"{BASE}/{OID}/record").mock(return_value=httpx.Response(200, json=record))
+    prof = await orcid.fetch_orcid_profile(OID)
+    assert prof["organizations"] == [
+        "Johns Hopkins University", "Stanford University", "University of Pennsylvania",
+        "Board of Medicine", "Santa Fe Institute"]
 
 
 @respx.mock

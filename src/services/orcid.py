@@ -26,11 +26,41 @@ async def fetch_orcid_record(orcid_id: str) -> dict[str, Any]:
         return resp.json()
 
 
+#: The ORCID record's affiliation sections that name places a PI publishes from, with each
+#: section's summary key.
+_AFFILIATION_SECTIONS = (
+    ("employments", "employment-summary"),
+    ("educations", "education-summary"),
+    ("qualifications", "qualification-summary"),
+    ("invited-positions", "invited-position-summary"),
+)
+
+
+def _organizations(record: dict[str, Any]) -> list[str]:
+    """Each organization name the record lists under employments, educations,
+    qualifications and invited positions, once, in record order. The non-PubMed corpus
+    matches OpenAlex affiliations against them (``non_pubmed_works._attributed``)."""
+    activities = record.get("activities-summary") or {}
+    names: list[str] = []
+    for section, summary_key in _AFFILIATION_SECTIONS:
+        for group in (activities.get(section) or {}).get("affiliation-group") or []:
+            if not isinstance(group, dict):
+                continue
+            for summary in group.get("summaries") or []:
+                entry = summary.get(summary_key) if isinstance(summary, dict) else None
+                organization = entry.get("organization") if isinstance(entry, dict) else None
+                name = organization.get("name") if isinstance(organization, dict) else None
+                if isinstance(name, str) and name.strip() and name.strip() not in names:
+                    names.append(name.strip())
+    return names
+
+
 async def fetch_orcid_profile(orcid_id: str) -> dict[str, Any]:
     """Extract name, affiliation, and email from ORCID record.
 
-    ``name`` is None when the record has no public name (spec 2026-10-05 §6.3): callers
-    fall back to the OAuth name or ask for one, never to the iD."""
+    Also every employment, and the record's organizations (``_organizations``). ``name`` is
+    None when the record has no public name (spec 2026-10-05 §6.3): callers fall back to the
+    OAuth name or ask for one, never to the iD."""
     record = await fetch_orcid_record(orcid_id)
     result: dict[str, Any] = {"orcid": orcid_id}
 
@@ -98,6 +128,7 @@ async def fetch_orcid_profile(orcid_id: str) -> dict[str, Any]:
         if dept:
             result["department"] = dept
     result["employments"] = all_employments
+    result["organizations"] = _organizations(record)
 
     # Researcher URLs (lab website)
     urls = (person.get("researcher-urls") or {}).get("researcher-url") or []
