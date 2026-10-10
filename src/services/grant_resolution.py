@@ -25,9 +25,13 @@ from datetime import UTC, datetime
 from src.services.nih_reporter import JHU_ORG_EXACT
 from src.services.person_names import PersonName, given_names_agree, surname_keys
 
+#: Activity codes whose awards reach the persona: research projects and individual career
+#: awards. Training (T32, K12, R25), instrument (S10), conference (R13), resource and core
+#: (P30, P41, R24, U24) and center (P50, U54) awards stay out.
 LLM_ACTIVITY_CODES = frozenset({
-    "R01", "R21", "R33", "R35", "R37", "R00", "R56", "R03", "RF1", "DP1", "DP2",
-    "U01", "U19", "UG3", "UH3", "P01", "K08", "K23", "K99", "R41", "R42", "R43", "R44",
+    "R01", "R21", "R33", "R35", "R37", "R00", "R56", "R03", "RF1", "R61", "DP1", "DP2", "DP5",
+    "U01", "U19", "UG3", "UH3", "P01", "K01", "K08", "K22", "K23", "K99",
+    "R41", "R42", "R43", "R44",
 })
 
 

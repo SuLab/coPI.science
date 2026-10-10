@@ -58,6 +58,11 @@ def test_training_codes_and_vetoed_rows_are_not_pooled():
     assert keys(build(ident(), g).active) == ["R01K"]
 
 
+@pytest.mark.parametrize("code", ["K01", "K22", "DP5", "R61"])
+def test_individual_career_and_phased_research_awards_are_pooled(code):
+    assert keys(build(ident(), [grant(f"{code}A", code=code)]).active) == [f"{code}A"]
+
+
 def test_reporter_rows_sharing_a_title_collapse_to_the_latest():
     g = [grant("R01A", title="Same  Title", end=(2027, 1, 1)),
          grant("R01B", title="same title", end=(2028, 1, 1))]
