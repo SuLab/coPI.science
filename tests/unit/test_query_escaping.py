@@ -31,13 +31,13 @@ def test_openalex_filter_value_keeps_ids_only():
 
 def test_the_uspto_query_has_exactly_its_own_quotes():
     q = uspto_inventor.inventor_query(HOSTILE)
-    assert q.count('"') == 4 and "\\" not in q and "\n" not in q
-    assert q.startswith('applicationMetaData.firstInventorName:"Jane OR applicationMetaData')
+    assert q.count('"') == 6 and "\\" not in q and "\n" not in q
+    assert q.startswith('applicationMetaData.firstInventorName:("Jane" AND "z") AND ')
 
 
 def test_the_uspto_query_uses_the_parsed_name_and_refuses_an_orcid_id():
     assert uspto_inventor.inventor_query("Dr. Jane Smith, PhD").startswith(
-        'applicationMetaData.firstInventorName:"Jane Smith" AND')
+        'applicationMetaData.firstInventorName:("Jane" AND "Smith") AND')
     assert uspto_inventor.inventor_query("0000-0002-1825-0097") is None
 
 
@@ -81,4 +81,4 @@ async def test_the_uspto_request_body_carries_the_escaped_query(monkeypatch):
     monkeypatch.setattr(uspto_inventor, "get_settings", lambda: type("S", (), {"uspto_api_key": "k"})())
     route = respx.post(odp.ODP_SEARCH_URL).mock(return_value=httpx.Response(404))
     await uspto_inventor.fetch_jhu_applications(HOSTILE)
-    assert json.loads(route.calls[0].request.content)["q"].count('"') == 4
+    assert json.loads(route.calls[0].request.content)["q"].count('"') == 6
