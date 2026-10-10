@@ -5,12 +5,14 @@ OpenAlex is often the largest discovery source for sparse-ORCID PIs (the
 new-PI onboarding case. Its identity is NOT trusted here: the rehearsal's one
 OpenAlex error linked a stranger's paper to a PI's ORCID, so every S2 candidate
 PubMed has goes through the resolver's author-match gate. The works PubMed lacks
-are the exception: for a PubMed-thin PI they are stored without a gate (owner
-decision D6, spec 2026-10-09 §5). This module fetches each work's identifiers and
-year, plus the title, type, venue, abstract and retraction flag that non-PubMed
-corpus reads, and offers the free single-DOI lookup (``fetch_work_by_doi``). It
-RAISES on failure (a silent empty result is a thin corpus, not an answer — audit
-M5).
+are the exception: for a PubMed-thin PI they are stored without staff review (owner
+decision D6, spec 2026-10-09 §5), but only when the ORCID's own authorship on the work
+names one of the PI's institutions or the publisher's metadata carries the ORCID
+(``fetch_orcid_authorships``; D6 amended after the 2026-10-09 rollout). This module
+fetches each work's identifiers and year, plus the title, type, venue, abstract and
+retraction flag that non-PubMed corpus reads, and offers the free single-DOI lookup
+(``fetch_work_by_doi``). It RAISES on failure (a silent empty result is a thin corpus, not
+an answer — audit M5).
 """
 
 import logging
@@ -57,6 +59,13 @@ def _doi_from_url(url: str | None) -> str | None:
 WORK_FIELDS = (
     "ids,publication_year,title,type,primary_location,abstract_inverted_index,is_retracted"
 )
+#: What ``fetch_orcid_authorships`` selects. A list response caps ``authorships`` at 100
+#: per work (measured 2026-10-09), and the request costs one credit per page.
+AUTHORSHIP_FIELDS = "ids,authorships"
+#: Kept from one authorship, each cut to _AFFILIATION_MAX characters: the strings are only
+#: compared with the PI's institutions, never stored or shown.
+_MAX_AFFILIATIONS = 10
+_AFFILIATION_MAX = 300
 
 
 def reconstruct_abstract(inverted_index: object) -> str | None:
@@ -104,22 +113,25 @@ def _work_record(work: dict) -> dict:
     }
 
 
-async def fetch_works_by_orcid(orcid: str) -> list[dict]:
-    """All OpenAlex works for an ORCID, each as ``_work_record`` shapes it.
+def _orcid_filter(orcid: str) -> str:
+    return f"author.orcid:https://orcid.org/{openalex_filter_value(orcid)}"
 
-    Cursor-paginated; includes a ``mailto`` (OpenAlex's polite pool) when a
-    contact email is configured.
-    """
+
+async def _list_works(filter_: str, select: str) -> list[dict]:
+    """Every work a list filter matches, as OpenAlex returns it (the ``select`` fields),
+    cursor-paginated up to ``_MAX_PAGES``; includes a ``mailto`` (OpenAlex's polite pool)
+    when a contact email is configured. Each page is a charged request, so the request
+    budget is checked before every attempt."""
     settings = get_settings()
     out: list[dict] = []
     cursor = "*"
     async with _make_client() as client:
         for _ in range(_MAX_PAGES):
             params = {
-                "filter": f"author.orcid:https://orcid.org/{openalex_filter_value(orcid)}",
+                "filter": filter_,
                 "per-page": str(_PER_PAGE),
                 "cursor": cursor,
-                "select": WORK_FIELDS,
+                "select": select,
             }
             contact = getattr(settings, "ncbi_contact_email", None)
             if contact:
@@ -135,11 +147,67 @@ async def fetch_works_by_orcid(orcid: str) -> list[dict]:
             )
             resp.raise_for_status()
             data = resp.json()
-            for work in data.get("results", []):
-                out.append(_work_record(work))
+            out.extend(data.get("results", []))
             cursor = (data.get("meta") or {}).get("next_cursor")
             if not cursor:
                 break
+    return out
+
+
+async def fetch_works_by_orcid(orcid: str) -> list[dict]:
+    """All OpenAlex works for an ORCID, each as ``_work_record`` shapes it."""
+    return [_work_record(work) for work in await _list_works(_orcid_filter(orcid), WORK_FIELDS)]
+
+
+def _orcid_key(value: object) -> str | None:
+    """An ORCID iD, bare or as an orcid.org URL, upper-cased; None when blank or not text."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip().rstrip("/").rsplit("/", 1)[-1].upper()
+
+
+def _texts(values: object) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    return [v[:_AFFILIATION_MAX] for v in values if isinstance(v, str) and v.strip()][
+        :_MAX_AFFILIATIONS
+    ]
+
+
+def _authorship_of(work: dict, orcid: str) -> dict | None:
+    """The authorship OpenAlex assigned to ``orcid`` on ``work``, or None when its author list
+    has none (a list response keeps the first 100 authors only)."""
+    want = _orcid_key(orcid)
+    if want is None:
+        return None
+    for authorship in work.get("authorships") or []:
+        author = authorship.get("author") if isinstance(authorship, dict) else None
+        if not isinstance(author, dict) or _orcid_key(author.get("orcid")) != want:
+            continue
+        institutions = authorship.get("institutions") or []
+        return {
+            "institutions": _texts([
+                inst.get("display_name") for inst in institutions if isinstance(inst, dict)
+            ]),
+            "raw_affiliations": _texts(authorship.get("raw_affiliation_strings")),
+            "orcid_in_metadata": _orcid_key(authorship.get("raw_orcid")) == want,
+        }
+    return None
+
+
+async def fetch_orcid_authorships(orcid: str) -> dict[str, dict | None]:
+    """The ORCID's own authorship on each PMID-less work OpenAlex attributes to it, by DOI
+    (``ids.doi`` without the resolver prefix; a work with no DOI is left out):
+    ``institutions`` (OpenAlex's names for them), ``raw_affiliations`` (as printed) and
+    ``orcid_in_metadata`` (the publisher's metadata carries the ORCID, so the work is not
+    only OpenAlex's assignment). None for a work whose author list, capped at 100 in a list
+    response, lacks that authorship. One charged request per page; RAISES on failure."""
+    out: dict[str, dict | None] = {}
+    works = await _list_works(f"{_orcid_filter(orcid)},has_pmid:false", AUTHORSHIP_FIELDS)
+    for work in works:
+        doi = _doi_from_url((work.get("ids") or {}).get("doi"))
+        if doi:
+            out.setdefault(doi, _authorship_of(work, orcid))
     return out
 
 

@@ -167,3 +167,75 @@ async def test_title_and_venue_are_one_line(monkeypatch):
                         _client_factory(lambda request: httpx.Response(200, json=page)))
     [work] = await openalex.fetch_works_by_orcid("0000-0001-2345-6789")
     assert (work["title"], work["venue"]) == ("Safe ## Keywords robots", "Proc. RSS")
+
+
+def _authored(doi, *authorships, pmid=None):
+    ids = {"doi": f"https://doi.org/{doi}"} if doi else {}
+    if pmid:
+        ids["pmid"] = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}"
+    return {"ids": ids, "authorships": list(authorships)}
+
+
+def _authorship(orcid, *, institutions=(), raw=(), raw_orcid=None):
+    return {"author": {"orcid": f"https://orcid.org/{orcid}" if orcid else None},
+            "institutions": [{"display_name": name} for name in institutions],
+            "raw_affiliation_strings": list(raw), "raw_orcid": raw_orcid}
+
+
+async def test_fetch_orcid_authorships_lists_pmid_less_works_with_the_orcids_authorship(
+    monkeypatch,
+):
+    pi = "0000-0002-4217-477X"
+    seen = []
+
+    def handler(request):
+        seen.append(dict(request.url.params))
+        return httpx.Response(200, json={"results": [
+            _authored("10.1/Own", _authorship("0000-0001-1111-1111", institutions=["Elsewhere"]),
+                      _authorship(pi.lower(), institutions=["Princeton University"],
+                                  raw=["Dept. of ECE, Princeton University"],
+                                  raw_orcid=f"https://orcid.org/{pi}")),
+            _authored("10.1/merged", _authorship(pi, institutions=["State Grid Shanghai"])),
+            _authored("10.1/truncated", _authorship("0000-0001-1111-1111")),
+            _authored(None, _authorship(pi)),
+        ], "meta": {"next_cursor": None}})
+
+    monkeypatch.setattr(openalex, "_make_client", _client_factory(handler))
+    found = await openalex.fetch_orcid_authorships(pi)
+
+    assert found == {
+        "10.1/Own": {"institutions": ["Princeton University"],
+                     "raw_affiliations": ["Dept. of ECE, Princeton University"],
+                     "orcid_in_metadata": True},
+        "10.1/merged": {"institutions": ["State Grid Shanghai"], "raw_affiliations": [],
+                        "orcid_in_metadata": False},
+        "10.1/truncated": None,
+    }
+    [params] = seen
+    assert params["filter"] == f"author.orcid:https://orcid.org/{pi},has_pmid:false"
+    assert params["select"] == openalex.AUTHORSHIP_FIELDS == "ids,authorships"
+
+
+async def test_fetch_orcid_authorships_bounds_what_it_keeps(monkeypatch):
+    pi = "0000-0002-4217-4776"
+
+    def handler(request):
+        return httpx.Response(200, json={"results": [_authored(
+            "10.1/a", {"author": "not a dict"},
+            _authorship(pi, institutions=["I" * 400], raw=[f"Aff {i}" for i in range(15)])),
+        ], "meta": {"next_cursor": None}})
+
+    monkeypatch.setattr(openalex, "_make_client", _client_factory(handler))
+    [authorship] = (await openalex.fetch_orcid_authorships(pi)).values()
+    assert authorship["institutions"] == ["I" * 300]
+    assert authorship["raw_affiliations"] == [f"Aff {i}" for i in range(10)]
+
+
+async def test_fetch_orcid_authorships_raises_on_failure(monkeypatch):
+    def handler(request):
+        return httpx.Response(500, text="boom")
+
+    monkeypatch.setattr(openalex, "_make_client", _client_factory(handler))
+    monkeypatch.setattr(http_pacing, "_sleep", _instant)
+    with pytest.raises(httpx.HTTPStatusError):
+        await openalex.fetch_orcid_authorships("0000-0002-4217-4776")

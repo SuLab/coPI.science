@@ -6,6 +6,7 @@ from sqlalchemy import select
 from src.models import Publication
 from src.services import non_pubmed_works
 from src.services.corpus import CorpusResult, CorpusStageError
+from src.services.job_queue import JobDeferred
 from src.services.profile_pipeline import run_profile_pipeline
 from tests.unit.test_pipeline_corpus_integration import (  # noqa: F401
     _make_pi,
@@ -31,6 +32,20 @@ def _orcid(doi, title="ORCID title"):
 def _corpus(kept=(), openalex=(), orcid=()):
     return CorpusResult(kept=list(kept), flagged=[], ranked=list(kept),
                         orcid_works=list(orcid), openalex_works=list(openalex))
+
+
+HOPKINS = {"institutions": ["Johns Hopkins University"], "raw_affiliations": [],
+           "orcid_in_metadata": False}
+
+
+@pytest.fixture(autouse=True)
+def hopkins_authorships(monkeypatch, wired):  # noqa: F811
+    """Every OpenAlex work the corpus lists carries a Hopkins authorship for the PI, unless a
+    test patches ``fetch_orcid_authorships`` itself."""
+    async def lookup(orcid):
+        return {w["doi"]: HOPKINS for w in wired.corpus.openalex_works if w.get("doi")}
+
+    monkeypatch.setattr(non_pubmed_works, "fetch_orcid_authorships", lookup)
 
 
 @pytest.fixture
@@ -152,3 +167,61 @@ async def test_the_pre_lock_check_uses_the_paper_derived_tenure_year(db_session,
     wired.corpus = _corpus(kept=kept, openalex=[_oa("10.1/conf", "Conference paper")])
     await run_profile_pipeline(user.id, db_session, job.id)
     assert "10.1/conf" in {r.doi for r in await _pubs(db_session, user.id)}
+
+
+@pytest.mark.usefixtures("no_lookup")
+async def test_an_openalex_work_nothing_ties_to_the_pi_is_not_stored(
+    db_session, wired, monkeypatch,  # noqa: F811
+):
+    # 2026-10-09 rollout: OpenAlex credited one PI's ORCID with 25 papers by namesakes.
+    async def lookup(orcid):
+        assert orcid == user.orcid
+        return {"10.1/own": {"institutions": [], "raw_affiliations": [
+                    "Dept. of ECE, Princeton University, Princeton, NJ"],
+                    "orcid_in_metadata": False},
+                "10.1/namesake": {"institutions": ["State Grid Shanghai Municipal Electric "
+                                                   "Power Company"], "raw_affiliations": [],
+                                  "orcid_in_metadata": False}}
+
+    monkeypatch.setattr(non_pubmed_works, "fetch_orcid_authorships", lookup)
+    user, _agent, job = await _make_pi(db_session)
+    wired.profile["organizations"] = ["Princeton University", "Johns Hopkins University"]
+    wired.corpus = _corpus(openalex=[_oa("10.1/own", "Safety filters for robots"),
+                                     _oa("10.1/namesake", "Cable termination defects")])
+    await run_profile_pipeline(user.id, db_session, job.id)
+    assert {r.doi for r in await _pubs(db_session, user.id)} == {"10.1/own"}
+    await db_session.refresh(job)
+    [note] = [p for p in job.payload["progress"] if p["step"] == "non_pubmed_unattributed"]
+    assert "Skipped 1 works only OpenAlex attributes to the PI" in note["detail"]
+
+
+async def test_an_authorship_lookup_failure_fails_the_run_before_any_publication_write(
+    db_session, wired, monkeypatch,  # noqa: F811
+):
+    async def lookup(orcid):
+        raise RuntimeError("OpenAlex 503")
+
+    monkeypatch.setattr(non_pubmed_works, "fetch_orcid_authorships", lookup)
+    user, _agent, job = await _make_pi(db_session)
+    wired.corpus = _corpus(openalex=[_oa("10.1/x", "Conference paper")])
+    with pytest.raises(CorpusStageError, match="non_pubmed_lookup"):
+        await run_profile_pipeline(user.id, db_session, job.id)
+    assert await _pubs(db_session, user.id) == []
+
+
+async def test_a_budget_deferral_from_the_authorship_list_defers_the_job(
+    db_session, wired, monkeypatch,  # noqa: F811
+):
+    # The list request is charged, so openalex_budget can defer the job; that must not
+    # become a stage failure that spends a retry attempt (review 2026-10-09).
+    from datetime import UTC, datetime
+
+    async def lookup(orcid):
+        raise JobDeferred(datetime.now(UTC), "OpenAlex free budget low")
+
+    monkeypatch.setattr(non_pubmed_works, "fetch_orcid_authorships", lookup)
+    user, _agent, job = await _make_pi(db_session)
+    wired.corpus = _corpus(openalex=[_oa("10.1/x", "Conference paper")])
+    with pytest.raises(JobDeferred):
+        await run_profile_pipeline(user.id, db_session, job.id)
+    assert await _pubs(db_session, user.id) == []

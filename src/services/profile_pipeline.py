@@ -62,7 +62,7 @@ from src.services.jhu_rules import (
     set_tenure_start,
     tenure_filter,
 )
-from src.services.job_queue import AfterCommit, NonRetryableJobError
+from src.services.job_queue import AfterCommit, JobDeferred, NonRetryableJobError
 from src.services.llm import SynthesisRefused, synthesize_profile
 from src.services.non_pubmed_works import collect_non_pubmed_works
 from src.services.orcid import fetch_orcid_profile
@@ -349,7 +349,7 @@ async def _steps3_4_resolve_corpus(run: PipelineRun) -> None:
     corpus_result = run.corpus_result
     if await _may_be_pubmed_thin(run):
         run.non_pubmed_works = await _collect_non_pubmed(
-            corpus_result, await _enriched_non_pubmed_dois(run)
+            run, await _enriched_non_pubmed_dois(run)
         )
     await run.progress(
         "step4",
@@ -450,15 +450,32 @@ async def _enriched_non_pubmed_dois(run: PipelineRun) -> frozenset[str]:
 
 
 async def _collect_non_pubmed(
-    result: Any, enriched: frozenset[str] = frozenset(),
+    run: PipelineRun, enriched: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Phase B collection (spec 2026-10-09 §5.2), before any lock: network only (free OpenAlex
-    singleton lookups). A failure is a corpus stage failure, so the job retries rather than
-    storing less."""
+    singleton lookups, and one charged authorship list when OpenAlex alone attributes a work
+    to the PI). A failure is a corpus stage failure, so the job retries rather than storing
+    less. A work only OpenAlex attributes is kept when the PI's authorship names Johns Hopkins
+    or an organization on the PI's ORCID record, or the publisher lists the PI's ORCID."""
+    unattributed: list[str] = []
     try:
-        return await collect_non_pubmed_works(result, enriched_dois=enriched)
+        works = await collect_non_pubmed_works(
+            run.corpus_result, enriched_dois=enriched, pi_orcid=run.orcid_id,
+            institutions=run.orcid_profile.get("organizations") or [],
+            unattributed=unattributed,
+        )
+    except JobDeferred:
+        raise  # the authorship list is charged: a budget deferral spends no retry attempt
     except Exception as exc:
         raise CorpusStageError(f"corpus stage non_pubmed_lookup failed: {exc}") from exc
+    if unattributed:
+        await run.progress(
+            "non_pubmed_unattributed",
+            f"Skipped {len(unattributed)} works only OpenAlex attributes to the PI: their "
+            "author affiliation names neither Johns Hopkins nor an organization on the PI's "
+            "ORCID record, and the publisher does not list the PI's ORCID.",
+        )
+    return works
 
 
 async def _derive_tenure_start(run: PipelineRun) -> None:
