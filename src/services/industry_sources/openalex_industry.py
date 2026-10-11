@@ -13,6 +13,7 @@ from src.services.industry_sources import JHU_OPENALEX_IDS, EvidenceItem, Paged
 from src.services.industry_sources.companies import classify_company
 from src.services.jhu_rules import is_hopkins_affiliation
 from src.services.openalex import _NO_SUCH_WORK, _lookup_doi_ok
+from src.services.person_names import PersonName, given_names_agree, parse_person_name
 from src.services.query_escaping import openalex_filter_value
 
 logger = logging.getLogger(__name__)
@@ -51,18 +52,35 @@ def _oaid(url: str | None) -> str:
 
 
 _ORCID_RE = re.compile(r"\d{4}-\d{4}-\d{4}-\d{3}[\dX]$")
+#: Seniority of a `_role`, most senior first; any other role ranks last.
+_ROLE_RANK = {"corresponding": 0, "last": 1, "first": 2}
 
 
-def _pi_authorship(work: dict, pi_orcid: str) -> dict | None:
+def _printed_as(raw_name: str | None, pi: PersonName) -> bool:
+    raw = parse_person_name(raw_name or "")
+    return bool(raw.surname_keys & pi.surname_keys) and given_names_agree(pi.first, raw.first)
+
+
+def _pi_authorship(work: dict, pi_orcid: str, pi_name: str | None = None) -> dict | None:
+    """The authorship carrying the PI's ORCID. OpenAlex can put one ORCID on several
+    authorships of a work (2026-10-11: Erika Pearce's on three of W4318981448's, the first
+    printed as "Edward J. Pearce" and only the third her corresponding one). Then the most
+    senior of those printed under a name agreeing with `pi_name` is the PI's; when none
+    agrees, or `pi_name` is not given, the first."""
     if not pi_orcid:
         return None
     tail = pi_orcid.rsplit("/", 1)[-1]
     if not _ORCID_RE.search(tail):
         return None
-    for a in work.get("authorships") or []:
-        if (a.get("author") or {}).get("orcid", "") and a["author"]["orcid"].endswith(tail):
-            return a
-    return None
+    mine = [a for a in work.get("authorships") or []
+            if ((a.get("author") or {}).get("orcid") or "").endswith(tail)]
+    if len(mine) < 2 or not pi_name:
+        return mine[0] if mine else None
+    pi = parse_person_name(pi_name)
+    named = [a for a in mine if _printed_as(a.get("raw_author_name"), pi)]
+    if not named:
+        return mine[0]
+    return min(named, key=lambda a: _ROLE_RANK.get(_role(a), len(_ROLE_RANK)))
 
 
 def _pi_at_jhu(auth: dict) -> bool:
@@ -77,11 +95,12 @@ def _role(auth: dict) -> str:
     return auth.get("author_position") or "middle"
 
 
-def evidence_from_work(work: dict, pi_orcid: str, tenure_start: int | None, *, company_funder_ids: set[str]) -> list[EvidenceItem]:
+def evidence_from_work(work: dict, pi_orcid: str, tenure_start: int | None, *, company_funder_ids: set[str],
+                       pi_name: str | None = None) -> list[EvidenceItem]:
     year = work.get("publication_year")
     if tenure_start is None or not year or year < tenure_start:
         return []
-    me = _pi_authorship(work, pi_orcid)
+    me = _pi_authorship(work, pi_orcid, pi_name)
     if me is None or not _pi_at_jhu(me):
         return []
     wid = _oaid(work.get("id"))

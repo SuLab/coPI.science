@@ -184,3 +184,36 @@ def test_real_company_with_trailing_period_still_matches():
 
 def test_empty_pi_orcid_never_matches_any_author():
     assert evidence_from_work(work(2021, ["I145311948"], [("I4210091798", "Paratek Pharmaceuticals (United States)")]), "", 2018, company_funder_ids=set()) == []
+
+
+def shared_orcid_work(*pi_authorships):
+    """A 2023 work with a Pfizer co-author, plus `pi_authorships` (raw name, position,
+    corresponding) that all carry the PI's ORCID at JHU."""
+    auths = [{"author": {"orcid": None}, "author_position": "first", "is_corresponding": False,
+              "institutions": [{"id": "https://openalex.org/I1", "display_name": "Pfizer", "type": "company"}]}]
+    auths += [{"author": {"orcid": PI}, "raw_author_name": raw, "author_position": pos, "is_corresponding": corr,
+               "institutions": [{"id": "https://openalex.org/I145311948", "display_name": "JHU", "type": "education"}]}
+              for raw, pos, corr in pi_authorships]
+    return {"id": "https://openalex.org/W1", "ids": {}, "publication_year": 2023, "authorships": auths, "funders": []}
+
+
+def shared_orcid_roles(w, **kw):
+    return [i.pi_role for i in evidence_from_work(w, PI, 2022, company_funder_ids=set(), **kw)]
+
+
+def test_shared_orcid_takes_the_pis_most_senior_own_authorship():
+    # W4318981448 as OpenAlex had it on 2026-10-11.
+    w = shared_orcid_work(("Edward J. Pearce", "middle", False), ("Erika L. Pearce", "middle", False),
+                          ("Erika L. Pearce", "last", True))
+    assert shared_orcid_roles(w, pi_name="Erika Pearce") == ["corresponding"]
+
+
+def test_shared_orcid_never_takes_another_persons_role():
+    w = shared_orcid_work(("Erika L. Pearce", "middle", False), ("Edward J. Pearce", "last", True))
+    assert shared_orcid_roles(w, pi_name="Erika Pearce") == ["middle"]
+
+
+def test_shared_orcid_without_a_name_match_keeps_the_first_authorship():
+    w = shared_orcid_work(("Edward J. Pearce", "middle", False), ("Erika L. Pearce", "last", True))
+    assert shared_orcid_roles(w) == ["middle"]
+    assert shared_orcid_roles(w, pi_name="Jane Doe") == ["middle"]

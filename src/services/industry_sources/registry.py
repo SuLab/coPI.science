@@ -98,7 +98,8 @@ class OpenAlexSource:
             raise _unavailable(self.name, exc) from exc
         items: list[EvidenceItem] = []
         for w in works:
-            items += evidence_from_work(w, ctx.user.orcid, ctx.tenure_start, company_funder_ids=cfids)
+            items += evidence_from_work(w, ctx.user.orcid, ctx.tenure_start, company_funder_ids=cfids,
+                                        pi_name=ctx.user.name)
         return SourceResult(
             items, note=f"openalex works={len(works)} items={len(items)} by_doi={len(by_doi)}",
             coverage="truncated" if paged.truncated else "ok")
