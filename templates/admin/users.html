@@ -67,27 +67,32 @@
 </div>
 
 <!-- Users table -->
+{# Desktop (>= 1024px) must not scroll sideways: the table's min-content has to fit the region. ORCID,
+    Version and Claimed (all on the detail page) appear only from xl, cells use px-3, and from lg
+    the free-text cells may break anywhere so one long name, institution or cohort token cannot
+    widen a column. Below lg the region scrolls instead, so words stay whole on small screens.
+    A new lg/xl column spends that headroom; re-measure at 1024 and 1280. #}
 {% call ui.data_table(caption="Registered users", id="users-table", sticky=False) %}
 <thead class="bg-gray-50">
     <tr>
-        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
-        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden md:table-cell">Institution</th>
-        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden lg:table-cell">ORCID</th>
-        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Access</th>
-        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden md:table-cell">Agent</th>
-        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden md:table-cell">Cohorts</th>
-        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden md:table-cell">Pubs</th>
-        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden lg:table-cell">Version</th>
-        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden lg:table-cell">Claimed</th>
-        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden md:table-cell">Joined</th>
-        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden md:table-cell">Last Login</th>
+        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden md:table-cell">Institution</th>
+        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden xl:table-cell">ORCID</th>
+        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase">Access</th>
+        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden md:table-cell">Agent</th>
+        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden md:table-cell">Cohorts</th>
+        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden md:table-cell">Pubs</th>
+        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden xl:table-cell">Version</th>
+        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden xl:table-cell">Claimed</th>
+        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden md:table-cell">Joined</th>
+        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase hidden md:table-cell">Last Login</th>
     </tr>
 </thead>
 <tbody class="divide-y divide-gray-100">
     {% for item in user_data %}
     <tr class="relative hover:bg-gray-50 cursor-pointer" data-href="/admin/users/{{ item.user.id }}">
-        <td class="px-4 py-3">
+        <td class="px-3 py-3 lg:wrap-anywhere">
             <a href="/admin/users/{{ item.user.id }}" class="after:absolute after:inset-0">
                 <div class="text-sm font-medium text-gray-900">{{ item.user.name }}</div>
             </a>
@@ -95,14 +100,14 @@
             <div class="text-sm text-gray-500">{{ item.user.department }}</div>
             {% endif %}
         </td>
-        <td class="px-4 py-3 text-sm text-gray-600 hidden md:table-cell">
+        <td class="px-3 py-3 text-sm text-gray-600 hidden md:table-cell lg:wrap-anywhere">
             {{ item.user.institution or '—' }}
         </td>
-        <td class="px-4 py-3 hidden lg:table-cell">
+        <td class="px-3 py-3 hidden xl:table-cell">
             <a href="https://orcid.org/{{ item.user.orcid }}" target="_blank"
                class="relative z-10 text-sm text-green-600 hover:underline">{{ item.user.orcid }}</a>
         </td>
-        <td class="px-4 py-3">
+        <td class="px-3 py-3">
             {% set access_colors = {
                 'allowed': 'bg-green-100 text-green-700',
                 'pending': 'bg-amber-100 text-amber-700',
@@ -113,7 +118,7 @@
                 {{ item.access_status | replace('_', ' ') | title }}
             </span>
         </td>
-        <td class="px-4 py-3">
+        <td class="px-3 py-3">
             {% set status_colors = {
                 'no_profile': 'bg-gray-100 text-gray-600',
                 'generating': 'bg-blue-100 text-blue-700',
@@ -124,7 +129,7 @@
                 {{ item.profile_status | replace('_', ' ') | title }}
             </span>
         </td>
-        <td class="px-4 py-3 hidden md:table-cell">
+        <td class="px-3 py-3 hidden md:table-cell">
             {% set agent_colors = {
                 'not_requested': 'bg-gray-100 text-gray-500',
                 'awaiting_token': 'bg-amber-100 text-amber-700',
@@ -136,11 +141,11 @@
                 {{ item.agent_status | replace('_', ' ') | title }}
             </span>
         </td>
-        <td class="px-4 py-3 hidden md:table-cell">
+        <td class="px-3 py-3 hidden md:table-cell">
             {% if not item.user.agent %}
             <span class="text-sm text-gray-400">No agent</span>
             {% elif item.cohorts %}
-            <div class="flex flex-wrap gap-1">
+            <div class="flex flex-wrap gap-1 lg:wrap-anywhere">
                 {% for c in item.cohorts %}
                 <a href="/admin/cohorts/{{ c.id }}" class="relative z-10">{{ ui.badge(c.name, 'brand' if item.user.agent.status == 'active' else 'neutral') }}</a>
                 {% endfor %}
@@ -149,21 +154,21 @@
             <span class="text-sm text-gray-400">—</span>
             {% endif %}
         </td>
-        <td class="px-4 py-3 text-sm text-gray-600 hidden md:table-cell">{{ item.pub_count }}</td>
-        <td class="px-4 py-3 text-sm text-gray-600 hidden lg:table-cell">
+        <td class="px-3 py-3 text-sm text-gray-600 hidden md:table-cell">{{ item.pub_count }}</td>
+        <td class="px-3 py-3 text-sm text-gray-600 hidden xl:table-cell">
             {{ (item.profile.profile_version or '—') if item.profile else '—' }}
         </td>
-        <td class="px-4 py-3 hidden lg:table-cell">
+        <td class="px-3 py-3 hidden xl:table-cell">
             {% if item.user.claimed_at %}
             <span class="text-sm text-green-600">✓ {{ item.user.claimed_at.strftime('%b %d') }}</span>
             {% else %}
             <span class="text-sm text-gray-400">No</span>
             {% endif %}
         </td>
-        <td class="px-4 py-3 text-sm text-gray-500 hidden md:table-cell">
+        <td class="px-3 py-3 text-sm text-gray-500 hidden md:table-cell">
             {{ item.user.created_at.strftime('%b %d, %Y') }}
         </td>
-        <td class="px-4 py-3 text-sm text-gray-500 hidden md:table-cell">
+        <td class="px-3 py-3 text-sm text-gray-500 hidden md:table-cell">
             {% if item.user.last_login_at %}
                 {{ item.user.last_login_at.strftime('%b %d, %Y') }}
             {% else %}
