@@ -15,6 +15,7 @@ from . import (
     pi_evidence,
     pi_profile,
     prompt_suggestions,
+    staff,
 )
 
 router = APIRouter()
@@ -38,5 +39,6 @@ for feature in (
     activity,
     discussions,
     prompt_suggestions,
+    staff,
 ):
     router.include_router(feature.router)

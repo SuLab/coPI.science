@@ -50,6 +50,12 @@ from src.routers.workspace.pi_profile import (
     workspace_restore_publication,
     workspace_retry_profile,
 )
+from src.routers.workspace.staff import (
+    workspace_create_staff_account,
+    workspace_delete_reviewer,
+    workspace_restore_reviewer,
+    workspace_revoke_reviewer,
+)
 from src.services import directory
 from src.web.urls import legacy_query, page_url
 
@@ -88,6 +94,10 @@ manager_discover_companies = workspace_discover_companies
 manager_delete_company = workspace_delete_company
 manager_confirm_company = workspace_confirm_company
 manager_reject_company = workspace_reject_company
+manager_create_staff_account = workspace_create_staff_account
+manager_revoke_reviewer = workspace_revoke_reviewer
+manager_restore_reviewer = workspace_restore_reviewer
+manager_delete_reviewer = workspace_delete_reviewer
 
 
 @router.get("", response_class=HTMLResponse, name="legacy_manager_root")
@@ -137,6 +147,10 @@ for _path, _endpoint, _name in (
     ("/pis/{user_id}/companies/{company_id}/delete", manager_delete_company, "legacy_manager_delete_company"),
     ("/pis/{user_id}/companies/{company_id}/confirm", manager_confirm_company, "legacy_manager_confirm_company"),
     ("/pis/{user_id}/companies/{company_id}/reject", manager_reject_company, "legacy_manager_reject_company"),
+    ("/staff", manager_create_staff_account, "legacy_manager_create_staff_account"),
+    ("/staff/{user_id}/revoke", manager_revoke_reviewer, "legacy_manager_revoke_reviewer"),
+    ("/staff/{user_id}/restore", manager_restore_reviewer, "legacy_manager_restore_reviewer"),
+    ("/staff/{user_id}/delete", manager_delete_reviewer, "legacy_manager_delete_reviewer"),
 ):
     router.add_api_route(_path, _endpoint, methods=["POST"], name=_name)
 
@@ -153,6 +167,11 @@ async def manager_assessment_detail(assessment_id: uuid.UUID, request: Request, 
 @router.get('/slack-bots', name='legacy_manager_slack_bots')
 async def manager_slack_bots(request: Request, current_user: User = _STAFF):
     return redirect(request, current_user, 'slack_bots', 'workspace_slack_bots', manager=True)
+
+# The POST alias above shares this path, so without a GET a stale link would get a 405.
+@router.get('/staff', name='legacy_manager_staff')
+async def manager_staff(request: Request, current_user: User = _STAFF):
+    return redirect(request, current_user, 'staff', 'workspace_staff', manager=True)
 
 @router.get('/discussions', name='legacy_manager_discussions')
 async def manager_discussions(request: Request, page: int = _PAGE, current_user: User = _STAFF):

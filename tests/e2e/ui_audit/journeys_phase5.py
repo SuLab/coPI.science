@@ -48,6 +48,7 @@ async def journey_admin_workspace_operations(h) -> dict:
         "/workspace/pis": 'form[action="/workspace/pis"]',
         "/workspace/assessments": "#assessments-assignment-select",
         "/workspace/slack-bots": "table",
+        "/workspace/staff": 'form[action="/workspace/staff"]',
         "/workspace/discussions": 'button[name="export"][value="html"]',
         "/workspace/activity": "table",
         "/workspace/prompt-suggestions": 'form[action="/reviews/suggestions/generate"]',

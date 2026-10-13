@@ -12,8 +12,9 @@ edit. A running simulation engine re-syncs the roster from the DB every ~30s
 (`_sync_roster_from_db`), so flipping an agent to `status='active'` (with a token on
 its row) makes it go live **without a restart**.
 
-**The one-step path (2026-08-24): the manager PIs tab.** `POST /manager/pis`
-(the "Add a PI by ORCID iD" form on `/manager/pis`) now does, in ONE commit:
+**The one-step path (2026-08-24): the manager PIs tab.** `POST /workspace/pis`
+(the "Add a PI by ORCID iD" form on `/workspace/pis`; `POST /manager/pis` is a legacy
+alias for the same handler) now does, in ONE commit:
 create the User, enqueue the `generate_profile` job, mint a **pending**
 `AgentRegistry` row (inert — the roster sync loads only `status='active'`),
 and record the ORCID-employment-derived JHU tenure start. The atomicity is
@@ -296,7 +297,12 @@ doc's §8.
 - **PI** — the original account: own profile, own lab agent, `/profile` and `/agent`.
 - **Manager** — global, read-mostly: `/manager/pis`, `/manager/assessments`,
   `/manager/discussions`, `/manager/activity`. A scoped, deliberate reversal of the
-  original all-GET guarantee (design D1) adds exactly nineteen write routes — `POST
+  original all-GET guarantee (design D1) adds an explicit set of write routes. The
+  canonical routes live under `/workspace/…` (`/workspace/pis…`, `/workspace/staff…`); each
+  is mirrored on the manager router as a `/manager/…` alias with the same handler, and
+  that alias set is what
+  `tests/integration/test_manager_views.py::test_manager_router_mutations_are_an_explicit_allowlist`
+  pins: 32 POST paths as of 2026-10-13 (28 before the Staff page). They are `POST
   /manager/pis` (create a PI via ORCID), `/manager/pis/{id}/profile` (edit a PI's
   profile fields), `/manager/pis/{id}/profile/retry` (queue profile generation again
   after a dead job or for an ungrounded profile), `/manager/pis/{id}/mute` / `/unmute` (toggle a PI's agent),
@@ -312,10 +318,15 @@ doc's §8.
   (scout_hub 1.10.0) — `/manager/pis/{id}/companies` (add a company by hand),
   `/manager/pis/{id}/companies/{company_id}/delete`, `/confirm` and `/reject`
   (review a discovered or confirmed company; delete records a confirmed company as
-  rejected, and a manual add of that name revives it), and `/manager/pis/{id}/companies/discover`
-  (queue company discovery) — and nothing else;
-  `tests/integration/test_manager_views.py`'s
-  `test_manager_router_mutations_are_an_explicit_allowlist` fails loudly on a twentieth.
+  rejected, and a manual add of that name revives it), `/manager/pis/{id}/companies/discover`
+  (queue company discovery), the nine paper-review routes (spec 2026-10-05 §6.3, see "Paper
+  review, drafts and Regenerate" above) — `/manager/pis/{id}/candidates/{candidate_id}/accept`
+  and `/reject`, `/manager/pis/{id}/publications/{publication_id}/keep`, `/exclude` and
+  `/restore`, `/manager/pis/{id}/draft/accept` and `/discard`, `/manager/pis/{id}/regenerate`
+  and `/manager/pis/{id}/persona/reexport` — and the four Staff page routes (2026-10-13, see
+  "The Staff page" below) — `/manager/staff` (preview, then create or convert a staff
+  account), `/manager/staff/{id}/revoke`, `/restore` and `/delete` (a reviewer only) — and
+  nothing else; the test fails loudly on any other POST path.
   **Still cannot impersonate** or set roles (both stay admin-only), and there is
   deliberately no LLM-call drill-down and no export. A manager MAY provision a Slack
   bot and activate a pending PI's agent from `/manager/pis/{id}` (F2, 2026-09-10) —
@@ -332,8 +343,10 @@ doc's §8.
   approve/disapprove via `/reviews`, and asking the assessment chat
   (`/assessment-chat/*`, reviewer tier — see `docs/operations/assessment-chat.md`). Cannot assign reviewers, cannot see
   discussions/activity/prompt-suggestions, has no PI surface (`/profile`,
-  `/agent`), and has no admin access. Provisioned the same way as manager/admin:
-  the admin Account Type role-set on `/admin/users/{id}`, or the `role:set` CLI.
+  `/agent`), and has no admin access, nor the Staff page. Created on the Staff page
+  (`/workspace/staff`, by an admin or a manager, see "The Staff page" below); the admin
+  Account Type role-set on `/admin/users/{id}` and the `role:set` CLI still work for an
+  existing account (order matters, see "Provisioning staff without the Staff page").
   `get_pi_user` denies it exactly as it denies a manager; `is_staff` (admin OR
   manager) deliberately **excludes** it, since the manager router's write
   handlers and the discussions/activity/prompt-suggestions pages must never
@@ -415,9 +428,30 @@ denied access does not go through this check (open-findings rows
     docker compose -f docker-compose.prod.yml exec blackbird-app \
       python -m src.cli role:set --orcid 0000-0000-0000-0000 --role admin
 
-New managers are provisioned in two steps: they sign in with ORCID (landing on
-`/access-pending`), an admin approves them at `/admin/access-requests`, then sets their
-role. Between approval and role-setting the account behaves as a PI.
+**Provisioning staff without the Staff page.** New managers and reviewers are created on
+the Staff page (`/workspace/staff`, 2026-10-13; see "The Staff page" below). The older
+routes still work, but their order matters: approving an account while its role is `pi`
+queues a full profile pipeline (`src/routers/admin/access.py`), and
+`enqueue_profile_job_if_absent` queues nothing for a manager or reviewer
+(`src/services/profile_jobs.py`). The approve-then-set-role order this paragraph gave
+before 2026-10-13 is the wrong one.
+
+- **Before the person signs in** (from a `blackbird-app` shell):
+
+      docker compose -f docker-compose.prod.yml exec blackbird-app \
+        python -m src.cli seed-profile --orcid <iD> --no-pipeline
+      docker compose -f docker-compose.prod.yml exec blackbird-app \
+        python -m src.cli role:set --orcid <iD> --role reviewer   # or manager
+
+  then Approve on `/admin/access-requests`. `seed-profile --no-pipeline` creates a
+  pending `pi` user and no job, but does record a JHU tenure key when ORCID shows a Hopkins
+  employment (`src/cli.py`).
+- **After the person signed in** (a `pending` `pi` account with no agent): set the Account
+  Type first (`/admin/users/{id}`, which for a `pi` redirects to the workspace PI page's
+  account block), **then** Approve.
+- **Already made through Add PI:** Reject on `/admin/agents` suspends the pending agent
+  without activating it (the approve form always activates, whatever its status dropdown
+  says); the role change is then allowed. The profile job has already been queued.
 
 **A pending user's typed address is unverified.** The address typed on `/access-pending`
 goes to `users.contact_email_unverified`, shown as "(unverified)" on
@@ -467,10 +501,109 @@ device, reading `session["user_id"]` directly and still with no auth dependency;
 denial and a role change (`/admin/users/{id}/role`, `admin:grant`, `admin:revoke`,
 `role:set`) bump it too (`src/services/session_epoch.py`).
 
+## The Staff page (`/workspace/staff`, 2026-10-13)
+
+The web way to add a manager or reviewer without a lab bot (plan
+`docs/plans/2026-10-13-staff-accounts-without-a-bot-plan.md`; service
+`src/services/staff_accounts.py`, routes `src/routers/workspace/staff.py`). The "Staff" nav
+item shows it to admins and managers; a reviewer gets 403, and `GET /manager/staff`
+redirects staff to it. It lists every manager, reviewer and admin (name, ORCID, role,
+access status, last sign-in) with the add form and a "Recent changes" list. **Add PI is
+never the way to add staff:** it always mints a lab agent (pending, with a profile job for
+a new ORCID), and an agent-owning account cannot leave the PI surfaces until the agent is
+suspended. The PI directory's Add PI form links here.
+
+Who may do what (owner decisions D1–D8, 2026-10-13):
+
+- **Create (D1).** Admins create managers or reviewers; managers create reviewers only.
+  Nobody creates an admin or a PI here. A manager is told to ask an admin when the ORCID is
+  on the access allowlist (D8), for a new account and a conversion alike, before ORCID is
+  even fetched: otherwise create-then-delete would strip an admin's pre-approval.
+- **Confirm step.** The first submit writes nothing: for a new iD it shows ORCID's public
+  name, institution and employments; for an iD an account already holds, that account's
+  stored name and state (access status, whether it has a profile). Confirm acts. If
+  anything the preview showed has changed by then, nothing is written and the page shows
+  the fresh preview with a "something changed" notice. A refusal redirects to plain
+  `/workspace/staff` with a flash, the form refilled from the session (nothing in the URL).
+  A new account is a `users` row with the chosen role and `access_status='allowed'`, its
+  ORCID public email set through `assign_user_email`, and no agent, job, JHU tenure key or
+  persona file. Its name comes from ORCID; when ORCID shows none, the typed name (the D60
+  allowlist) is required. The first ORCID sign-in lands on `/workspace/pis` (manager) or
+  `/workspace/assessments` (reviewer), skips onboarding and queues nothing (a saved `next`
+  or a pending invite token still wins).
+- **Convert an existing account (D2).** An admin may convert a `pi` account that owns no
+  agent and is not denied, `pending` or `allowed`, with or without a profile (the profile is
+  kept); a manager only a `pending` agentless `pi` account with no profile. Refused for
+  both: an account owning any `agents` row (any status, `suspended` included) or any
+  `agent_delegates` row (an admin is sent to `/admin/users/{id}`, a manager told to ask an
+  admin); an account with a per-user profile or enrichment job `pending` or `processing`
+  (try again when it finishes); a `denied` account or one already staff ("cannot be
+  converted here"). A manager is told to ask an admin for an `allowed` or profiled PI. An
+  account whose stored name is empty or an ORCID iD needs a typed name, which replaces it.
+  Converting sets the role (bumping the session epoch, which signs the account out
+  everywhere) and `access_status='allowed'`. An admin converting a working PI keeps its
+  profile and its industry-score rows, which stay in every PI's percentile group (O1:
+  accepted by the owner, along with the risk of a mistyped iD).
+- **Revoke, restore, delete (D5, D6)** — reviewer rows only, by admins and managers, never
+  on one's own account. Revoke denies access and bumps the session epoch (as
+  `admin_deny_access` does); restore sets `allowed` and queues nothing. A manager may revoke
+  only a reviewer who has signed in with access (`users.last_login_at` set; D7): otherwise
+  creating or converting someone and revoking them at once would be a manager's deny power
+  over a person who never used review access (a pending sign-in never sets `last_login_at`).
+  Such a row offers a manager Delete instead, which leaves the person free to sign in again.
+  Admins may revoke any reviewer. A manager may restore any denied reviewer, including one an
+  admin denied. Delete goes through
+  `delete_user_account` and always removes the ORCID from the access allowlist.
+- **Manager and admin rows** carry no buttons: those accounts are changed only by admins,
+  on `/admin/users/{id}`, which the page links for admins.
+- Every POST is refused under impersonation.
+
+**Audit (D3).** Every create, convert, revoke, restore and delete writes an
+`admin_audit_events` row in the same transaction as its effect (actions
+`staff_account_create`, `staff_account_convert`, `reviewer_revoke`, `reviewer_restore`,
+`reviewer_delete`; payload `user_id`, `orcid`, `name`, `role`; the actor is the session
+user) and a log line. The rows feed the page's "Recent changes" list and, as action and time
+only, `/admin/simulation`'s 20-row "Recent admin actions", where they can push
+simulation-control rows out of the window (accepted).
+
+Consequences recorded with the owner:
+
+- **Keeping a person out of managers' reach:** an admin sets the account to `pi` **first**,
+  then denies it. The reverse order leaves a moment where it is a denied reviewer a manager
+  can restore; manager restore covers only `reviewer` accounts and manager conversion
+  refuses `denied` ones. Deleting is not enough: the next sign-in is a pending `pi` account
+  with no profile, which a manager may convert.
+- **Convert, then delete** lets a manager remove a pending, profile-less PI sign-up. The
+  person can sign in again, and the audit rows record both steps.
+- **A reviewer can own an agent row** (an account converted by the old Add-PI workaround
+  keeps its suspended agent). Deleting such a reviewer runs the full teardown in "Deleting a
+  PI" below: persona files removed, Slack bot token revoked. The delete confirmation says so.
+- **A manager's delete always removes the allowlist row.** An allowlisted ORCID otherwise
+  signs straight back in as an `allowed` PI and queues a profile pipeline. D8 keeps a
+  manager from reaching an admin's allowlist row this way: a manager cannot create or
+  convert an allowlisted ORCID in the first place.
+
+**What a reviewer delete keeps and removes.** Kept, with the account reference set to NULL:
+their reviews and review events (the reviewer's name is kept on them), assessment-chat usage
+and opens, prompt-suggestion status attribution, the allowlist `added_by` of rows they added,
+and audit-row actors. Removed with the account: their review assignments and their own
+assessment-chat turns.
+
+**Side effects.** The first `reviewer` account turns on the reviewer tier of the worker's
+assessment-chat opening questions (`assessment_chat_suggestions._tiers` counts any reviewer
+row), spending Claude credit under `assessment_chat_suggestions_daily_usd_limit`, as a role
+change already did. A new staff account can be assigned assessments before it ever signs in
+(the assignee list filters on role and `allowed` only). `enqueue_profile_job_if_absent`
+re-reads the stored role and access status before queueing, so an approval, allowlist add,
+login, Add-PI adoption, retry, regenerate or refresh racing a conversion queues no pipeline
+for the new staff account (the re-read takes a share lock, so it waits for the conversion to
+commit).
+
 ## Deleting a PI
 
 **All deletion goes through `src/services/user_deletion.py::delete_user_account`**
-(both `POST /profile/delete-account` and `POST /admin/users/{id}/delete`).
+(`POST /profile/delete-account`, `POST /admin/users/{id}/delete`, and, for a reviewer,
+`POST /workspace/staff/{id}/delete`).
 Never `db.delete(user)` directly — before 2026-08-25 that was the whole
 process, and it left the deleted PI's agent RUNNING: `agents.user_id` is SET
 NULL, the roster sync loads by status alone, and the agent reads its persona

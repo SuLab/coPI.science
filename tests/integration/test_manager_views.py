@@ -1,9 +1,10 @@
 """The /manager surface: deny-by-default, PI-scoped, and read-only except for
-an explicit, mechanically-enumerated allowlist of twenty-eight write routes (design
+an explicit, mechanically-enumerated allowlist of thirty-two write routes (design
 D1, amended 2026-09-10 by F2, 2026-09-11 by the two enrichment vetoes,
 2026-10-01 by email verification, 2026-10-02 by the five Companies routes,
-2026-10-05 by the profile retry and the four grant-identity and ORCID-veto routes and
-2026-10-06 by the nine corpus and profile review routes)."""
+2026-10-05 by the profile retry and the four grant-identity and ORCID-veto routes,
+2026-10-06 by the nine corpus and profile review routes and 2026-10-13 by the four
+Staff routes)."""
 
 import re
 import uuid
@@ -57,8 +58,8 @@ def _manager_get_paths(param_values: dict[str, str] | None = None) -> list[str]:
 
 def test_manager_router_mutations_are_an_explicit_allowlist():
     """D12 amended, not abolished (design decision D1): the manager router may
-    have non-GET routes now, but only these twenty-eight, named exactly. A future
-    accidental twenty-ninth write route still fails this test loudly. The two
+    have non-GET routes now, but only these thirty-two, named exactly. A future
+    accidental thirty-third write route still fails this test loudly. The two
     provisioning routes joined the list with F2 (2026-09-10): a manager may
     install a PI's Slack bot and activate the agent from /workspace/pis/{id}.
     The grant veto joined 2026-09-11 (Task 5 of
@@ -74,7 +75,10 @@ def test_manager_router_mutations_are_an_explicit_allowlist():
     generation again for a PI whose job died or whose profile is ungrounded.
     The four grant-identity and ORCID-veto routes joined 2026-10-05 (spec
     2026-10-05 §6.1). The nine review routes joined 2026-10-06 (spec 2026-10-05 §6.3
-    Review UIs; the eighth and ninth are Re-export and D71's Restore).
+    Review UIs; the eighth and ninth are Re-export and D71's Restore). The four
+    Staff routes joined 2026-10-13 (plan
+    docs/plans/2026-10-13-staff-accounts-without-a-bot-plan.md): managers create
+    reviewers and revoke, restore or delete them; admins also create managers.
     """
     allowed_post_paths = {
         "/pis",
@@ -105,6 +109,10 @@ def test_manager_router_mutations_are_an_explicit_allowlist():
         "/pis/{user_id}/draft/discard",
         "/pis/{user_id}/regenerate",
         "/pis/{user_id}/persona/reexport",
+        "/staff",
+        "/staff/{user_id}/revoke",
+        "/staff/{user_id}/restore",
+        "/staff/{user_id}/delete",
     }
     methods = {m for r in manager_router.router.routes for m in getattr(r, "methods", ())}
     assert methods == {"GET", "POST"}, f"unexpected method on the manager router: {methods}"

@@ -25,7 +25,7 @@ def _routes(router):
             yield route
 
 
-def test_all_28_alias_writes_use_identical_callable_and_staff_dependency():
+def test_all_alias_writes_use_identical_callable_and_staff_dependency():
     canonical = {r.path: r for r in _routes(workspace.router) if 'POST' in getattr(r, 'methods', ())}
     aliases = {r.path: r for r in _routes(manager.router) if 'POST' in getattr(r, 'methods', ())}
     assert set(canonical) == POST_SUFFIXES == set(aliases)

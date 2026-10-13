@@ -110,12 +110,14 @@ PAGES: dict[str, Callable[[GateWorld], str]] = {
     "/manager/prompt-suggestions": lambda w: "/manager/prompt-suggestions",
     "/manager/prompt-suggestions/{suggestion_id}": lambda w: f"/manager/prompt-suggestions/{w.suggestion.id}",
     "/manager/slack-bots": lambda w: "/manager/slack-bots",
+    "/manager/staff": lambda w: "/manager/staff",
     "/workspace": lambda w: "/workspace",
     "/workspace/pis": lambda w: "/workspace/pis",
     "/workspace/pis/{user_id}": lambda w: f"/workspace/pis/{w.users['pi'].id}",
     "/workspace/prompt-suggestions": lambda w: "/workspace/prompt-suggestions",
     "/workspace/prompt-suggestions/{suggestion_id}": lambda w: f"/workspace/prompt-suggestions/{w.suggestion.id}",
     "/workspace/slack-bots": lambda w: "/workspace/slack-bots",
+    "/workspace/staff": lambda w: "/workspace/staff",
     "/onboarding": lambda w: "/onboarding",
     "/profile": lambda w: "/profile",
     "/profile/delete-account": lambda w: "/profile/delete-account",
@@ -405,6 +407,29 @@ async def test_every_page_passes_the_gate(client, gate_world):
     never = set(PAGES) - rendered_200 - set(NO_200_EXPECTED)
     assert not never, f"no role rendered these with 200, so the gate checked nothing there: {sorted(never)}"
     assert not problems, "\n".join(problems)
+
+
+async def test_staff_confirmation_panel_passes_the_gate(client, gate_world, monkeypatch):
+    """The Staff page's confirmation panel renders only as the 200 answer to a create POST
+    without ``confirm``, which the GET walk above never reaches; it gets the same checks."""
+    from src.services import staff_accounts
+
+    async def fetch(orcid):
+        return {
+            "name": "Gate Person", "institution": "Gate University",
+            "employments": [{"organization": "Gate University", "start_year": 2020, "current": True}],
+        }
+
+    monkeypatch.setattr(staff_accounts, "fetch_orcid_profile", fetch)
+    r = await client.post(
+        "/workspace/staff", data={"orcid": "0000-0002-1825-0097", "user_role": USER_ROLE_REVIEWER},
+        headers=auth_headers(gate_world.users["admin"].id), follow_redirects=False,
+    )
+    assert r.status_code == 200, (r.status_code, r.headers.get("location"))
+    assert r.headers.get("content-type", "").startswith("text/html")
+    assert "Gate Person" in r.text and "Gate University" in r.text
+    assert page_problems(r.text) == []
+    assert _unscrollable_tables(r.text) == 0
 
 
 def test_the_landmark_checker_has_teeth():

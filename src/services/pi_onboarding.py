@@ -142,7 +142,8 @@ async def adopt_agentless_pi(
     db: AsyncSession, orcid: str, *, name: str | None = None,
 ) -> User | None:
     """The PI account that already holds ``orcid`` but has no lab agent, readied for
-    the Add-PI flow; None when no account holds the iD.
+    the Add-PI flow; None when no account holds the iD, including one deleted during
+    the ORCID fetch (the caller then creates the account as for a new PI).
 
     A PI who signed in with ORCID before anyone added them has a ``pi`` User (pending
     access until an admin approves it) and no AgentRegistry row — only Add-PI mints
@@ -159,6 +160,14 @@ async def adopt_agentless_pi(
     A validated ``name`` (``person_names.validate_person_name``; ``InvalidPersonName``
     propagates) replaces the adopted account's name only when that name is empty, an
     ORCID iD or letter-less (``person_names.is_orcid_like``).
+
+    The holder is checked twice: unlocked before the ORCID fetch, and again under
+    ``FOR UPDATE`` after it, before anything is written, so a staff conversion or a
+    newly minted agent that commits during the fetch is refused rather than
+    overwritten (staff-accounts plan §5.5); a holder gone by then returns None with
+    nothing written. No row lock is held across the fetch,
+    which can take up to 3 x 30 s. The row lock is held until the caller's
+    transaction ends.
     """
     orcid = validate_orcid(orcid)
     user = (
@@ -166,30 +175,50 @@ async def adopt_agentless_pi(
     ).scalar_one_or_none()
     if user is None:
         return None
-    has_agent = await db.scalar(
-        select(AgentRegistry.id).where(AgentRegistry.user_id == user.id)
-    )
-    if user.user_role != USER_ROLE_PI or user.access_status == "denied" or has_agent:
-        raise ValueError(f"A user with ORCID {orcid} already exists")
+    await _require_agentless_pi(db, user, orcid)
+
+    profile_data = None
+    if await get_tenure_start(db, user.id) is None:
+        try:
+            profile_data = await fetch_orcid_profile(orcid)
+        except Exception as exc:  # the pipeline derives a paper-based start instead
+            logger.warning("Adopting %s: ORCID record unavailable (%s)", orcid, exc)
+
+    # populate_existing: a plain select would hand back the identity-map object with
+    # the values read before the fetch.
+    user = (
+        await db.execute(
+            select(User).where(User.id == user.id)
+            .with_for_update().execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if user is None:
+        return None  # deleted during the fetch; the caller's create handles the iD
+    await _require_agentless_pi(db, user, orcid)
 
     if name is not None and name.strip() and (
         not (user.name or "").strip() or is_orcid_like(user.name)
     ):
         user.name = validate_person_name(name)
 
-    if await get_tenure_start(db, user.id) is None:
-        try:
-            profile_data = await fetch_orcid_profile(orcid)
-        except Exception as exc:  # the pipeline derives a paper-based start instead
-            logger.warning("Adopting %s: ORCID record unavailable (%s)", orcid, exc)
-        else:
-            await record_employment_tenure(db, user, profile_data)
+    if profile_data is not None and await get_tenure_start(db, user.id) is None:
+        await record_employment_tenure(db, user, profile_data)
     has_profile = await db.scalar(
         select(ResearcherProfile.id).where(ResearcherProfile.user_id == user.id)
     )
     if has_profile is None:
         await enqueue_profile_job_if_absent(db, user, priority=INTERACTIVE_PRIORITY)
     return user
+
+
+async def _require_agentless_pi(db: AsyncSession, user: User, orcid: str) -> None:
+    """Raise the D6 "already exists" ValueError unless ``user`` is a non-denied
+    ``pi`` with no AgentRegistry row."""
+    has_agent = await db.scalar(
+        select(AgentRegistry.id).where(AgentRegistry.user_id == user.id)
+    )
+    if user.user_role != USER_ROLE_PI or user.access_status == "denied" or has_agent:
+        raise ValueError(f"A user with ORCID {orcid} already exists")
 
 
 async def create_pending_agent_for(db: AsyncSession, user: User) -> AgentRegistry:

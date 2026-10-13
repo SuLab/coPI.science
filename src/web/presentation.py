@@ -36,7 +36,7 @@ class PageRecord(Mapping):
 
 RESEARCH_USER = frozenset("id name user_role orcid institution department".split())
 ACCOUNT_USER = frozenset(
-    "email email_verified_at name_sanitized_at onboarding_complete claimed_at created_at last_login_at agent".split()
+    "email email_verified_at name_sanitized_at onboarding_complete claimed_at created_at last_login_at agent access_status".split()
 )
 RESEARCH_PROFILE = frozenset(
     "id user_id profile_version research_summary techniques experimental_models disease_areas key_targets keywords".split()
@@ -144,7 +144,7 @@ REVIEWER_SCHEMAS = {
 # Fixed derived-view dictionary schema. Unknown future keys are not page data.
 VIEW_FIELDS = frozenset(
     (
-        "No Project _order _signals a abstract accepted_profile_ids accession action activated "
+        "No Project _order _signals a abstract accepted_profile_ids access_status accession account_user_id action activated "
         "activation_blocked activation_blockers active activity_code actor actor_id actor_name "
         "actor_user_id additionalProperties admin admin_view advance_min advisor agent agent_a agent_b "
         "agent_filter agent_id agent_stats agent_status agents all all_runs_refused allow_historical "
@@ -152,7 +152,7 @@ VIEW_FIELDS = frozenset(
         "assessment_counts_by_run assessment_created_at assessment_id assessments assessments_limit "
         "assigned_by_name assigned_by_user_id assigned_names assignee_name assignee_user_id assignment at attempts "
         "avg_length badge band_counts banding banding_note base_profile_version before_tenure betas "
-        "billed block blockers board body bot_name bot_score bots can_retry_profile candidates change "
+        "billed block blockers board body bot_name bot_score bots can_delete can_restore can_retry_profile can_revoke candidates change "
         "change_summary changed_by_user_id channel channel_filter channel_name channel_stats channel_type "
         "channels chat chat_enabled chat_suggestions chips citations claimed_at claimed_filter "
         "clear_funding co_founder comment companies_confirmed companies_suggested company_class "
@@ -160,22 +160,22 @@ VIEW_FIELDS = frozenset(
         "components concern_count concerns conditional_min confidence config confirmed_companies "
         "constraint consult consult_count consults consumed_at content content_hash content_normalized "
         "context_tier core_project_num corresponding count counted counts coverage create created_at "
-        "created_by_agent created_by_user_id current_hash cut_off date decided_at decision decision_id "
+        "created_by_agent created_by_user_id current current_hash cut_off date decided_at decision decision_id "
         "default default_factory deferred_until department dependencies description detail device_dx "
         "dimension dimension_provenance dimension_rationales dimension_rows dimension_scores "
         "dimension_stats dimensions discovery disease_areas distinct_companies doi doi_verified domain "
         "draft draft_diff draft_stale drop_counts drops_total edited effort eligible_count else_ email "
-        "email_verified_at enabled encoding end_year ended_at enqueued_at entries error error_code "
+        "email_verified_at employments enabled encoding end_year ended_at enqueued_at entries error error_code "
         "established evaluated_at event evidence evidence_count evidence_flagged_count "
-        "evidence_pmid_count evidence_pub_count exc_info excluded excluded_at exist_ok expected_version "
+        "evidence_pmid_count evidence_pub_count exc_info excluded excluded_at exist_ok expectation expected_version "
         "experimental_models fallbacks feature feedback_ids feedback_mode feedback_snapshot fields "
         "file_status filed filings finalized_at first first_fy for form form_d_status format former "
         "founder fragment frozen funder_name funding funding_as_of funding_note funding_source_url "
         "funding_usd fundings gating gating_definitions gating_descriptions gating_rationales "
-        "gating_reasons ge grant_identity grant_sections grants has_bot_token has_older_row has_token "
+        "gating_reasons ge grant_identity grant_sections grants has_agent has_bot_token has_older_row has_profile has_token "
         "headers held_counts hours id identity identity_evidence in in_doubt in_tenure inactive "
         "incomplete_panel_count index_elements industry industry_evidence initiated_by input_truncated "
-        "institution institution_filter inventor is_consult is_hub is_subproject is_verdict_message items "
+        "institution institution_filter inventor is_consult is_hub is_self is_subproject is_verdict_message items "
         "jhu_tenure_start job_id jobs journal key key_points key_targets keywords kind lab lab_filter "
         "lab_options label last last_error last_fy last_login_at latency_ms le links log_id "
         "log_scan_limit logs_scanned manager max max_attempts max_retries max_tokens maxsplit mean "
@@ -183,7 +183,7 @@ VIEW_FIELDS = frozenset(
         "methods_text mid_scale mid_scale_count min minutes missing_domains missing_ok model "
         "most_active_agent most_active_count muted muted_at n name name_sanitized_at never new_role "
         "new_status no_result none_confirmed normalized_name note off_rubric_count onboarding_complete "
-        "opinion orcid orcid_fundings origin other outcome output_config overall_official page page_count "
+        "opinion orcid orcid_fundings organization origin other outcome output_config overall_official page page_count "
         "panel_by_thread panel_domains panel_failure_reason panel_owed panel_received panel_row_limit "
         "panel_state panel_summary panel_truncated parents partial pass_label password password_hash past "
         "path payload pct pending pending_profile pending_profile_created_at percentile "
@@ -204,11 +204,11 @@ VIEW_FIELDS = frozenset(
         "runs_by_id scale_known scale_max scale_min schema scoped score scored_dimension_count "
         "scorer_version scores section selected_run_id sender_name served_by_model set_ show_all_runs "
         "shown_email signals simulation_run_id skip slack_bot_token sold sort sort_options source "
-        "source_url specialist staff start_year started_at statements status status_code status_filter "
+        "source_url specialist staff staff_changes staff_preview staff_preview_changed staff_refill staff_roles staff_rows start_year started_at statements status status_code status_filter "
         "status_set_at status_set_by_name status_set_by_user_id stored_hash strength strengths strict "
         "subject_agent_id subject_label suggestion suggestions suggestions_limit summary "
         "summary_claimed_at summary_html summary_text synchronize_session synthesis_validated system "
-        "system_prompt target target_user techniques tenure_provisional tenure_start tenure_start_used "
+        "system_prompt target target_name target_orcid target_user techniques tenure_provisional tenure_start tenure_start_used "
         "text thinking thread_id thread_total threads thresholds tier timeline timeout title today "
         "token_hash tool tool_turns total total_api_calls total_channels total_count total_length "
         "total_messages total_runs transcript_available type type_ tzinfo unanchored uncapped "

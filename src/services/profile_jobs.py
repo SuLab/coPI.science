@@ -31,8 +31,31 @@ async def enqueue_profile_job_if_absent(
     those. Adds and flushes; the caller commits. ``user`` must already have an
     id (flush a new User first). ``priority`` orders the claim (see
     ``Job.priority``); None is the default, 0.
+
+    The role and access status are re-read from the row, not taken from
+    ``user``: a staff conversion committed after the caller loaded ``user``
+    must not leave a manager or reviewer with a queued pipeline run
+    (staff-accounts plan §5.5). The re-read is a column select, so autoflush
+    sends the caller's pending edits first and nothing in memory is
+    overwritten; an entity select would return the stale identity-map object
+    and ``refresh()`` would discard those edits. When the row is not yet in
+    the database the in-memory values decide, as before.
+
+    The re-read takes ``FOR SHARE``: a plain read would see the old ``pi`` role
+    while a staff conversion holds the row ``FOR UPDATE``, and the job would be
+    inserted after the conversion commits. ``FOR SHARE`` waits behind that lock
+    and returns the committed role. It does not block other ``FOR SHARE`` or
+    ``FOR KEY SHARE`` readers, and is held until the caller's transaction ends.
+    A caller that already updated the row holds a stronger lock itself, so the
+    re-read does not wait on it.
     """
-    if user.user_role in _NO_PROFILE_ROLES or user.access_status == "denied":
+    stored = (await db.execute(
+        select(User.user_role, User.access_status)
+        .where(User.id == user.id)
+        .with_for_update(read=True)
+    )).one_or_none()
+    role, access = stored if stored is not None else (user.user_role, user.access_status)
+    if role in _NO_PROFILE_ROLES or access == "denied":
         return None
     new_id = await insert_job_if_absent(
         db, type="generate_profile", user_id=user.id,

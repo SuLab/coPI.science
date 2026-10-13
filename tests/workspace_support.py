@@ -12,5 +12,6 @@ POST_SUFFIXES = frozenset({
     '/pis/{user_id}/companies/discover', '/pis/{user_id}/companies/{company_id}/delete',
     '/pis/{user_id}/companies/{company_id}/confirm', '/pis/{user_id}/companies/{company_id}/reject',
     '/pis/{user_id}/mute', '/pis/{user_id}/unmute', '/pis/{user_id}/slack/provision',
-    '/pis/{user_id}/activate',
+    '/pis/{user_id}/activate', '/staff', '/staff/{user_id}/revoke', '/staff/{user_id}/restore',
+    '/staff/{user_id}/delete',
 })
