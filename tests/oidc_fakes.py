@@ -1,7 +1,9 @@
 """Test doubles for the OpenID Connect providers (spec 2026-10-13 §8: no test talks to Microsoft
 or ORCID): a signing key, ID tokens signed with it, a self-signed client certificate, and one
 httpx.MockTransport answering as Microsoft's token endpoint and per-tenant key sets and as
-ORCID's key set. tests/conftest.py registers the `fake_idp` fixture for every test module."""
+ORCID's key set. tests/conftest.py registers the `fake_idp` fixture for every test module.
+The token endpoint is served through a MockTransport of whichever HTTP library authlib's client
+is built on (microsoft_identity.TOKEN_HTTP: httpx2 under authlib 1.8, httpx under 1.7)."""
 from __future__ import annotations
 
 import base64
@@ -126,12 +128,13 @@ class FakeIdP:
         }
         self.orcid_keys = [public_jwk()]
 
-    def handler(self, request: httpx.Request) -> httpx.Response:
+    def handler(self, request: httpx.Request, http=httpx) -> httpx.Response:
+        """Answer `request`; `http` is the library whose Response the transport expects."""
         url = request.url
         if url.host == MICROSOFT_HOST and url.path == "/organizations/oauth2/v2.0/token":
             self.token_requests.append(request)
             status, body = self.token_response
-            return httpx.Response(status, json=body)
+            return http.Response(status, json=body)
         if url.host == MICROSOFT_HOST and url.path.endswith("/discovery/v2.0/keys"):
             self.key_fetches.append(str(url))
             if self.keys_status != 200:
@@ -156,6 +159,9 @@ def fake_idp(monkeypatch):
 
     fake = FakeIdP()
     monkeypatch.setattr(id_tokens, "HTTP_TRANSPORT", httpx.MockTransport(fake.handler))
+    http = microsoft_identity.TOKEN_HTTP
+    monkeypatch.setattr(microsoft_identity, "TOKEN_TRANSPORT",
+                        http.MockTransport(lambda request: fake.handler(request, http)))
     monkeypatch.setattr(microsoft_identity, "KEYS", id_tokens.KeySetCache())
     monkeypatch.setattr(orcid_reauth, "KEYS", id_tokens.KeySetCache())
     return fake

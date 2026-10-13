@@ -7,7 +7,6 @@ import time
 import uuid
 from urllib.parse import parse_qs, urlsplit
 
-import httpx
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
@@ -158,12 +157,10 @@ async def test_the_code_exchange_sends_a_certificate_assertion(fake_idp):
 
 
 async def test_a_non_json_4xx_from_the_token_endpoint_logs_its_status(fake_idp, monkeypatch):
-    from src.services import id_tokens
-
     def html_403(request):
-        return httpx.Response(403, text="<html>blocked</html>")
+        return mi.TOKEN_HTTP.Response(403, text="<html>blocked</html>")
 
-    monkeypatch.setattr(id_tokens, "HTTP_TRANSPORT", httpx.MockTransport(html_403))
+    monkeypatch.setattr(mi, "TOKEN_TRANSPORT", mi.TOKEN_HTTP.MockTransport(html_403))
     with pytest.raises(mi.MicrosoftSignInError) as e:
         await mi.exchange_code(make_config(), code="c", code_verifier="v" * 64)
     assert "status=403" in str(e.value)

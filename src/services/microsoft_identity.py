@@ -51,6 +51,19 @@ from src.services.id_tokens import (
 
 logger = logging.getLogger(__name__)
 
+# authlib 1.8 builds AsyncOAuth2Client on httpx2 whenever httpx2 is installed (anthropic pulls it
+# in), and 1.7 on httpx. TOKEN_HTTP is whichever this authlib uses: its errors are caught, and a
+# test's TOKEN_TRANSPORT must be its MockTransport. Key fetches (id_tokens) always use httpx.
+try:
+    import httpx2
+except ImportError:  # pragma: no cover - depends on the installed packages
+    httpx2 = None
+TOKEN_HTTP = (httpx2 if httpx2 is not None and issubclass(AsyncOAuth2Client, httpx2.AsyncClient)
+              else httpx)
+_TOKEN_HTTP_ERRORS = (httpx.HTTPError, TOKEN_HTTP.HTTPError)
+#: Tests replace this with a TOKEN_HTTP.MockTransport; None uses the network. Read at call time.
+TOKEN_TRANSPORT = None
+
 _LOGIN = "https://login.microsoftonline.com"
 AUTHORIZE_URL = f"{_LOGIN}/organizations/oauth2/v2.0/authorize"
 TOKEN_URL = f"{_LOGIN}/organizations/oauth2/v2.0/token"
@@ -246,7 +259,7 @@ async def exchange_code(config: MicrosoftSignInConfig, *, code: str, code_verifi
     )
     statuses: list[int] = []  # authlib raises only on 5xx; a 4xx HTML page fails in .json()
 
-    async def _record_status(response: httpx.Response) -> None:
+    async def _record_status(response) -> None:  # a TOKEN_HTTP.Response
         statuses.append(response.status_code)
 
     try:
@@ -255,7 +268,7 @@ async def exchange_code(config: MicrosoftSignInConfig, *, code: str, code_verifi
             client_secret=config.private_key_pem,  # PrivateKeyJWT signs with the "secret"
             token_endpoint_auth_method=assertion,
             redirect_uri=config.redirect_uri,
-            transport=id_tokens.HTTP_TRANSPORT,
+            transport=TOKEN_TRANSPORT,
             timeout=id_tokens.HTTP_TIMEOUT_SECONDS,
             event_hooks={"response": [_record_status]},
         ) as client:
@@ -267,7 +280,7 @@ async def exchange_code(config: MicrosoftSignInConfig, *, code: str, code_verifi
         if exc.error == "interaction_required":
             raise InteractionRequired(exc.error) from exc
         raise MicrosoftSignInError(f"token endpoint error={exc.error}") from exc
-    except (httpx.HTTPError, ValueError, TypeError, AttributeError) as exc:
+    except (*_TOKEN_HTTP_ERRORS, ValueError, TypeError, AttributeError) as exc:
         status = statuses[-1] if statuses else None
         raise MicrosoftSignInError(
             f"token request failed: {type(exc).__name__} status={status}") from exc
