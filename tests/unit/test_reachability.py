@@ -149,7 +149,7 @@ ROUTE_ALLOWLIST: dict[tuple[str, str], str] = {
 
 for suffix in POST_SUFFIXES:
     ROUTE_ALLOWLIST[("POST", "/manager" + suffix)] = "Legacy manager POST alias executes the exact canonical callable before returning; existing clients may submit it."
-for path in ("/manager", "/manager/pis", "/manager/pis/{user_id}", "/manager/assessments", "/manager/assessments/{assessment_id}", "/manager/slack-bots", "/manager/discussions", "/manager/activity", "/manager/activity/{run_id}", "/manager/prompt-suggestions", "/manager/prompt-suggestions/{suggestion_id}", "/admin/assessments", "/admin/assessments/{assessment_id}", "/admin/discussions", "/admin/activity", "/admin/activity/{run_id}"):
+for path in ("/manager", "/manager/pis", "/manager/pis/{user_id}", "/manager/assessments", "/manager/assessments/{assessment_id}", "/manager/slack-bots", "/manager/staff", "/manager/discussions", "/manager/activity", "/manager/activity/{run_id}", "/manager/prompt-suggestions", "/manager/prompt-suggestions/{suggestion_id}", "/admin/assessments", "/admin/assessments/{assessment_id}", "/admin/discussions", "/admin/activity", "/admin/activity/{run_id}"):
     ROUTE_ALLOWLIST[("GET", path)] = "Guarded legacy GET compatibility endpoint; canonical workspace links are primary."
 
 # Optional third-party imports that are allowed to be absent at test time. Empty
@@ -1026,10 +1026,12 @@ def test_static_link_resolution_coverage_is_reported():
     # five external links: a confirmed row's source and funding source, and a
     # suggestion's PubMed record, Wikidata item and Form D filing.
     # The corpus review cards add two explicit PubMed links (candidate and unanchored).
+    # The Staff page (2026-10-13) adds three orcid.org links (the account rows and the
+    # create and convert previews).
     unresolvable = len(values) - len(resolvable)
-    assert unresolvable <= 55, (
+    assert unresolvable <= 58, (
         f"{unresolvable} of {len(values)} href/action values do not resolve to a "
-        "checkable local path (was 55) — the matcher probably regressed, or a new "
+        "checkable local path (was 58) — the matcher probably regressed, or a new "
         "link is built from a variable"
     )
 

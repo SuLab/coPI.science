@@ -63,7 +63,7 @@ async def test_origin_guard_refuses_every_workspace_write_before_auth_or_mutatio
         {'Origin': 'null', 'Referer': own + '/workspace/pis'},
         {'Origin': 'https://attacker.invalid', 'Sec-Fetch-Site': 'same-origin'},
     )
-    assert len(POST_SUFFIXES) == 28
+    assert len(POST_SUFFIXES) == 32
     for prefix in ('/workspace', '/manager'):
         for suffix in sorted(POST_SUFFIXES):
             path = prefix + suffix.format(**ids)

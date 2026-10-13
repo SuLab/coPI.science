@@ -50,7 +50,8 @@ def routes(ids: dict) -> list[str]:
         "/admin/access-requests", "/admin/simulation", "/workspace/pis",
         f"/workspace/pis/{ids['pi']}", "/workspace/assessments", f"/workspace/assessments/{a2}",
         "/workspace/discussions", "/workspace/activity", f"/workspace/activity/{run}",
-        "/workspace/slack-bots", "/workspace/prompt-suggestions", f"/assessment-chat/{a2}",
+        "/workspace/slack-bots", "/workspace/staff", "/workspace/prompt-suggestions",
+        f"/assessment-chat/{a2}",
         "/invite/badtoken",
     ]
 

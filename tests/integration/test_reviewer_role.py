@@ -237,6 +237,7 @@ REVIEWER_MANAGER_EXPECTATIONS = {
     ("GET", "/manager/activity"): 403,
     ("GET", "/manager/activity/{run_id}"): 403,
     ("GET", "/manager/slack-bots"): 403,
+    ("GET", "/manager/staff"): 403,
     ("GET", "/manager/prompt-suggestions"): 403,
     ("GET", "/manager/prompt-suggestions/{suggestion_id}"): 403,
     ("POST", "/manager/pis"): 403,
@@ -267,6 +268,10 @@ REVIEWER_MANAGER_EXPECTATIONS = {
     ("POST", "/manager/pis/{user_id}/draft/discard"): 403,
     ("POST", "/manager/pis/{user_id}/regenerate"): 403,
     ("POST", "/manager/pis/{user_id}/persona/reexport"): 403,
+    ("POST", "/manager/staff"): 403,
+    ("POST", "/manager/staff/{user_id}/revoke"): 403,
+    ("POST", "/manager/staff/{user_id}/restore"): 403,
+    ("POST", "/manager/staff/{user_id}/delete"): 403,
 }
 
 # What each write route needs in its POST body to get PAST FastAPI's own
@@ -302,6 +307,10 @@ _REVIEWER_POST_BODIES = {
     "/manager/pis/{user_id}/draft/discard": None,
     "/manager/pis/{user_id}/regenerate": None,
     "/manager/pis/{user_id}/persona/reexport": None,
+    "/manager/staff": None,
+    "/manager/staff/{user_id}/revoke": None,
+    "/manager/staff/{user_id}/restore": None,
+    "/manager/staff/{user_id}/delete": None,
 }
 
 

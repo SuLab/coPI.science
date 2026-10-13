@@ -15,6 +15,7 @@ QUERY_FIELDS = {
     "prompt_suggestions": ("status",),
     "prompt_suggestion_detail": (),
     "slack_bots": (),
+    "staff": (),
     "home": (),
 }
 

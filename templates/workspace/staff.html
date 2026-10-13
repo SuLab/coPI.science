@@ -1,0 +1,214 @@
+{% extends "base.html" %}
+{% block title %}Workspace — Staff — CoPI{% endblock %}
+
+{% block content %}
+{% set access_labels = {'allowed': 'approved', 'pending': 'pending', 'denied': 'revoked'} %}
+{% set refill = staff_refill or {} %}
+<div class="flex items-center justify-between mb-2">
+    <h1 class="text-2xl font-bold text-gray-900">Staff</h1>
+    <span class="text-sm text-gray-500">{{ staff_rows | length }} accounts</span>
+</div>
+<p class="text-sm text-gray-500 mb-6">
+    Manager, reviewer and admin accounts. A staff account has no lab bot and no research
+    profile; the person signs in with this ORCID iD.
+    {% if permissions.admin %}Admin and manager accounts are changed on their account pages.
+    {% else %}Only an admin can change an admin or manager account.{% endif %}
+</p>
+
+{% if staff_preview %}
+{% set p = staff_preview %}
+<section class="bg-white rounded-lg border border-indigo-200 p-4 mb-6" aria-labelledby="staff-confirm-heading">
+    <h2 id="staff-confirm-heading" class="font-semibold text-gray-800 mb-2">Confirm</h2>
+    {% if staff_preview_changed %}
+    <p class="text-sm text-amber-800 bg-amber-50 rounded p-2 mb-3" role="alert">
+        Something changed since the preview. Review it again before confirming.
+    </p>
+    {% endif %}
+    {% if p.outcome == 'create' %}
+    <p class="text-sm text-gray-700">
+        Create a <b>{{ p.role }}</b> account for <b>{{ p.name }}</b>{% if p.institution %}, <b>{{ p.institution }}</b>{% endif %}
+        (ORCID <a href="https://orcid.org/{{ p.orcid }}" target="_blank" class="text-green-700 hover:underline">{{ p.orcid }}</a>).
+    </p>
+    {% set current_jobs = p.employments | selectattr('current') | list %}
+    {% if current_jobs %}
+    <p class="text-xs text-gray-600 mt-2">Current employment on ORCID:</p>
+    <ul class="text-sm text-gray-700 list-disc ml-5">
+        {% for e in current_jobs %}
+        <li>{{ e.organization }}{% if e.start_year %} (since {{ e.start_year }}){% endif %}</li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p class="text-xs text-gray-600 mt-2">ORCID lists no current employment.</p>
+    {% endif %}
+    {% else %}
+    <p class="text-sm text-gray-700">
+        Convert <b>{{ p.name }}</b>'s existing PI account
+        (access: {{ access_labels.get(p.access_status, p.access_status) }},
+        {{ 'has a profile' if p.has_profile else 'no profile' }})
+        to a <b>{{ p.role }}</b> account
+        (ORCID <a href="https://orcid.org/{{ p.orcid }}" target="_blank" class="text-green-700 hover:underline">{{ p.orcid }}</a>).
+    </p>
+    {% endif %}
+    <div class="flex items-center gap-3 mt-4">
+        <form method="post" action="{{ page_url(request, 'workspace_create_staff_account') }}">
+            <input type="hidden" name="orcid" value="{{ p.orcid }}">
+            <input type="hidden" name="user_role" value="{{ p.role }}">
+            <input type="hidden" name="name" value="{{ p.name }}">
+            <input type="hidden" name="confirm" value="1">
+            <input type="hidden" name="expectation" value="{{ p.expectation }}">
+            <button type="submit" class="bg-indigo-600 text-white text-sm px-3 py-1 rounded hover:bg-indigo-700">
+                {{ 'Create account' if p.outcome == 'create' else 'Convert account' }}
+            </button>
+        </form>
+        <a href="{{ page_url(request, 'workspace_staff') }}" class="text-sm text-indigo-700 underline">Cancel</a>
+    </div>
+</section>
+{% endif %}
+
+<section class="mb-6" aria-labelledby="staff-add-heading">
+    <h2 id="staff-add-heading" class="font-semibold text-gray-800 mb-2">Add a staff account</h2>
+    {% if staff_roles %}
+    <form method="post" action="{{ page_url(request, 'workspace_create_staff_account') }}" class="flex flex-wrap items-end gap-2">
+        <div>
+            <label class="block text-xs text-gray-500 mb-1" for="staff-orcid">ORCID iD</label>
+            <input type="text" id="staff-orcid" name="orcid" placeholder="0000-0000-0000-0000"
+                   value="{{ refill.get('orcid') or '' }}"
+                   class="border rounded px-2 py-1 text-sm" required>
+        </div>
+        <div>
+            <label class="block text-xs text-gray-500 mb-1" for="staff-role">Role</label>
+            <select id="staff-role" name="user_role" class="border rounded px-2 py-1 text-sm">
+                {% for role in staff_roles %}
+                <option value="{{ role }}" {% if refill.get('user_role') == role %}selected{% endif %}>{{ role | title }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label class="block text-xs text-gray-500 mb-1" for="staff-name">Name (only if ORCID shows none)</label>
+            <input type="text" id="staff-name" name="name" maxlength="100"
+                   value="{{ refill.get('name') or '' }}"
+                   class="border rounded px-2 py-1 text-sm">
+        </div>
+        <button type="submit" class="bg-indigo-600 text-white text-sm px-3 py-1 rounded hover:bg-indigo-700">
+            Preview
+        </button>
+    </form>
+    {% if permissions.admin and refill.get('account_user_id') %}
+    <p class="text-sm text-gray-700 mt-2">
+        <a href="/admin/users/{{ refill.get('account_user_id') }}" class="text-indigo-700 underline">Open that account's page</a>
+    </p>
+    {% endif %}
+    <p class="text-xs text-gray-600 mt-2">
+        The first submit shows who the iD belongs to; nothing is created until you confirm.
+    </p>
+    {% else %}
+    <p class="text-sm text-gray-600">You cannot create staff accounts.</p>
+    {% endif %}
+</section>
+
+<section class="mb-6" aria-labelledby="staff-accounts-heading">
+    <h2 id="staff-accounts-heading" class="font-semibold text-gray-800 mb-2">Accounts</h2>
+    <div class="bg-white rounded-lg border border-gray-200 overflow-x-auto" tabindex="0" role="region" aria-label="Staff accounts">
+        <table class="min-w-full divide-y divide-gray-200">
+            <thead class="bg-gray-50">
+                <tr>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">ORCID</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Role</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Access</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Last sign-in</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+                {% for row in staff_rows %}
+                {% set u = row.user %}
+                <tr class="hover:bg-gray-50">
+                    <td class="px-4 py-3 text-sm font-medium text-gray-900">
+                        {% if permissions.admin %}
+                        <a href="/admin/users/{{ u.id }}" class="hover:text-indigo-700 hover:underline">{{ u.name }}</a>
+                        {% else %}{{ u.name }}{% endif %}
+                        {% if row.is_self %}<span class="text-xs text-gray-600">(you)</span>{% endif %}
+                    </td>
+                    <td class="px-4 py-3">
+                        <a href="https://orcid.org/{{ u.orcid }}" target="_blank"
+                           class="text-xs text-green-700 hover:underline">{{ u.orcid }}</a>
+                    </td>
+                    <td class="px-4 py-3 text-sm text-gray-700">{{ (u.user_role or '') | title }}</td>
+                    <td class="px-4 py-3 text-sm">
+                        {% if u.access_status == 'allowed' %}
+                            <span class="px-2 py-0.5 rounded text-xs bg-green-100 text-green-800">approved</span>
+                        {% elif u.access_status == 'denied' %}
+                            <span class="px-2 py-0.5 rounded text-xs bg-red-100 text-red-800">revoked</span>
+                        {% else %}
+                            <span class="px-2 py-0.5 rounded text-xs bg-yellow-100 text-yellow-800">{{ access_labels.get(u.access_status, u.access_status or '—') }}</span>
+                        {% endif %}
+                    </td>
+                    <td class="px-4 py-3 text-xs text-gray-500">
+                        {% if u.last_login_at %}{{ u.last_login_at | ts("date") }}{% else %}<span class="text-gray-600">never</span>{% endif %}
+                    </td>
+                    <td class="px-4 py-3 text-sm">
+                        <div class="flex flex-wrap items-center gap-2">
+                        {% if row.can_revoke %}
+                        <form method="post" action="{{ page_url(request, 'workspace_revoke_reviewer', user_id=u.id) }}"
+                              data-confirm="Revoke {{ u.name }}'s access? They are signed out everywhere and cannot sign in until restored.">
+                            <button type="submit" aria-label="Revoke access for {{ u.name }}"
+                                    class="text-xs px-2 py-1 rounded border border-amber-300 text-amber-800 hover:bg-amber-50">Revoke</button>
+                        </form>
+                        {% endif %}
+                        {% if row.can_restore %}
+                        <form method="post" action="{{ page_url(request, 'workspace_restore_reviewer', user_id=u.id) }}">
+                            <button type="submit" aria-label="Restore access for {{ u.name }}"
+                                    class="text-xs px-2 py-1 rounded border border-green-300 text-green-800 hover:bg-green-50">Restore</button>
+                        </form>
+                        {% endif %}
+                        {% if row.can_delete %}
+                        <form method="post" action="{{ page_url(request, 'workspace_delete_reviewer', user_id=u.id) }}"
+                              data-confirm="Delete reviewer {{ u.name }}? Their reviews and approve/disapprove history are kept, with the name {{ u.name }}. Their review assignments and their assessment-chat history are deleted, and the ORCID iD is removed from the access allowlist.{% if row.has_agent %} This account owns a lab agent, so the full teardown runs: its persona files are removed and its Slack bot token is revoked.{% endif %} This cannot be undone.">
+                            <button type="submit" aria-label="Delete {{ u.name }}"
+                                    class="text-xs px-2 py-1 rounded bg-red-600 text-white hover:bg-red-700">Delete</button>
+                        </form>
+                        {% endif %}
+                        {% if not (row.can_revoke or row.can_restore or row.can_delete) %}
+                            {% if permissions.admin and not row.is_self %}
+                            <a href="/admin/users/{{ u.id }}" class="text-xs text-indigo-700 underline">Account page</a>
+                            {% else %}
+                            <span class="text-xs text-gray-600">—</span>
+                            {% endif %}
+                        {% endif %}
+                        </div>
+                    </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="6" class="px-4 py-6 text-sm text-gray-600 text-center">No staff accounts yet.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section aria-labelledby="staff-changes-heading">
+    <h2 id="staff-changes-heading" class="font-semibold text-gray-800 mb-2">Recent changes</h2>
+    {% set action_labels = {
+        'staff_account_create': 'Created',
+        'staff_account_convert': 'Converted from PI',
+        'reviewer_revoke': 'Access revoked',
+        'reviewer_restore': 'Access restored',
+        'reviewer_delete': 'Deleted'
+    } %}
+    {% if staff_changes %}
+    <ul class="bg-white rounded-lg border border-gray-200 divide-y divide-gray-100 text-sm">
+        {% for c in staff_changes %}
+        <li class="px-4 py-2 text-gray-700">
+            <span class="text-xs text-gray-500">{{ c.created_at | ts }}</span> ·
+            <b>{{ action_labels.get(c.action, c.action) }}</b>:
+            {{ c.target_name or '—' }}{% if c.target_orcid %} ({{ c.target_orcid }}){% endif %}{% if c.role %}, {{ c.role }}{% endif %}
+            <span class="text-gray-600">by {{ c.actor_name or 'a deleted account' }}</span>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p class="text-sm text-gray-600">No staff account changes yet.</p>
+    {% endif %}
+</section>
+{% endblock %}

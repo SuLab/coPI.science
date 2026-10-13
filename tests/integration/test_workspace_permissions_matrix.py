@@ -116,7 +116,10 @@ async def _snapshot(db, user_id):
         names = [col.name for col in inspect(table).columns if "token" not in col.name and "password" not in col.name]
         values = (await db.execute(select(*[getattr(table, name) for name in names]).where(column == user_id))).all()
         rows.append(tuple(tuple(normalize(value) for value in row) for row in values))
-    return tuple(counts), tuple(rows), await db.scalar(select(func.count()).select_from(Job))
+    return (
+        tuple(counts), tuple(rows), await db.scalar(select(func.count()).select_from(Job)),
+        await db.scalar(select(func.count()).select_from(User)),
+    )
 
 
 async def _database_hashes(db):
@@ -154,8 +157,11 @@ def _file_snapshot(root):
 
 
 async def _effect(db, user_id, ids):
-    """The target-owned columns each PI write can change, excluding acting-user attribution."""
+    """The target-owned columns each PI or Staff write can change, excluding acting-user
+    attribution, plus the global user count (a Staff create adds a row nobody owns yet)."""
     return (
+        (await db.execute(select(User.user_role, User.access_status, User.session_epoch).where(User.id == user_id))).first(),
+        await db.scalar(select(func.count()).select_from(User)),
         await db.scalar(select(ResearcherProfile.profile_version).where(ResearcherProfile.user_id == user_id)),
         await db.scalar(select(AgentRegistry.status).where(AgentRegistry.user_id == user_id)),
         await db.scalar(select(func.count()).select_from(Job).where(Job.user_id == user_id)),
@@ -192,9 +198,16 @@ _DOCUMENTED_REFUSALS = frozenset({
 @pytest.mark.parametrize("role,as_role", [
     (None, None), ("pi", None), ("reviewer", None), ("admin", "pi"), ("admin", "reviewer"),
 ], ids=["anonymous", "pi", "reviewer", "admin-as-pi", "admin-as-reviewer"])
-async def test_all_28_writes_deny_untrusted_effective_identities(client, db_session, role, as_role, tmp_path):
-    """Every alias receives a syntactically valid form and existing child identifiers."""
+async def test_all_writes_deny_untrusted_effective_identities(client, db_session, role, as_role, tmp_path):
+    """Every alias receives a syntactically valid form and existing child identifiers.
+
+    The acting users exist before the baseline snapshot, which counts every ``users`` row."""
     target, ids = await _target(db_session)
+    headers = {}
+    if role:
+        actor = await factories.make_user(db_session, user_role=role)
+        effective = await factories.make_user(db_session, user_role=as_role) if as_role else None
+        headers = auth_headers(actor.id, impersonate=effective.id if effective else None)
     from src.services import profile_export
 
     agent_id = await db_session.scalar(select(AgentRegistry.agent_id).where(AgentRegistry.id == ids["agent_id"]))
@@ -204,11 +217,6 @@ async def test_all_28_writes_deny_untrusted_effective_identities(client, db_sess
     persona_root = profile_export.PROFILES_DIR.parent
     assert persona_root.is_relative_to(tmp_path)
     files_before = _file_snapshot(persona_root)
-    headers = {}
-    if role:
-        actor = await factories.make_user(db_session, user_role=role)
-        effective = await factories.make_user(db_session, user_role=as_role) if as_role else None
-        headers = auth_headers(actor.id, impersonate=effective.id if effective else None)
     values = {"user_id": target.id, **ids}
     for prefix in ("/workspace", "/manager"):
         for suffix in POST_SUFFIXES:
@@ -353,7 +361,7 @@ async def test_all_workspace_get_and_head_routes_follow_effective_role(client, d
     paths = (
         "/workspace", "/workspace/pis", f"/workspace/pis/{pi.id}",
         "/workspace/assessments", f"/workspace/assessments/{ids['assessment_id']}",
-        "/workspace/slack-bots", "/workspace/discussions", "/workspace/activity",
+        "/workspace/slack-bots", "/workspace/staff", "/workspace/discussions", "/workspace/activity",
         f"/workspace/activity/{ids['run_id']}", "/workspace/prompt-suggestions",
         f"/workspace/prompt-suggestions/{ids['suggestion_id']}",
     )
