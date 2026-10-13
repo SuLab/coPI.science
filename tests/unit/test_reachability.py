@@ -129,6 +129,11 @@ ROUTE_ALLOWLIST: dict[tuple[str, str], str] = {
         "ORCID OAuth redirect_uri — the caller is orcid.org. The value we register with "
         "ORCID is settings.orcid_redirect_uri (src/config.py), not a link in this app."
     ),
+    ("GET", "/auth/microsoft/callback"): (
+        "Microsoft sign-in redirect_uri — the caller is login.microsoftonline.com. The value "
+        "registered with Microsoft is settings.microsoft_redirect_uri (src/config.py), not a "
+        "link in this app."
+    ),
     ("POST", "/reviews/assessments/{assessment_id}/status"): (
         "Deliberately caller-less, which is a NEW category on this list: every "
         "other entry names a real external caller, and this one names none. The "

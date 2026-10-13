@@ -51,6 +51,12 @@ def _login_location(request: Request) -> str:
     return f"/login?next={quote(target, safe='')}"
 
 
+def pending_access_payload(user: User) -> dict:
+    """What /access-pending shows for an account that may not sign in. One shape for the login
+    gate (src/routers/auth.py::complete_sign_in) and the revocation check below."""
+    return {"user_id": str(user.id), "orcid": user.orcid, "email": user.email, "name": user.name}
+
+
 async def get_current_user(
     request: Request,
     db: AsyncSession = Depends(get_db),
@@ -108,8 +114,9 @@ async def get_current_user(
     # POP `user_id`; do NOT call request.session.clear(). /access-pending
     # renders `session["pending_access"]`, so clearing the session lands the
     # user on a page that cannot say which account is blocked. We repopulate
-    # `pending_access` in exactly the shape src/routers/auth.py's own access
-    # gate writes at login, so the two arrivals at that page look the same.
+    # `pending_access` through pending_access_payload, the shape the login gate
+    # (src/routers/auth.py::complete_sign_in) also writes, so the two arrivals at
+    # that page look the same.
     #
     # This redirect target and POST /logout must both stay free of
     # get_current_user: /access-pending (src/routers/public.py) takes no auth
@@ -118,12 +125,7 @@ async def get_current_user(
     # tests/integration/test_access_revocation.py.
     if session_user.access_status != "allowed":
         request.session.pop("user_id", None)
-        request.session["pending_access"] = {
-            "user_id": str(session_user.id),
-            "orcid": session_user.orcid,
-            "email": session_user.email,
-            "name": session_user.name,
-        }
+        request.session["pending_access"] = pending_access_payload(session_user)
         raise HTTPException(
             status_code=status.HTTP_302_FOUND,
             headers={"Location": "/access-pending"},

@@ -5,9 +5,10 @@ The session (src/main.py) is a signed, 30-day cookie with no server-side store.
 epoch into ``session[SESSION_EPOCH_KEY]``, ``get_current_user`` (src/dependencies.py)
 refuses a session whose epoch differs, and bumping the epoch therefore ends every
 session the account holds, on every device. Bumped by logout (src/routers/auth.py),
-access denial (src/routers/admin/access.py) and a role change
-(src/routers/admin/users.py, src/cli.py). NULL counts as 0, and so does a session with
-no epoch key.
+access denial (src/routers/admin/access.py), a role change
+(src/routers/admin/users.py, src/cli.py) and a Microsoft sign-in removal
+(src/routers/settings.py, src/routers/admin/users.py). NULL counts as 0, and so does a
+session with no epoch key.
 """
 
 from __future__ import annotations

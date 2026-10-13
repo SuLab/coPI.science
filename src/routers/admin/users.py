@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
 from src.dependencies import get_admin_user, refuse_impersonation
-from src.models import USER_ROLE_ADMIN, VALID_USER_ROLES, User
+from src.models import USER_ROLE_ADMIN, VALID_USER_ROLES, AdminAuditEvent, User
 from src.routers.admin._common import _ADMIN, _DB, _template_context, router, templates
 from src.routers.workspace.compatibility import redirect
 from src.services import directory
@@ -22,6 +22,8 @@ from src.services.directory import (
     load_account_detail,
 )
 from src.services.email_verification import mark_email_verified
+from src.services.microsoft_identity import link_view, unlink
+from src.services.session_epoch import bump_session_epoch
 from src.services.user_deletion import delete_user_account
 from src.services.user_roles import RoleChangeRefused, change_user_role
 
@@ -101,6 +103,9 @@ async def admin_user_detail(
             pub_scope=detail["pub_scope"],
             jobs=detail["jobs"],
             valid_user_roles=VALID_USER_ROLES,
+            microsoft_link=(await link_view(db, user_id))
+            if getattr(request.app.state, "microsoft_sign_in", None)
+            else None,
         ),
     )
 
@@ -245,3 +250,33 @@ async def admin_verify_user_email(
         return RedirectResponse(url=f"/admin/users/{user_id}?error={error}", status_code=302)
     logger.info("Admin %s verified the email address of user %s", current_user.id, user_id)
     return RedirectResponse(url=f"/admin/users/{user_id}?email_verified=1", status_code=302)
+
+
+@router.post("/users/{user_id}/microsoft/unlink")
+async def admin_remove_microsoft_link(
+    user_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = _DB,
+    current_user: User = _ADMIN,
+):
+    """Remove a user's linked Microsoft sign-in and end all their sessions (spec 2026-10-13
+    §5.3). Admins only; refused under impersonation, because the audit row names the admin.
+    An admin removing their own link signs themselves out too (S5)."""
+    if getattr(request.app.state, "microsoft_sign_in", None) is None:
+        raise HTTPException(status_code=404, detail="Not Found")
+    refuse_impersonation(current_user, "Microsoft sign-in changes are disabled while impersonating.")
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    actor_id = current_user.id
+    removed = await unlink(db, user_id)
+    if removed is not None:
+        await bump_session_epoch(db, user_id)
+        db.add(AdminAuditEvent(
+            action="microsoft_unlink", actor_user_id=actor_id,
+            payload={"user_id": str(user_id), "tenant_id": removed.tenant_id,
+                     "sign_in_name": removed.sign_in_name},
+        ))
+        await db.commit()
+        logger.info("Admin %s removed the Microsoft sign-in of user %s", actor_id, user_id)
+    return RedirectResponse(url=f"/admin/users/{user_id}", status_code=302)

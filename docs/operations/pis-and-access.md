@@ -501,6 +501,40 @@ device, reading `session["user_id"]` directly and still with no auth dependency;
 denial and a role change (`/admin/users/{id}/role`, `admin:grant`, `admin:revoke`,
 `role:set`) bump it too (`src/services/session_epoch.py`).
 
+**Microsoft sign-in for staff** (spec `docs/specs/2026-10-13-microsoft-staff-sign-in-design.md`,
+migration `0066`). Admins, managers and reviewers can link a work or school Microsoft account in
+Settings and then use "Sign in with Microsoft (staff)" on `/login`; ORCID keeps working and stays
+the only way to create an account. Linking needs an ORCID re-sign-in (`prompt=login`, checked by
+`auth_time`) under 15 minutes old. Accounts are matched by Microsoft's `(tid, oid)` only, never by
+email; only members (`acct` 0) of the tenants in `MICROSOFT_ALLOWED_TENANT_IDS` get through. A
+user's own Unlink signs them out everywhere; an admin removes a link from `/admin/users/{id}` (or the
+workspace PI page for a `pi`), which also signs the user out and writes an `admin_audit_events` row
+(`microsoft_unlink`). Disabling someone's Microsoft account does NOT end their Blackbird sessions or
+their ORCID login: offboarding is still a role or access change here.
+
+Off while `MICROSOFT_CLIENT_ID` is empty. A missing or invalid `MICROSOFT_*` value stops
+`blackbird-app` at start (the worker and agent are unaffected); clear `MICROSOFT_CLIENT_ID` and
+recreate to roll back. **Turning it on:**
+
+1. Decide where the app registration lives (spec D4, §7.2). In an organisation that lets users
+   consent only to verified publishers or apps registered in its own tenant, its admin must approve
+   the app once.
+2. Entra admin center → App registrations → New registration: "Multiple Entra ID tenants", platform
+   Web, redirect URI `https://blackbird.copi.science/auth/microsoft/callback` only (development uses a
+   separate registration). Leave implicit grant off; confirm app instance property lock is on.
+   Token configuration → Add optional claim → ID → `acct`.
+3. `openssl req -x509 -newkey rsa:3072 -sha256 -days 365 -nodes -keyout key.pem -out cert.pem -subj "/CN=blackbird-microsoft-signin"`;
+   upload `cert.pem` under Certificates & secrets → Certificates.
+4. In `.env`: `MICROSOFT_CLIENT_ID`, `MICROSOFT_REDIRECT_URI` (the URI above),
+   `MICROSOFT_ALLOWED_TENANT_IDS` (comma-separated tenant GUIDs), `MICROSOFT_CERTIFICATE_B64`
+   (`base64 -w0 cert.pem`), `MICROSOFT_PRIVATE_KEY_B64` (`base64 -w0 key.pem`); `chmod 600 .env`;
+   delete `key.pem`. Every copy of `.env` (backups included) now carries the key.
+5. `$DC up -d --force-recreate blackbird-app`.
+6. One live link and sign-in per allowed organisation; confirm the items in spec §9.
+7. Calendar a reminder 30 days before the certificate expires (the app also logs a warning at
+   start from 30 days out). To renew or move to a CA-signed certificate: upload the new one (a
+   registration holds several), change the two `.env` values, recreate, delete the old one.
+
 ## The Staff page (`/workspace/staff`, 2026-10-13)
 
 The web way to add a manager or reviewer without a lab bot (plan

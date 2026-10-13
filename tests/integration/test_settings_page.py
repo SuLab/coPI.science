@@ -1,4 +1,4 @@
-"""/settings is the account page only."""
+"""/settings is the account page (plus the Microsoft section for staff, tested in test_microsoft_settings.py)."""
 
 import pytest
 

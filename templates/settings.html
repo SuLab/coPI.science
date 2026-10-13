@@ -12,5 +12,33 @@
             Delete account
         </a>
     </div>
+
+    {% if microsoft %}
+    <!-- Microsoft sign-in (staff; spec 2026-10-13 §5.7) -->
+    <div class="border-t border-gray-200 mt-8 pt-6" id="microsoft-sign-in">
+        <h2 class="text-lg font-semibold text-gray-900 mb-2">Microsoft sign-in</h2>
+        {% if microsoft.link %}
+        <p class="text-sm text-gray-700 mb-1">
+            Linked to <strong>{{ microsoft.link.sign_in_name or "your Microsoft account" }}</strong>
+            on {{ microsoft.link.linked_at | ts("date") }}.
+        </p>
+        <p class="text-sm text-gray-500 mb-3">
+            Last used: {{ microsoft.link.last_sign_in_at | ts("date") if microsoft.link.last_sign_in_at else "never" }}.
+        </p>
+        <form method="POST" action="/settings/microsoft/unlink"
+              data-confirm="Remove Microsoft sign-in? You will be signed out everywhere.">
+            <button type="submit" class="text-sm text-red-600 hover:text-red-700">Unlink Microsoft account</button>
+        </form>
+        {% elif microsoft.can_link %}
+        <p class="text-sm text-gray-600 mb-3">
+            Use your organisation's Microsoft account as a second way to sign in. ORCID keeps working.
+        </p>
+        <a href="/auth/microsoft/link" class="text-sm text-indigo-600 hover:underline">Link Microsoft account</a>
+        {% else %}
+        <p class="text-sm text-gray-600 mb-3">To link a Microsoft account, first confirm it's you.</p>
+        <a href="/login/start?reauth=1" class="text-sm text-indigo-600 hover:underline">Sign in with ORCID again to link</a>
+        {% endif %}
+    </div>
+    {% endif %}
 </div>
 {% endblock %}

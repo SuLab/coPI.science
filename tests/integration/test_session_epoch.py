@@ -12,6 +12,14 @@ from tests.session_support import raw_session_headers, session_from_response, se
 pytestmark = pytest.mark.integration
 
 
+def _login_session(response) -> dict:
+    """The session a successful login set, minus the sign-in stamp (spec 2026-10-13 §5.3)."""
+    session = session_from_response(response)
+    assert isinstance(session.pop("signed_in_at"), int)
+    assert session.pop("signed_in_via") == "orcid"
+    return session
+
+
 async def _pi(db_session, **overrides):
     user = await factories.make_user(db_session, user_role=USER_ROLE_PI, **overrides)
     await factories.make_profile(db_session, user=user)
@@ -44,7 +52,7 @@ async def test_login_clears_the_pre_login_session_and_keeps_the_vetted_next(
         "planted": "by an attacker",
     })
     assert r.status_code == 302 and r.headers["location"] == "/profile/edit"
-    assert session_from_response(r) == {"user_id": str(user.id), "epoch": 0}
+    assert _login_session(r) == {"user_id": str(user.id), "epoch": 0}
 
 
 async def test_login_drops_an_unsafe_next(client, db_session, monkeypatch):
@@ -52,7 +60,7 @@ async def test_login_drops_an_unsafe_next(client, db_session, monkeypatch):
     r = await _callback(client, monkeypatch, user.orcid,
                         {"post_login_redirect": "https://evil.example/"})
     assert r.headers["location"] == "/profile"
-    assert session_from_response(r) == {"user_id": str(user.id), "epoch": 0}
+    assert _login_session(r) == {"user_id": str(user.id), "epoch": 0}
 
 
 async def test_login_keeps_a_pending_invite_token(client, db_session, monkeypatch):
@@ -60,13 +68,13 @@ async def test_login_keeps_a_pending_invite_token(client, db_session, monkeypatc
     r = await _callback(client, monkeypatch, user.orcid,
                         {"pending_invite_token": "tok-9", "planted": 1})
     assert r.headers["location"] == "/invite/tok-9"
-    assert session_from_response(r) == {"user_id": str(user.id), "epoch": 0}
+    assert _login_session(r) == {"user_id": str(user.id), "epoch": 0}
 
 
 async def test_login_stores_the_accounts_epoch(client, db_session, monkeypatch):
     user = await _pi(db_session, session_epoch=4)
     r = await _callback(client, monkeypatch, user.orcid, {})
-    assert session_from_response(r) == {"user_id": str(user.id), "epoch": 4}
+    assert _login_session(r) == {"user_id": str(user.id), "epoch": 4}
 
 
 async def test_a_refused_login_carries_only_pending_access(client, db_session, monkeypatch):

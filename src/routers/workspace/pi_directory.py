@@ -17,6 +17,7 @@ from src.services.agent_activation import activation_blockers, persona_blockers
 from src.services.company_discovery import latest_discovery_job
 from src.services.email_verification import mark_email_verified
 from src.services.jhu_rules import get_tenure_start
+from src.services.microsoft_identity import link_view
 from src.services.persona_lifecycle import export_after_lifecycle
 from src.services.pi_companies import PI_COMPANY_ROLE_LABELS, list_companies
 from src.services.pi_onboarding import (
@@ -146,6 +147,9 @@ async def workspace_pi_detail(
             discovery=_discovery_view(await latest_discovery_job(db, user_id)) if staff else None,
             review=await profile_review.load_review_cards(db, user_id) if staff else None,
             revisions=await list_public_revisions(db, user_id) if staff else None,
+            microsoft_link=(await link_view(db, user_id))
+            if current_user.is_admin and getattr(request.app.state, "microsoft_sign_in", None)
+            else None,
             tenure_provisional=detail["grant_sections"].tenure_start
             if tenure_start is None
             else None,

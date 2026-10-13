@@ -75,7 +75,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0065"
+DEFAULT_TARGET = "0066"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -110,9 +110,9 @@ DEFAULT_TARGET = "0065"
 #: unindexed ondelete-FK columns — see issue #25 P1), 0034 (two nullable columns plus
 #: one foreign-key constraint on agents), 0035 (three nullable columns across three
 #: tables, no backfill), and the 0036-0062 objects enumerated in PLANNED_OBJECTS (and
-#: PLANNED_RECREATES) below, plus 0063's two nullable columns, 0064's one, and 0065's
+#: PLANNED_RECREATES) below, plus 0063's two nullable columns, 0064's one, 0065's
 #: index (its CHECK swap recreates an existing constraint, which the collision check must
-#: not list). 0063's ADD VALUE on
+#: not list), and 0066's table. 0063's ADD VALUE on
 #: thread_outcome_enum enumerates nothing: adding a value to an existing type creates
 #: no object to collide with — the same reason 0058's job_type_enum ADD VALUE has no
 #: entry either.
@@ -121,7 +121,7 @@ SUPPORTED_START_REVISIONS = (
     "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040",
     "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
     "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060",
-    "0061", "0062", "0063", "0064",
+    "0061", "0062", "0063", "0064", "0065",
 )
 
 #: Tables whose row counts are snapshotted for postflight. Empty = every user table.
@@ -556,6 +556,15 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     # 0065_non_pubmed_publications (spec 2026-10-09 §5.4). The CHECK it drops and recreates
     # under the same name is not listed: it exists before 0065 runs.
     PlannedObject("0065", "index", "uq_publications_user_doi_nopmid", "publications"),
+    # 0066_user_microsoft_identities (spec 2026-10-13 §5.1).
+    PlannedObject("0066", "table", "user_microsoft_identities"),
+    PlannedObject(
+        "0066", "constraint", "uq_user_microsoft_identities_user_id", "user_microsoft_identities"
+    ),
+    PlannedObject(
+        "0066", "constraint", "uq_user_microsoft_identities_tenant_object",
+        "user_microsoft_identities",
+    ),
 )
 
 #: What ``upgrade()`` DROPS. Kept apart from PLANNED_OBJECTS because the collision check
@@ -579,7 +588,7 @@ REVISION_ORDER = (
     "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039",
     "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
     "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060",
-    "0061", "0062", "0063", "0064", "0065",
+    "0061", "0062", "0063", "0064", "0065", "0066",
 )
 
 

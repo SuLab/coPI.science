@@ -265,6 +265,12 @@ ENDPOINTS: list[Ep] = [
 
 _ID = {e: e.label for e in ENDPOINTS}
 
+#: Routes on these routers that the sweeps below cannot drive, each with the file that
+#: owns its authorization tests. POST /settings/microsoft/unlink is a 404 unless
+#: app.state.microsoft_sign_in is set, and acts only on a linked account:
+#: tests/integration/test_microsoft_settings.py.
+OWNED_ELSEWHERE = {("POST", "/settings/microsoft/unlink")}
+
 
 async def _versioned_form(db, user_id, fields):
     profile = await _prof(db, user_id)
@@ -306,6 +312,8 @@ def test_the_endpoint_inventory_is_the_whole_first_run_surface():
                     live.add((method, prefix + route.path))
 
     declared = {(e.method, e.path) for e in ENDPOINTS}
+    assert OWNED_ELSEWHERE <= live, f"stale OWNED_ELSEWHERE entries: {sorted(OWNED_ELSEWHERE - live)}"
+    live -= OWNED_ELSEWHERE
     assert declared == live, (
         "the endpoint inventory has drifted from the routers; "
         f"missing from the tests: {sorted(live - declared)}; "

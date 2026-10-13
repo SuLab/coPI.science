@@ -20,6 +20,7 @@ from src.routers import (
     csp_report,
     invite,
     manager,
+    microsoft_auth,
     onboarding,
     profile,
     public,
@@ -27,6 +28,7 @@ from src.routers import (
 )
 from src.routers import settings as settings_router
 from src.services.assessment_chat import drain_live_tasks
+from src.services.microsoft_identity import load_config as load_microsoft_config
 from src.web.errors import install_error_handlers
 from src.web.head_requests import HeadAsGetMiddleware
 from src.web.security_headers import CSP_REPORT_PATH, SecurityHeadersMiddleware
@@ -275,6 +277,11 @@ def create_app() -> FastAPI:
     # to be registered in both routers' template setup.
     application.state.assessment_chat_enabled = settings.assessment_chat_enabled
 
+    # Microsoft sign-in for staff (spec 2026-10-13 §5.2, S1). Validated here, in the web
+    # process only: a bad MICROSOFT_* value stops the web app at start (MicrosoftConfigError)
+    # but never the worker or the agent, which load the same .env. None = off.
+    application.state.microsoft_sign_in = load_microsoft_config(settings)
+
     # HEAD on every GET route (M-02). Added FIRST, so it is the innermost
     # middleware and only routing sees the GET: see src/web/head_requests.py.
     application.add_middleware(HeadAsGetMiddleware)
@@ -330,6 +337,7 @@ def create_app() -> FastAPI:
     # Include routers
     application.include_router(public.router, tags=["public"])
     application.include_router(auth.router, tags=["auth"])
+    application.include_router(microsoft_auth.router, tags=["auth"])
     application.include_router(csp_report.router, tags=["csp"])
     application.include_router(onboarding.router, prefix="/onboarding", tags=["onboarding"])
     application.include_router(profile.router, prefix="/profile", tags=["profile"])

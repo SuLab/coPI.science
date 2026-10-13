@@ -47,6 +47,7 @@ from src.models.enrichment import (
     PiOrcidFunding,
 )
 from src.models.job import Job
+from src.models.microsoft_identity import UserMicrosoftIdentity
 from src.models.opportunity import AssessmentDrop, OpportunityAssessment
 from src.models.pi_company import CompanyDiscoveryCoiLedger, CompanyDiscoveryUsage, PiCompany
 from src.models.profile import ResearcherProfile
@@ -78,6 +79,7 @@ from src.models.user import (
 
 __all__ = [
     "User",
+    "UserMicrosoftIdentity",
     "ResearcherProfile",
     "Publication",
     "PublicationCandidate",

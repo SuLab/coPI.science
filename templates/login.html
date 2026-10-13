@@ -25,6 +25,7 @@
                 {% elif error == 'no_code' %}No authorization code received. Please try again.
                 {% elif error == 'state_mismatch' %}Security check failed. Please try again.
                 {% elif error == 'token_error' %}Could not complete authentication. Please try again.
+                {% elif error_message %}{{ error_message }}
                 {% else %}Sign in failed. Please try again.{% endif %}
             </div>
             {% endif %}
@@ -36,6 +37,12 @@
                 </svg>
                 Sign in with ORCID
             </a>
+            {% if microsoft_enabled %}
+            <a href="/auth/microsoft/start"
+               class="flex items-center justify-center w-full mt-3 bg-white border border-gray-300 hover:bg-gray-50 text-gray-800 font-medium py-3 px-6 rounded-lg transition-colors duration-200">
+                Sign in with Microsoft (staff)
+            </a>
+            {% endif %}
 
             <p class="text-center text-xs text-gray-600 mt-4">
                 Don't have an ORCID? <a href="https://orcid.org/register" target="_blank" class="text-indigo-600 hover:underline">Create one for free</a>

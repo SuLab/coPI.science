@@ -1,0 +1,20 @@
+{# A user's linked Microsoft sign-in, for admins (spec 2026-10-13 §5.7). Expects target_user and
+   microsoft_link (src/services/microsoft_identity.py::link_view, or None). #}
+{% if microsoft_link %}
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6" id="microsoft-sign-in">
+    <h2 class="font-semibold text-gray-800 mb-2">Microsoft sign-in</h2>
+    <dl class="grid grid-cols-2 gap-4 text-sm mb-4">
+        <div><dt class="text-gray-500">Signed in as</dt><dd class="font-medium">{{ microsoft_link.sign_in_name or '—' }}</dd></div>
+        <div><dt class="text-gray-500">Tenant ID</dt><dd class="font-medium font-mono text-xs">{{ microsoft_link.tenant_id }}</dd></div>
+        <div><dt class="text-gray-500">Linked</dt><dd class="font-medium">{{ microsoft_link.linked_at | ts("date") }}</dd></div>
+        <div><dt class="text-gray-500">Last used</dt><dd class="font-medium">{{ microsoft_link.last_sign_in_at | ts("date") if microsoft_link.last_sign_in_at else 'never' }}</dd></div>
+    </dl>
+    <form method="POST" action="/admin/users/{{ target_user.id }}/microsoft/unlink"
+          data-confirm="Remove {{ target_user.name }}'s Microsoft sign-in? They will be signed out everywhere.">
+        <button type="submit"
+                class="px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700">
+            Remove Microsoft sign-in
+        </button>
+    </form>
+</div>
+{% endif %}

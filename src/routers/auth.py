@@ -1,6 +1,9 @@
-"""ORCID OAuth flow — /login, /auth/callback, /logout."""
+"""ORCID OAuth flow — /login, /auth/callback, /logout — and the sign-in tail every provider
+shares (complete_sign_in)."""
 
 import logging
+import secrets
+import time
 import uuid
 from datetime import UTC, datetime, timezone
 from urllib.parse import urlsplit
@@ -15,9 +18,13 @@ from starlette.routing import Match
 
 from src.config import get_settings
 from src.database import get_db
+from src.dependencies import IMPERSONATE_KEY, pending_access_payload
 from src.models import AccessAllowlist, User
 from src.models.job import INTERACTIVE_PRIORITY
+from src.services.id_tokens import IdTokenError
+from src.services.microsoft_identity import MICROSOFT_ERROR_MESSAGES
 from src.services.orcid import fetch_orcid_profile
+from src.services.orcid_reauth import validate_reauth_id_token
 from src.services.person_names import is_orcid_like, name_from_machine_source
 from src.services.profile_jobs import enqueue_profile_job_if_absent
 from src.services.session_epoch import (
@@ -27,6 +34,8 @@ from src.services.session_epoch import (
     epoch_in_session,
 )
 from src.services.user_email import assign_user_email
+from src.web.flash import flash
+from src.web.sign_in_session import VIA_ORCID, record_orcid_reauth, record_sign_in
 from src.web.templating import make_templates
 from src.web.urls import page_url
 
@@ -41,6 +50,13 @@ _DB = Depends(get_db)
 ORCID_AUTH_URL = "https://orcid.org/oauth/authorize"
 ORCID_TOKEN_URL = "https://orcid.org/oauth/token"
 ORCID_SCOPE = "/authenticate"
+#: The ORCID re-sign-in before linking Microsoft (spec 2026-10-13 D10): ORCID documents
+#: `prompt` and `auth_time` only for the openid scope, which grants what /authenticate does.
+ORCID_REAUTH_SCOPE = "openid"
+#: Session key of a pending reauth: {"nonce", "started_at"}.
+ORCID_REAUTH_KEY = "orcid_reauth"
+REAUTH_FLOW_MAX_AGE_SECONDS = 600
+_REAUTH_FAILED = "Could not confirm your ORCID sign-in. Please try again."
 
 # Session key holding the path to resume after a successful login.
 POST_LOGIN_KEY = "post_login_redirect"
@@ -152,16 +168,37 @@ async def login(request: Request):
     if is_safe_next_url(request, next_url):
         request.session[POST_LOGIN_KEY] = next_url
     error = request.query_params.get("error")
-    return templates.TemplateResponse(request, "login.html", {"error": error})
+    return templates.TemplateResponse(request, "login.html", {
+        "error": error,
+        "error_message": MICROSOFT_ERROR_MESSAGES.get(error or ""),
+        "microsoft_enabled": getattr(request.app.state, "microsoft_sign_in", None) is not None,
+    })
 
 
 @router.get("/login/start")
-async def login_start(request: Request):
-    """Initiate ORCID OAuth redirect."""
-    if request.session.get("user_id"):
+async def login_start(request: Request, reauth: str | None = None):
+    """Initiate the ORCID OAuth redirect.
+
+    With ``reauth=1`` a signed-in user signs in to ORCID again before linking a Microsoft
+    account: ``prompt=login`` forces the password prompt and the callback checks the ID token's
+    ``auth_time`` (spec 2026-10-13 D10), then returns to /settings. Refused while impersonating.
+    """
+    signed_in = bool(request.session.get("user_id"))
+    if signed_in and (reauth != "1" or request.session.get(IMPERSONATE_KEY)):
         return RedirectResponse(url="/", status_code=302)
     client = _get_oauth_client()
-    authorization_url, state = client.create_authorization_url(ORCID_AUTH_URL)
+    if signed_in:
+        nonce = secrets.token_urlsafe(32)
+        authorization_url, state = client.create_authorization_url(
+            ORCID_AUTH_URL, scope=ORCID_REAUTH_SCOPE, prompt="login", nonce=nonce
+        )
+        request.session[ORCID_REAUTH_KEY] = {"nonce": nonce, "started_at": int(time.time())}
+        request.session[POST_LOGIN_KEY] = "/settings"
+    else:
+        # An abandoned reauth left in a since-revoked session would turn this ordinary
+        # sign-in's callback into a reauth that has no signed-in user to prove.
+        request.session.pop(ORCID_REAUTH_KEY, None)
+        authorization_url, state = client.create_authorization_url(ORCID_AUTH_URL)
     request.session["oauth_state"] = state
     return RedirectResponse(url=authorization_url, status_code=302)
 
@@ -268,12 +305,14 @@ async def _find_or_create_user(
     return user
 
 
-def _post_login_redirect(request: Request, user: User) -> RedirectResponse:
-    """Where a freshly logged-in, allowed user goes; writes the session keys."""
+def _post_login_redirect(request: Request, user: User, *, via: str) -> RedirectResponse:
+    """Where a freshly logged-in, allowed user goes; writes the session keys, including the
+    sign-in stamp (which provider, and when) that linking a Microsoft account checks."""
     # Set session. The epoch is what get_current_user compares with
     # users.session_epoch on every request (spec 2026-10-01 §6.7).
     request.session["user_id"] = str(user.id)
     request.session[SESSION_EPOCH_KEY] = current_epoch(user)
+    record_sign_in(request.session, via)
     request.session.pop("pending_access", None)
 
     # Check for pending invite token — skip onboarding, go straight to acceptance
@@ -308,6 +347,55 @@ def _post_login_redirect(request: Request, user: User) -> RedirectResponse:
     return RedirectResponse(url="/profile", status_code=302)
 
 
+async def complete_sign_in(request: Request, db: AsyncSession, user: User, *,
+                           via: str) -> RedirectResponse:
+    """The end of every sign-in, ORCID or Microsoft (spec 2026-10-13 §5.3): stamp, commit, start
+    a fresh session (A-11), then the access gate and the landing page. One function, so the gate
+    and the session rules cannot drift between providers."""
+    if user.access_status == "allowed":
+        user.last_login_at = datetime.now(timezone.utc)
+    await db.commit()
+    _start_fresh_session(request)
+    if user.access_status != "allowed":
+        request.session["pending_access"] = pending_access_payload(user)
+        return RedirectResponse(url="/access-pending", status_code=302)
+    return _post_login_redirect(request, user, via=via)
+
+
+def _callback_failure(request: Request, code: str, *, reauth: bool) -> RedirectResponse:
+    """Where a failed ORCID callback lands. A reauth belongs to a signed-in user, whom /login
+    would bounce to / and drop the message, so it gets a flash on /settings instead."""
+    if reauth:
+        request.session.pop(POST_LOGIN_KEY, None)
+        flash(request, _REAUTH_FAILED, "error")
+        return RedirectResponse(url="/settings", status_code=302)
+    return RedirectResponse(url=f"/login?error={code}", status_code=302)
+
+
+async def _orcid_reauth_refusal(request: Request, db: AsyncSession, token: dict, orcid_id: str,
+                                reauth: dict) -> RedirectResponse | None:
+    """None when this callback proves the signed-in user just re-entered their ORCID credentials
+    (D10); otherwise the refusal, with the session left as it was."""
+    now = int(time.time())
+    user_id = _session_user_id(request)
+    user = await db.get(User, user_id) if user_id is not None else None
+    started = reauth.get("started_at")
+    if (user is None or user.orcid != orcid_id or request.session.get(IMPERSONATE_KEY)
+            or isinstance(started, bool) or not isinstance(started, int)
+            or now - started > REAUTH_FLOW_MAX_AGE_SECONDS):
+        logger.warning("ORCID reauth refused: not the signed-in account, impersonating, or expired")
+        return _callback_failure(request, "reauth", reauth=True)
+    try:
+        await validate_reauth_id_token(
+            token.get("id_token"), client_id=get_settings().orcid_client_id,
+            nonce=reauth.get("nonce"), orcid=orcid_id, now=now,
+        )
+    except IdTokenError as exc:
+        logger.warning("ORCID reauth refused: %s", exc)
+        return _callback_failure(request, "reauth", reauth=True)
+    return None
+
+
 @router.get("/auth/callback")
 async def auth_callback(
     request: Request,
@@ -316,13 +404,16 @@ async def auth_callback(
     error: str | None = None,
     db: AsyncSession = Depends(get_db),
 ):
-    """Handle ORCID OAuth callback."""
+    """Handle the ORCID OAuth callback: a sign-in, or the re-sign-in /login/start?reauth=1
+    began, which must prove itself (_orcid_reauth_refusal) before it signs in afresh."""
+    reauth = request.session.pop(ORCID_REAUTH_KEY, None)
+    is_reauth = isinstance(reauth, dict)
     if error:
         logger.warning("ORCID OAuth error: %s", error)
-        return RedirectResponse(url="/login?error=oauth_error", status_code=302)
+        return _callback_failure(request, "oauth_error", reauth=is_reauth)
 
     if not code:
-        return RedirectResponse(url="/login?error=no_code", status_code=302)
+        return _callback_failure(request, "no_code", reauth=is_reauth)
 
     # Verify state — FAIL CLOSED. The callback must present a state parameter
     # that matches the random value stashed in the (signed) session by
@@ -336,7 +427,7 @@ async def auth_callback(
     stored_state = request.session.pop("oauth_state", None)
     if not stored_state or not state or state != stored_state:
         logger.warning("OAuth state missing or mismatched — rejecting callback")
-        return RedirectResponse(url="/login?error=state_mismatch", status_code=302)
+        return _callback_failure(request, "state_mismatch", reauth=is_reauth)
 
     settings = get_settings()
     client = _get_oauth_client()
@@ -349,13 +440,18 @@ async def auth_callback(
         )
     except Exception as exc:
         logger.error("Failed to fetch ORCID token: %s", exc)
-        return RedirectResponse(url="/login?error=token_error", status_code=302)
+        return _callback_failure(request, "token_error", reauth=is_reauth)
 
     orcid_id = token.get("orcid")
     orcid_name = token.get("name", "")
 
     if not orcid_id:
-        return RedirectResponse(url="/login?error=no_orcid", status_code=302)
+        return _callback_failure(request, "no_orcid", reauth=is_reauth)
+
+    if is_reauth:
+        refusal = await _orcid_reauth_refusal(request, db, token, orcid_id, reauth)
+        if refusal is not None:
+            return refusal
 
     # Fetch full profile from ORCID API
     try:
@@ -377,27 +473,11 @@ async def auth_callback(
         profile_data=profile_data, allowlist_entry=allowlist_entry,
     )
 
-    if user.access_status == "allowed":
-        user.last_login_at = datetime.now(timezone.utc)
-
-    await db.commit()
-
-    # Session fixation (A-11): nothing from the pre-login session survives the
-    # login except what _start_fresh_session keeps.
-    _start_fresh_session(request)
-
-    # Access gate: users who aren't allowed do not get a session
-    if user.access_status != "allowed":
-        # Stash ORCID + any known email in session for the /access-pending page
-        request.session["pending_access"] = {
-            "user_id": str(user.id),
-            "orcid": orcid_id,
-            "email": user.email,
-            "name": user.name,
-        }
-        return RedirectResponse(url="/access-pending", status_code=302)
-
-    return _post_login_redirect(request, user)
+    response = await complete_sign_in(request, db, user, via=VIA_ORCID)
+    if is_reauth and request.session.get("user_id"):
+        # complete_sign_in started a fresh session; only now may it carry the proof (D10).
+        record_orcid_reauth(request.session)
+    return response
 
 
 def _session_user_id(request: Request) -> uuid.UUID | None:

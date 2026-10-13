@@ -1328,3 +1328,18 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > `'openalex'`, and the old scripts would otherwise meet PMID-less rows labelled as
 > anchored), drops the index and restores 0062's CHECK; the rows stay and appear on the
 > manager's Unanchored papers card for Keep or Exclude.
+
+> **Deploy order for `0066_user_microsoft_identities` — migrate BEFORE the new web image serves;
+> no agent rebuild needed; no backfill.** `0066` creates `user_microsoft_identities`: one row per
+> staff account that linked a Microsoft sign-in, unique on `(tenant_id, object_id)` and on
+> `user_id`, `ON DELETE CASCADE` from `users`. Design:
+> `docs/specs/2026-10-13-microsoft-staff-sign-in-design.md` §5.1.
+>
+> *Old code on the new schema* is safe: nothing old reads the table. *New code on the old schema*
+> is not: `/settings` and every Microsoft route query it and raise `UndefinedTable`. **Agent
+> image:** no rebuild needed — the engine imports `src.models` but never queries this table. The
+> `CREATE TABLE` takes no lock on an existing table. **No backfill:** an empty table means nobody
+> has linked yet. The feature stays off until `MICROSOFT_CLIENT_ID` is set (runbook in
+> `docs/operations/pis-and-access.md`). Commit before building.
+>
+> Rollback: `alembic downgrade 0065` drops the table and every link; staff sign in with ORCID.

@@ -132,7 +132,8 @@ STAFF_KEYS = frozenset(
     "jobs review revisions draft discovery company_suggestions companies_suggested activation_blockers activation_blocked activated blockers has_bot_token can_retry_profile profile_status agent_status email email_verified_at name_sanitized_at onboarding_complete claimed_at last_login_at".split()
 )
 ADMIN_KEYS = frozenset(
-    "raw_verdict raw_opinion raw_opinion_truncated unplaced_turns held_counts in_doubt".split()
+    "raw_verdict raw_opinion raw_opinion_truncated unplaced_turns held_counts in_doubt "
+    "microsoft_link".split()
 )
 REVIEWER_SCHEMAS = {
     "PiGrantIdentity": SCHEMAS["PiGrantIdentity"] - {"candidates"},
@@ -178,6 +179,7 @@ VIEW_FIELDS = frozenset(
         "institution institution_filter inventor is_consult is_hub is_self is_subproject is_verdict_message items "
         "jhu_tenure_start job_id jobs journal key key_points key_targets keywords kind lab lab_filter "
         "lab_options label last last_error last_fy last_login_at latency_ms le links log_id "
+        "last_sign_in_at linked_at microsoft_link sign_in_name tenant_id "
         "log_scan_limit logs_scanned manager max max_attempts max_retries max_tokens maxsplit mean "
         "mechanism message message_total message_ts messages messages_available messages_json methods "
         "methods_text mid_scale mid_scale_count min minutes missing_domains missing_ok model "

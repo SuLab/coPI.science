@@ -23,6 +23,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 from testcontainers.postgres import PostgresContainer
 
+# Suite-wide, so a test module takes `fake_idp` as a parameter without importing it (an
+# imported fixture used as a parameter is a ruff F811 redefinition).
+from tests.oidc_fakes import fake_idp  # noqa: F401
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -195,6 +199,9 @@ async def asgi_app(db_session):
     from src.main import create_app
 
     app = create_app()
+    # Microsoft sign-in off unless a test turns it on: create_app() reads the host's .env, and
+    # no test may depend on it (spec 2026-10-13 §8).
+    app.state.microsoft_sign_in = None
 
     async def _override_get_db():
         yield db_session

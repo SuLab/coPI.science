@@ -158,6 +158,12 @@ NON_SECRET_STR_FIELDS = {
     # Channel names for the run-start announcement — public channel names,
     # not credentials.
     "run_start_announce_channels",
+    # Microsoft sign-in (spec 2026-10-13 §5.2): a public client id, a redirect URL, tenant GUIDs
+    # and the PUBLIC certificate. The private key (microsoft_private_key_b64) is masked by name.
+    "microsoft_client_id",
+    "microsoft_redirect_uri",
+    "microsoft_allowed_tenant_ids",
+    "microsoft_certificate_b64",
 }
 
 
@@ -255,3 +261,9 @@ def test_the_inbound_email_settings_are_retired():
                  "ses_inbound_s3_bucket", "ses_inbound_s3_prefix",
                  "llm_agent_model_sonnet"):
         assert name not in Settings.model_fields, name
+
+
+def test_the_microsoft_private_key_is_masked():
+    s = Settings(_env_file=None, microsoft_private_key_b64="sentinel-private-key")
+    assert "sentinel-private-key" not in repr(s) + str(s)
+    assert s.microsoft_private_key_b64 == "sentinel-private-key"
