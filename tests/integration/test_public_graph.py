@@ -312,7 +312,7 @@ async def test_a_decision_exactly_on_the_shared_boundary_lands_in_exactly_one_wi
 
 
 async def test_cabo_window_start_is_inclusive_and_its_end_is_exclusive(
-    client, db_session, roster, run
+    client, db_session, roster, run, monkeypatch
 ):
     """Both edges of a closed-open window, at the exact instant, plus proof that
     the excluded row is otherwise perfectly renderable.
@@ -343,6 +343,8 @@ async def test_cabo_window_start_is_inclusive_and_its_end_is_exclusive(
     # Control: the excluded row is a normal, public, well-formed proposal — it
     # renders on /scripps-graph, whose window has no upper bound. So "CABO-AT-END
     # is absent" is about the window arithmetic, not about a malformed fixture.
+    # (young is off /scripps-graph by directory exclusion; lift it for the control.)
+    monkeypatch.setattr(public_mod, "_SCRIPPS_GRAPH_EXCLUDED", frozenset())
     scripps = await _get(client, "/scripps-graph")
     assert "CABO-AT-END" in scripps.text, (
         "control leg failed: the excluded decision does not render anywhere, so "
@@ -808,7 +810,7 @@ class TestScrippsGraphUsesTheCohort:
 
         assert "droujinine" not in public_mod._SCRIPPS  # the premise
 
-        a, b = await _two_agents_with_a_proposal(db_session, "droujinine", "good")
+        a, b = await _two_agents_with_a_proposal(db_session, "droujinine", "bollong")
         cohort = Cohort(name="scripps-investigators", description="d")
         db_session.add(cohort)
         await db_session.flush()
@@ -818,7 +820,25 @@ class TestScrippsGraphUsesTheCohort:
 
         payload = _payload(await _get(client, "/scripps-graph"))
 
-        assert {n["id"] for n in payload["nodes"]} == {"droujinine", "good"}
+        assert {n["id"] for n in payload["nodes"]} == {"droujinine", "bollong"}
+
+    async def test_members_missing_from_the_faculty_directory_are_left_off(
+        self, client, db_session
+    ):
+        from src.models import Cohort, CohortMembership
+
+        await _two_agents_with_a_proposal(db_session, "droujinine", "bollong")
+        await _two_agents_with_a_proposal(db_session, "good", "paulson")
+        cohort = Cohort(name="scripps-investigators", description="d")
+        db_session.add(cohort)
+        await db_session.flush()
+        for aid in ("droujinine", "bollong", "good", "paulson"):
+            db_session.add(CohortMembership(cohort_id=cohort.id, agent_id=aid))
+        await db_session.commit()
+
+        payload = _payload(await _get(client, "/scripps-graph"))
+
+        assert {n["id"] for n in payload["nodes"]} == {"droujinine", "bollong"}
 
     async def test_falls_back_to_hardcoded_set_when_cohort_absent(
         self, client, db_session
@@ -838,11 +858,19 @@ class TestScrippsGraphUsesTheCohort:
             "cravatt", "petrascheck"
         }
 
-    async def test_every_node_colors_as_scripps(self, client, db_session):
-        """On a Scripps-only view nothing may fall through to 'Other'."""
-        from src.models import Cohort, CohortMembership
+    async def test_nodes_color_by_normalized_department(self, client, db_session):
+        """Every node on this view is Scripps, so the color key is the PI's
+        department, normalized across the free-text spellings in users.department."""
+        from sqlalchemy import update
 
-        a, b = await _two_agents_with_a_proposal(db_session, "droujinine", "good")
+        from src.models import Cohort, CohortMembership, User
+
+        a, b = await _two_agents_with_a_proposal(db_session, "droujinine", "bollong")
+        await db_session.execute(
+            update(User)
+            .where(User.email == f"{a}@example.org")
+            .values(department="Department of Integrative Structural & Computational Biology (ISCB)")
+        )
         cohort = Cohort(name="scripps-investigators", description="d")
         db_session.add(cohort)
         await db_session.flush()
@@ -850,9 +878,14 @@ class TestScrippsGraphUsesTheCohort:
             db_session.add(CohortMembership(cohort_id=cohort.id, agent_id=aid))
         await db_session.commit()
 
-        payload = _payload(await _get(client, "/scripps-graph"))
+        response = await _get(client, "/scripps-graph")
+        by_id = {n["id"]: n["institution"] for n in _payload(response)["nodes"]}
 
-        assert {n["institution"] for n in payload["nodes"]} == {"Scripps"}
+        assert by_id == {
+            "droujinine": "Integrative Structural & Computational Biology",
+            "bollong": "Department not listed",
+        }
+        assert "Integrative Structural &amp; Computational Biology" in response.text  # legend
 
     async def test_cabo_graph_coloring_is_untouched_by_the_cohort(
         self, client, db_session

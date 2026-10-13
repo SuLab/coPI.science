@@ -122,6 +122,14 @@ _OTHER_INST = {
 # /scripps-graph selects its nodes from this cohort, not from _SCRIPPS.
 SCRIPPS_COHORT_NAME = "scripps-investigators"
 
+# Cohort members left off /scripps-graph because they are not in the
+# scripps.edu faculty directory (checked 2026-10-13), which is the page's
+# source of truth for department coloring. They stay in the cohort itself.
+_SCRIPPS_GRAPH_EXCLUDED = frozenset({
+    "alanjary", "chatterjee", "good", "hogenesch", "maillie", "mcnamara",
+    "paulson", "williams", "young",
+})
+
 
 async def _scripps_agent_ids(db: AsyncSession) -> set[str] | None:
     """Agent IDs in the scripps-investigators cohort, or None if there are none.
@@ -465,6 +473,84 @@ def _institution_legend(nodes: list[dict]) -> tuple[list[dict], dict[str, str]]:
     return legend, color_map
 
 
+# Scripps departments, for /scripps-graph's department coloring. users.department
+# is free text (ISCB alone appears six ways), so each raw value is matched by
+# substring against these patterns in order and the first hit wins. Order
+# matters: "molecular and cellular biology" and "molecular experimental medicine"
+# must be tried before the bare "molecular medicine", and a PI listing two
+# departments ("... and Dept of Molecular Medicine") resolves to the first match.
+# Colors are fixed per department so the graph does not recolor as PIs join.
+_DEPARTMENT_PATTERNS: list[tuple[str, str]] = [
+    ("calibr", "Calibr-Skaggs"),
+    ("integrative structural", "Integrative Structural & Computational Biology"),
+    ("iscb", "Integrative Structural & Computational Biology"),
+    ("immunology", "Immunology & Microbiology"),
+    ("molecular and cellular biology", "Molecular & Cellular Biology"),
+    ("molecular experimental medicine", "Molecular & Experimental Medicine"),
+    ("molecular medicine", "Molecular Medicine"),
+    ("neuroscience", "Neuroscience"),
+    ("chemistry", "Chemistry"),
+    ("artificial intelligence", "AI Enablement"),
+]
+_DEPARTMENT_COLORS: dict[str, str] = {
+    "Integrative Structural & Computational Biology": "#4C72B0",
+    "Chemistry": "#C44E52",
+    "Molecular & Cellular Biology": "#2E8B57",
+    "Molecular Medicine": "#7B61B0",
+    "Molecular & Experimental Medicine": "#A0522D",
+    "Immunology & Microbiology": "#D9732B",
+    "Neuroscience": "#0F766E",
+    "Calibr-Skaggs": "#C2185B",
+    "AI Enablement": "#334155",
+}
+_DEPARTMENT_UNKNOWN = "Department not listed"
+
+
+def _department_label(raw: str | None) -> str:
+    """Map a free-text users.department to its canonical Scripps department."""
+    if not raw or not raw.strip():
+        return _DEPARTMENT_UNKNOWN
+    norm = re.sub(r"[^a-z]+", " ", raw.lower().replace("&", " and ")).strip()
+    norm = re.sub(r"\s+", " ", norm)
+    for pattern, label in _DEPARTMENT_PATTERNS:
+        if pattern in norm:
+            return label
+    return re.sub(r"^(?:department|dept\.?) of\s+", "", raw.strip(), flags=re.I)
+
+
+def _department_legend(nodes: list[dict]) -> tuple[list[dict], dict[str, str]]:
+    """Legend + color map for department-colored nodes (count desc, unknown last).
+
+    Unlike :func:`_institution_legend`, single-PI departments are kept: there are
+    only a handful of departments, and folding one into "Other" would hide it.
+    """
+    counts = Counter(n["institution"] for n in nodes)
+    reserved = set(_DEPARTMENT_COLORS.values())
+    palette = [c for c in _INSTITUTION_PALETTE if c not in reserved]
+    legend, color_map = [], {}
+    palette_i = 0
+    for label, count in sorted(
+        ((k, v) for k, v in counts.items() if k != _DEPARTMENT_UNKNOWN),
+        key=lambda kv: (-kv[1], kv[0].lower()),
+    ):
+        color = _DEPARTMENT_COLORS.get(label)
+        if color is None:
+            color = palette[palette_i % len(palette)]
+            palette_i += 1
+        color_map[label] = color
+        legend.append({"label": label, "color": color, "count": count})
+    if counts.get(_DEPARTMENT_UNKNOWN):
+        color_map[_DEPARTMENT_UNKNOWN] = _INSTITUTION_FALLBACK_COLOR
+        legend.append(
+            {
+                "label": _DEPARTMENT_UNKNOWN,
+                "color": _INSTITUTION_FALLBACK_COLOR,
+                "count": counts[_DEPARTMENT_UNKNOWN],
+            }
+        )
+    return legend, color_map
+
+
 @router.get("/", response_class=HTMLResponse)
 async def landing(request: Request):
     """Public landing page. Logged-in users redirect to their profile."""
@@ -683,7 +769,11 @@ async def _build_graph_payload(
         active_rows = nodes_result.fetchall()
     elif scripps_only:
         nodes_result = await db.execute(
-            text("SELECT agent_id, pi_name, bot_name FROM agents ORDER BY pi_name")
+            text(
+                "SELECT a.agent_id, a.pi_name, a.bot_name, u.department "
+                "FROM agents a LEFT JOIN users u ON u.id = a.user_id "
+                "ORDER BY a.pi_name"
+            )
         )
         selector = await _scripps_agent_ids(db)
         if selector is None:
@@ -694,7 +784,10 @@ async def _build_graph_payload(
                 SCRIPPS_COHORT_NAME,
             )
             selector = _SCRIPPS
-        active_rows = [r for r in nodes_result.fetchall() if r.agent_id in selector]
+        active_rows = [
+            r for r in nodes_result.fetchall()
+            if r.agent_id in selector and r.agent_id not in _SCRIPPS_GRAPH_EXCLUDED
+        ]
     elif all_agents:
         nodes_result = await db.execute(
             text(
@@ -719,9 +812,10 @@ async def _build_graph_payload(
         inst_map = _group_institutions([row.institution for row in active_rows])
         institution_of = lambda row: inst_map[row.institution]  # noqa: E731
     elif scripps_only:
-        # Every node on this view is Scripps by construction. Without this branch
-        # the nine cohort members absent from _SCRIPPS would colour as "Other".
-        institution_of = lambda row: "Scripps"  # noqa: E731
+        # Every node on this view is Scripps by construction, so color by
+        # department instead. The value rides in the "institution" field because
+        # that is the key the shared template colors and labels nodes by.
+        institution_of = lambda row: _department_label(row.department)  # noqa: E731
     else:
         institution_of = lambda row: _institution_for(row.agent_id)  # noqa: E731
 
@@ -921,6 +1015,7 @@ async def cabo_graph(request: Request, db: AsyncSession = Depends(get_db)):
 async def scripps_graph(request: Request, db: AsyncSession = Depends(get_db)):
     """Scripps-only slice of the collaboration network."""
     nodes, links = await _cached_graph_payload(db, scripps_only=True)
+    legend, color_map = _department_legend(nodes)
     return _render_graph(
         request,
         {
@@ -931,8 +1026,13 @@ async def scripps_graph(request: Request, db: AsyncSession = Depends(get_db)):
             "proposal_count": sum(link["weight"] for link in links),
             "page_title": "Scripps Research collaboration network",
             "pi_label": "Scripps PIs",
-            "legend": [],
-            "color_map": _LEGACY_COLOR_MAP,
+            "legend": legend,
+            "color_map": color_map,
+            # Wide, short canvas: pull hard toward the horizontal midline and
+            # barely at all toward the vertical one, so the layout spreads into
+            # a horizontal oval instead of a disc.
+            "force_x_strength": 0.012,
+            "force_y_strength": 0.3,
             "since_label": "since March 1, 2026",
         },
     )

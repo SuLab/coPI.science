@@ -361,6 +361,19 @@
   const COLORS = JSON.parse((colorMapEl && colorMapEl.textContent) || "{}");
   const FALLBACK_COLOR = "#94a3b8";
   const colorFor = (inst) => COLORS[inst] || FALLBACK_COLOR;
+  // White labels wash out on light fills (Scripps gold, pale palette entries):
+  // switch to dark text when the fill's WCAG relative luminance is high enough
+  // that dark text has the better contrast ratio.
+  const textColorFor = (hex) => {
+    const m = /^#?([0-9a-f]{6})$/i.exec(hex || "");
+    if (!m) return "#ffffff";
+    const lin = (c) => (c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
+    const n = parseInt(m[1], 16);
+    const L = 0.2126 * lin(((n >> 16) & 255) / 255)
+            + 0.7152 * lin(((n >> 8) & 255) / 255)
+            + 0.0722 * lin((n & 255) / 255);
+    return L > 0.22 ? "#1e293b" : "#ffffff";
+  };
 
   const root = svg.append("g");
 
@@ -402,6 +415,11 @@
   const approxPillH = (d) => fontSize(d) + 14;
   const collideRadius = (d) => Math.max(d._w || approxPillW(d), d._h || approxPillH(d)) / 2 + 6;
 
+  // Centering pull per axis; a weak x and strong y spreads the layout into a
+  // horizontal oval. Routes may override the defaults.
+  const FORCE_X_STRENGTH = {{ force_x_strength | default(0.04) }};
+  const FORCE_Y_STRENGTH = {{ force_y_strength | default(0.18) }};
+
   const simulation = d3.forceSimulation(data.nodes)
     .force(
       "link",
@@ -411,8 +429,8 @@
     )
     .force("charge", d3.forceManyBody().strength(-420))
     .force("center", d3.forceCenter(width / 2, height / 2))
-    .force("x", d3.forceX(width / 2).strength(0.04))
-    .force("y", d3.forceY(height / 2).strength(0.18))
+    .force("x", d3.forceX(width / 2).strength(FORCE_X_STRENGTH))
+    .force("y", d3.forceY(height / 2).strength(FORCE_Y_STRENGTH))
     .force("collide", d3.forceCollide().radius(collideRadius))
     .alphaDecay(0.025)
     .velocityDecay(0.35);
@@ -507,6 +525,7 @@
 
   node.append("text")
     .style("font-size", (d) => fontSize(d) + "px")
+    .style("fill", (d) => textColorFor(colorFor(d.institution)))
     .text((d) => d.label);
 
   // Measure rendered text and size pill rects to fit. Re-run collide once sized.
@@ -802,8 +821,8 @@
   window.addEventListener("resize", () => {
     const w = window.innerWidth, h = window.innerHeight;
     simulation.force("center", d3.forceCenter(w / 2, h / 2));
-    simulation.force("x", d3.forceX(w / 2).strength(0.04));
-    simulation.force("y", d3.forceY(h / 2).strength(0.18));
+    simulation.force("x", d3.forceX(w / 2).strength(FORCE_X_STRENGTH));
+    simulation.force("y", d3.forceY(h / 2).strength(FORCE_Y_STRENGTH));
     simulation.alpha(0.3).restart();
   });
 })();
