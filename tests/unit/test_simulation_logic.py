@@ -6297,8 +6297,13 @@ class TestInterestingPostsRestoredOnException:
             post_id="orig.0", channel="general", sender_agent_id="b",
             content_snippet="x", posted_at=0.0,
         )
+        # A private-channel post still bypasses the block (a PI-priority post
+        # in a public channel no longer does).
+        from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE
+
+        engine._channel_visibility["collab-a-b"] = VISIBILITY_COLLAB_PRIVATE
         avail_eligible = PostRef(
-            post_id="avail.0", channel="general", sender_agent_id="b",
+            post_id="avail.0", channel="collab-a-b", sender_agent_id="b",
             content_snippet="y", posted_at=1.0, pi_priority=True,
         )
         agent.state.interesting_posts = [orig_ineligible, avail_eligible]

@@ -278,6 +278,12 @@ REBUILD_WINDOW_S = 14 * 24 * 3600  # 14 days
 # SchultzBot (the reunion host) so he stays active without a human reviewer.
 UNBLOCK_EXEMPT_AGENTS = {"schultz"}
 
+# Posts per scan call in the post-unblock catch-up. Scan refusals are
+# content-driven, so a refused batch loses its posts; small batches keep that
+# loss near the size of an ordinary scan (~2-3 posts) instead of the whole
+# window. See SimulationEngine._phase2_scan_filter.
+_SCAN_CATCHUP_BATCH = 5
+
 # A thread parked for this many of its agent's own turns is dropped from
 # active_threads entirely. _is_parked_thread already excludes a parked thread
 # from load/rate accounting, but nothing else evicts it — a counterpart that
@@ -1373,13 +1379,86 @@ class SimulationEngine:
     # Phase 2: Scan & Filter
     # ------------------------------------------------------------------
 
+    def _unreviewed_proposal_block_active(self, agent: Agent) -> bool:
+        """Whether ``agent`` is held by the unreviewed-proposal block.
+
+        True when it has at least ``unreviewed_proposal_block_count`` unreviewed
+        non-funding proposals and is not in ``UNBLOCK_EXEMPT_AGENTS``. Phase 5
+        then acts only on funding and collab_private posts, and Phase 2 scans
+        only the posts that survive the block. Both read this one
+        predicate so they cannot disagree about who is blocked.
+        """
+        if agent.agent_id in UNBLOCK_EXEMPT_AGENTS:
+            return False
+        unreviewed_non_funding_count = sum(
+            1 for p in agent.state.pending_proposals
+            if not p.reviewed and not self.message_log.is_funding_thread(p.thread_id)
+        )
+        return unreviewed_non_funding_count >= get_settings().unreviewed_proposal_block_count
+
+    def _survives_unreviewed_block(self, entry: LogEntry) -> bool:
+        """Whether Phase 5 can still act on this top-level post under the block.
+
+        Mirrors the bypass in ``_phase5_new_post``: funding posts and
+        collab_private posts. A private post is recognised by either its persisted visibility or the
+        engine's channel map; over-including one only costs a scan, while
+        missing one would stall a PI-requested refinement.
+        """
+        return (
+            is_funding_post(entry.content)
+            or entry.visibility == VISIBILITY_COLLAB_PRIVATE
+            or self._channel_visibility.get(entry.channel) == VISIBILITY_COLLAB_PRIVATE
+        )
+
+    def _seed_scan_skip_marker(self, agent: Agent) -> None:
+        """At a state rebuild, treat an already-blocked agent as skipping since 0.
+
+        The skip marker lives in memory only, so without this an agent blocked
+        across a restart (or a roster re-add) would get no catch-up when its
+        block lifts. The catch-up window and cap still bound what is replayed.
+        """
+        if (
+            get_settings().scan_skip_regular_posts_when_blocked
+            and self._unreviewed_proposal_block_active(agent)
+        ):
+            agent.state.scan_regular_skipped_since = 0.0
+
     async def _phase2_scan_filter(self, agent: Agent) -> None:
-        """Scan new top-level posts and decide which to add to interesting_posts."""
+        """Scan new top-level posts and decide which to add to interesting_posts.
+
+        While the unreviewed-proposal block is active, only posts that survive
+        it are evaluated — the rest could never be acted on, so scanning them
+        (and pruning the list they fill) is wasted spend. The first scan after
+        the block lifts also evaluates the regular posts skipped meanwhile,
+        bounded by ``scan_catchup_window_hours`` / ``scan_catchup_max_posts``,
+        in batches of ``_SCAN_CATCHUP_BATCH`` so one refused batch loses only
+        its own posts, as any failed scan does.
+        """
         settings = get_settings()
+        cursor = agent.state.last_seen_cursor
+        since = cursor
+
+        blocked = (
+            settings.scan_skip_regular_posts_when_blocked
+            and self._unreviewed_proposal_block_active(agent)
+        )
+        if blocked:
+            if agent.state.scan_regular_skipped_since is None:
+                agent.state.scan_regular_skipped_since = cursor
+                logger.info(
+                    "[%s] Phase 2: unreviewed-proposal block active — scanning "
+                    "only funding/private posts until it lifts",
+                    agent.agent_id,
+                )
+        elif agent.state.scan_regular_skipped_since is not None:
+            # The block lifted since the last turn: reach back over the skipped
+            # window, but no further than the catch-up horizon.
+            horizon = time.time() - settings.scan_catchup_window_hours * 3600
+            since = min(cursor, max(agent.state.scan_regular_skipped_since, horizon))
 
         # Get new top-level posts since agent's last turn
         new_posts = self.message_log.get_new_top_level_posts(
-            since=agent.state.last_seen_cursor,
+            since=since,
             channels=agent.state.subscribed_channels,
             exclude_agent_id=agent.agent_id,
             allowed_sender_ids=agent.allowed_sender_ids,
@@ -1390,10 +1469,48 @@ class SimulationEngine:
         known_ids.update(agent.state.active_threads.keys())
         new_posts = [p for p in new_posts if p.ts not in known_ids]
 
-        if not new_posts:
+        skipped: list[LogEntry] = []
+        if blocked:
+            new_posts = [p for p in new_posts if self._survives_unreviewed_block(p)]
+        elif since < cursor:
+            # Catch-up. Up to the cursor, the posts that survive the block were
+            # already scanned while blocked; only the skipped regular ones are
+            # owed a scan — the newest scan_catchup_max_posts of them.
+            skipped = sorted(
+                (p for p in new_posts
+                 if p.posted_at <= cursor and not self._survives_unreviewed_block(p)),
+                key=lambda p: p.posted_at,
+            )
+            keep = max(settings.scan_catchup_max_posts, 0)
+            skipped = skipped[-keep:] if keep else []
+            new_posts = [p for p in new_posts if p.posted_at > cursor]
+            logger.info(
+                "[%s] Phase 2: unreviewed-proposal block lifted — catching up on "
+                "%d skipped post(s)",
+                agent.agent_id, len(skipped),
+            )
+
+        if not new_posts and not skipped:
+            if not blocked:
+                agent.state.scan_regular_skipped_since = None
             logger.debug("[%s] Phase 2: No new posts to evaluate", agent.agent_id)
             return
 
+        for start in range(0, len(skipped), _SCAN_CATCHUP_BATCH):
+            await self._scan_posts(agent, skipped[start:start + _SCAN_CATCHUP_BATCH])
+        # Retired only once the catch-up batches have run: an exception escaping
+        # one leaves the window for the next turn.
+        if not blocked:
+            agent.state.scan_regular_skipped_since = None
+        if new_posts:
+            await self._scan_posts(agent, new_posts)
+
+        # Prune if over cap
+        if len(agent.state.interesting_posts) > settings.interesting_posts_cap:
+            await self._phase2_prune(agent)
+
+    async def _scan_posts(self, agent: Agent, posts: list[LogEntry]) -> None:
+        """One Phase 2 scan call: add the posts the agent selects to interesting_posts."""
         # Build post data for LLM
         post_dicts = [
             {
@@ -1402,7 +1519,7 @@ class SimulationEngine:
                 "sender": p.sender_name,
                 "content_snippet": p.content,
             }
-            for p in new_posts
+            for p in posts
         ]
 
         system_prompt, messages = agent.build_phase2_scan_prompt(post_dicts)
@@ -1422,7 +1539,7 @@ class SimulationEngine:
             selected_ids = set(result.get("selected_post_ids", []))
 
             # Add selected posts to interesting_posts
-            for post in new_posts:
+            for post in posts:
                 if post.ts in selected_ids:
                     foa_num = None
                     snippet_len = 200
@@ -1440,14 +1557,10 @@ class SimulationEngine:
 
             logger.info(
                 "[%s] Phase 2: Evaluated %d posts, added %d to interesting",
-                agent.agent_id, len(new_posts), len(selected_ids),
+                agent.agent_id, len(posts), len(selected_ids),
             )
         except Exception as exc:
             logger.error("[%s] Phase 2 scan failed: %s", agent.agent_id, exc)
-
-        # Prune if over cap
-        if len(agent.state.interesting_posts) > settings.interesting_posts_cap:
-            await self._phase2_prune(agent)
 
     async def _phase2_prune(self, agent: Agent) -> None:
         """Prune interesting_posts to ≤ cap."""
@@ -2804,17 +2917,10 @@ class SimulationEngine:
 
         # Check preconditions
         at_thread_threshold = self._non_funding_thread_count(agent) >= settings.active_thread_threshold
-        unreviewed_non_funding_count = sum(
-            1 for p in agent.state.pending_proposals
-            if not p.reviewed and not self.message_log.is_funding_thread(p.thread_id)
-        )
-        has_unreviewed_non_funding = (
-            agent.agent_id not in UNBLOCK_EXEMPT_AGENTS
-            and unreviewed_non_funding_count >= settings.unreviewed_proposal_block_count
-        )
+        has_unreviewed_non_funding = self._unreviewed_proposal_block_active(agent)
         blocked_for_regular = at_thread_threshold or has_unreviewed_non_funding
 
-        # Check for PI-priority posts — these bypass random skip and blocking
+        # Check for PI-priority posts — these bypass the random skip
         has_pi_priority = any(p.pi_priority for p in agent.state.interesting_posts)
 
         if not has_pi_priority and random.random() < settings.phase5_skip_probability:
@@ -2833,7 +2939,7 @@ class SimulationEngine:
             is_funding = self.message_log.is_funding_thread(post.post_id)
             # Posts in collab_private channels are by definition PI-engaged
             # refinement; they must bypass the unreviewed-proposal block for
-            # the same reason pi_priority and funding posts do. Without this,
+            # the same reason funding posts do. Without this,
             # an agent with any unrelated pending proposal would silently skip
             # the handover message that migrated the conversation into the
             # private channel in the first place.
@@ -2847,8 +2953,12 @@ class SimulationEngine:
             if post.channel in self._finalized_private_channels:
                 continue
 
-            # PI-priority, funding, and private-channel posts bypass regular blocking
-            if blocked_for_regular and not is_funding and not post.pi_priority and not is_private:
+            # Only funding and private-channel posts bypass regular blocking —
+            # the same set the post-LLM block check below accepts. A
+            # PI-priority post in a public channel waits for the block to
+            # lift: offering it here only bought an Opus call whose reply was
+            # then rejected, every turn until the block lifted.
+            if blocked_for_regular and not is_funding and not is_private:
                 continue
 
             # Turn-taking in flat private channels: don't reply if we were
@@ -6641,6 +6751,18 @@ class SimulationEngine:
             latest_ts = max(e.posted_at for e in self.message_log._entries)
             for agent in self.agents.values():
                 agent.state.last_seen_cursor = latest_ts
+        for agent in self.agents.values():
+            self._seed_scan_skip_marker(agent)
+        # Logged so a restart can be checked against the pre-restart blocked
+        # set: the block is rebuilt from the DB, never carried over in memory.
+        blocked_ids = sorted(
+            a.agent_id for a in self.agents.values()
+            if self._unreviewed_proposal_block_active(a)
+        )
+        logger.info(
+            "Unreviewed-proposal block active for %d agent(s) after rebuild: %s",
+            len(blocked_ids), ", ".join(blocked_ids) or "-",
+        )
 
         # Log rebuild summary
         for agent in self.agents.values():
@@ -6942,6 +7064,7 @@ class SimulationEngine:
             has_prior_state = bool(has_own_messages or reopened_rows or call_count)
             if has_prior_state:
                 agent.state.last_seen_cursor = self.message_log.latest_timestamp
+            self._seed_scan_skip_marker(agent)
             logger.info(
                 "[roster] Rebuilt state for %s agent %s: %d active thread(s), "
                 "%d proposal(s), %d API call(s)",
@@ -7972,7 +8095,8 @@ class SimulationEngine:
         interesting_posts as a PI-priority post carrying the guidance as
         pi_context — mirroring how the legacy public reopen force-seeds an
         active_thread. pi_priority bypasses the random Phase 5 skip and the
-        unreviewed-proposal block; the existing private-channel turn-taking
+        collab_private channel bypasses the unreviewed-proposal block; the
+        existing private-channel turn-taking
         (don't reply if we posted last) decides which bot goes first.
 
         Fires once per thread per process (tracked in

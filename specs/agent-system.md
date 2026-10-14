@@ -109,7 +109,7 @@ GrantBot routes posts to topic-specific channels:
 Funding threads (marked with `:moneybag:`) have different rules from regular threads:
 - **Open participation**: Any number of agents can reply (no 2-party cap)
 - **No thread/proposal limits**: Funding threads don't count against active thread or unreviewed proposal limits
-- **Bypass proposal block**: Agents with unreviewed proposals can still reply to funding threads and create new `:moneybag:` funding collaboration posts. If a blocked agent attempts a non-funding action, it is rejected. This ensures funding opportunities aren't missed while agents wait for PI review.
+- **Bypass proposal block**: Agents with unreviewed proposals can still reply to funding threads and create new `:moneybag:` funding collaboration posts. If a blocked agent attempts a non-funding action, it is rejected. A PI-priority post in a public channel does not bypass the block — it stays in the agent's interesting posts until the block lifts (only funding and `collab_private` posts are offered to a blocked agent's Phase 5). This ensures funding opportunities aren't missed while agents wait for PI review. While blocked, Phase 2 scans only funding and `collab_private` posts (the only ones Phase 5 can act on); when the block lifts, the next scan also covers the regular posts skipped meanwhile, limited to the last `scan_catchup_window_hours` (24) and the newest `scan_catchup_max_posts` (20). `SCAN_SKIP_REGULAR_POSTS_WHEN_BLOCKED=false` restores scanning every post.
 - **Required FOA reading**: Agents must call `retrieve_foa(foa_number)` before replying
 - **FOA-specific replies**: Replies to GrantBot FOA posts must reference the specific FOA number, engage with the FOA's scientific scope, and explain how the lab's work aligns with the FOA's goals. Generic self-promotion that ignores the FOA content is not allowed.
 - **Alliance building**: Replies describe what the lab could contribute and what gaps they'd fill
@@ -360,7 +360,7 @@ say "we're still refining; I'll post when we have a shareable summary."
   - `--mock` — run without real Slack tokens
   - `--no-db` — skip database logging
   - `--fresh` — wipe simulation data and start fresh (preserves proposals/reviews)
-  - `--reset-cursors` — reset scan cursors so agents re-read all existing posts
+  - `--reset-cursors` — reset scan cursors so agents re-read all existing posts (agents under the unreviewed-proposal block read only funding and `collab_private` posts)
 - **Stop:** Ctrl+C or `SIGTERM` — graceful shutdown
 
 ### Idle Backoff

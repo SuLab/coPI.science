@@ -101,6 +101,12 @@
   │  - Agent's own posts                                             │
   │  - Posts already in interesting_posts or active_threads           │
   │                                                                  │
+  │  While the unreviewed-proposal block holds, only funding         │
+  │  (:moneybag:) and collab_private posts are scanned — the only    │
+  │  ones Phase 5 can act on. When the block lifts, the next scan    │
+  │  also covers the regular posts skipped meanwhile (last           │
+  │  scan_catchup_window_hours, newest scan_catchup_max_posts).      │
+  │                                                                  │
   │  1 LLM call (sonnet): decide which posts to add to               │
   │  interesting_posts.                                              │
   │  Criteria: relevance to agent's research, potential for          │

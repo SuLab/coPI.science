@@ -364,6 +364,17 @@ class Settings(BaseSettings):
     unreviewed_proposal_block_count: int = 2  # block Phase 5 new posts at N+ unreviewed non-funding proposals
     max_thread_messages: int = 12           # system-enforced thread close
     interesting_posts_cap: int = 20         # triggers prune
+    # Phase 2 scan under the unreviewed-proposal block. Phase 5 of a blocked
+    # agent discards every post except funding and collab_private ones, so
+    # scanning (and pruning) regular posts only refilled a list it could not act
+    # on — most of the scan+prune spend in the 2026-10 usage audit. When True, a
+    # blocked agent scans only posts Phase 5 can still act on; once the block
+    # lifts, the regular posts it skipped are scanned once, limited to the last
+    # scan_catchup_window_hours and the newest scan_catchup_max_posts of them.
+    # False restores scanning every post regardless of the block.
+    scan_skip_regular_posts_when_blocked: bool = True
+    scan_catchup_window_hours: float = 24.0
+    scan_catchup_max_posts: int = 20
     turn_delay_seconds: float = 0.0         # pause between turns
     phase5_skip_probability: float = 0.0    # chance agent skips new post
     daily_post_cap: int = 5                 # max new top-level posts per agent per day

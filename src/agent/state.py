@@ -92,6 +92,12 @@ class AgentState:
     pending_proposals: list[ProposalRef] = field(default_factory=list)
     last_selected: float = 0.0
     last_seen_cursor: float = 0.0  # for scanning new posts since last turn
+    # The cursor value at which Phase 2 started skipping regular posts because
+    # the unreviewed-proposal block was active; None while not skipping. The
+    # first scan after the block lifts catches up from here (bounded by
+    # settings.scan_catchup_*). In memory only; a state rebuild re-seeds it at
+    # 0.0 for an agent already blocked (SimulationEngine._seed_scan_skip_marker).
+    scan_regular_skipped_since: float | None = None
 
     # Sliding-window LLM call ledger, maintained by Agent.record_api_call.
     # Distinct from Agent.api_call_count on purpose: api_call_count is LIFETIME
