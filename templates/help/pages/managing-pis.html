@@ -525,7 +525,9 @@ anchor, or found no longer tied to the PI after a complete search, and that no o
 <p>
     <strong>Regenerate profile</strong>, in the Corpus and profile review card, queues a
     generation for any PI. The button is disabled while a generation is queued or running,
-    and for a while after one finishes; the text under it gives the reason. When it is
+    and for a while after one finishes; it is also disabled while the PI is at the limit of
+    at most five profile generations in 24 hours, counting every generation however it
+    started; the text under it gives the reason. When it is
     accepted the page says "Profile generation queued. A profile edited since its last
     generation gets a draft to review."
 </p>
@@ -546,7 +548,8 @@ anchor, or found no longer tied to the PI after a complete search, and that no o
         Profile first.</li>
 </ul>
 <p>It is not offered while a generation is queued or running. When it is accepted the page
-    says "Profile generation queued."</p>
+    says "Profile generation queued." The same limit of five profile generations in 24 hours
+    applies.</p>
 <p>
     For an account whose access has been turned off, either button says "This account's
     access is denied; no profile is generated." and nothing is queued.
@@ -593,7 +596,7 @@ anchor, or found no longer tied to the PI after a complete search, and that no o
     The <strong>Persona revisions</strong> card lists the most recent versions of the
     persona, newest first. Each shows when it was written, how it was changed, who changed
     it ("system" for an automatic change) and a short summary. <strong>view text</strong>
-    opens the full persona as it was then. A PI with no lab agent has no revisions.
+    opens the full persona as it was then. It lists only the versions written while this PI owned a lab agent, plus versions from before this change on the PI's current agent. A PI who never had a lab agent has none.
 </p>
 
 <h2 id="jobs">The Jobs table</h2>

@@ -55,6 +55,8 @@ from urllib.parse import urlsplit
 
 from markupsafe import Markup, escape
 
+from src.services.publication_links import encode_doi
+
 #: The visible text of every rewritten link. Identical for every URL: two
 #: citations in one paragraph are told apart by the ``title`` (the full URL),
 #: not by a number this module would have to invent.
@@ -295,7 +297,7 @@ def plain_with_citation_links(
         else:
             # The `doi` group ends the match, so its trail is the match's trail.
             doi, trail = _split_trailing(doi)
-            url = _DOI_RESOLVER + doi if doi.split("/", 1)[1] else ""
+            url = _DOI_RESOLVER + encode_doi(doi) if doi.split("/", 1)[1] else ""
         if (
             not url
             or not _is_linkable(url)

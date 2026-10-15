@@ -1,7 +1,10 @@
 """The persona file across an agent's lifecycle (spec 2026-10-05 §6.4, D31)."""
+import re
+
 import pytest
 from sqlalchemy import select
 
+from src.agent.persona_sections import sections
 from src.models import USER_ROLE_ADMIN, ProfileRevision
 from src.services import persona_lifecycle, profile_export
 from src.services.agent_form import agent_form_version
@@ -9,6 +12,7 @@ from src.services.persona_lifecycle import (
     archive_persona_file,
     export_after_lifecycle,
     persona_has_research_summary,
+    rename_persona_files,
 )
 from tests import factories
 from tests.flash_support import session_flashes
@@ -160,3 +164,57 @@ async def test_admin_link_publishes_the_new_owners_persona(client, db_session, d
     assert r.status_code == 302
     assert "New owner's work." in (public / "linkme.md").read_text(encoding="utf-8")
     assert len(list(orphaned.glob("linkme.*.md"))) == 1
+
+
+GATE_CASES = (
+    "# X\n\n## Research Summary\n\nWords.\n",
+    "# X\n\n## Research Summary\n\n## Keywords\n\na\n",
+    "# X\n\n## Research Summary\r\n\r\nWords.\r\n",
+    "# X\n\n## Research Summary\n\n ## Keywords a\n",
+    "# X\n\n## Research Summary\x85Words.",
+    "# X\n\n## Research Summary\n\x1cWords\n",
+    "## Research Summary  \nText",
+    "",
+)
+
+
+@pytest.mark.parametrize("text", GATE_CASES)
+def test_gate_agrees_with_engine_reader(text):
+    assert persona_has_research_summary(text) == bool(
+        sections(text).get("Research Summary", "").strip())
+
+
+async def test_relink_archives_previous_owners_persona_with_their_tag(client, db_session, dirs):
+    public, orphaned = dirs
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+    former = await factories.make_user(db_session)
+    await factories.make_profile(db_session, user=former, research_summary="Former's work.")
+    agent = await factories.make_agent(db_session, user=former, agent_id="smith", status="active")
+    (public / "smith.md").write_text("# Former's persona\n", encoding="utf-8")
+    new_owner = await factories.make_user(db_session)
+    await factories.make_profile(db_session, user=new_owner, research_summary="New owner's work.")
+    await db_session.commit()
+    r = await client.post(f"/admin/agents/{agent.id}/link", data={"user_id": str(new_owner.id)},
+                          headers=auth_headers(admin.id), follow_redirects=False)
+    assert r.status_code == 302
+    [archived] = list(orphaned.glob(f"smith.*.owner-{former.id.hex}.md"))
+    assert archived.read_text(encoding="utf-8") == "# Former's persona\n"
+    assert "New owner's work." in (public / "smith.md").read_text(encoding="utf-8")
+
+
+async def test_rename_without_profile_archives_with_owner_tag(db_session, dirs):
+    public, orphaned = dirs
+    owner = await factories.make_user(db_session)
+    await factories.make_agent(db_session, user=owner, agent_id="renamednew")
+    (public / "renamedold.md").write_text("old persona", encoding="utf-8")
+    await db_session.commit()
+    await rename_persona_files(db_session, owner.id, old_agent_id="renamedold", actor_id=None)
+    [archived] = list(orphaned.glob("renamedold.*.md"))
+    assert archived.name.endswith(f".owner-{owner.id.hex}.md")
+
+
+def test_unknown_owner_keeps_untagged_name(dirs):
+    public, _orphaned = dirs
+    (public / "x.md").write_text("x", encoding="utf-8")
+    moved = archive_persona_file("x")
+    assert moved is not None and re.fullmatch(r"x\.\d{8}T\d{12}Z\.md", moved.name)

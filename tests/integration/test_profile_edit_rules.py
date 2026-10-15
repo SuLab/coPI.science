@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 from src.models import USER_ROLE_MANAGER, ProfileRevision, ResearcherProfile
 from src.services import profile_export
 from src.services.person_names import NAME_MAX_CHARS
+from src.services.profile_edit import apply_profile_edits
 from src.services.profile_limits import (
     SUMMARY_MAX_CHARS,
     SUMMARY_MAX_WORDS,
@@ -234,3 +235,47 @@ async def test_agent_pi_name_is_untouched_by_a_blank_name(client, db_session, pu
     await _post(client, db_session, "manager", pi, agent, {"profile_version": "1", "name": ""})
     await db_session.refresh(agent)
     assert agent.pi_name == "Jane Wang"
+
+
+async def _stored(db, user_id):
+    return await db.scalar(
+        select(ResearcherProfile).where(ResearcherProfile.user_id == user_id)
+        .execution_options(populate_existing=True))
+
+
+async def _edit(db, pi, form, version):
+    return await apply_profile_edits(
+        db, target_user=pi, changed_by_user_id=pi.id, form=form, expected_version=version)
+
+
+async def test_crlf_resubmission_of_summary_is_not_a_change(db_session, public):
+    pi = await factories.make_user(db_session, name="Jane Wang")
+    await factories.make_profile(db_session, user=pi, research_summary="a\n\nb", profile_version=3)
+    await factories.make_agent(db_session, user=pi, status="active")
+    assert await _edit(db_session, pi, {"research_summary": "a\r\n\r\nb"}, 3) is None
+    profile = await _stored(db_session, pi.id)
+    assert profile.human_edited_at is None
+    assert profile.research_summary == "a\n\nb"
+
+
+async def test_new_tag_with_unicode_separator_is_refused(db_session, public):
+    pi, _profile, _agent = await _lab(db_session)
+    assert await _edit(db_session, pi, {"techniques": ["a\u2028b"]}, 1) == "tag_invalid"
+    profile = await _stored(db_session, pi.id)
+    assert profile.techniques == ["technique-a"] and profile.profile_version == 1
+
+
+async def test_stored_tag_with_newline_does_not_block_save(db_session, public):
+    pi, _profile, _agent = await _lab(db_session, techniques=["x\ny"])
+    assert await _edit(db_session, pi, {"techniques": ["x\r\ny", "new"]}, 1) is None
+    assert (await _stored(db_session, pi.id)).techniques == ["x\ny", "new"]
+
+
+async def test_crlf_summary_counts_lf_against_the_cap(db_session, public):
+    pi, _profile, _agent = await _lab(db_session)
+    lf = "\n".join(["x" * 99] * 200) + "x"
+    assert len(lf) == SUMMARY_MAX_CHARS and len(lf.split()) <= SUMMARY_MAX_WORDS
+    crlf = lf.replace("\n", "\r\n")
+    assert len(crlf) > SUMMARY_MAX_CHARS
+    assert await _edit(db_session, pi, {"research_summary": crlf}, 1) is None
+    assert (await _stored(db_session, pi.id)).research_summary == lf

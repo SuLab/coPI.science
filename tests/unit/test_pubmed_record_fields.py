@@ -142,6 +142,6 @@ def test_year_fallbacks(pubdate, article_date, expected):
 
 def test_title_and_journal_are_one_line():
     record = _one("<Article><Journal><Title>J\r\nX</Title></Journal>"
-                  "<ArticleTitle>A\nB C  D</ArticleTitle></Article>")
+                  "<ArticleTitle>A\nB\u2028C  D</ArticleTitle></Article>")
     assert record["title"] == "A B C D" and record["journal"] == "J X"
     assert _one("<Article><ArticleTitle></ArticleTitle></Article>")["title"] == ""

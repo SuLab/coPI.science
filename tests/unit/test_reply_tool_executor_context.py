@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from src.agent.agent import Agent
 from src.agent.engine import reply_lane
 from src.agent.message_log import LogEntry
+from src.agent.publication_records import PublicationIds
 from src.agent.simulation import SimulationEngine
 from src.agent.state import ThreadState
 
@@ -16,7 +17,8 @@ def _engine():
 async def test_the_executor_passes_gate_hub_ids_and_own_ids(monkeypatch):
     eng, _hub, lab = _engine()
     lab.allowed_sender_ids = {"blackbird"}
-    lab._own_paper_ids = {"38980071"}
+    lab._public_profile = "# Jane Wang Lab\n"    # no disk read: the live mount may hold wang.md
+    lab.set_publication_ids(PublicationIds(in_use_pmids=frozenset({"38980071"}), row_count=1))
     seen = {}
 
     async def fake_execute_tool(name, tool_input, agent_id, thread, **kwargs):

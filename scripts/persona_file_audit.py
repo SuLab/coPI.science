@@ -14,10 +14,16 @@ Exactly one mode is required:
   --reexport-missing  Lists the non-suspended agents whose file is MISSING or NOSUMMARY
                       while the owner's profile has a summary; with --apply re-exports each
                       in its own transaction and writes its files. Enqueues no job.
+  --reexport-stale    Lists (STALE) every non-suspended lab agent whose owner has a profile
+                      and whose persona file differs from a fresh render or whose last write
+                      failed (profile_publish.persona_out_of_date); with --apply re-exports
+                      each in its own transaction (revision mechanism "reexport") and writes
+                      its files. Exit 1 when any re-export failed. Run after a release that
+                      changes the rendering, so every persona carries it.
 
 --keep names persona stems never treated as orphans (default: blackbird, the hub's file; its
-archive is a separate step after the new agent is up). --apply is accepted only with
---archive-orphans or --reexport-missing.
+archive is a separate step after the new agent is up). --apply is accepted with
+--archive-orphans, --reexport-missing or --reexport-stale.
 
 Usage (runs inside the app container):
     docker compose -f docker-compose.prod.yml exec -T blackbird-app python scripts/persona_file_audit.py --check
@@ -48,10 +54,14 @@ from src.services.persona_lifecycle import (  # noqa: E402
     archive_persona_file,
     persona_has_research_summary,
 )
-from src.services.profile_publish import reexport_persona, write_persona_files  # noqa: E402
+from src.services.profile_publish import (  # noqa: E402
+    persona_out_of_date,
+    reexport_persona,
+    write_persona_files,
+)
 
 DEFAULT_KEEP = ("blackbird",)
-_MODES = ("check", "archive-orphans", "reexport-missing")
+_MODES = ("check", "archive-orphans", "reexport-missing", "reexport-stale")
 
 
 async def _agents(db: AsyncSession):
@@ -145,6 +155,34 @@ async def run(db: AsyncSession, mode: str, *, apply: bool, keep: frozenset[str])
                     change_summary="Persona file audit re-export")
                 await db.commit()
                 path = await write_persona_files(db, user_id) if rendered else None
+            except Exception as exc:  # one agent's failure must not stop the rest
+                await db.rollback()
+                path = None
+                print(f"  error: {exc}")
+            if path is None:
+                failed += 1
+                print(f"FAILED {slug}")
+            else:
+                print(f"REEXPORTED {slug} -> {path}")
+        return 1 if failed else 0
+
+    if mode == "reexport-stale":
+        failed = 0
+        for slug, user_id, role, status, _summary, has_profile in rows:
+            if not (requires_linked_user(role) and user_id is not None and has_profile):
+                continue
+            if status == "suspended" or not await persona_out_of_date(db, user_id):
+                continue
+            print(f"STALE {slug}")
+            if not apply:
+                continue
+            try:
+                await reexport_persona(
+                    db, user_id, mechanism="reexport",
+                    change_summary="Persona file audit re-export (stale file)",
+                    skip_if_file_matches=True)
+                await db.commit()
+                path = await write_persona_files(db, user_id)
             except Exception as exc:  # one agent's failure must not stop the rest
                 await db.rollback()
                 path = None

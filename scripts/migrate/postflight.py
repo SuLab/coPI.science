@@ -16,7 +16,7 @@ What follows --target and what does not:
     or the comparison FAILs; a snapshot ``target`` other than --target only WARNs.
   * The pinned table/column/index/constraint expectations (EXPECTED_TABLES,
     EXPECTED_COLUMNS, EXPECTED_INDEXES, EXPECTED_CONSTRAINTS) describe the 0019-0023
-    chain and the 0056, 0062, 0065 and 0068 objects only (VERIFIED_REVISIONS), whatever the target.
+    chain and the 0056, 0062, 0065, 0068 and 0069 objects only (VERIFIED_REVISIONS), whatever the target.
 
 Exit codes (contract):
 
@@ -148,6 +148,8 @@ EXPECTED_COLUMNS: tuple[tuple[str, str, str, bool, str | None], ...] = (
     ("researcher_profiles", "human_edited_at", "timestamp with time zone", True, ""),
     ("researcher_profiles", "evidence_flagged_count", "integer", True, ""),
     ("agents", "persona_export_failed_at", "timestamp with time zone", True, ""),
+    # 0069: NULL means "written before 0069" (or an agent with no user); never backfilled.
+    ("profile_revisions", "owner_user_id", "uuid", True, ""),
 )
 
 EXPECTED_TABLES = (
@@ -156,12 +158,12 @@ EXPECTED_TABLES = (
 )
 
 #: Revisions this script's EXPECTED_TABLES/EXPECTED_COLUMNS/EXPECTED_INDEXES below
-#: actually verify. Pinned: 0019-0023, 0056, 0062, 0065 and 0068. Not pinned (documented omission):
+#: actually verify. Pinned: 0019-0023, 0056, 0062, 0065, 0068 and 0069. Not pinned (documented omission):
 #: the 0024-0055, 0057-0061, 0063-0064 and 0066-0067 objects, which preflight's PLANNED_OBJECTS collision check and
 #: tests/integration/test_model_migration_parity.py cover. Bump this tuple (and add the
 #: corresponding EXPECTED_* entries) to extend the pins. The row-count and enum checks
 #: do not read it: they are scoped by revision span instead.
-VERIFIED_REVISIONS: tuple[str, ...] = ("0019", "0020", "0021", "0022", "0023", "0056", "0062", "0065", "0068")
+VERIFIED_REVISIONS: tuple[str, ...] = ("0019", "0020", "0021", "0022", "0023", "0056", "0062", "0065", "0068", "0069")
 
 #: index name -> the exact pg_indexes.indexdef tail, so a same-named index on the WRONG
 #: columns (or a partial index that lost its predicate) fails too.
@@ -199,6 +201,8 @@ EXPECTED_INDEXES: dict[str, str] = {
     "uq_publications_user_doi_nopmid": (
         "USING btree (user_id, lower((doi)::text)) WHERE (pmid IS NULL)"
     ),
+    # 0069.
+    "ix_profile_revisions_owner_user_id": "USING btree (owner_user_id)",
 }
 
 #: constraint name -> (table, pg_get_constraintdef)
@@ -221,6 +225,11 @@ EXPECTED_CONSTRAINTS: dict[str, tuple[str, str]] = {
     "ck_publications_provenance": ("publications", "'openalex'"),
     # 0068: the last allowed value proves this revision's CHECK (substring compare).
     "ck_publications_excluded_reason": ("publications", "'repair_script'"),
+    # 0069.
+    "fk_profile_revisions_owner_user_id_users": (
+        "profile_revisions",
+        "FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE",
+    ),
     "uq_publication_candidates_user_pmid": ("publication_candidates", "UNIQUE (user_id, pmid)"),
     "ck_publication_candidates_status": ("publication_candidates", "'rejected'"),
 }

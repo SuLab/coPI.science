@@ -6,17 +6,65 @@ followed by an approval or a first login before the first pipeline commits —
 runs ONE pipeline instead of two. The insert itself is idempotent under
 concurrency (``job_queue.insert_job_if_absent``, backed by 0056's partial unique
 index), so a truly concurrent pair also yields one row.
+
+The four routes a person presses (the PI's Refresh, ``/onboarding/retry``, and the staff
+page's Retry and Regenerate) go through ``enqueue_profile_regeneration`` instead. It caps a PI
+at ``PROFILE_REGENERATION_DAILY_CAP`` ``generate_profile`` jobs per
+``PROFILE_REGENERATION_WINDOW`` (Q25, F2, C8). Operator scripts and the CLI keep calling
+``enqueue_profile_job_if_absent`` and are not capped.
 """
 from __future__ import annotations
 
-from sqlalchemy import select
+import logging
+import uuid
+from dataclasses import dataclass
+from datetime import timedelta
+from typing import Literal
+
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import USER_ROLE_MANAGER, USER_ROLE_REVIEWER, Job, ResearcherProfile, User
+from src.models.job import INTERACTIVE_PRIORITY
+from src.services.advisory_locks import lock_profile_regeneration
 from src.services.job_queue import insert_job_if_absent
 
 _NO_PROFILE_ROLES = frozenset({USER_ROLE_MANAGER, USER_ROLE_REVIEWER})
 _LIVE_STATUSES = ("pending", "processing")
+
+logger = logging.getLogger(__name__)
+
+#: The most generate_profile jobs one PI may have enqueued in PROFILE_REGENERATION_WINDOW
+#: before the four capped routes refuse another (Q25, F2).
+PROFILE_REGENERATION_DAILY_CAP = 5
+PROFILE_REGENERATION_WINDOW = timedelta(hours=24)
+#: The staff routes' refusal, and the Regenerate button's reason (R5.16).
+REGENERATION_LIMIT_REASON = (
+    f"This PI has had {PROFILE_REGENERATION_DAILY_CAP} profile generations in the last "
+    "24 hours, the daily limit; try again later."
+)
+RegenerationStatus = Literal["queued", "in_flight", "limited", "not_eligible"]
+
+
+@dataclass(frozen=True)
+class RegenerationOutcome:
+    status: RegenerationStatus
+    job: Job | None
+    recent_jobs: int
+
+
+async def _live_profile_job(db: AsyncSession, user_id: uuid.UUID) -> Job | None:
+    """The user's oldest pending or processing generate_profile job, or None."""
+    return (await db.execute(
+        select(Job)
+        .where(
+            Job.user_id == user_id,
+            Job.type == "generate_profile",
+            Job.status.in_(_LIVE_STATUSES),
+        )
+        .order_by(Job.enqueued_at)
+        .limit(1)
+    )).scalar_one_or_none()
 
 
 async def enqueue_profile_job_if_absent(
@@ -63,16 +111,51 @@ async def enqueue_profile_job_if_absent(
     )
     if new_id is not None:
         return await db.get(Job, new_id)
-    return (await db.execute(
-        select(Job)
-        .where(
-            Job.user_id == user.id,
+    return await _live_profile_job(db, user.id)
+
+
+async def recent_profile_generation_count(db: AsyncSession, user_id: uuid.UUID) -> int:
+    """The user's generate_profile jobs enqueued in the last PROFILE_REGENERATION_WINDOW,
+    whatever their status or source (route, operator script, worker rerun)."""
+    return await db.scalar(
+        select(func.count()).select_from(Job).where(
+            Job.user_id == user_id,
             Job.type == "generate_profile",
-            Job.status.in_(_LIVE_STATUSES),
+            Job.enqueued_at > func.now() - PROFILE_REGENERATION_WINDOW,
         )
-        .order_by(Job.enqueued_at)
-        .limit(1)
-    )).scalar_one_or_none()
+    ) or 0
+
+
+async def enqueue_profile_regeneration(
+    db: AsyncSession, user_id: uuid.UUID, *, actor_id: uuid.UUID | None,
+) -> RegenerationOutcome:
+    """Queue the user's profile generation for one of the four capped routes (C8).
+
+    Under a per-user advisory transaction lock: ``not_eligible`` when there is no such user
+    or ``enqueue_profile_job_if_absent`` refuses (a manager, a reviewer, a denied account);
+    ``limited`` when no job is live and PROFILE_REGENERATION_DAILY_CAP or more were
+    enqueued in the window; otherwise the shared enqueue at INTERACTIVE_PRIORITY. With a
+    live job that inserts nothing and only lifts its priority (``in_flight``); without one
+    it inserts (``queued``). The lock is held until the caller's transaction ends.
+    Flushes; never commits."""
+    await lock_profile_regeneration(db, user_id)
+    user = await db.get(User, user_id)
+    if user is None:
+        return RegenerationOutcome("not_eligible", None, 0)
+    live = await _live_profile_job(db, user_id)
+    recent = await recent_profile_generation_count(db, user_id)
+    if live is None and recent >= PROFILE_REGENERATION_DAILY_CAP:
+        logger.info(
+            "generate_profile for user %s refused: %d jobs in the last 24 h (actor %s)",
+            user_id, recent, actor_id,
+        )
+        return RegenerationOutcome("limited", None, recent)
+    job = await enqueue_profile_job_if_absent(db, user, priority=INTERACTIVE_PRIORITY)
+    if job is None:
+        return RegenerationOutcome("not_eligible", None, recent)
+    status: RegenerationStatus = "in_flight" if live is not None else "queued"
+    logger.info("generate_profile for user %s %s (actor %s)", user_id, status, actor_id)
+    return RegenerationOutcome(status, job, recent)
 
 
 def profile_retry_warranted(

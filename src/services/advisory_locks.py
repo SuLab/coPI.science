@@ -65,6 +65,16 @@ async def lock_agent_persona(db: AsyncSession, user_id: uuid.UUID) -> None:
     )
 
 
+async def lock_profile_regeneration(db: AsyncSession, user_id: uuid.UUID) -> None:
+    """pg_advisory_xact_lock on generate_profile:<user_id>, held until the caller's
+    transaction ends: one PI's capped profile-generation requests count and enqueue one at a
+    time (C8 of the 2026-10-15 publication-handling design)."""
+    await db.execute(
+        text(f"SELECT pg_advisory_xact_lock({entity_key_sql('generate_profile')})"),
+        {"id": str(user_id)},
+    )
+
+
 _HELD_SQL = text(
     "SELECT EXISTS (SELECT 1 FROM pg_locks "
     "WHERE locktype = 'advisory' AND granted AND objsubid = 1 "

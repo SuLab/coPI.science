@@ -1560,3 +1560,52 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > (`$DC run` and `run_migration.sh` always use `:latest`, which is then the old image). The
 > downgrade discards every recorded reason. **Never reuse revision id `0068`**, whatever
 > happens to this feature.
+
+> **Deploy order for `0069_profile_revision_owner` — migrate BEFORE the new images serve,
+> with the worker idle; rebuild all three images; no backfill.** `0069` adds
+> `profile_revisions.owner_user_id` (uuid, NULL): the user who owned the agent when the
+> revision was written, with the foreign key `fk_profile_revisions_owner_user_id_users`
+> (`ON DELETE CASCADE` from `users`) and the index `ix_profile_revisions_owner_user_id`.
+> Design: the publication-handling design (spec 2026-10-15, §10 R5.17 to R5.25).
+>
+> *Old code on the new schema* is safe: its revision inserts leave the column NULL, which
+> account deletion purges by the agent the deleted user owns. *New code on the old schema* is
+> not: `ProfileRevision` maps the column, so profile saves, the profile pipeline, account
+> deletion and the staff "Persona revisions" list raise `UndefinedColumn`, and the engine's
+> memory-revision write is swallowed to a WARNING. **Agent image:** rebuilt, because
+> `src/agent/` changes in the same release (pi_lab 1.2.0), and the engine maps
+> `ProfileRevision`. **No backfill:** NULL means "written before 0069".
+>
+> **Lock.** The foreign key takes a lock on `users`. The worker holds one transaction
+> across a profile pipeline run that writes `users` and `profile_revisions` rows, so migrate
+> with no `processing` job (`SELECT count(*) FROM jobs WHERE status = 'processing'` is 0), or
+> the chain's 10 s `lock_timeout` rolls the apply back.
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     git status --porcelain --untracked-files=all -- src templates static prompts alembic \
+>         scripts help_assets pyproject.toml alembic.ini   # must print nothing (commit first)
+>     # Rollback point: tag the image each container RUNS, not :latest, which the build overwrites.
+>     for s in blackbird-app worker; do
+>       docker image tag "$(docker inspect -f '{{.Image}}' "$($DC ps -q $s)")" \
+>         copi-blackbird-$s:rollback-pre-0069
+>     done
+>     docker image tag "$(docker inspect -f '{{.Image}}' "$($DC --profile agent ps -q agent)")" \
+>       copi-blackbird-agent:rollback-pre-0069
+>     $DC build blackbird-app worker
+>     $DC --profile agent build agent
+>     docker image tag copi-blackbird-blackbird-app:latest copi-blackbird-blackbird-app:pub5-0069
+>     # worker idle (no processing job), then:
+>     ./scripts/migrate/run_migration.sh                   # rehearse
+>     ./scripts/migrate/run_migration.sh --apply
+>     $DC up -d blackbird-app worker
+>     $DC up -d agent                                      # ONLY when /admin/simulation shows no live run
+>
+> If a run is live, leave the agent on its old image: old agent code on the new schema is safe.
+> The next run starts FRESH (pi_lab 1.2.0).
+>
+> Rollback: re-tag each `:rollback-pre-0069` as `:latest`, then `$DC up -d blackbird-app worker`,
+> and `$DC up -d agent` only with no live run. `0069` stays applied. **Never downgrade first**:
+> the new image would then raise `UndefinedColumn`. To downgrade, after the old image serves,
+> run `alembic downgrade 0068` in a one-off `docker run --rm` container off
+> `copi-blackbird-blackbird-app:pub5-0069`, on the compose network with the stack's `.env`.
+> The downgrade drops the column and every recorded owner. **Never reuse revision id `0069`.**

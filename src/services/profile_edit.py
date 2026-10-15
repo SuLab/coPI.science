@@ -20,6 +20,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import FormData
 
+from src.agent.persona_sections import LINE_BREAK_CHARS, normalize_line_breaks
 from src.models import AgentRegistry, Job, ResearcherProfile, User
 from src.models.job import INTERACTIVE_PRIORITY
 from src.services.grant_sections import load_grant_sections
@@ -56,6 +57,9 @@ USER_FIELD_MAX_CHARS = 255
 #: widget whose tags were all removed (posting no values) still clears the field, while
 #: a form without the widget, or a page rendered before it existed, changes nothing.
 TAG_FIELDS_MARKER = "tag_fields"
+#: Any line break the persona exporter neutralises (C10): a new tag containing one is
+#: refused with ``tag_invalid``.
+_LINE_BREAK_RE = re.compile("[" + LINE_BREAK_CHARS + "]")
 
 
 def list_fields_from_form(form: FormData) -> dict[str, list[str] | None]:
@@ -71,10 +75,11 @@ def list_fields_from_form(form: FormData) -> dict[str, list[str] | None]:
 
 def _clean_tags(values: Sequence[str]) -> list[str]:
     """Stripped, non-empty tags. A ``str`` is refused: it would iterate as characters,
-    and a comma string is exactly the format this replaced."""
+    and a comma string is exactly the format this replaced. Line breaks are normalised to
+    ``\\n`` (C10), so a stored tag re-posted with the browser's CRLF still equals it."""
     if isinstance(values, str):
         raise TypeError("list fields take a list of tags, not a comma-separated string")
-    return [v.strip() for v in values if v.strip()]
+    return [normalize_line_breaks(v).strip() for v in values if v.strip()]
 
 
 def parse_expected_version(raw: str | None) -> int | None:
@@ -252,7 +257,7 @@ def _edit_cap_error(
                 continue
             if len(tag) > TAG_MAX_CHARS:
                 return TAG_TOO_LONG
-            if "\n" in tag or "\r" in tag or tag.startswith("#"):
+            if _LINE_BREAK_RE.search(tag) or tag.startswith("#"):
                 return TAG_INVALID
     return None
 
@@ -442,6 +447,9 @@ async def apply_profile_edits(
         f: (_clean_tags(form[f]) if f in _LIST_FIELDS else form[f])
         for f in PROFILE_FIELDS if form.get(f) is not None
     }
+    if isinstance(values.get("research_summary"), str):
+        # Browsers post textarea line breaks as CRLF: compare and store LF (C10, F8).
+        values["research_summary"] = normalize_line_breaks(values["research_summary"])
     if profile is not None and profile.profile_version != expected_version:
         # Every profile writer holds the persona lock taken above, so the version cannot
         # move again before this transaction ends; the conditional UPDATE below stays as

@@ -11,6 +11,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.models.agent_registry import AgentRegistry
 from src.models.profile_revision import ProfileRevision
 
 logger = logging.getLogger(__name__)
@@ -82,6 +83,11 @@ async def create_revision(
             generate_profile job, which records "pipeline".)
         change_summary: Optional short description of what changed.
 
+    The revision is stamped ``owner_user_id`` = the agent's ``user_id`` at write time
+    (None for the hub and the specialists); account deletion purges by it (C6). This is
+    the one place a ``ProfileRevision`` is built
+    (``tests/unit/test_profile_revision_writers.py``).
+
     Returns:
         The created ProfileRevision, or the existing newest one when ``content`` is
         byte-identical to it — see below.
@@ -97,10 +103,24 @@ async def create_revision(
     # does a revert back to an older body. See the two halves pinned in
     # tests/integration/test_cli.py: test_backfill_run_twice_does_not_duplicate_any_
     # revision and test_a_changed_profile_body_still_creates_a_new_revision.
+    #
+    # Since migration 0069 the newest row also has to belong to the same owner, or to no
+    # recorded owner: a body identical to another owner's revision is recorded again for the
+    # new owner, so deleting either user leaves the other's history intact.
+    #
+    # The owner is the agent's user now, read in the caller's transaction (C6 of the
+    # 2026-10-15 publication-handling design): None for an agent with no user.
+    owner = await db.scalar(
+        select(AgentRegistry.user_id).where(AgentRegistry.id == agent_registry_id)
+    )
     previous = await latest_revision(
         db, agent_registry_id=agent_registry_id, profile_type=profile_type
     )
-    if previous is not None and previous.content == content:
+    if (
+        previous is not None
+        and previous.content == content
+        and previous.owner_user_id in (owner, None)
+    ):
         logger.debug(
             "Skipped unchanged %s profile revision for agent %s (via %s)",
             profile_type, agent_registry_id, mechanism,
@@ -114,6 +134,7 @@ async def create_revision(
         changed_by_user_id=changed_by_user_id,
         mechanism=mechanism,
         change_summary=change_summary,
+        owner_user_id=owner,
     )
     db.add(revision)
     await db.flush()

@@ -12,6 +12,7 @@ from src.agent.engine import constants, deps
 from src.agent.engine.constants import ROSTER_POLL_INTERVAL
 from src.agent.engine.context import EngineContext, RejectionCounts, via
 from src.agent.engine.helpers import star_role
+from src.agent.publication_records import load_publication_ids
 from src.agent.roles import role_problem
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE
 from src.services.cohorts import compute_gates, summarise_gates
@@ -56,6 +57,8 @@ class Roster:
         "_bot_name_to_id",
         "_profile_mtimes",
         "_last_roster_poll",
+        "_last_publication_records_poll",
+        "_publication_records_loaded",
         "_cohort_gate_active",
         "_cohort_preflight_error",
         "_cohort_log_signature",
@@ -103,6 +106,11 @@ class Roster:
         # Last wall-clock time the AgentRegistry roster was re-synced (live
         # add/remove of agents as their status flips). See _sync_roster_from_db.
         self._last_roster_poll: float = 0.0
+        # Last wall-clock time every agent's publication ids were loaded (C12), and
+        # whether a load has succeeded yet (the first success logs at INFO). See
+        # _sync_publication_records.
+        self._last_publication_records_poll: float = 0.0
+        self._publication_records_loaded: bool = False
 
     def _sync_profiles_from_disk(self) -> None:
         """Reload any agent whose public profile file changed on disk since last turn.
@@ -271,6 +279,8 @@ class Roster:
                 self.slack_clients[aid] = client
                 self._bot_name_to_id[agent.bot_name.lower()] = aid
                 logger.info("[roster] Added newly-active agent %s to live roster", aid)
+            # A newly added agent gets its publication ids on the next records sync.
+            self._last_publication_records_poll = 0.0
 
             # Rebuild cross-agent derived structures after any membership change.
             self.message_log.set_bot_name_map(self._bot_name_to_id)
@@ -281,6 +291,34 @@ class Roster:
         except Exception as exc:
             # A transient DB hiccup must never crash the main loop.
             logger.warning("[roster] roster sync failed: %s", exc)
+
+    async def _sync_publication_records(self) -> None:
+        """Load every live agent's publication ids (C12) in a session of its own, at
+        most every ``PUBLICATION_RECORDS_POLL_INTERVAL`` seconds. A failed load is logged
+        and every agent keeps its last ids; a DB-less engine never loads, so its agents'
+        records stay the persona alone."""
+        if not self.session_factory:
+            return
+        now = deps.time.time()
+        if now - self._last_publication_records_poll < constants.PUBLICATION_RECORDS_POLL_INTERVAL:
+            return
+        self._last_publication_records_poll = now
+        try:
+            async with self.session_factory() as db:
+                ids = await load_publication_ids(db, list(self.agents))
+            for aid, agent in list(self.agents.items()):
+                if aid in ids:
+                    agent.set_publication_ids(ids[aid])
+        except Exception as exc:  # a transient DB failure must never crash the main loop
+            logger.warning("[records] publication ids load failed: %s — keeping the last load", exc)
+            return
+        level = logging.DEBUG if self._publication_records_loaded else logging.INFO
+        self._publication_records_loaded = True
+        logger.log(
+            level, "[records] publication ids loaded for %d agents (%d in-use rows; %d with none)",
+            len(ids), sum(i.row_count for i in ids.values()),
+            sum(1 for i in ids.values() if i.row_count == 0),
+        )
 
     def _apply_role_changes(
         self, desired: dict, problems: dict[str, str | None],

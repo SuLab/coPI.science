@@ -78,7 +78,7 @@
       <div>
         <div class="font-medium">{{ c.title or '(no title)' }}</div>
         <div class="text-xs text-gray-500">{{ c.year or 'year unknown' }}{% if c.stages %} · stages {{ c.stages }}{% endif %} ·
-          <a href="https://pubmed.ncbi.nlm.nih.gov/{{ c.pmid }}/" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">PMID {{ c.pmid }}</a></div>
+          {% set pm = pubmed_url(c.pmid) %}{% if pm %}<a href="{{ pm }}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">PMID {{ c.pmid }}</a>{% else %}PMID {{ c.pmid }}{% endif %}</div>
       </div>
       <div class="flex gap-2">
         <form method="post" action="{{ page_url(request, 'workspace_accept_candidate', user_id=target_user.id, candidate_id=c.id) }}"><button type="submit" class="text-xs text-green-700 underline">Accept</button></form>
@@ -97,7 +97,7 @@
       <div>
         <div class="font-medium">{{ c.title or '(no title)' }}</div>
         <div class="text-xs text-gray-500">{{ c.year or 'year unknown' }}{% if c.stages %} · stages {{ c.stages }}{% endif %} ·
-          <a href="https://pubmed.ncbi.nlm.nih.gov/{{ c.pmid }}/" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">PMID {{ c.pmid }}</a></div>
+          {% set pm = pubmed_url(c.pmid) %}{% if pm %}<a href="{{ pm }}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">PMID {{ c.pmid }}</a>{% else %}PMID {{ c.pmid }}{% endif %}</div>
       </div>
       <div class="flex gap-2">
         <form method="post" action="{{ page_url(request, 'workspace_accept_candidate', user_id=target_user.id, candidate_id=c.id) }}"><button type="submit" class="text-xs text-green-700 underline">Accept</button></form>
@@ -116,8 +116,8 @@
     <li class="py-2 flex justify-between gap-4 text-sm">
       <div>
         <div class="font-medium">{{ p.title or '(no title)' }}</div>
-        <div class="text-xs text-gray-500">{{ p.journal or 'journal unknown' }} · {{ p.year or 'year unknown' }}{% if p.pmid %} ·
-          <a href="https://pubmed.ncbi.nlm.nih.gov/{{ p.pmid }}/" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">PMID {{ p.pmid }}</a>{% endif %}</div>
+        <div class="text-xs text-gray-500">{{ p.journal or 'journal unknown' }} · {{ p.year or 'year unknown' }}{% set pm = pubmed_url(p.pmid) %}{% if pm %} ·
+          <a href="{{ pm }}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">PMID {{ p.pmid }}</a>{% endif %}</div>
       </div>
       <div class="flex gap-2">
         <form method="post" action="{{ page_url(request, 'workspace_keep_publication', user_id=target_user.id, publication_id=p.id) }}"><button type="submit" class="text-xs text-green-700 underline">Keep</button></form>

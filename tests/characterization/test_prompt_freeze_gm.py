@@ -48,6 +48,17 @@ A fifth owner-approved exception (Q16 of the 2026-10-15 publication-handling des
 reviewed line by line. It licenses no other regeneration, and `test_agent_turn_gm.ambr` is not
 touched by it.
 
+A further owner-approved exception (Q17 of the 2026-10-15 publication-handling design, the
+pi_lab 1.2.0 bump). It covers the entries that compose a lab's system prompt
+(`test_pi_lab_reply_turn_gm`, `test_phase5_pitch_with_live_cohort_gate_and_prior_threads_gm`
+and `test_working_memory_update_request_gm`), and the two that embed the pi_lab prompt-set
+stamp or its `role.toml` (`test_run_start_marker_gm` and
+`test_review_bot_request_over_a_superseded_verdict_gm`). They are regenerated once. The `.ambr`
+diff must be exactly the `<lab_profile>` fence with its one-line notice, the pi_lab version and
+hash stamps, and the new `role.toml` comment and version lines, checked line by line. It
+licenses no other regeneration. `test_agent_turn_gm.ambr`'s seven lab-profile blocks are
+regenerated under the same approval.
+
 An owner-approved fixture change (2026-10-15, Phase 4 integration): `test_export_via_pipeline_gm`
 seeds its stored profile with `evidence_pub_count=0`, a known zero. Under PIPE-15 a NULL stored
 count is protected, which would keep the stored text and so change what this entry pins; with a

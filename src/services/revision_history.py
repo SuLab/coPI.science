@@ -1,10 +1,10 @@
 """The read-only revision history on the manager PI page (spec 2026-10-05 §6.4, D61):
-the PI's ``public`` profile revisions, newest first. Staff only (D47); the router decides."""
+the ``public`` profile revisions the PI owns (F14), newest first. Staff only (D47); the router decides."""
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import AgentRegistry, ProfileRevision, User
@@ -26,13 +26,22 @@ class RevisionRow:
 async def list_public_revisions(
     db: AsyncSession, user_id: uuid.UUID, *, limit: int = HISTORY_LIMIT,
 ) -> list[RevisionRow]:
-    """The newest ``limit`` ``public`` revisions of the PI's agent (``created_at`` then
-    ``id`` descending); [] when the PI has no agent. Reads only."""
+    """The newest ``limit`` ``public`` revisions this PI owns (``owner_user_id``, on any
+    agent, including one since linked to someone else), plus the legacy revisions with no
+    recorded owner (written before migration 0069) of the PI's current agent; ``created_at``
+    then ``id`` descending (F14, C6). Another owner's revisions are never listed. [] when
+    there are none. Reads only."""
     rows = (await db.execute(
         select(ProfileRevision, User.name)
         .join(AgentRegistry, AgentRegistry.id == ProfileRevision.agent_registry_id)
         .outerjoin(User, User.id == ProfileRevision.changed_by_user_id)
-        .where(AgentRegistry.user_id == user_id, ProfileRevision.profile_type == "public")
+        .where(
+            ProfileRevision.profile_type == "public",
+            or_(
+                ProfileRevision.owner_user_id == user_id,
+                and_(ProfileRevision.owner_user_id.is_(None), AgentRegistry.user_id == user_id),
+            ),
+        )
         .order_by(ProfileRevision.created_at.desc(), ProfileRevision.id.desc())
         .limit(limit)
     )).all()

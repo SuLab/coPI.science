@@ -2,6 +2,7 @@ from src.agent.engine.constants import _CHANNEL_KEYWORDS
 from src.agent.persona_sections import (
     TAG_SECTION_HEADINGS,
     match_channels,
+    normalize_line_breaks,
     recent_publication_pmids,
     sections,
 )
@@ -72,3 +73,18 @@ def test_pmids_outside_recent_publications_are_not_own_ids():
     assert recent_publication_pmids(PERSONA) == {"22222222", "33333333", "44444444"}
     assert recent_publication_pmids("## Research Summary\n\nPMID 1\n") == set()
     assert recent_publication_pmids(None) == set()
+
+
+def test_sections_split_on_every_exporter_break():
+    assert sections("## A\r\nx\u2028## B\ny\x85## C\nz") == {
+        "A": "\nx\n", "B": "\ny\n", "C": "\nz"}
+
+
+def test_raw_and_universal_newline_reads_agree():
+    t = "## A\r\nx\r## B\ry"
+    assert sections(t) == sections(t.replace("\r\n", "\n").replace("\r", "\n"))
+
+
+def test_normalize_line_breaks_maps_every_break_to_lf():
+    assert normalize_line_breaks("a\r\nb\rc\x0bd\x0ce\x85f\u2028g\u2029h") == (
+        "a\nb\nc\nd\ne\nf\ng\nh")

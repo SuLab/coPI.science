@@ -48,6 +48,7 @@ from src.agent.engine.constants import (  # re-exported: tests and scripts impor
     PRIOR_THREADS_KEPT_PER_PAIR as PRIOR_THREADS_KEPT_PER_PAIR,
     PROFILES_DIR as PROFILES_DIR,
     PROPOSAL_DRAIN_SETTLE_TICKS as PROPOSAL_DRAIN_SETTLE_TICKS,
+    PUBLICATION_RECORDS_POLL_INTERVAL as PUBLICATION_RECORDS_POLL_INTERVAL,
     REBUILD_WINDOW_S as REBUILD_WINDOW_S,
     ROSTER_POLL_INTERVAL as ROSTER_POLL_INTERVAL,
     RUN_STATS_UPDATE_INTERVAL as RUN_STATS_UPDATE_INTERVAL,
@@ -507,6 +508,10 @@ class SimulationEngine:
                 # Pick up active/inactive flips (and newly-provisioned tokens) from
                 # the DB so the roster changes live, without a process restart.
                 await self._sync_roster_from_db()
+
+                # Each live agent's own-paper ids (C12), on their own cadence: loaded
+                # before any lane builds a prompt this tick.
+                await self._sync_publication_records()
 
                 # Operator control plane: claim a pending stop command and
                 # refresh the heartbeat row, so /admin/simulation can see the

@@ -54,8 +54,8 @@ Every help page and tutorial step keeps these rules (spec §6.3):
    prompt-suggestion batch size, label strings. Say where the page shows the value instead
    (the assessments header prints the bands; the chat drawer prints its usage). These
    change without a template change, so a stated number would go stale silently.
-4. **The only numbers allowed** are the 1–5 overall rating and the 10,000-character comment
-   limit; `tests/unit/test_help_stated_constants.py` pins both to the code that enforces
+4. **The only numbers allowed** are the 1–5 overall rating, the 10,000-character comment
+   limit and the profile-generation limit (five per PI in 24 hours); `tests/unit/test_help_stated_constants.py` pins both to the code that enforces
    them. Every other number is left out, including the session lifetime, the re-sign-in
    window for Microsoft linking, the Regenerate cooldown, the roster sync interval and the
    count of Workspace tabs: point to the UI text that shows it, or describe it without the

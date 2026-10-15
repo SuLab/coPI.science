@@ -597,6 +597,9 @@ async def admin_link_agent(
     if refusal is not None:
         flash(request, refusal, "error")
         return RedirectResponse(url="/admin/agents", status_code=302)
+    # The file at this slug was written for the agent's owner until now, if anyone (C6):
+    # its archived copy is tagged with that user, whom deleting then purges it with.
+    previous_owner_id = agent.user_id
     agent.user_id = user.id
     try:
         await db.commit()
@@ -610,6 +613,7 @@ async def admin_link_agent(
             # (spec 2026-10-05 §6.4, D31): archive it and publish the new owner's persona.
             await export_after_lifecycle(
                 db, user.id, event="Agent linked", actor_id=actor_id, replace_leftover=True,
+                leftover_owner_id=previous_owner_id,
             )
     return RedirectResponse(url="/admin/agents", status_code=302)
 

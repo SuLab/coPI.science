@@ -1,6 +1,6 @@
 import pytest
 
-from src.agent.agent import Agent
+from src.agent.agent import LAB_PROFILE_PREAMBLE, Agent, render_lab_profile_section
 from src.agent.prompt_safety import delimit
 from src.agent.state import ThreadState
 
@@ -43,7 +43,7 @@ def test_the_lab_system_prompt_is_byte_identical_without_the_directory():
     lab = _lab()
     base = lab._load_prompt("agent-system.md", "")
     memory = "*No working memory yet — this is your first simulation.*"
-    header = f"{base}\n\n{lab._render_identity()}\n\n## Your Lab Profile (Public)\n{PERSONA}"
+    header = f"{base}\n\n{lab._render_identity()}\n\n{render_lab_profile_section(PERSONA)}"
     assert lab.build_thread_reply_system_prompt() == f"{header}\n\n## Your Working Memory\n{memory}"
     assert lab.build_system_prompt() == f"{header}\n\n## Your Working Memory\n{memory}\n"
     assert not hasattr(lab, "_lab_directory")
@@ -104,3 +104,10 @@ def test_reload_clears_the_cached_ids(profiles):
     (profiles / "public" / "wang.md").write_text("# Jane Wang Lab\n", encoding="utf-8")
     lab.reload_profiles()
     assert lab.own_paper_ids == set()
+
+
+def test_hub_prompt_has_no_lab_profile_fence():
+    hub = _hub()
+    for prompt in (hub.build_system_prompt(), hub.build_thread_reply_system_prompt()):
+        assert "lab_profile" not in prompt
+        assert LAB_PROFILE_PREAMBLE not in prompt

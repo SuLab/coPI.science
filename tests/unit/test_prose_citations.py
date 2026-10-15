@@ -365,3 +365,8 @@ def test_a_full_doi_url_is_linked_once_beside_a_doi_reference():
         f", and {_doi_anchor('10.1038/x')}."
     )
     assert out.count("<a ") == 2
+
+
+def test_key_point_doi_reference_is_encoded():
+    out = str(plain_with_citation_links("doi 10.1002/x;2-#", link_doi_references=True))
+    assert 'href="https://doi.org/10.1002/x;2-%23"' in out

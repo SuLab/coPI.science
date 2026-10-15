@@ -158,3 +158,33 @@ async def test_own_profile_page_shows_the_scoped_count(client, db_session):
     assert "In-Tenure Paper" in body
     assert "Pre-Tenure Paper" not in body
     assert "before tenure" not in body.lower()
+
+
+async def _pi_with_an_undated_row(db_session):
+    pi = await factories.make_user(db_session)
+    await factories.make_profile(db_session, user=pi)
+    db_session.add_all([
+        Publication(user_id=pi.id, title="Paper from 2024", year=2024),
+        Publication(user_id=pi.id, title="Undated paper", year=None),
+        Publication(user_id=pi.id, title="Paper from 2020", year=2020),
+    ])
+    await db_session.flush()
+    return pi
+
+
+def _in_order(body: str, *titles: str) -> bool:
+    positions = [body.index(title) for title in titles]
+    return positions == sorted(positions)
+
+
+async def test_profile_page_lists_undated_last(client, db_session):
+    pi = await _pi_with_an_undated_row(db_session)
+    body = (await client.get("/profile", headers=auth_headers(pi.id))).text
+    assert _in_order(body, "Paper from 2024", "Paper from 2020", "Undated paper")
+
+
+async def test_staff_pi_page_lists_undated_last(client, db_session):
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    pi = await _pi_with_an_undated_row(db_session)
+    body = (await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(manager.id))).text
+    assert _in_order(body, "Paper from 2024", "Paper from 2020", "Undated paper")

@@ -4,7 +4,8 @@ An agent's creation, request, link, rename and activation each publish the PI's 
 after the change commits: a ``lifecycle_export`` revision of the rendered text (when it
 differs from the file), a commit, then ``profile_publish.write_persona_files``. A file
 already at a new or relinked agent's slug was not written for its owner, so it is moved to
-``ORPHANED_DIR`` first. Nothing here runs inside the caller's transaction: every function
+``ORPHANED_DIR`` first, named with the user id of the owner it was written for when that is
+known (C6 of the 2026-10-15 publication-handling design). Nothing here runs inside the caller's transaction: every function
 expects the caller to have committed, and ends its own transaction before returning."""
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.agent.persona_sections import RESEARCH_SUMMARY_HEADING, sections
 from src.models import AgentRegistry
 from src.services import profile_export
 from src.services.pi_companies import move_companies_file
@@ -34,31 +36,23 @@ logger = logging.getLogger(__name__)
 ORPHANED_DIR = Path("profiles/private/orphaned")
 #: The slug rule persona files share with ``user_deletion`` and ``pi_companies``.
 _SAFE_AGENT_ID = re.compile(r"[a-z0-9_-]{1,50}")
-_SUMMARY_HEADING = "## Research Summary"
 
 
 def persona_has_research_summary(text: str | None) -> bool:
-    """Whether persona ``text`` has a line exactly ``## Research Summary`` followed by a
-    non-blank line before the next ``## `` heading. ``render_profile_markdown`` omits the
-    heading for an empty summary, so a file without it has no summary to serve."""
-    if not text:
-        return False
-    lines = text.splitlines()
-    try:
-        start = lines.index(_SUMMARY_HEADING)
-    except ValueError:
-        return False
-    for line in lines[start + 1:]:
-        if line.startswith("## "):
-            return False
-        if line.strip():
-            return True
-    return False
+    """Whether persona ``text`` has a non-blank Research Summary section, parsed exactly as
+    the engine parses it (``persona_sections.sections``, which splits on the exporter's
+    line-break set; C10, F8). ``render_profile_markdown`` omits the heading for an empty
+    summary, so a file without it has no summary to serve."""
+    return bool(sections(text or "").get(RESEARCH_SUMMARY_HEADING, "").strip())
 
 
-def archive_persona_file(agent_id: str) -> Path | None:
+def archive_persona_file(
+    agent_id: str, *, owner_user_id: uuid.UUID | None = None,
+) -> Path | None:
     """Move ``profile_export.PROFILES_DIR/<agent_id>.md`` to
-    ``ORPHANED_DIR/<agent_id>.<UTC %Y%m%dT%H%M%S%fZ>.md`` and return the new path. None when
+    ``ORPHANED_DIR/<agent_id>.<UTC %Y%m%dT%H%M%S%fZ>.md`` (``…Z.owner-<owner_user_id hex>.md``
+    when the owner the file was written for is known, C6; account deletion purges those) and
+    return the new path. None when
     there is no such file, the slug fails ``_SAFE_AGENT_ID`` (logged at ERROR), or the move
     failed (logged at ERROR, the file left in place). Never raises."""
     if not _SAFE_AGENT_ID.fullmatch(agent_id or ""):
@@ -69,7 +63,8 @@ def archive_persona_file(agent_id: str) -> Path | None:
         if not source.is_file():
             return None
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-        target = ORPHANED_DIR / f"{agent_id}.{stamp}.md"
+        tag = f".owner-{owner_user_id.hex}" if owner_user_id is not None else ""
+        target = ORPHANED_DIR / f"{agent_id}.{stamp}{tag}.md"
         ORPHANED_DIR.mkdir(parents=True, exist_ok=True)
         # profiles/public and profiles/private share the bind mount on the host, but
         # shutil.move also covers a cross-device move.
@@ -83,13 +78,15 @@ def archive_persona_file(agent_id: str) -> Path | None:
 
 async def export_after_lifecycle(
     db: AsyncSession, user_id: uuid.UUID, *, event: str, actor_id: uuid.UUID | None,
-    replace_leftover: bool = False,
+    replace_leftover: bool = False, leftover_owner_id: uuid.UUID | None = None,
 ) -> Path | None:
     """Publish the PI's persona after a committed lifecycle change (spec §6.4, D31).
 
     With ``replace_leftover`` (agent created, requested, linked or renamed) the file now at
     the agent's slug is archived first (``archive_persona_file``), even when nothing is
-    exported. Then ``reexport_persona`` records a ``lifecycle_export`` revision with
+    exported. ``leftover_owner_id`` names the user the leftover file was written for, when
+    known (a relink passes the previous owner); the archived copy is then tagged with it.
+    Then ``reexport_persona`` records a ``lifecycle_export`` revision with
     ``event`` as its change summary (without ``replace_leftover``, nothing is recorded or
     written when the file already equals the render), ``db`` is committed, and
     ``write_persona_files`` writes the persona and companies files.
@@ -103,7 +100,7 @@ async def export_after_lifecycle(
             select(AgentRegistry.agent_id).where(AgentRegistry.user_id == user_id)
         )
         if slug:
-            archive_persona_file(slug)
+            archive_persona_file(slug, owner_user_id=leftover_owner_id)
     rendered = await reexport_persona(
         db, user_id, mechanism="lifecycle_export", changed_by_user_id=actor_id,
         change_summary=event, skip_if_file_matches=not replace_leftover,
@@ -135,7 +132,8 @@ async def rename_persona_files(
             except OSError as exc:
                 logger.error("Persona file of renamed agent %s not removed: %s", old_agent_id, exc)
     elif await render_persona_from_db(db, user_id) is None:
-        archive_persona_file(old_agent_id)  # no profile: nothing stands behind the old file
+        # No profile: nothing stands behind the old file. It is this owner's (C6).
+        archive_persona_file(old_agent_id, owner_user_id=user_id)
     else:
         logger.error(
             "Persona file of renamed agent %s kept: the export under the new id failed",

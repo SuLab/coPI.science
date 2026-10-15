@@ -11,6 +11,7 @@ from src.services.agent_activation import (
 from src.services.agent_form import agent_form_version
 from src.services.agent_mute import set_agent_mute_state
 from src.services.profile_jobs import profile_retry_warranted
+from src.services.profile_publish import reexport_persona, write_persona_files
 from tests import factories
 from tests.flash_support import session_flashes
 from tests.integration.test_manager_access import auth_headers
@@ -88,3 +89,14 @@ async def test_an_empty_summary_blocks_activation_and_warrants_retry(db_session)
     _pi, profile, agent = await _lab(db_session, agent_id="blanked", summary="")
     assert "the profile has no Research Summary" in await activation_blockers(db_session, agent)
     assert profile_retry_warranted(profile, None) is True
+
+
+async def test_activation_gate_accepts_exported_summary_starting_with_a_separator(db_session):
+    pi, _profile, agent = await _lab(db_session, agent_id="sepgate",
+                                     summary="\u2028## Not a heading\nReal text.")
+    await reexport_persona(db_session, pi.id, mechanism="reexport")
+    await db_session.commit()
+    path = await write_persona_files(db_session, pi.id)
+    assert path is not None
+    assert "## Research Summary\n\n\\## Not a heading\nReal text." in path.read_text(encoding="utf-8")
+    assert await persona_blockers(db_session, agent) == []

@@ -9,14 +9,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.dependencies import impersonation_note
 from src.models import USER_ROLE_PI, Job, Publication, PublicationCandidate, ResearcherProfile, User
-from src.models.job import INTERACTIVE_PRIORITY
 from src.services import directory, profile_review
 from src.services.profile_edit import (
     apply_profile_edits,
     list_fields_from_form,
     parse_expected_version,
 )
-from src.services.profile_jobs import enqueue_profile_job_if_absent, profile_retry_warranted
+from src.services.profile_jobs import (
+    REGENERATION_LIMIT_REASON,
+    enqueue_profile_regeneration,
+    profile_retry_warranted,
+)
 from src.services.profile_publish import reexport_persona, write_persona_files
 from src.services.pubmed import fetch_pubmed_records
 from src.web.flash import flash
@@ -100,8 +103,8 @@ async def workspace_retry_profile(
     activation gate refuses both states (and an empty summary, spec 2026-10-05 §6.4).
     Allowed only in those states
     (``profile_retry_warranted``), and the enqueue is the shared idempotent one, so
-    a double click runs one pipeline."""
-    target = await _require_pi(db, user_id)
+    a double click runs one pipeline. Capped at five generations per PI in 24 hours (Q25, F2)."""
+    await _require_pi(db, user_id)
     profile = (
         await db.execute(select(ResearcherProfile).where(ResearcherProfile.user_id == user_id))
     ).scalar_one_or_none()
@@ -123,9 +126,11 @@ async def workspace_retry_profile(
         return RedirectResponse(
             url=page_url(request, "workspace_pi_detail", user_id=user_id), status_code=302
         )
-    job = await enqueue_profile_job_if_absent(db, target, priority=INTERACTIVE_PRIORITY)
+    outcome = await enqueue_profile_regeneration(db, user_id, actor_id=current_user.id)
     await db.commit()
-    if job is None:
+    if outcome.status == "limited":
+        flash(request, REGENERATION_LIMIT_REASON, "error")
+    elif outcome.status == "not_eligible":
         flash(request, "This account's access is denied; no profile is generated.", "error")
     else:
         flash(request, "Profile generation queued.", "success")
@@ -470,17 +475,23 @@ async def workspace_regenerate_profile(
 ):
     """Queue a profile generation for any profile, refused while one is in flight or within
     ``profile_review.REGENERATE_COOLDOWN`` of the last completed one. A profile edited since
-    its last generation gets a draft to review instead of an overwrite (D19)."""
-    target = await _require_pi(db, user_id)
+    its last generation gets a draft to review instead of an overwrite (D19). Capped at five
+    generations per PI in 24 hours (Q25, F2)."""
+    await _require_pi(db, user_id)
     refusal = await profile_review.regenerate_refusal(db, user_id)
     if refusal is not None:
         flash(request, refusal, "error")
         return _review_redirect(request, user_id, "regenerate_refused")
-    job = await enqueue_profile_job_if_absent(db, target, priority=INTERACTIVE_PRIORITY)
-    _warn_if_impersonated(request, current_user, "Profile regenerate", user_id)
-    _log_actor(current_user, "queued a profile regeneration", user_id)
+    outcome = await enqueue_profile_regeneration(db, user_id, actor_id=current_user.id)
+    if outcome.status == "limited":
+        await db.commit()
+        flash(request, REGENERATION_LIMIT_REASON, "error")
+        return _review_redirect(request, user_id, "regenerate_refused")
+    if outcome.status != "not_eligible":
+        _warn_if_impersonated(request, current_user, "Profile regenerate", user_id)
+        _log_actor(current_user, "queued a profile regeneration", user_id)
     await db.commit()
-    if job is None:
+    if outcome.status == "not_eligible":
         flash(request, "This account's access is denied; no profile is generated.", "error")
     else:
         flash(

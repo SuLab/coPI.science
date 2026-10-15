@@ -76,3 +76,15 @@ def test_the_channel_rows_compare_the_old_and_new_rule():
                                   "aging-and-longevity"}
     assert rows["lab"].after == {"general", "structural-biology"}
     assert "chemical-biology" in rows["vhub"].after
+
+
+async def test_a_record_less_lab_is_warned(db_session, profiles):
+    await _seed(db_session, profiles)
+    (profiles / "public" / "vwang.md").write_text(
+        "# vwang Lab — Public Profile\n\n## Key Methods and Technologies\n\n- cryo-EM\n",
+        encoding="utf-8")
+    result = {r.name: r for r in await v.run_checks(db_session)}["publication_records"]
+    assert result.status == "WARN"
+    assert result.details == [
+        "vwang: no publication records on file; its prompt gets the Publication Records section"
+    ]

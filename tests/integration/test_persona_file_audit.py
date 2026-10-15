@@ -1,8 +1,11 @@
 """scripts/persona_file_audit.py (spec 2026-10-05 §6.4 one-off, §9 row 4)."""
 import pytest
+from sqlalchemy import func, select
 
 from scripts.persona_file_audit import run
+from src.models import ProfileRevision
 from src.services import persona_lifecycle, profile_export
+from src.services.profile_publish import render_persona_from_db, write_persona_files
 from tests import factories
 
 pytestmark = pytest.mark.integration
@@ -74,3 +77,40 @@ async def test_reexport_missing_writes_the_file(db_session, dirs, capsys):
     assert await run(db_session, "reexport-missing", apply=True, keep=frozenset()) == 0
     assert "Audit words." in (public / "auditre.md").read_text(encoding="utf-8")
     assert "REEXPORTED auditre" in capsys.readouterr().out
+
+
+async def _current_and_stale(db, *, stale_status="active"):
+    current = await factories.make_user(db)
+    await factories.make_profile(db, user=current)
+    await factories.make_agent(db, user=current, agent_id="auditcur", status="active")
+    stale = await factories.make_user(db)
+    await factories.make_profile(db, user=stale)
+    stale_agent = await factories.make_agent(db, user=stale, agent_id="auditold",
+                                             status=stale_status)
+    await db.commit()
+    return current, stale, stale_agent
+
+
+async def test_reexport_stale_lists_then_rewrites(db_session, dirs, capsys):
+    public, _ = dirs
+    current, stale, stale_agent = await _current_and_stale(db_session)
+    await write_persona_files(db_session, current.id)
+    (public / "auditold.md").write_text("old", encoding="utf-8")
+    assert await run(db_session, "reexport-stale", apply=False, keep=frozenset()) == 0
+    out = capsys.readouterr().out
+    assert "STALE auditold" in out and "STALE auditcur" not in out
+    assert (public / "auditold.md").read_text(encoding="utf-8") == "old"
+    assert await run(db_session, "reexport-stale", apply=True, keep=frozenset()) == 0
+    _agent, rendered = await render_persona_from_db(db_session, stale.id)
+    assert (public / "auditold.md").read_text(encoding="utf-8") == rendered
+    assert await db_session.scalar(select(func.count()).select_from(ProfileRevision).where(
+        ProfileRevision.agent_registry_id == stale_agent.id,
+        ProfileRevision.mechanism == "reexport")) == 1
+
+
+async def test_reexport_stale_skips_suspended(db_session, dirs, capsys):
+    public, _ = dirs
+    await _current_and_stale(db_session, stale_status="suspended")
+    (public / "auditold.md").write_text("old", encoding="utf-8")
+    assert await run(db_session, "reexport-stale", apply=False, keep=frozenset()) == 0
+    assert "auditold" not in capsys.readouterr().out

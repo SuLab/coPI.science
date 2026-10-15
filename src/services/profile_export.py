@@ -1,17 +1,78 @@
-"""Export a ResearcherProfile from the database to a markdown file for agent consumption."""
+"""Export a ResearcherProfile from the database to the persona markdown the lab agent reads.
+
+Sanitising (C10 of the 2026-10-15 publication-handling design; main SPEC EXP-1, EXP-2;
+Q18): every stored text field passes through ``one_line`` or ``escape_block`` when it is
+rendered, so the rule covers rows stored before it too. The rendered text keeps this
+invariant:
+
+1. Its only line break is ``\\n``.
+2. Every line whose first non-blank character is ``#`` is the title line or an exporter
+   ``## `` heading: ``persona_sections.PUBLIC_PROFILE_SECTIONS``, ``## Active Grants`` and
+   ``## Past Grants (since <year>)``, each at most once.
+3. No user-text line starts with a code fence (three backticks or three tildes), and none
+   is a run of only ``=`` or only ``-`` (a setext underline or a rule).
+4. Every line under ``## Recent Publications`` is an exporter-built ``- `` item.
+5. Escaping is idempotent: an escaped line starts with ``\\``.
+
+Mid-line ``#`` runs (``C#``), bullets, numbered lines and inline Markdown are untouched; a
+line-leading ``#1`` becomes ``\\#1`` (spec 2026-10-05 D49). Links come from
+``publication_links`` (Q28, F22).
+"""
 
 import logging
 import re
 from pathlib import Path
 
+from src.agent.persona_sections import (
+    LINE_BREAK_CHARS,
+    RECENT_PUBLICATIONS_HEADING,
+    RESEARCH_SUMMARY_HEADING,
+    TAG_SECTION_HEADINGS,
+    normalize_line_breaks,
+)
 from src.models import ResearcherProfile, User
 from src.services.fs import atomic_write_text
 from src.services.grant_sections import GrantSections, grant_section_lines
+from src.services.publication_links import doi_url, pubmed_url
 from src.services.tenure_scope import TenureScopedPublications, publication_sort_key
 
 logger = logging.getLogger(__name__)
 
 PROFILES_DIR = Path("profiles/public")
+
+_LINE_BREAK_RUN = re.compile(r"[ \t]*[" + LINE_BREAK_CHARS + r"]+[ \t]*")
+_HEADING_LINE = re.compile(r"^([ \t]*)#", re.MULTILINE)
+_FENCE_LINE = re.compile(r"^([ \t]*)(?=`{3}|~{3})", re.MULTILINE)
+_SETEXT_LINE = re.compile(r"^([ \t]*)(?=(?:=+|-+)[ \t]*$)", re.MULTILINE)
+
+
+def one_line(text: object) -> str:
+    """``text`` on one line (C10): ``None`` is ``""``; each run of line breaks
+    (``LINE_BREAK_CHARS``), with the spaces and tabs around it, becomes one space; the
+    result is stripped."""
+    if text is None:
+        return ""
+    return _LINE_BREAK_RUN.sub(" ", str(text)).strip()
+
+
+def escape_block(text: object) -> str:
+    """``text`` safe to place under a persona heading (C10): ``None`` is ``""``; every line
+    break becomes ``\\n``; the whole is stripped; then a backslash goes before the first
+    non-blank character of every line that starts with ``#`` (a heading, D49), a code
+    fence, or a run of only ``=`` or only ``-`` (a setext underline or a rule). The three
+    rules never apply to the same line, and an escaped line starts with ``\\``, so
+    escaping is idempotent."""
+    if text is None:
+        return ""
+    block = normalize_line_breaks(str(text)).strip()
+    block = _HEADING_LINE.sub(r"\1\\#", block)
+    block = _FENCE_LINE.sub(r"\1\\", block)
+    return _SETEXT_LINE.sub(r"\1\\", block)
+
+
+def _inline(text: object) -> str:
+    """A single-line field: ``escape_block(one_line(text))``."""
+    return escape_block(one_line(text))
 
 
 def _check_inputs(publications: object, grants: object) -> None:
@@ -90,58 +151,60 @@ def _header_lines(user: User) -> list[str]:
 
 
 def _bullet_section(lines: list[str], title: str, items) -> None:
-    """Append a ``## title`` bullet list to ``lines``; nothing when ``items`` is falsy."""
-    if items:
+    """Append a ``## title`` bullet list of the non-empty ``_inline`` items to ``lines``;
+    nothing when none is left."""
+    cleaned = [item for item in map(_inline, items or ()) if item]
+    if cleaned:
         lines.append(f"## {title}\n")
-        for item in items:
-            lines.append(f"- {item}")
+        lines.extend(f"- {item}" for item in cleaned)
         lines.append("")
 
 
 def _citation(pub) -> str:
-    """One publication's citation text and link (spec 2026-10-05 §6.3, P28): the DOI only
-    when it is verified against PubMed's record for the PMID (``doi_verified``) and fits
-    the journal; else the PubMed page; a PMID-less row keeps a DOI that fits the journal,
-    and gets no link when the DOI contradicts it."""
+    """One publication's citation text and link (spec 2026-10-05 §6.3, P28; F22, EXP-5):
+    the DOI link when the DOI is verified against PubMed's record for the PMID
+    (``doi_verified``), is DOI-shaped and fits the journal; else the PubMed page of an
+    all-digit PMID; else a DOI-shaped DOI that fits the journal; else no link. Title and
+    journal are ``_inline``."""
     parts = []
-    if pub.title:
-        parts.append(pub.title.rstrip("."))
-    if pub.journal:
-        parts.append(f"*{pub.journal}*")
+    title = _inline(pub.title).rstrip(".")
+    if title:
+        parts.append(title)
+    journal = _inline(pub.journal)
+    if journal:
+        parts.append(f"*{journal}*")
     if pub.year:
         parts.append(f"({pub.year})")
     citation = ". ".join(parts) + "."
-    doi_fits = bool(pub.doi) and _validate_doi_journal(pub.doi, pub.journal)
-    if doi_fits and pub.doi_verified:
-        citation += f" https://doi.org/{pub.doi}"
-    elif pub.pmid:
-        citation += f" https://pubmed.ncbi.nlm.nih.gov/{pub.pmid}/"
-    elif doi_fits:
-        citation += f" https://doi.org/{pub.doi}"
-    return citation
-
-
-def _escape_heading_lines(text: str) -> str:
-    """``text`` with a backslash before the ``#`` of every line whose first non-blank
-    character is ``#`` (indentation kept), so a Research Summary cannot open a persona
-    section for any parser (spec 2026-10-05 D49)."""
-    return re.sub(r"(?m)^([ \t]*)#", r"\1\\#", text)
+    doi_href = doi_url(pub.doi) if pub.doi and _validate_doi_journal(pub.doi, pub.journal) else None
+    pubmed_href = pubmed_url(pub.pmid)
+    if doi_href and pub.doi_verified:
+        link = doi_href
+    elif pubmed_href:
+        link = pubmed_href
+    elif doi_href:
+        link = doi_href
+    else:
+        link = None          # the citation ends with "." and no URL
+    return f"{citation} {link}" if link else citation
 
 
 def _publication_lines(publications: TenureScopedPublications | None) -> list[str]:
     """Recent Publications section (up to 20, publication_sort_key order); empty when none.
-    Each line ends with its link (``_citation``) and, where the row has a PMID,
-    ``(PMID n)`` (D49)."""
+    A row whose ``_inline`` title is empty is dropped before the sort and the cap. Each
+    line ends with its link (``_citation``) and, for an all-digit PMID, ``(PMID n)``
+    (D49)."""
     if not publications:
         return []
-    sorted_pubs = sorted([p for p in publications if p.title], key=publication_sort_key)[:20]
+    titled = [p for p in publications if _inline(p.title).rstrip(".")]
+    sorted_pubs = sorted(titled, key=publication_sort_key)[:20]
     if not sorted_pubs:
         return []
-    lines = ["## Recent Publications\n"]
+    lines = [f"## {RECENT_PUBLICATIONS_HEADING}\n"]
     for pub in sorted_pubs:
         line = f"- {_citation(pub)}"
         pmid = str(pub.pmid or "").strip()
-        if pmid.isdigit():
+        if pubmed_url(pmid):
             line += f" (PMID {pmid})"
         lines.append(line)
     lines.append("")
@@ -157,23 +220,29 @@ def render_profile_markdown(
 ) -> str:
     """Render the exported markdown. Section order is part of the bot-facing contract:
     header, Research Summary, the tag sections, Recent Publications, Active Grants, Past
-    Grants (since <year>). A summary line starting with ``#`` is written ``\\#``."""
+    Grants (since <year>). Every field is sanitised (module docstring); the section headings
+    are ``persona_sections``' constants (main SPEC EXP-11)."""
     _check_inputs(publications, grants)
     lines = _header_lines(user)
 
-    if profile.research_summary:
-        lines.append("## Research Summary\n")
-        lines.append(_escape_heading_lines(profile.research_summary))
+    summary = escape_block(profile.research_summary)
+    if summary:
+        lines.append(f"## {RESEARCH_SUMMARY_HEADING}\n")
+        lines.append(summary)
         lines.append("")
 
-    _bullet_section(lines, "Key Methods and Technologies", profile.techniques)
-    _bullet_section(lines, "Model Systems", profile.experimental_models)
-    _bullet_section(lines, "Disease Areas / Biological Processes", profile.disease_areas)
-    _bullet_section(lines, "Key Molecular Targets", profile.key_targets)
+    for heading, items in zip(
+        TAG_SECTION_HEADINGS[:4],
+        (profile.techniques, profile.experimental_models, profile.disease_areas,
+         profile.key_targets),
+        strict=True,
+    ):
+        _bullet_section(lines, heading, items)
 
-    if profile.keywords:
-        lines.append("## Keywords\n")
-        lines.append(", ".join(profile.keywords))
+    keywords = ", ".join(k for k in map(_inline, profile.keywords or ()) if k)
+    if keywords:
+        lines.append(f"## {TAG_SECTION_HEADINGS[4]}\n")
+        lines.append(keywords)
         lines.append("")
 
     lines.extend(_publication_lines(publications))
@@ -200,7 +269,7 @@ _DOI_PUBLISHER_PATTERNS: dict[str, list[str]] = {
     # 10.1101/ falls through to the bioRxiv/medRxiv preprint check.
     "10.1101/cshperspect": ["cold spring harbor perspectives"],
     "10.1101/gad": ["genes & development", "genes and development", "genes dev"],
-    "10.1101/gr.": ["genome research"],
+    "10.1101/gr": ["genome research"],
     "10.1101/sqb": ["cold spring harbor symposia"],
     "10.1101/pdb": ["cold spring harbor protocols"],
     "10.1101/lm": ["learning & memory", "learning and memory"],
@@ -208,7 +277,6 @@ _DOI_PUBLISHER_PATTERNS: dict[str, list[str]] = {
     "10.1074/jbc": ["journal of biological chemistry"],
     "10.1073/pnas": ["proceedings of the national academy"],
     "10.15252/embj": ["embo journal"],
-    "10.1109/": ["ieee"],
     "10.1371/journal.pgen": ["plos genetics"],
     "10.1371/journal.pbio": ["plos biology"],
     "10.1371/journal.pone": ["plos one"],
@@ -217,6 +285,14 @@ _DOI_PUBLISHER_PATTERNS: dict[str, list[str]] = {
     "10.1016/j.bpj": ["biophysical journal"],
     "10.1016/j.sbi": ["current opinion in structural biology"],
 }
+
+#: Each prefix matches only when the character after it is not a letter (main SPEC
+#: EXP-7), so 10.1016/j.cell does not claim 10.1016/j.cellsig and the bare 10.1101/ does
+#: not claim 10.1101/mcs. Compiled once; dict order and first match win as before.
+_DOI_PUBLISHER_RULES: tuple[tuple[str, re.Pattern[str], list[str]], ...] = tuple(
+    (prefix, re.compile(re.escape(prefix.lower()) + r"(?![a-z])"), patterns)
+    for prefix, patterns in _DOI_PUBLISHER_PATTERNS.items()
+)
 
 
 def _validate_doi_journal(doi: str, journal: str | None) -> bool:
@@ -231,8 +307,8 @@ def _validate_doi_journal(doi: str, journal: str | None) -> bool:
     doi_lower = doi.lower()
     journal_lower = journal.lower()
 
-    for prefix, expected_patterns in _DOI_PUBLISHER_PATTERNS.items():
-        if doi_lower.startswith(prefix.lower()):
+    for prefix, rule, expected_patterns in _DOI_PUBLISHER_RULES:
+        if rule.match(doi_lower):
             # This DOI has a known prefix — check if journal matches
             if any(pat in journal_lower for pat in expected_patterns):
                 return True

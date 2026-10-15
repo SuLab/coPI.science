@@ -32,3 +32,18 @@ async def test_lock_agent_persona_uses_the_agent_namespace():
         "SELECT pg_advisory_xact_lock(hashtextextended('agent:' || CAST(:id AS text), 0))",
         {"id": str(uid)},
     )]
+
+
+async def test_lock_profile_regeneration_uses_its_namespace():
+    seen = []
+
+    class _Db:
+        async def execute(self, statement, params):
+            seen.append((str(statement), params))
+
+    uid = uuid.uuid4()
+    await al.lock_profile_regeneration(_Db(), uid)
+    assert seen == [(
+        "SELECT pg_advisory_xact_lock(hashtextextended('generate_profile:' || CAST(:id AS text), 0))",
+        {"id": str(uid)},
+    )]

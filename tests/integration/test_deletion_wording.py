@@ -47,7 +47,7 @@ async def test_the_staff_dialog_lists_research_data_for_an_admin(client, db_sess
     body = (await client.get("/workspace/staff", headers=auth_headers(admin.id))).text
     dialog = _dialog(body, "Rae Viewer")
     for phrase in ("its researcher profile", "its 2 stored publications",
-                   "the profile revisions stored for that agent",
+                   "its lab agent's persona files (the agent is suspended and its Slack bot token revoked)",
                    "copies of its profile text in the model-call logs"):
         assert phrase in dialog
 
@@ -69,14 +69,11 @@ async def test_a_manager_sees_the_admin_label_not_delete(client, db_session):
     assert "Holds research data: an admin deletes it" in body
 
 
-async def test_no_deletion_text_claims_the_phase_5_purge(client, db_session):
-    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+async def test_the_non_pi_refusal_panel_claims_no_purge_fact(client, db_session):
     rev = await _reviewer_with_research_data(db_session)
-    staff = (await client.get("/workspace/staff", headers=auth_headers(admin.id))).text
-    own = (await client.get("/profile/delete-account", headers=auth_headers(rev.id))).text
-    for body in (staff, own):
-        assert "archived" not in body.lower()
-        assert "linked to someone else" not in body.lower()
+    body = (await client.get("/profile/delete-account", headers=auth_headers(rev.id))).text
+    assert "archived" not in body.lower()
+    assert "linked to someone else" not in body.lower()
 
 
 async def test_the_self_delete_page_sends_research_data_to_an_admin(client, db_session):
@@ -109,3 +106,41 @@ async def test_an_unknown_error_value_shows_no_banner(client, db_session):
                              headers=auth_headers(rev.id))).text
     assert "exactly to confirm" not in body
     assert 'action="/profile/delete-account"' in body
+
+
+async def _three_deletion_pages(client, db):
+    admin = await factories.make_user(db, user_role=USER_ROLE_ADMIN)
+    pi = await factories.make_user(db)
+    reviewer = await factories.make_user(db, user_role=USER_ROLE_REVIEWER)
+    return [
+        html.unescape((await client.get("/profile/delete-account",
+                                        headers=auth_headers(pi.id))).text),
+        html.unescape((await client.get(f"/workspace/pis/{pi.id}",
+                                        headers=auth_headers(admin.id))).text),
+        html.unescape((await client.get(f"/admin/users/{reviewer.id}",
+                                        headers=auth_headers(admin.id))).text),
+    ]
+
+
+async def test_deletion_pages_name_archived_copies(client, db_session):
+    for body in await _three_deletion_pages(client, db_session):
+        assert "archived copy" in body
+
+
+async def test_deletion_pages_name_relinked_revisions(client, db_session):
+    for body in await _three_deletion_pages(client, db_session):
+        assert "linked to someone else" in body
+
+
+async def test_staff_dialog_names_the_purge_facts_for_research_data(client, db_session):
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+    with_profile = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER,
+                                             name="Rhea Profile")
+    await factories.make_profile(db_session, user=with_profile)
+    await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER, name="Paul Plain")
+    body = (await client.get("/workspace/staff", headers=auth_headers(admin.id))).text
+    rich, plain = _dialog(body, "Rhea Profile"), _dialog(body, "Paul Plain")
+    for phrase in ("every profile revision written while it owned a lab agent",
+                   "any archived copy of its persona file"):
+        assert phrase in rich
+        assert phrase not in plain

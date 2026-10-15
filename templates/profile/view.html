@@ -168,12 +168,14 @@
                         {{ pub.journal }}{% if pub.year %} · {{ pub.year }}{% endif %}
                     </p>
                     <div class="flex gap-2 mt-1">
-                        {% if pub.pmid %}
-                        <a href="https://pubmed.ncbi.nlm.nih.gov/{{ pub.pmid }}" target="_blank"
+                        {% set pm = pubmed_url(pub.pmid) %}
+                        {% if pm %}
+                        <a href="{{ pm }}" target="_blank"
                            class="text-xs text-blue-600 hover:underline">PubMed</a>
                         {% endif %}
-                        {% if pub.doi %}
-                        <a href="https://doi.org/{{ pub.doi }}" target="_blank"
+                        {% set doi_href = doi_url(pub.doi) %}
+                        {% if doi_href %}
+                        <a href="{{ doi_href }}" target="_blank"
                            class="text-xs text-blue-600 hover:underline">DOI</a>
                         {% endif %}
                     </div>

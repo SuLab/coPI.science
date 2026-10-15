@@ -19,7 +19,7 @@ from src.services.profile_edit import (
     list_fields_from_form,
     parse_expected_version,
 )
-from src.services.profile_jobs import enqueue_profile_job_if_absent
+from src.services.profile_jobs import enqueue_profile_job_if_absent, enqueue_profile_regeneration
 from src.web.templating import make_templates
 from src.web.page_context import page_context
 
@@ -189,8 +189,10 @@ async def retry_pipeline(
     Gated on get_pi_user: this is the POST twin of the GET self-heal at
     ``onboarding_start``, which already refuses to enqueue generate_profile
     for a manager (F8). Narrowing only the GET left the pipeline one form
-    POST away.
+    POST away. Capped at five generations per PI in 24 hours (Q25, F2).
     """
-    await enqueue_profile_job_if_absent(db, current_user, priority=INTERACTIVE_PRIORITY)
+    outcome = await enqueue_profile_regeneration(db, current_user.id, actor_id=current_user.id)
     await db.commit()
+    if outcome.status == "limited":
+        return RedirectResponse(url="/onboarding?error=retry_limited", status_code=302)
     return RedirectResponse(url="/onboarding", status_code=302)

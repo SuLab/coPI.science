@@ -21,6 +21,7 @@ def make_templates() -> Jinja2Templates:
         markdown_with_citation_links,
         plain_with_citation_links,
     )
+    from src.services.publication_links import doi_url, pubmed_url
     from src.web.flash import flash_context
     from src.web.help_pages import shot_meta
 
@@ -52,4 +53,8 @@ def make_templates() -> Jinja2Templates:
     from src.web.urls import page_url
 
     templates.env.globals["page_url"] = page_url
+    # Publication links, one definition for the persona and every template (Q28, F22):
+    # None for a value that is not a DOI-shaped DOI or an all-digit PMID.
+    templates.env.globals["doi_url"] = doi_url
+    templates.env.globals["pubmed_url"] = pubmed_url
     return templates

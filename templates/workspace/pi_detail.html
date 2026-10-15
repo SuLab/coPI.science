@@ -279,8 +279,10 @@
     <div class="border border-red-200 rounded-xl p-6 mb-6">
         <h2 class="font-semibold text-red-700 mb-2">Danger Zone</h2>
         <p class="text-sm text-gray-600 mb-2">
-            Permanently deletes this user's profile (including all stored
-            revisions and the on-disk copy), publications, jobs, and agent DMs.
+            Permanently deletes this user's profile (including every stored
+            revision written while they owned a lab agent, even on an agent since
+            linked to someone else, the on-disk copy and any archived copy),
+            publications, jobs, and agent DMs.
             A linked lab agent is suspended and its Slack token revoked.
             Messages the agent already posted, completed assessments and the copies
             of the profile text in the simulation's model-call logs remain in the
@@ -670,8 +672,9 @@
                     · {% if pub.methods_text %}Methods ✓{% else %}No methods fetched{% endif %}
                 </p>
                 <div class="flex gap-2 mt-1">
-                    {% if pub.pmid %}
-                    <a href="https://pubmed.ncbi.nlm.nih.gov/{{ pub.pmid }}" target="_blank"
+                    {% set pm = pubmed_url(pub.pmid) %}
+                    {% if pm %}
+                    <a href="{{ pm }}" target="_blank"
                        class="text-xs text-blue-600 hover:underline">PubMed</a>
                     {% endif %}
                     {% if pub.pmcid %}<span class="text-xs text-gray-600">PMC: {{ pub.pmcid }}</span>{% endif %}
@@ -691,7 +694,10 @@
                     <p class="font-medium text-gray-800">{{ pub.title }}</p>
                     <p class="text-gray-500 text-xs mt-0.5">{{ pub.journal or 'journal unknown' }} · {{ pub.year or 'year unknown' }}</p>
                     <div class="flex gap-2 mt-1">
-                        {% if pub.pmid %}<a href="https://pubmed.ncbi.nlm.nih.gov/{{ pub.pmid }}" target="_blank" rel="noopener noreferrer" class="text-xs text-blue-600 hover:underline">PubMed</a>{% endif %}
+                        {% set pm = pubmed_url(pub.pmid) %}
+                        {% if pm %}
+                        <a href="{{ pm }}" target="_blank" rel="noopener noreferrer" class="text-xs text-blue-600 hover:underline">PubMed</a>
+                        {% endif %}
                         <form method="post" action="{{ page_url(request, 'workspace_exclude_publication', user_id=target_user.id, publication_id=pub.id) }}"><button type="submit" class="text-xs text-red-700 underline">Exclude</button></form>
                     </div>
                 </div>

@@ -29,6 +29,7 @@ import base64
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -1197,3 +1198,18 @@ async def test_no_logged_in_user_can_read_or_write_another_users_data(client, db
                 "impersonation is inert even for an admin, so the "
                 "negative assertions above are not testing anything"
             )
+
+
+async def test_onboarding_retry_limited_shows_message(client, db_session):
+    newcomer = await factories.make_user(db_session, onboarding_complete=False)
+    now = datetime.now(UTC)
+    db_session.add_all([
+        Job(type="generate_profile", user_id=newcomer.id, status="dead", payload={},
+            enqueued_at=now - timedelta(hours=h))
+        for h in (1, 2, 3, 4, 5)
+    ])
+    await db_session.flush()
+    r = await client.post("/onboarding/retry", headers=_auth(newcomer.id))
+    assert r.status_code == 302 and r.headers["location"] == "/onboarding?error=retry_limited"
+    page = await client.get("/onboarding?error=retry_limited", headers=_auth(newcomer.id))
+    assert "Too many attempts today — please try again tomorrow or contact support." in page.text

@@ -30,6 +30,12 @@ class ProfileRevision(Base):
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
+    #: The user who owned the agent when this revision was written (migration 0069, C6 of
+    #: the 2026-10-15 publication-handling design); NULL before 0069, and for an agent with
+    #: no user (the hub, the specialists). Account deletion purges by it.
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True,
+    )
     mechanism: Mapped[str] = mapped_column(
         String(20), nullable=False
     )  # web, web_impersonated, agent, pipeline, grant_veto, orcid_veto, grant_pin,
@@ -54,6 +60,7 @@ class ProfileRevision(Base):
             created_at.desc(),
         ),
         Index("ix_profile_revisions_changed_by_user_id", "changed_by_user_id"),
+        Index("ix_profile_revisions_owner_user_id", "owner_user_id"),
     )
 
     def __repr__(self) -> str:

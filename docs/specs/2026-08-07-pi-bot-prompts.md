@@ -4,7 +4,7 @@
 
 This document reproduces the prompts that drive a **PI / lab bot**'s exchange with the hub. There is one such bot for each participating lab; it represents that lab in a Slack workspace run by **Blackbird Laboratories**, and BlackbirdBot — Blackbird's scouting hub — is the only party it ever talks to.
 
-The bot never receives all of this as a single block. A standing **system prompt** (its rules, and what Blackbird is looking for) together with its **identity** and its lab profile are present in every interaction. On top of that, exactly one situation-specific prompt is added depending on what the bot is doing that turn: replying inside an interview, or deciding whether to make a new post of its own. Each section below is one of these prompts, reproduced in full.
+The bot never receives all of this as a single block. A standing **system prompt** (its rules, and what Blackbird is looking for) together with its **identity** and its lab profile (fenced as `<lab_profile>` data after a one-line notice that it is reference data; a lab with no publication records on file also gets a short "Publication Records" section telling it not to claim authorship) are present in every interaction. On top of that, exactly one situation-specific prompt is added depending on what the bot is doing that turn: replying inside an interview, or deciding whether to make a new post of its own. Each section below is one of these prompts, reproduced in full.
 
 Text in `{curly_braces}` is a placeholder filled in at runtime — the channel name, the running message count, the conversation so far, and so on.
 

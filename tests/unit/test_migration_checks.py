@@ -278,9 +278,9 @@ def test_supported_start_revisions_are_exactly_the_documented_set():
         "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038",
         "0039", "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048",
         "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058",
-        "0059", "0060", "0061", "0062", "0063", "0064", "0065", "0066", "0067",
+        "0059", "0060", "0061", "0062", "0063", "0064", "0065", "0066", "0067", "0068",
     )
-    assert pf.DEFAULT_TARGET == "0068"
+    assert pf.DEFAULT_TARGET == "0069"
 
 
 def test_every_post_branch_revision_is_a_supported_start():
@@ -2025,3 +2025,11 @@ def test_0062_plans_its_new_objects():
         ("column", "human_edited_at"), ("column", "evidence_flagged_count"),
         ("column", "persona_export_failed_at"),
     }
+
+
+def test_postflight_pins_the_0069_objects():
+    assert "0069" in po.VERIFIED_REVISIONS
+    assert ("profile_revisions", "owner_user_id", "uuid", True, "") in po.EXPECTED_COLUMNS
+    assert po.EXPECTED_INDEXES["ix_profile_revisions_owner_user_id"] == "USING btree (owner_user_id)"
+    assert po.EXPECTED_CONSTRAINTS["fk_profile_revisions_owner_user_id_users"] == (
+        "profile_revisions", "FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE")

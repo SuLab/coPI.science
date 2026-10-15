@@ -8,6 +8,7 @@ from src.models import USER_ROLE_MANAGER, USER_ROLE_REVIEWER, ProfileRevision
 from src.services import persona_lifecycle, profile_export
 from src.services.jhu_rules import set_provisional_tenure_start
 from src.services.persona_lifecycle import export_after_lifecycle
+from src.services.revision_history import list_public_revisions
 from tests import factories
 from tests.integration.test_manager_access import auth_headers
 from tests.persona_support import write_persona
@@ -88,3 +89,46 @@ async def test_manager_activation_refuses_without_a_persona_file(client, db_sess
     assert "activation_blocked=1" in r.headers["location"]
     page = await client.get(r.headers["location"], headers=auth_headers(mgr.id))
     assert "persona file profiles/public/mgrnofile.md is missing" in page.text
+
+
+async def _revision(db, agent, owner, content, profile_type="public"):
+    revision = ProfileRevision(agent_registry_id=agent.id, profile_type=profile_type,
+                               content=content, mechanism="pipeline",
+                               owner_user_id=owner.id if owner is not None else None)
+    db.add(revision)
+    await db.flush()
+    return revision
+
+
+async def _relinked(db):
+    former = await factories.make_user(db)
+    current = await factories.make_user(db)
+    agent = await factories.make_agent(db, user=former, agent_id="smithrev")
+    return former, current, agent
+
+
+async def test_revision_list_hides_another_owners_rows(db_session):
+    former, current, agent = await _relinked(db_session)
+    r_former = await _revision(db_session, agent, former, "former's persona")
+    agent.user_id = current.id
+    await db_session.flush()
+    r_current = await _revision(db_session, agent, current, "current's persona")
+    assert [r.id for r in await list_public_revisions(db_session, current.id)] == [r_current.id]
+    assert [r.id for r in await list_public_revisions(db_session, former.id)] == [r_former.id]
+
+
+async def test_revision_list_keeps_legacy_null_rows_of_the_current_agent(db_session):
+    former, current, agent = await _relinked(db_session)
+    agent.user_id = current.id
+    await db_session.flush()
+    legacy = await _revision(db_session, agent, None, "legacy persona")
+    assert [r.id for r in await list_public_revisions(db_session, current.id)] == [legacy.id]
+    assert await list_public_revisions(db_session, former.id) == []
+
+
+async def test_revision_list_excludes_memory_rows(db_session):
+    _former, current, agent = await _relinked(db_session)
+    agent.user_id = current.id
+    await db_session.flush()
+    await _revision(db_session, agent, current, "memory text", profile_type="memory")
+    assert await list_public_revisions(db_session, current.id) == []

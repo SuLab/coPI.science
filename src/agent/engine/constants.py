@@ -109,6 +109,9 @@ CHANNEL_POLL_INTERVAL = 15.0   # seconds between conversations.history sweeps
 #: 240 identical lines an hour PER CHANNEL burying everything else.
 POLL_ERROR_LOG_INTERVAL = 300.0
 ROSTER_POLL_INTERVAL = 30.0    # seconds between AgentRegistry roster re-syncs
+#: Seconds between loads of every live agent's publication ids (C12 of the 2026-10-15
+#: publication-handling design; Roster._sync_publication_records).
+PUBLICATION_RECORDS_POLL_INTERVAL = 30.0
 #: Seconds between control-plane polls (claim a pending stop command, refresh
 #: the heartbeat row). See _poll_control_plane.
 CONTROL_POLL_INTERVAL = 30.0
@@ -199,7 +202,7 @@ __all__ = [
     "HEADLINES_MAX_AT_SHUTDOWN", "MEMORY_EVENTS_MAX_AT_SHUTDOWN",
     "PERSIST_UPSERT_CHUNK_ROWS", "PER_ROW_RECOVERY_DEADLINE_S", "POLL_ERROR_LOG_INTERVAL",
     "PRIOR_THREADS_KEPT_PER_PAIR", "PROFILES_DIR", "PROPOSAL_DRAIN_SETTLE_TICKS",
-    "REBUILD_WINDOW_S", "ROSTER_POLL_INTERVAL", "RUN_STATS_UPDATE_INTERVAL",
+    "PUBLICATION_RECORDS_POLL_INTERVAL", "REBUILD_WINDOW_S", "ROSTER_POLL_INTERVAL", "RUN_STATS_UPDATE_INTERVAL",
     "SEEDED_CHANNELS", "TRUNCATION_NOTICE", "_CALLS_PER_LOG_ROW", "_CHANNEL_KEYWORDS",
     "_ROW_LEVEL_DB_ERRORS", "_UNIVERSAL_CHANNELS", "_UNSET",
 ]

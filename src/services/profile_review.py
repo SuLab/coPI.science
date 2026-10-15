@@ -31,6 +31,11 @@ from src.services.corpus_additions import (
 )
 from src.services.profile_drafts import DRAFT_FIELDS, Draft, draft_is_stale, read_draft
 from src.services.profile_limits import SUMMARY_MAX_CHARS, cap_tags
+from src.services.profile_jobs import (
+    PROFILE_REGENERATION_DAILY_CAP,
+    REGENERATION_LIMIT_REASON,
+    recent_profile_generation_count,
+)
 from src.services.profile_publish import persona_out_of_date
 
 #: How long after a completed generation Regenerate stays refused (spec §6.3).
@@ -161,7 +166,9 @@ async def _generation_in_flight(db: AsyncSession, user_id: uuid.UUID) -> bool:
 
 async def regenerate_refusal(db: AsyncSession, user_id: uuid.UUID) -> str | None:
     """Why Regenerate is refused now, or None: a ``generate_profile`` job is pending or
-    processing, or the newest completed one finished within ``REGENERATE_COOLDOWN``."""
+    processing, the newest completed one finished within ``REGENERATE_COOLDOWN``, or
+    PROFILE_REGENERATION_DAILY_CAP generations were enqueued in the last 24 hours (Q25;
+    ``enqueue_profile_regeneration`` stays authoritative under its lock)."""
     if await _generation_in_flight(db, user_id):
         return "A profile generation is already queued or running."
     last = await db.scalar(
@@ -174,6 +181,8 @@ async def regenerate_refusal(db: AsyncSession, user_id: uuid.UUID) -> str | None
             "A profile generation finished less than an hour ago "
             f"(at {last.astimezone(UTC):%H:%M} UTC); try again later."
         )
+    if await recent_profile_generation_count(db, user_id) >= PROFILE_REGENERATION_DAILY_CAP:
+        return REGENERATION_LIMIT_REASON
     return None
 
 

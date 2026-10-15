@@ -24,6 +24,7 @@
             {% elif error == 'email_taken' %}That email address is already in use by another account.
             {% elif error == 'profile_changed' %}This profile changed while you were editing it (a regeneration or another edit saved first). Reload the page to see the current version, then re-apply your changes.
             {% elif error == 'profile_generating' %}Profile is being generated — try again shortly.
+            {% elif error == 'retry_limited' %}Too many attempts today — please try again tomorrow or contact support.
             {% elif profile_error_text(error) %}{{ profile_error_text(error) }}
             {% else %}Something went wrong saving your changes. Please try again.{% endif %}
         </p>

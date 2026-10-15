@@ -3,7 +3,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from src.models import (
     USER_ROLE_MANAGER,
@@ -12,13 +12,16 @@ from src.models import (
     Publication,
     PublicationCandidate,
 )
+from src.models.job import INTERACTIVE_PRIORITY
 from src.routers.workspace import pi_profile as manager_routes
 from src.services import profile_export, profile_review
 from src.services.jhu_rules import set_tenure_start
 from src.services.profile_drafts import build_draft_payload
+from src.services.profile_jobs import REGENERATION_LIMIT_REASON
 from src.services.profile_limits import SUMMARY_MAX_CHARS
 from src.services.profile_review import GENERATION_NOTE_STAFF_TEXT, GenerationNote
 from tests import factories
+from tests.flash_support import session_flashes
 from tests.integration.test_manager_access import auth_headers
 
 pytestmark = pytest.mark.integration
@@ -221,7 +224,7 @@ async def test_regenerate_queues_interactive_and_refuses_in_flight_or_recent(cli
     assert "error" not in r.headers["location"]
     [job] = (await db_session.execute(select(Job).where(
         Job.user_id == pi.id, Job.type == "generate_profile"))).scalars().all()
-    assert job.status == "pending" and job.priority == manager_routes.INTERACTIVE_PRIORITY
+    assert job.status == "pending" and job.priority == INTERACTIVE_PRIORITY
     r = await _post(client, f"/workspace/pis/{pi.id}/regenerate", mgr)
     assert "error=regenerate_refused" in r.headers["location"]
     job.status, job.completed_at = "completed", datetime.now(UTC) - timedelta(minutes=10)
@@ -583,3 +586,61 @@ async def test_accept_draft_refuses_a_non_list_field(client, db_session, public)
     assert "error=no_draft" in r.headers["location"]
     await db_session.refresh(profile)
     assert profile.profile_version == 3 and profile.pending_profile is not None
+
+
+async def _generations(db, user_id, status, *hours_ago, newest_completed_minutes_ago=None):
+    now = datetime.now(UTC)
+    for hours in hours_ago:
+        enqueued = now - timedelta(hours=hours)
+        db.add(Job(type="generate_profile", user_id=user_id, status=status, payload={},
+                   enqueued_at=enqueued,
+                   completed_at=enqueued + timedelta(minutes=5) if status == "completed" else None))
+    if newest_completed_minutes_ago is not None:
+        done = now - timedelta(minutes=newest_completed_minutes_ago)
+        db.add(Job(type="generate_profile", user_id=user_id, status="completed", payload={},
+                   enqueued_at=done - timedelta(minutes=10), completed_at=done))
+    await db.commit()
+
+
+async def _generation_count(db, user_id):
+    return await db.scalar(select(func.count()).select_from(Job).where(
+        Job.user_id == user_id, Job.type == "generate_profile"))
+
+
+def _flash_texts(response):
+    return [f["text"] for f in session_flashes(response)]
+
+
+async def test_staff_retry_limited(client, db_session, public):
+    pi, _profile, _agent, mgr = await _setup(db_session)
+    await _generations(db_session, pi.id, "dead", 1, 2, 3, 4, 5)
+    r = await _post(client, f"/workspace/pis/{pi.id}/profile/retry", mgr)
+    assert r.status_code == 302
+    assert REGENERATION_LIMIT_REASON in _flash_texts(r)
+    assert await _generation_count(db_session, pi.id) == 5
+
+
+async def test_regenerate_cooldown_still_first(client, db_session, public):
+    pi, _profile, _agent, mgr = await _setup(db_session)
+    await _generations(db_session, pi.id, "completed", 2, 3, 4, 5,
+                       newest_completed_minutes_ago=10)
+    r = await _post(client, f"/workspace/pis/{pi.id}/regenerate", mgr)
+    texts = _flash_texts(r)
+    assert any("less than an hour ago" in t for t in texts)
+    assert REGENERATION_LIMIT_REASON not in texts
+
+
+async def test_regenerate_card_shows_cap_reason(db_session):
+    pi, _profile, _agent, _mgr = await _setup(db_session)
+    await _generations(db_session, pi.id, "completed", 2, 3, 4, 5, 6)
+    cards = await profile_review.load_review_cards(db_session, pi.id)
+    assert cards.regenerate_refusal == REGENERATION_LIMIT_REASON
+
+
+async def test_legacy_manager_routes_are_capped(client, db_session, public):
+    pi, _profile, _agent, mgr = await _setup(db_session)
+    await _generations(db_session, pi.id, "completed", 2, 3, 4, 5, 6)
+    r = await _post(client, f"/manager/pis/{pi.id}/regenerate", mgr)
+    assert "error=regenerate_refused" in r.headers["location"]
+    assert REGENERATION_LIMIT_REASON in _flash_texts(r)
+    assert await _generation_count(db_session, pi.id) == 5

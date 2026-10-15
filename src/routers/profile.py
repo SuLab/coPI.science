@@ -16,7 +16,6 @@ from src.dependencies import (
     staff_landing_redirect,
 )
 from src.models import AgentRegistry, Publication, ResearcherProfile, User
-from src.models.job import INTERACTIVE_PRIORITY
 from src.services.admin_invariant import LastAdminError, ensure_admin_remains
 from src.services.grant_sections import load_grant_sections
 from src.services.profile_edit import (
@@ -24,7 +23,7 @@ from src.services.profile_edit import (
     list_fields_from_form,
     parse_expected_version,
 )
-from src.services.profile_jobs import enqueue_profile_job_if_absent
+from src.services.profile_jobs import enqueue_profile_regeneration
 from src.services.tenure_scope import (
     publication_in_use,
     publication_order_by,
@@ -185,10 +184,18 @@ async def profile_refresh(
 
     get_pi_user: a manager has no research profile to refresh (D7), and this
     fires the same ORCID/PubMed generate_profile pipeline that F8 kept off
-    manager accounts on the onboarding side.
+    manager accounts on the onboarding side. Capped (Q25): past the daily limit nothing is
+    queued and a flash says so.
     """
-    await enqueue_profile_job_if_absent(db, current_user, priority=INTERACTIVE_PRIORITY)
+    outcome = await enqueue_profile_regeneration(db, current_user.id, actor_id=current_user.id)
     await db.commit()
+    if outcome.status == "limited":
+        flash(
+            request,
+            "Too many profile refreshes today — please try again tomorrow or contact support.",
+            "error",
+        )
+        return RedirectResponse(url="/profile", status_code=302)
     return RedirectResponse(url="/profile?refreshing=1", status_code=302)
 
 

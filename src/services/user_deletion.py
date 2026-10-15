@@ -12,15 +12,18 @@ This module is the one place deletion policy lives. Both delete routes call
 
 Two phases, deliberately:
 
-* **in-transaction** — lock, suspend the linked agent, purge revisions/DMs/
-  tenure key (and optionally the allowlist row), delete the user, COMMIT. It
+* **in-transaction** — lock, suspend the linked agent, purge the user's profile
+  revisions (by owner, C6 of the 2026-10-15 publication-handling design), DMs and tenure
+  key (and optionally the allowlist row), delete the user, COMMIT. It
   first takes the PI's ``agents`` row FOR UPDATE and then the per-PI persona
   lock (``lock_agent_persona``), the lock order every profile writer follows
   (``profile_publish`` module docstring, spec 2026-10-05 §4.3): a writer holding
   ``lock_persona_writer`` commits before this deletes anything, so its revision
   is purged and its persona file removed below, and a writer that starts later
   finds no user and records or writes nothing.
-* **post-commit** — filesystem cleanup and Slack token revocation. External
+* **post-commit** — filesystem cleanup (the agent's files and the user's owner-tagged
+  archived persona copies; a symbolic link is removed, never followed) and Slack token
+  revocation. External
   effects that cannot roll back run only once the DB state is durable; a
   failure lands on the report and in the log, never raises. A half-failed
   cleanup still leaves a *suspended* agent, which is the state that actually
@@ -32,15 +35,17 @@ so a manager unmute cannot resurrect a deleted PI's agent.
 """
 
 import logging
+import os
 import re
 import shutil
+import stat
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -66,11 +71,14 @@ logger = logging.getLogger(__name__)
 # engine's memory writer (src/agent/agent.py, PROFILES_DIR / "memory") owns
 # _MEMORY_DIR, and pi_companies.COMPANIES_DIR (src/services/pi_companies.py)
 # writes _COMPANIES_DIR/{agent_id}.md, the hub's staff company record
-# (tests/unit/test_pi_companies.py pins that pair equal). Module-level so tests
+# (tests/unit/test_pi_companies.py pins that pair equal), and persona_lifecycle.ORPHANED_DIR
+# (src/services/persona_lifecycle.py) archives persona copies under _ORPHANED_DIR
+# (tests/unit/test_user_deletion_paths.py pins that pair equal). Module-level so tests
 # can monkeypatch them to a tmp_path.
 _PUBLIC_DIR = Path("profiles/public")
 _MEMORY_DIR = Path("profiles/memory")
 _COMPANIES_DIR = Path("profiles/private/companies")
+_ORPHANED_DIR = Path("profiles/private/orphaned")
 
 # agent_id slugs are minted by our own code (lowercase last names, optional
 # initial prefix / numeric suffix), but this function deletes files, so it
@@ -164,7 +172,75 @@ async def research_data_for(
     }
 
 
-def _agent_paths(agent_id: str) -> list[Path]:
+def _record_error(report: DeletionReport, message: str) -> None:
+    """Report and log a teardown problem that does not stop the teardown."""
+    report.errors.append(message)
+    logger.error("Deletion teardown: %s", message)
+
+
+def _remove_entry(path: Path, report: DeletionReport) -> None:
+    """Remove ``path`` without following a symbolic link (main SPEC WEB-5; D-D7): a real
+    directory goes with ``shutil.rmtree`` (which never follows a link inside the tree and
+    refuses one at the top); anything else, a symbolic link included, is unlinked, so a
+    link's target is never touched. A missing path is nothing to do. A removal is listed
+    in ``files_deleted``; a failure is reported and logged."""
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        report.errors.append(f"file cleanup {path}: {exc}")
+        logger.error("Deletion teardown: could not remove %s: %s", path, exc)
+        return
+    try:
+        if stat.S_ISDIR(mode):
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    except OSError as exc:
+        report.errors.append(f"file cleanup {path}: {exc}")
+        logger.error("Deletion teardown: could not remove %s: %s", path, exc)
+        return
+    report.files_deleted.append(str(path))
+
+
+def _archive_stamp_dirs(root: Path, report: DeletionReport) -> list[Path]:
+    """The real directories directly under the memory archive ``root``, sorted; none when
+    it is missing. A ``root`` that is a symbolic link, and an entry that is one, are
+    reported and never followed (``Path.glob`` would follow a symlinked stamp out of
+    ``profiles/``)."""
+    try:
+        mode = os.lstat(root).st_mode
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        _record_error(report, f"memory archive {root}: {exc}")
+        return []
+    if stat.S_ISLNK(mode):
+        _record_error(report, f"memory archive: {root} is a symbolic link; not followed")
+        return []
+    if not stat.S_ISDIR(mode):
+        return []
+    stamps: list[Path] = []
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if entry.is_symlink():
+                    report.errors.append(
+                        f"memory archive: {entry.path} is a symbolic link; not followed")
+                    logger.error(
+                        "Deletion teardown: archive entry %s is a symbolic link; not followed",
+                        entry.path,
+                    )
+                elif entry.is_dir(follow_symlinks=False):
+                    stamps.append(Path(entry.path))
+    except OSError as exc:
+        _record_error(report, f"memory archive {root}: {exc}")
+        return []
+    return sorted(stamps)
+
+
+def _agent_paths(agent_id: str, report: DeletionReport) -> list[Path]:
     if not _SAFE_AGENT_ID.fullmatch(agent_id):
         raise ValueError(f"refusing file cleanup for unsafe agent_id {agent_id!r}")
     paths = [
@@ -174,26 +250,51 @@ def _agent_paths(agent_id: str) -> list[Path]:
         _MEMORY_DIR / agent_id,  # partitioned memory directory
     ]
     # --fresh archives whole memory trees under archive/<stamp>/; a deleted
-    # PI's synthesized memory must be purged from those snapshots too.
-    archive_root = _MEMORY_DIR / "archive"
-    if archive_root.is_dir():
-        paths.extend(sorted(archive_root.glob(f"*/{agent_id}")))
-        paths.extend(sorted(archive_root.glob(f"*/{agent_id}.md")))
+    # PI's synthesized memory must be purged from those snapshots too. Only real stamp
+    # directories are searched, so no symbolic link is followed (D-D7).
+    for stamp_dir in _archive_stamp_dirs(_MEMORY_DIR / "archive", report):
+        paths.append(stamp_dir / agent_id)
+        paths.append(stamp_dir / f"{agent_id}.md")
     return paths
 
 
 def _delete_agent_files(agent_id: str, report: DeletionReport) -> None:
-    for path in _agent_paths(agent_id):
-        try:
-            if path.is_dir():
-                shutil.rmtree(path)
-                report.files_deleted.append(str(path))
-            elif path.exists():
-                path.unlink()
-                report.files_deleted.append(str(path))
-        except OSError as exc:
-            report.errors.append(f"file cleanup {path}: {exc}")
-            logger.error("Deletion teardown: could not remove %s: %s", path, exc)
+    for path in _agent_paths(agent_id, report):
+        _remove_entry(path, report)
+
+
+def _delete_archived_personas(user_id: uuid.UUID, report: DeletionReport) -> None:
+    """Remove the archived persona copies tagged with ``user_id`` (C6, Q29) from the top
+    level of ``_ORPHANED_DIR``: ``<agent_id>.<stamp>.owner-<user id hex>.md``, whichever
+    agent they came from. Untagged copies, archived with no known owner, are kept (F30).
+    A symbolic-link directory is not followed, and a matching directory is not removed;
+    both are reported. Never raises."""
+    name_re = re.compile(rf"[a-z0-9_-]{{1,50}}\.\d{{8}}T\d{{12}}Z\.owner-{user_id.hex}\.md")
+    try:
+        mode = os.lstat(_ORPHANED_DIR).st_mode
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        _record_error(report, f"archived personas {_ORPHANED_DIR}: {exc}")
+        return
+    if stat.S_ISLNK(mode):
+        _record_error(
+            report, f"archived personas: {_ORPHANED_DIR} is a symbolic link; not followed")
+        return
+    try:
+        with os.scandir(_ORPHANED_DIR) as entries:
+            found = sorted(
+                (Path(entry.path), entry.is_dir(follow_symlinks=False))
+                for entry in entries if name_re.fullmatch(entry.name)
+            )
+    except OSError as exc:
+        _record_error(report, f"archived personas {_ORPHANED_DIR}: {exc}")
+        return
+    for path, is_dir in found:
+        if is_dir:
+            _record_error(report, f"archived personas: {path} is a directory; not removed")
+            continue
+        _remove_entry(path, report)
 
 
 async def _delete_in_transaction(
@@ -220,15 +321,24 @@ async def _delete_in_transaction(
             agent.status = "suspended"
             report.agent_suspended = True
         res = await db.execute(
-            sa_delete(ProfileRevision).where(
-                ProfileRevision.agent_registry_id == agent.id
-            )
-        )
-        report.revisions_deleted = res.rowcount or 0
-        res = await db.execute(
             sa_delete(PiDmMessage).where(PiDmMessage.agent_id == agent.agent_id)
         )
         report.dms_deleted += res.rowcount or 0
+
+    # Revisions by owner (C6, Q29): every revision stamped with this user, on any agent
+    # (one since linked to someone else included), plus the legacy unstamped revisions
+    # (written before migration 0069) of the agent the user owns now. A revision stamped
+    # for another owner belongs to that owner and stays; an unstamped revision of an agent
+    # the user no longer owns has no known owner and stays too. ON DELETE CASCADE would
+    # remove the stamped rows with the users row anyway; deleting them here counts them.
+    owned = ProfileRevision.owner_user_id == user.id
+    if agent is not None:
+        owned = or_(owned, and_(
+            ProfileRevision.owner_user_id.is_(None),
+            ProfileRevision.agent_registry_id == agent.id,
+        ))
+    res = await db.execute(sa_delete(ProfileRevision).where(owned))
+    report.revisions_deleted = res.rowcount or 0
 
     # Local-transport DMs are keyed by the string "local:<users.id>", the one
     # place a users.id value outlives its row (audit F4) — purge these even
@@ -282,6 +392,8 @@ async def delete_user_account(
         except ValueError as exc:
             report.errors.append(str(exc))
             logger.error("Deletion teardown: %s", exc)
+    # The user's owner-tagged archived persona copies, with or without an agent now (Q29).
+    _delete_archived_personas(report.user_id, report)
 
     stored = (token or "").strip()
     if stored.startswith("xoxb-placeholder"):

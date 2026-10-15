@@ -4,6 +4,9 @@ Mirrors the rubric's pattern (blackbird_rubric.py: [meta].version +
 sha256[:12] of the bytes): the version is a human declaration, the hash is the
 drift alarm that catches an edit nobody bumped the version for.
 """
+import hashlib
+from pathlib import Path
+
 import pytest
 
 from src.agent import roles
@@ -95,3 +98,22 @@ def test_real_role_tomls_declare_a_version_and_still_parse():
         assert prompt_set_stamp(role).version not in ("", "unversioned")
     spec = load_role("scout_hub")
     assert spec.label == "Scout Hub"  # unchanged by the new key
+
+_ROOT = Path(__file__).resolve().parents[2]
+#: sha256 of the four pi_lab base prompt files at the Phase 4 head, equal to blackbird
+#: 3080cbbc because no phase before 5 edits prompts/ (I9). Phase 5 changes only role.toml.
+_PI_LAB_FILES_AT_PHASE_4 = {
+    "prompts/agent-system.md": "09f72578820d547d549e6f8681b896938f5f10375bbefd081cdff9b970efb3de",
+    "prompts/identity.md": "202f39cbd450be7d77418ed0dfcfa924492904589caceba80ad92d0476dfe3d6",
+    "prompts/phase4-thread-reply.md": "07e33ce7adc8cb1bfe143362fd653186fefa3111d319ef1e72169cd432e1014e",
+    "prompts/phase5-new-post.md": "0243133fb71a7d1c23ed58f298eef05646996cb53e7bb40c67cfda95259b8d83",
+}
+
+
+def test_pi_lab_prompt_set_version_is_1_2_0():
+    assert prompt_set_stamp("pi_lab").version == "1.2.0"
+
+
+def test_pi_lab_prompt_files_are_unchanged_by_phase_5():
+    for rel, digest in _PI_LAB_FILES_AT_PHASE_4.items():
+        assert hashlib.sha256((_ROOT / rel).read_bytes()).hexdigest() == digest, rel

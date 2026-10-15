@@ -1,5 +1,5 @@
 """The only code constants the help pages state (spec 2026-10-14 §6.3 rule 4): the 1-5
-overall rating and the review comment limit. Each is pinned to the validator that
+overall rating, the review comment limit and the profile-generation limit. Each is pinned to the validator that
 enforces it and to the help text that states it, so moving either value fails here until
 templates/help/pages/assessments.html is updated."""
 
@@ -43,3 +43,21 @@ def test_reviewing_section_states_the_same_values():
     section = _reviewing_section()
     assert re.search(r"\b1\b\D{0,40}\b5\b", section), "the 1-5 rating range is not stated"
     assert f"{_MAX_COMMENT_CHARS:,}" in section, "the comment limit is not stated"
+
+
+def test_the_profile_generation_limit_is_five_in_24_hours():
+    from datetime import timedelta
+
+    from src.services.profile_jobs import (
+        PROFILE_REGENERATION_DAILY_CAP,
+        PROFILE_REGENERATION_WINDOW,
+        REGENERATION_LIMIT_REASON,
+    )
+
+    assert PROFILE_REGENERATION_DAILY_CAP == 5
+    assert PROFILE_REGENERATION_WINDOW == timedelta(hours=24)
+    managing = (ROOT / "templates/help/pages/managing-pis.html").read_text(encoding="utf-8")
+    assert "five profile generations in 24 hours" in managing
+    troubleshooting = (ROOT / "templates/help/pages/troubleshooting.html").read_text(
+        encoding="utf-8")
+    assert f'<h3>"{REGENERATION_LIMIT_REASON}"</h3>' in troubleshooting
