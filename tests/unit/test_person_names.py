@@ -6,9 +6,12 @@ from src.services.company_sources import pi_name
 from src.services.person_names import (
     InvalidPersonName,
     is_orcid_like,
+    match_fold,
+    match_keys,
     name_from_machine_source,
     parse_person_name,
     sanitize_person_name,
+    split_comma_form,
     surname_candidates,
     validate_person_name,
 )
@@ -118,3 +121,40 @@ def test_machine_id_names_are_collapsed_and_cut_to_the_allowlist():
     assert is_orcid_like(name)
     assert name_from_machine_source(None) == (None, False)
     assert name_from_machine_source("\n*\t") == ("", True)
+
+
+@pytest.mark.parametrize(("text", "folded"), [
+    ("Kjær", "kjaer"), ("Søren", "soren"), ("Łopuszański", "lopuszanski"),
+    ("Œuvre", "oeuvre"), ("Þór", "thor"), ("Đorđe", "dorde"),
+    ("Straße", "strasse"), ("Yıldız", "yildiz"), ("O’Neal", "o'neal"),
+])
+def test_match_fold_spells_the_letters_nfkd_keeps(text, folded):
+    assert match_fold(text) == folded
+
+
+def test_match_keys_adds_the_german_variant_only_for_umlauts():
+    assert match_keys("Mueller") == {"mueller"}
+    assert match_keys("Muller") == {"muller"}
+    assert match_keys("Müller") == {"muller", "mueller", "müller"}
+
+
+def test_match_keys_keep_a_non_latin_name_comparable():
+    assert match_keys("王") == {"王"}
+    assert match_keys("  ") == frozenset()
+
+
+@pytest.mark.parametrize(("name", "expected"), [
+    ("Doe, Jane", ("Doe", "Jane")),
+    ("Garcia Marquez, Gabriel", ("Garcia Marquez", "Gabriel")),
+    ("Smith, John, Jr.", ("Smith", "John")),
+    ("Smith Jr, John", ("Smith", "John")),
+    ("Doe, Dr. Jane", ("Doe", "Jane")),
+    ("Jane Doe, PhD", None),
+    ("Martin Luther King, Jr.", None),
+    ("Jane Doe", None),
+    ("Doe, ", None),
+    ("A, B, C", None),
+    ("0000-0002-1825-0097", None),
+])
+def test_split_comma_form(name, expected):
+    assert split_comma_form(name) == expected

@@ -29,8 +29,10 @@ Review set (``--review``, NEVER applied automatically):
   - rows whose only identity evidence is a bare single-letter forename/initial
     (``bare_initial_only``, D3 — a judgement call, not a mechanical one);
   - rows that fail ``match_pi_author`` on weaker evidence: no author list
-    (``unverifiable_no_authors``), consortium-only (``consortium_only``), or
-    the PI's surname present with a disagreeing forename (``forename_mismatch``);
+    (``unverifiable_no_authors``), consortium-only (``consortium_only``), several authors
+    matching the PI's name (``ambiguous_author``), an author list PubMed marks incomplete
+    without the PI (``unverifiable_incomplete_list``), or the PI's surname present with a
+    disagreeing forename (``forename_mismatch``);
   - rows with a secondary excluded type (``secondary_excluded_type``, D4);
   - resolved additions found without an ORCID anchor (``unanchored_addition``);
   - rows with no stored PMID at all (``no_pmid`` — nothing to refetch);
@@ -96,6 +98,7 @@ from src.services.corpus import (  # noqa: E402
     EXCLUDED_TYPES,
     CorpusStageError,
     _match_pi_author_detail,
+    _pi_name,
     _split_particle_splice,
     _surname_matches,
     match_pi_author,
@@ -109,7 +112,6 @@ from src.services.corpus_additions import (  # noqa: E402
     select_corpus_additions,
 )
 from src.services.job_queue import JobDeferred  # noqa: E402
-from src.services.person_names import is_orcid_like, surname_candidates  # noqa: E402
 from src.services.profile_publish import (  # noqa: E402
     lock_persona_writer,
     reexport_persona,
@@ -240,24 +242,21 @@ def partition_duplicate_pmids(
 
 
 def _record_has_surname(record: dict[str, Any], pi_name: str) -> bool:
-    """Whether ANY listed author carries the PI's surname.
+    """Whether ANY valid listed author carries the PI's surname.
 
-    Uses the service's own surname comparison (folding, compound and
-    particle-splice handling) so this agrees with `match_pi_author` about
-    what a surname match is — the difference between the two is purely the
-    forename leg, which is what makes "surname present, forename disagrees"
-    a reviewable case rather than a removable one. The surname forms are the shared
-    parser's (``person_names.surname_candidates``), as the gate reads them: "Jane Doe,
-    PhD" is a Doe, "John Smith Jr." a Smith; an ORCID-iD name has none.
+    Uses the service's own surname comparison (folding, joins, containment and
+    particle-splice handling) so this agrees with `match_pi_author` about what a surname
+    match is — the difference between the two is purely the forename leg, which is what
+    makes "surname present, forename disagrees" a reviewable case rather than a removable
+    one. The surname forms are the gate's own (``corpus._pi_name``): "Jane Doe, PhD" is a
+    Doe, "Doe, Jane" a Doe, "John Smith Jr." a Smith; an ORCID-iD name has none. Entries
+    PubMed marks ``ValidYN="N"`` are ignored, as the gate ignores them.
     """
-    if is_orcid_like(pi_name):
-        return False
-    parts = pi_name.strip().split()
-    surnames = surname_candidates(pi_name) or ((parts[-1],) if parts else ())
+    surnames = _pi_name(pi_name).surnames
     if not surnames:
         return False
     for author in record.get("authors") or []:
-        if author.get("collective"):
+        if author.get("collective") or author.get("valid", True) is False:
             continue
         candidate = (author.get("last") or "").strip()
         if not candidate:
@@ -339,6 +338,10 @@ def classify_stored_publications(
                 reason = "unverifiable_no_authors"
             elif kind == "consortium":
                 reason = "consortium_only"
+            elif kind == "ambiguous":
+                reason = "ambiguous_author"
+            elif kind == "incomplete_list":
+                reason = "unverifiable_incomplete_list"
             elif _record_has_surname(record, pi_name):
                 reason = "forename_mismatch"
             else:

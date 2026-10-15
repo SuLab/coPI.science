@@ -24,7 +24,7 @@ from dataclasses import dataclass
 
 # German umlaut/eszett expansion, applied to the ORIGINAL text only, so "Müller"
 # yields both "muller" and "mueller" while ASCII "Muller" yields only "muller"
-# (the asymmetry src/services/corpus.py `_surname_variants` documents).
+# (the asymmetry the corpus gate keeps through `match_keys`).
 _GERMAN = str.maketrans(
     {"ü": "ue", "ö": "oe", "ä": "ae", "ß": "ss", "Ü": "Ue", "Ö": "Oe", "Ä": "Ae"}
 )
@@ -122,6 +122,56 @@ def ascii_letters(text: str) -> str:
     digit dropped: "Müller" -> "Muller", "O'Brien" -> "OBrien"."""
     folded = unicodedata.normalize("NFKD", text.translate(_ASCII_LETTERS))
     return "".join(c for c in folded if c.isascii() and c.isalnum())
+
+
+def match_fold(text: str | None) -> str:
+    """``fold`` after spelling out the letters NFKD keeps (ø, æ, œ, ß, đ, ð, ł, þ, ı, in
+    both cases; ``_ASCII_LETTERS``): "Kjær" -> "kjaer", "Łopuszański" -> "lopuszanski",
+    "O’Neal" -> "o'neal". The corpus identity gate's folding (spec 2026-10-15 R3.1)."""
+    return fold((text or "").translate(_ASCII_LETTERS))
+
+
+def match_keys(text: str | None) -> frozenset[str]:
+    """The comparable keys of one name part; two parts are equal when their key sets
+    intersect. Three keys, each with every character but a-z and 0-9 removed, so hyphens,
+    spaces, apostrophes and periods never count: ``match_fold`` of the text; the same of
+    its German expansion (differs only for ä/ö/ü/ß, so "Müller" meets "Mueller" while
+    "Muller" never does); and the NFC case-folded alphanumerics, which keep a non-Latin
+    name comparable with itself. Empty keys are dropped."""
+    t = (text or "").strip()
+    keys = {
+        re.sub(r"[^0-9a-z]", "", match_fold(t)),
+        re.sub(r"[^0-9a-z]", "", match_fold(t.translate(_GERMAN))),
+        "".join(c for c in unicodedata.normalize("NFC", t).casefold() if c.isalnum()),
+    }
+    return frozenset(k for k in keys if k)
+
+
+def split_comma_form(full_name: str | None) -> tuple[str, str] | None:
+    """``(surname, given)`` for a name written "Surname, Given" ("Doe, Jane",
+    "Smith, John, Jr.", "Smith Jr, John", "Doe, Dr. Jane"), else None: no comma, a comma
+    before degrees or a generation only ("Jane Doe, PhD", "Martin Luther King, Jr."),
+    three name parts, an empty side (honorifics removed), or an ORCID iD. Trailing comma
+    parts made only of suffixes or degrees are dropped first, as `_strip_comma_degrees`
+    does; trailing suffix words leave the surname while it has more than one word."""
+    if is_orcid_like(full_name):
+        return None
+    parts = unicodedata.normalize("NFC", full_name or "").split(",")
+    while (
+        len(parts) > 1
+        and parts[-1].strip()
+        and all(_is_suffix(ascii_letters(w)) for w in parts[-1].split())
+    ):
+        parts.pop()
+    if len(parts) != 2:
+        return None
+    surname_words = strip_honorifics(parts[0]).split()
+    while len(surname_words) > 1 and _is_suffix(ascii_letters(surname_words[-1])):
+        surname_words.pop()
+    surname, given = " ".join(surname_words), strip_honorifics(parts[1])
+    if not surname or not given:
+        return None
+    return surname, given
 
 
 def _is_suffix(word: str) -> bool:

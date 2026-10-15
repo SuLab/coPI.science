@@ -12,9 +12,9 @@ Owner decisions (spec §2): D5, store DOI-bearing works with OpenAlex abstracts;
 ORCID-listed works and OpenAlex's works for the ORCID without staff review. D6 as amended
 after the 2026-10-09 rollout, where 25 of one PI's 38 OpenAlex-only works were other
 people's: a work only OpenAlex attributes to the ORCID is stored only when the ORCID's own
-authorship on it names Johns Hopkins or an organization on the PI's ORCID record, or the
-publisher's metadata carries the ORCID. The match is by name, so a namesake at a
-similarly named institution can still pass.
+authorship on it names Johns Hopkins or an organization on the PI's ORCID record (its name
+as one run of words, in order), or the publisher's metadata carries the ORCID. The match is
+by name, so a namesake at a similarly named institution can still pass.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from typing import Any
+from typing import Any, Literal
 
 from src.models.publication import PROVENANCE_OPENALEX
 from src.services.corpus import CorpusResult, _normalize_title
@@ -59,6 +59,22 @@ _GENERIC_WORDS = frozenset("""
     laboratories lab foundation inc ltd llc gmbh corporation corp company co group campus
 """.split())
 
+#: Generic words that name the same kind of place across languages and abbreviations: two
+#: words of one class are equal inside a run of words (spec 2026-10-15 R3.9).
+_GENERIC_CLASSES = (
+    frozenset({"university", "universitat", "universite", "universidad", "universidade",
+               "universita", "universiteit", "univ"}),
+    frozenset({"institute", "institut", "instituto", "istituto"}),
+    frozenset({"center", "centre", "centrum", "zentrum"}),
+    frozenset({"hospital", "hopital"}),
+    frozenset({"laboratory", "laboratories", "lab"}),
+    frozenset({"corporation", "corp"}),
+    frozenset({"program", "programme"}),
+    frozenset({"department", "dept"}),
+    frozenset({"science", "sciences"}),
+)
+_WORD_CLASS = {word: n for n, words in enumerate(_GENERIC_CLASSES) for word in words}
+
 Lookup = Callable[[str], Awaitable[dict[str, Any] | None]]
 AuthorshipLookup = Callable[[str], Awaitable[Mapping[str, dict[str, Any] | None]]]
 
@@ -86,9 +102,9 @@ async def collect_non_pubmed_works(
 
     An "openalex" work is kept only when the ORCID's own authorship on it is attributed
     (``_attributed``): it names Johns Hopkins or one of ``institutions`` (the organization
-    names on the PI's ORCID record), or the publisher's metadata carries ``pi_orcid``. The
-    authorships come from one ``authorship_lookup(pi_orcid)`` (default
-    ``fetch_orcid_authorships``, one charged request per page), made only when such a work
+    names on the PI's ORCID record; its name as one run of words, in order), or the
+    publisher's metadata carries ``pi_orcid``. The authorships come from one
+    ``authorship_lookup(pi_orcid)`` (default ``fetch_orcid_authorships``, one charged request per page), made only when such a work
     exists; its failure RAISES. With no ``pi_orcid`` no "openalex" work is kept. The DOIs of
     the works dropped this way are appended to ``unattributed`` when it is given."""
     lookup = lookup or fetch_work_by_doi
@@ -134,53 +150,112 @@ async def _authorships(
     return out
 
 
-def _attributed(authorship: Mapping[str, Any] | None, institutions: Sequence[str]) -> bool:
+def attribution_verdict(
+    authorship: Mapping[str, Any] | None, organizations: Sequence[str],
+) -> Literal["attributed", "unattributed", "unknown"]:
     """Whether the PI's authorship on a work (``openalex.fetch_orcid_authorships``) ties the
-    work to the PI: the publisher's metadata carries the ORCID, or an affiliation names Johns
-    Hopkins or one of ``institutions`` (``_names_organization``)."""
-    if not authorship:
-        return False
+    work to the PI. ``"unknown"`` when there is no authorship: no entry for the work, or an
+    author list (capped at 100 in a list response) without the PI. ``"attributed"`` when the
+    publisher's metadata carries the ORCID, an institution name or raw affiliation names
+    Johns Hopkins, or one names an organization on the PI's ORCID record
+    (``_names_organization``); otherwise ``"unattributed"``. Phase 4's re-check excludes on
+    ``"unattributed"`` and leaves ``"unknown"`` alone (spec 2026-10-15 C4)."""
+    if authorship is None:
+        return "unknown"
     if authorship.get("orcid_in_metadata"):
-        return True
+        return "attributed"
     names = authorship.get("institutions") or []
     raw = authorship.get("raw_affiliations") or []
     if any(is_hopkins_affiliation(text) for text in (*names, *raw) if isinstance(text, str)):
-        return True
-    return any(_names_organization(org, names, raw) for org in institutions)
+        return "attributed"
+    if any(_names_organization(org, names, raw) for org in organizations):
+        return "attributed"
+    return "unattributed"
+
+
+def _attributed(authorship: Mapping[str, Any] | None, institutions: Sequence[str]) -> bool:
+    """``attribution_verdict(...) == "attributed"``: at admission no authorship means the
+    work is not stored."""
+    return attribution_verdict(authorship, institutions) == "attributed"
+
+
+def _run_words(text: object) -> list[str]:
+    """``_words(text)`` without a leading "the"."""
+    words = _words(text)
+    return words[1:] if words[:1] == ["the"] else words
+
+
+def _same_word(a: str, b: str) -> bool:
+    """Equal, or two generic words of one ``_GENERIC_CLASSES`` class ("univ" = "university")."""
+    return a == b or (a in _WORD_CLASS and _WORD_CLASS.get(b) == _WORD_CLASS[a])
+
+
+def _distinctive(words: list[str]) -> list[str]:
+    return [word for word in words if word not in _GENERIC_WORDS]
+
+
+def _significant_run(words: list[str]) -> list[str]:
+    """``words`` from the first distinctive one on, later generic words kept: "University of
+    California San Diego" -> california san diego; "New York University" unchanged."""
+    for n, word in enumerate(words):
+        if word not in _GENERIC_WORDS:
+            return words[n:]
+    return []
+
+
+def _rotated_run(run: list[str]) -> list[str] | None:
+    """``run`` with its last distinctive word moved to the front, the rest in order
+    ("Children's Hospital Boston" -> boston childrens hospital); None below two
+    distinctive words (F11)."""
+    positions = [n for n, word in enumerate(run) if word not in _GENERIC_WORDS]
+    if len(positions) < 2:
+        return None
+    last = positions[-1]
+    return [run[last], *run[:last], *run[last + 1:]]
+
+
+def _holds_run(text_words: list[str], run: list[str]) -> bool:
+    """Whether ``run`` occurs as consecutive words of ``text_words`` (``_same_word``)."""
+    size = len(run)
+    return size > 0 and any(
+        all(_same_word(text_words[start + k], run[k]) for k in range(size))
+        for start in range(len(text_words) - size + 1)
+    )
 
 
 def _names_organization(
     organization: str, names: Sequence[str], raw: Sequence[str],
 ) -> bool:
     """Whether an OpenAlex institution name (``names``) or a raw affiliation string names
-    ``organization``. An organization with two or more distinctive words (not in
-    _GENERIC_WORDS) matches a text holding them all, in any order; one with a single
-    distinctive word matches only its whole name, so "University of Washington" never matches
-    "Washington University in St. Louis". An institution name with two or more distinctive
-    words also matches an organization whose name begins with them, as OpenAlex's English
-    short name begins a long native one ("Max Delbrück Center", "Max Delbrück Centrum für
-    Molekulare Medizin Berlin Buch"); a single word ("University of Washington") does not."""
-    words = _words(organization)
-    if words[:1] == ["the"]:
-        words = words[1:]
-    key = set(words) - _GENERIC_WORDS
-    if not key:
+    ``organization`` (Q11, F11). The organization's significant run of words must occur in
+    the text as one run, in order: "New York University" no longer matches "Columbia
+    University, New York, NY". A one-distinctive-word organization must occur as its whole
+    name ("University of Washington" never matches "Washington University"). With two or
+    more distinctive words the run may also occur with its last distinctive word first
+    ("Boston Children's Hospital" for "Children's Hospital Boston"). An institution name
+    whose own significant run has two or more distinctive words, and equals the
+    organization's leading words, also matches, as OpenAlex's English short name begins a
+    long native one ("Max Delbrück Center", "Max Delbrück Centrum für Molekulare Medizin
+    Berlin Buch"); the rotation does not apply there."""
+    words = _run_words(organization)
+    distinctive = _distinctive(words)
+    if not distinctive:
         return False
-    phrase = f" {' '.join(words)} "
-
-    def holds(text: str) -> bool:
-        found = _words(text)
-        if len(key) == 1:
-            return phrase in f" {' '.join(found)} "
-        return key <= set(found)
-
+    run = words if len(distinctive) == 1 else _significant_run(words)
+    rotated = _rotated_run(run)
+    for text in (*names, *raw):
+        found = _run_words(text)
+        if _holds_run(found, run) or (rotated is not None and _holds_run(found, rotated)):
+            return True
     for name in names:
-        if holds(name):
+        prefix = _significant_run(_run_words(name))
+        if (
+            len(_distinctive(prefix)) >= 2
+            and len(prefix) <= len(run)
+            and all(_same_word(a, b) for a, b in zip(prefix, run, strict=False))
+        ):
             return True
-        distinctive = [word for word in _words(name) if word not in _GENERIC_WORDS]
-        if len(distinctive) >= 2 and phrase.startswith(f" {' '.join(distinctive)} "):
-            return True
-    return any(holds(text) for text in raw)
+    return False
 
 
 def _words(text: object) -> list[str]:

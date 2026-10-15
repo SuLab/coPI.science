@@ -1407,3 +1407,106 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > downgrade drops the table and every recorded answer, so the prompt shows again. **Never reuse
 > revision id `0067`**, whatever happens to this feature: a later revision with that id would
 > count as already applied and its DDL would be skipped silently.
+
+> **Deploy order for publication-handling Phase 3 (name matching) — no migration; capture the F6 baseline on the image being replaced BEFORE building, and compare on the new image before it serves.**
+>
+> Design: the 2026-10-15 publication-handling design, Phase 3. The identity gate's matcher (`src/services/corpus.py`) and the OpenAlex organisation rule (`src/services/non_pubmed_works.py`) change, so newly admitted ORCID-anchored papers are stored at each PI's next run without review (F6). Stored rows are not re-judged until Phase 4. Images: `blackbird-app` and `worker`; the agent image is not rebuilt (no agent code changes). Never start a simulation run.
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>
+> **1. Read-only data checks** (before deploy; record the numbers in the deploy notes):
+>     $DC exec -T postgres psql -U copi -d copi -v ON_ERROR_STOP=1 <<'SQL'
+>     SET default_transaction_read_only = on;
+>     -- (a) comma-form names in the population (C-D6 exposure; F25 input: if 0, nothing outside the matcher changes)
+>     SELECT u.id, u.name FROM users u
+>      WHERE u.name LIKE '%,%'
+>        AND (u.user_role = 'pi' OR EXISTS (SELECT 1 FROM agents a WHERE a.user_id = u.id AND a.role = 'pi_lab'));
+>     -- (b) F6 (1) denominator: in-use anchored rows with a PMID
+>     SELECT count(*) AS rows, count(DISTINCT user_id) AS pis FROM publications
+>      WHERE excluded_at IS NULL AND pmid IS NOT NULL AND provenance ~ '^(s[1-4],)*s[13](,s[1-4])*$';
+>     -- (c) stored in-use openalex rows
+>     SELECT count(*) AS rows, count(DISTINCT user_id) AS pis FROM publications
+>      WHERE provenance = 'openalex' AND excluded_at IS NULL;
+>     -- (d) Phase 2's check 1, repeated: stored ORCID iDs with a bad mod 11-2 check digit (F22: must return no rows)
+>     WITH ids AS (
+>       SELECT 'users' AS src, orcid FROM users WHERE orcid IS NOT NULL
+>       UNION ALL SELECT 'access_allowlist', orcid FROM access_allowlist WHERE orcid IS NOT NULL
+>     ), d AS (
+>       SELECT src, orcid, replace(upper(btrim(orcid)), '-', '') AS v FROM ids
+>     ), s AS (
+>       SELECT src, orcid, v,
+>              CASE WHEN v ~ '^[0-9]{15}[0-9X]$' THEN
+>                (12 - (SELECT sum(substr(v, k, 1)::int * (1 << (16 - k)))
+>                       FROM generate_series(1, 15) AS k) % 11) % 11
+>              END AS chk
+>       FROM d
+>     )
+>     SELECT src, orcid FROM s
+>     WHERE chk IS NULL OR substr(v, 16, 1) <> CASE chk WHEN 10 THEN 'X' ELSE chk::text END
+>     ORDER BY src, orcid;
+>     -- (e) no bulk job pending or running (BULK_PRIORITY = -10, src/models/job.py:46): expect no rows
+>     SELECT type, status, count(*) FROM jobs
+>      WHERE status IN ('pending', 'processing') AND priority = -10 GROUP BY 1, 2;
+>     SQL
+> - **Stop conditions:**
+>   - (d) returns any row: an admin corrects each iD by hand after confirming it on the person's ORCID record. The deploy waits; otherwise R3.7 would treat that PI's iD as absent.
+>   - (e) returns any row: wait until the bulk run finishes, because the baseline shares OpenAlex's free daily meter.
+> - If (a) is non-zero, record the names for the owner (§16 O4, F25). It does not block.
+>
+> **2. Commit and gate.**
+> - `git status --porcelain --untracked-files=all -- src templates static prompts alembic scripts help_assets pyproject.toml alembic.ini` must print nothing.
+> - `./scripts/ci.sh` must be green from a clean `git worktree` of that commit (Integrated verification step 5).
+>
+> **3. Baseline from the image being replaced** (before any build):
+>     for s in blackbird-app worker; do
+>       docker image tag "$(docker inspect -f '{{.Image}}' "$($DC ps -q $s)")" copi-blackbird-$s:rollback-pre-phase3
+>     done
+>     docker image tag copi-blackbird-blackbird-app:rollback-pre-phase3 copi-blackbird-blackbird-app:latest   # run on the serving image
+>     umask 077
+>     SMOKE_ORCID=$($DC exec -T postgres psql -U copi -d copi -At \
+>       -c "SELECT orcid FROM users WHERE user_role = 'pi' AND orcid IS NOT NULL ORDER BY name LIMIT 1")
+>     $DC run --rm --no-deps -T -v "$PWD/scripts/audit_pi_corpus.py:/app/scripts/audit_pi_corpus.py:ro" \
+>       blackbird-app python scripts/audit_pi_corpus.py --baseline --orcid "$SMOKE_ORCID" | wc -l
+>     echo "smoke exit ${PIPESTATUS[0]}"   # smoke: wc prints 1, and the exit is 0
+>     $DC run --rm --no-deps -T -v "$PWD/scripts/audit_pi_corpus.py:/app/scripts/audit_pi_corpus.py:ro" \
+>       blackbird-app python scripts/audit_pi_corpus.py --baseline \
+>       2> ~/backups-blackbird/phase3-audit-baseline.err | gzip > ~/backups-blackbird/phase3-audit-baseline.jsonl.gz
+>     echo "baseline exit ${PIPESTATUS[0]}"
+>     tail -n 2 ~/backups-blackbird/phase3-audit-baseline.err
+> - **The two stderr lines:** `# audit_pi_corpus baseline: <N> PI(s), <T> anchored in-use rows evaluated, <U> unrefetchable`, then `# resolve_error: <k> PI(s): <orcid> <orcid> …`. `<T>` + `<U>` equals check (b)'s `rows`.
+> - **On exit 1** (some PI has `resolve_error`), wait for the OpenAlex meter to reset (UTC midnight). Then append a line for each listed iD; gzip members concatenate, and the compare keeps the last line per PI:
+>       for o in <the iDs on the "# resolve_error:" line>; do
+>         $DC run --rm --no-deps -T -v "$PWD/scripts/audit_pi_corpus.py:/app/scripts/audit_pi_corpus.py:ro" \
+>           blackbird-app python scripts/audit_pi_corpus.py --baseline --orcid "$o" \
+>           2>> ~/backups-blackbird/phase3-audit-baseline.err | gzip >> ~/backups-blackbird/phase3-audit-baseline.jsonl.gz
+>       done
+> - **Do not build until every PI has a complete line.**
+>
+> **4. Build:** `$DC build blackbird-app worker`. The agent is not rebuilt.
+>
+> **5. Compare from the new image** (one-off; nothing is recreated):
+>     gunzip -c ~/backups-blackbird/phase3-audit-baseline.jsonl.gz | \
+>       $DC run --rm --no-deps -T blackbird-app python scripts/audit_pi_corpus.py --compare - \
+>       > ~/backups-blackbird/phase3-audit-compare.jsonl 2> ~/backups-blackbird/phase3-audit-compare.err
+>     echo "compare exit ${PIPESTATUS[1]}"
+>     grep '^#' ~/backups-blackbird/phase3-audit-compare.err
+> - **Exit 0 (PASS):** continue to step 6.
+> - **Exit 2 (STOP FOR OWNER REVIEW):** stop. The owner reviews the stderr summary, each PI's `dropped` and `newly_admitted` lists with their `newly_admitted_authors` labels, and the `openalex` lines (the compare file) before step 6.
+>   - The labels are where a containment admission of a PI's middle name ("David, Jeffrey" for "Jeffrey David Rothstein", §16 O6) or a swap admission shows.
+>   - If the owner declines, re-tag `copi-blackbird-blackbird-app:rollback-pre-phase3` and `copi-blackbird-worker:rollback-pre-phase3` as `:latest`. Nothing was recreated, so nothing else is needed.
+> - **Exit 1 (INCOMPLETE):** complete the baseline first. Re-tag the rollback image as `:latest` and go back to step 3 (re-run the `--orcid` loop for the PIs the `# incomplete PI(s):` line names), then repeat steps 4 and 5.
+>
+> **6. Deploy:** `$DC up -d blackbird-app worker`. Do not recreate the agent.
+>
+> **7. Verify** (read-only):
+>     $DC exec -T worker python -c "from src.services.corpus import match_pi_author; print(match_pi_author({'authors':[{'last':'Kjær','fore':'Chi','initials':'C'}]}, 'Chi Kjaer'))"
+>     # prints ('individual', [])
+>     $DC exec -T blackbird-app python -c "from src.services.non_pubmed_works import attribution_verdict; print(attribution_verdict({'institutions':[],'raw_affiliations':['Columbia University, New York, NY'],'orcid_in_metadata':False}, ['New York University']))"
+>     # prints unattributed
+> - When the next `generate_profile` job runs (any F2 route; this phase enqueues none), open it on `/admin/jobs`. Its `corpus_flagged` step shows only labels from `_FLAG_REASON_LABELS`, never a raw code such as `author_list_incomplete`.
+>
+> **8. Rollback:** re-tag each `:rollback-pre-phase3` as `:latest`, then `$DC up -d blackbird-app worker`.
+> - There is no schema to undo.
+> - Rows stored by a Phase 3 run in the meantime stay: they are ordinary anchored rows.
+>
+> Rollback: re-tag each `:rollback-pre-phase3` as `:latest`, then `$DC up -d blackbird-app worker`. There is no schema to undo; rows stored by a Phase 3 run in the meantime are ordinary anchored rows and stay.

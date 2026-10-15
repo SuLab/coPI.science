@@ -125,6 +125,8 @@ _FLAG_REASON_LABELS = {
     "s4_affiliation_mismatch": (
         "name+affiliation search hit with a different author affiliation"
     ),
+    "author_list_incomplete": "incomplete author list without the PI",
+    "ambiguous_author_unconfirmed": "ambiguous name match not confirmed",
 }
 
 

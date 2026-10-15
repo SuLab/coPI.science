@@ -2,7 +2,7 @@
 import pytest
 
 from src.services.corpus import CorpusResult
-from src.services.non_pubmed_works import collect_non_pubmed_works
+from src.services.non_pubmed_works import attribution_verdict, collect_non_pubmed_works
 
 
 def _oa(doi, *, title="OA title", year=2024, type_="conference-paper", pmid=None,
@@ -322,3 +322,70 @@ async def test_an_unattributed_duplicate_does_not_displace_an_attributed_version
 async def test_non_pubmed_works_skip_a_non_doi_orcid_value():
     work = {"doi": "N/A", "pmid": None, "title": "X", "type": "journal-article"}
     assert await _collect(_result(orcid=[work]), lookup=_no_lookup) == []
+
+
+# ---------------------------------------------------------------------------
+# Spec 2026-10-15 R3.9: the organisation's significant words as one run (Q11, F11)
+# ---------------------------------------------------------------------------
+
+
+async def _keeps(authorship, organization):
+    """collect_non_pubmed_works over one OpenAlex-only work with this authorship."""
+    unattributed: list[str] = []
+    out = await collect_non_pubmed_works(
+        _result(openalex=[_oa("10.1/a")]), lookup=_no_lookup, pi_orcid=PI,
+        institutions=(organization,), authorship_lookup=_authorships({"10.1/a": authorship}),
+        unattributed=unattributed)
+    assert unattributed == ([] if out else ["10.1/a"])
+    return bool(out)
+
+
+@pytest.mark.parametrize(("authorship", "organization"), [
+    (_authorship(raw=["Columbia University, New York, NY"]), "New York University"),
+    (_authorship(raw=["Genentech, South San Francisco, California"]),
+     "University of California San Francisco"),
+    (_authorship(raw=["Kent State University, Kent, Ohio"]), "Ohio State University"),
+    (_authorship(institutions=["New York University"]), "New York Genome Center"),
+    (_authorship(raw=["San Diego State University, San Diego, California"]),
+     "University of California San Diego"),
+    (_authorship(raw=["North Carolina State University, Raleigh; Chapel Hill, NC"]),
+     "University of North Carolina at Chapel Hill"),
+    (_authorship(raw=["Massachusetts Institute of Technology, Cambridge; Boston General"]),
+     "Massachusetts General Hospital"),
+    (_authorship(institutions=["New York Medical College"]), "New York University"),
+])
+async def test_peer_cases_are_not_attributed(authorship, organization):
+    assert await _keeps(authorship, organization) is False
+
+
+@pytest.mark.parametrize(("authorship", "organization"), [
+    (_authorship(raw=["University of California, San Diego, La Jolla, CA"]),
+     "University of California San Diego"),
+    (_authorship(raw=["New York University School of Medicine, New York"]), "New York University"),
+    (_authorship(raw=["New York Univ., New York, NY"]), "New York University"),
+    (_authorship(raw=["The Ohio State University, Columbus, OH"]), "Ohio State University"),
+    (_authorship(institutions=["University of California, San Francisco"]),
+     "University of California San Francisco"),
+    (_authorship(raw=["Department of Genetics, Harvard Medical School, Boston, MA"]),
+     "Harvard Medical School"),
+])
+async def test_true_organisation_matches_still_attribute(authorship, organization):
+    assert await _keeps(authorship, organization) is True
+
+
+async def test_the_rotated_run_needs_two_distinctive_words_and_whole_words():
+    assert await _keeps(_authorship(institutions=["Boston Children's Hospital"]),
+                        "Children’s Hospital Boston") is True
+    assert await _keeps(_authorship(raw=["Washington University School of Medicine, St. Louis"]),
+                        "University of Washington") is False
+    assert await _keeps(_authorship(raw=["York University, Toronto; New York"]),
+                        "New York University") is False
+
+
+def test_attribution_verdict_is_three_valued():
+    assert attribution_verdict(None, []) == "unknown"
+    assert attribution_verdict(
+        {"institutions": [], "raw_affiliations": [], "orcid_in_metadata": False}, []
+    ) == "unattributed"
+    assert attribution_verdict(_authorship(in_metadata=True), []) == "attributed"
+    assert attribution_verdict(_authorship(raw=["Johns Hopkins University"]), []) == "attributed"

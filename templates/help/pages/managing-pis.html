@@ -269,17 +269,26 @@
 <h3>The identity check</h3>
 <p>Before a paper is stored or offered, it has to pass a check that it is the PI's:</p>
 <ul>
-    <li>the PI has to appear on the paper by name as an individual author;</li>
+    <li>the PI has to appear on the paper by name as an individual author. Accents, letters
+        such as ø, æ and ł, hyphens, spaces and apostrophes are compared alike. One part of a
+        double surname matches the whole ("Garcia" for "Garcia-Lopez"), but never a particle
+        such as "de" or "van" on its own. A name recorded as "Surname, Given" is read that
+        way, and initials written together ("JD") count as initials;</li>
     <li>editorials, comments, letters, news items, corrections, expressions of concern,
         biographies, retraction notices, retracted papers and papers credited only to a group
         are left out;</li>
-    <li>a paper found only by the name search, or one on which the PI's first name appears
-        only as an initial and no ORCID anchor confirms it, is also checked against the
-        matched author's affiliation, and may be left out when that affiliation does not
-        match the recorded institution;</li>
+    <li>a paper found only by the name search, one on which the PI's first name appears
+        only as an initial, or one on which several authors match the PI's name, is also
+        checked against the matched authors' affiliations when no ORCID anchor confirms it,
+        and may be left out when no affiliation matches the recorded institution;</li>
     <li>a paper whose authorship cannot be confirmed is left out. It is not offered as a
         candidate, and no page shows it;</li>
-    <li>papers published under a former surname never match.</li>
+    <li>papers published under a former surname never match;</li>
+    <li>a paper the PI's ORCID record or PubMed's ORCID field lists is kept in three further
+        cases: when PubMed cuts its author list short before the PI; when the only matching
+        author carries a different ORCID iD; and when PubMed records the PI's surname and
+        given name the wrong way round. Author entries PubMed marks as invalid are
+        ignored.</li>
 </ul>
 <p>
     A paper that is missing from every list usually failed this check. Check the PI's
@@ -300,7 +309,7 @@
     articles, conference papers, books, chapters and preprints that PubMed does not index,
     taken from the ORCID record and from OpenAlex. They are stored without review. A work
     that only OpenAlex attributes to the PI is stored only when the PI's authorship on it
-    names Hopkins or an organization on the PI's ORCID record, or the publisher's metadata
+    names Hopkins or an organization on the PI's ORCID record (its name as one run of words, in order), or the publisher's metadata
     carries the PI's ORCID iD. These works never appear in Candidate papers or Unanchored
     papers, and the page cannot exclude them.
 </p>

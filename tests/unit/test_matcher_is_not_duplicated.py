@@ -29,6 +29,14 @@ SINGLE_DEFINITION_NAMES = {
     "_surname_matches",
     "build_pubmed_query",
     "_match_pi_author_detail",
+    "_match_pi_author_full",
+    "_pi_name",
+    "_name_candidates",
+    "_containment_core",
+    "_forenames_agree",
+    "_forename_initials",
+    "_settle_ambiguity",
+    "_corroborated",
 }
 
 SEARCH_ROOTS = ("src", "scripts")

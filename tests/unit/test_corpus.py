@@ -764,3 +764,99 @@ async def test_resolve_corpus_passes_the_orcid_to_the_identity_gate(monkeypatch)
     _wire(monkeypatch, orcid_works=[{"pmid": "1"}], records=[_orcid_variant_record()])
     result = await resolve_corpus(_ORCID, "Scott Wilson", "Johns Hopkins University")
     assert [r["pmid"] for r in result.kept] == ["1"]
+
+
+# ---------------------------------------------------------------------------
+# Spec 2026-10-15 Phase 3: the gate's new kinds, the P3 rule and the swap
+# ---------------------------------------------------------------------------
+
+_JHU = "Johns Hopkins University"
+
+
+def _gate(rec, stages, name="Rachel Green", orcid=None):
+    return corpus._gate_records([rec], {str(rec["pmid"]): set(stages)}, name, _JHU, orcid)
+
+
+async def test_s4_searches_a_comma_form_name_given_name_first(monkeypatch):
+    _wire(monkeypatch)
+    terms: list[str] = []
+
+    async def recording_search(term, retmax=200):
+        terms.append(term)
+        return []
+
+    monkeypatch.setattr(corpus, "search_pmids", recording_search)
+    await resolve_corpus("0000-0001-2345-6789", "Doe, Jane", _JHU)
+    assert terms[-1] == corpus.build_pubmed_query("Jane Doe", [_JHU])
+
+
+def _incomplete():
+    return {**_rec(1, authors=[_author("Smith", "Ann", "A")]), "author_list_complete": False}
+
+
+def test_gate_keeps_an_anchored_incomplete_list():
+    kept, flagged, _dropped = _gate(_incomplete(), {"s3"})
+    assert flagged == []
+    assert kept[0]["authorship"] == "incomplete_list"
+    assert kept[0]["pi_affiliations"] == []
+
+
+def test_gate_flags_an_unanchored_incomplete_list():
+    kept, flagged, dropped = _gate(_incomplete(), {"s2"})
+    assert kept == []
+    assert [f["reason"] for f in flagged] == ["author_list_incomplete"]
+    assert dropped["identity"] == 1
+
+
+def test_records_without_the_new_keys_behave_as_complete_and_valid():
+    assert match_pi_author(_rec(1, authors=[_author("Smith", "Ann", "A")]), "Rachel Green")[0] == "no_match"
+    assert match_pi_author(_rec(2, authors=[_PI]), "Rachel Green")[0] == "individual"
+    assert match_pi_author(_rec(3, authors=[_author(collective="GTEx")]), "Rachel Green")[0] == "consortium"
+
+
+def _two_greens(aff_a, aff_b):
+    return _rec(1, authors=[_author("Green", "R", "R", affs=aff_a), _author("Green", "R", "R", affs=aff_b)])
+
+
+def test_gate_settles_ambiguity_by_institution():
+    kept, _f, _d = _gate(_two_greens(["X"], [_JHU]), {"s2"})
+    assert kept[0]["pi_affiliations"] == [_JHU]
+    assert kept[0]["authorship"] == "individual"
+
+
+def test_gate_keeps_an_anchored_ambiguous_record_without_affiliations():
+    kept, _f, _d = _gate(_two_greens(["X"], ["Y"]), {"s1"})
+    assert kept[0]["pi_affiliations"] == []
+    assert kept[0]["authorship"] == "ambiguous"
+
+
+def test_gate_flags_an_unconfirmed_ambiguous_record():
+    kept, flagged, _d = _gate(_two_greens(["X"], ["Y"]), {"s2"})
+    assert kept == []
+    assert [f["reason"] for f in flagged] == ["ambiguous_author_unconfirmed"]
+
+
+def test_gate_keeps_an_s4_ambiguous_record_without_affiliations():
+    kept, _f, _d = _gate(_two_greens([], []), {"s4"})
+    assert kept[0]["pi_affiliations"] == []
+
+
+def _p3_record():
+    return _rec(1, authors=[{**_author("Dang", "Chi V", "CV"), "orcid": "0000-0001-5133-7373"}])
+
+
+def test_gate_keeps_the_p3_record_on_s1():
+    kept, _f, _d = _gate(_p3_record(), {"s1"}, "Chi Dang", "0000-0002-4031-2522")
+    assert len(kept) == 1
+    _k, flagged, _d = _gate(_p3_record(), {"s2"}, "Chi Dang", "0000-0002-4031-2522")
+    assert [f["reason"] for f in flagged] == ["no_individual_author_match"]
+
+
+def test_gate_keeps_a_swapped_anchored_record():
+    def swapped():
+        return _rec(1, authors=[_author("Wen", "Zhang", "Z")])
+
+    kept, _f, _d = _gate(swapped(), {"s3"}, "Wen Zhang")
+    assert len(kept) == 1
+    _k, flagged, _d = _gate(swapped(), {"s4"}, "Wen Zhang")
+    assert [f["reason"] for f in flagged] == ["no_individual_author_match"]

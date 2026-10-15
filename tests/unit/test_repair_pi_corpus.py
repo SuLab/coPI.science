@@ -14,6 +14,7 @@ from scripts.audit_tenure_scope import (
 )
 from scripts.repair_pi_corpus import (
     StoredPublication,
+    _record_has_surname,
     build_removal_and_review_plan,
     classify_excluded_type,
     classify_stored_publications,
@@ -421,3 +422,36 @@ def test_a_suffix_or_degree_is_not_taken_for_the_surname_of_a_forename_mismatch(
     removals, review, _survivors = classify_stored_publications(stored, refetched, pi_name)
     assert removals == []
     assert [r.reason for r in review] == ["forename_mismatch"]
+
+
+# ---------------------------------------------------------------------------
+# Spec 2026-10-15 Phase 3: the repair agrees with the upgraded matcher
+# ---------------------------------------------------------------------------
+
+
+def test_record_has_surname_agrees_with_the_matcher_on_joins():
+    record = _record(1, authors=[_author("Hamacher Brady", "Anne", "A")])
+    assert _record_has_surname(record, "Anne Hamacher-Brady") is True
+
+
+def test_record_has_surname_reads_a_comma_form_name():
+    stored = [_pub("a", "1")]
+    refetched = {"1": _record(1, authors=[_author("Doe", "John", "J")])}
+    removals, review, _survivors = classify_stored_publications(stored, refetched, "Doe, Jane")
+    assert removals == []
+    assert [r.reason for r in review] == ["forename_mismatch"]
+
+
+def test_repair_sends_ambiguous_and_incomplete_records_to_review():
+    stored = [_pub("a", "1"), _pub("b", "2", title="Other Paper")]
+    refetched = {
+        "1": _record(1, authors=[_author("Doe", "Jane", "J", affs=["X"]),
+                                 _author("Doe", "Jane", "J", affs=["Y"])]),
+        "2": {**_record(2, title="Other Paper", authors=[_author("Smith", "Ann", "A")]),
+              "author_list_complete": False},
+    }
+    removals, review, _survivors = classify_stored_publications(stored, refetched, "Jane Doe")
+    assert removals == []
+    assert [(r.pmid, r.reason) for r in review] == [
+        ("1", "ambiguous_author"), ("2", "unverifiable_incomplete_list"),
+    ]

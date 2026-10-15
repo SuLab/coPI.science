@@ -9,19 +9,28 @@ and nothing else was ever asked. Stages here:
   S3  PubMed ``{orcid}[auid]`` (PubMed's own ORCID-verified author field)
   S4  PubMed name+affiliation search (only when an institution is known)
 
-Identity gates, per the 2026-08-13 rehearsal's matcher (ported from
-the retired sparse-data seeding script): every record must carry the PI as a
-named INDIVIDUAL author (surname + forename discrimination — "R Lara Green" is
-not "Rachel Green"), OR as the author carrying the PI's ORCID iD (publisher-supplied
-``author["orcid"]``) whose surname still matches — a name variant such as "Wilson, D
-Scott" for "Scott Wilson" is then identity-correct, while the surname requirement
-keeps a mis-tagged ORCID on someone else's name from attributing the paper. S4-only
-candidates, and bare-initial matches with no S1/S3 anchor, additionally need the PI's
-OWN affiliation to match the searched institution (or, from S4, to be absent — see
-``resolve_corpus``). Consortium-only papers (CollectiveName, no individual match) are identity-correct but are not
-individual lab output and cannot consume cap slots (R1); records with neither
-an individual match nor a collective are withheld AND flagged, never silently
-added or removed.
+Identity gates, per the 2026-08-13 rehearsal's matcher (ported from the retired sparse-data
+seeding script) as upgraded by the 2026-10-15 publication-handling design (Phase 3): every
+record must carry the PI as a named INDIVIDUAL author (surname + forename discrimination:
+"R Lara Green" is not "Rachel Green"), OR as the author carrying the PI's ORCID iD whose
+surname still matches (a variant such as "Wilson, D Scott" for "Scott Wilson" is then
+identity-correct, while the surname keeps a mis-tagged iD on someone else's name out).
+Names compare folded (``person_names.match_keys``: accents, ø/æ/ł, the German umlaut
+expansion, hyphens, spaces and apostrophes); a particle-stripped core, a compound
+surname's last part and one part of a double surname ("Garcia" for "Garcia-Lopez") match,
+never a particle alone. A ``users.name`` written "Surname, Given" is read that way, packed
+initials ("JD", "D.S.") are initials, and author entries PubMed marks ``ValidYN="N"`` are
+ignored. On an ORCID-anchored record (S1/S3) an author list PubMed marks incomplete is kept
+without the PI (``incomplete_list``), a record with no matching author is retried once with
+last name and forename swapped, and an author carrying a different iD is passed over only
+for a matching author without an iD or when the PI's own iD sits on another author; off an
+anchor a different iD disqualifies. Several matching authors (``ambiguous``), S4-only
+candidates and bare-initial matches additionally need corroboration (``_corroborated``): an
+S1/S3 anchor, the matched authors' OWN affiliation matching the searched institution, or,
+from S4, no affiliation at all (see ``resolve_corpus``). Consortium-only papers
+(CollectiveName, no individual match) are identity-correct but are not individual lab output
+and cannot consume cap slots (R1); records with neither an individual match nor a collective
+are withheld AND flagged, never silently added or removed.
 
 A preprint and its journal version carry different titles or years at times, so
 the title dedupe alone misses them; PubMed's own links (``update_of`` on the journal
@@ -42,14 +51,23 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.services.corpus_additions import is_anchored
+from src.services.identifiers import normalize_orcid
 from src.services.jhu_rules import is_hopkins_affiliation
 from src.services.job_queue import JobDeferred
 from src.services.openalex import _MAX_PAGES as _OPENALEX_MAX_PAGES
 from src.services.openalex import _PER_PAGE as _OPENALEX_PER_PAGE
 from src.services.openalex import fetch_works_by_orcid
 from src.services.orcid import fetch_orcid_works
-from src.services.patents import _to_ascii
-from src.services.person_names import is_orcid_like, parse_person_name, surname_candidates
+from src.services.person_names import (
+    PARTICLES,
+    fold,
+    is_orcid_like,
+    match_fold,
+    match_keys,
+    parse_person_name,
+    split_comma_form,
+    surname_candidates,
+)
 from src.services.pubmed import (
     _doi_fold,
     convert_dois_to_pmids,
@@ -153,101 +171,96 @@ def _aff_match(input_aff: str, paper_aff: str) -> bool:
     return re.search(pattern, paper_aff, re.IGNORECASE) is not None
 
 
+def _forenames_agree(author_token: str, pi_token: str) -> bool:
+    """Two spelled-out first names agree when some key of each (``match_keys``) is equal,
+    the author's starts with the PI's ("Rachelle" for "Rachel"), or the author's is a prefix
+    of the PI's of at least 3 letters ("Bert" for "Bertram", never "Al" for "Alan")."""
+    return any(
+        a == p or a.startswith(p) or (len(a) >= 3 and p.startswith(a))
+        for a in match_keys(author_token)
+        for p in match_keys(pi_token)
+    )
+
+
+def _forename_initials(fore: str, initials: str | None) -> list[str] | None:
+    """The initials an author entry gives, or None when its ForeName is spelled out.
+
+    With no ForeName, the Initials field (spaces and periods dropped). A ForeName counts as
+    initials when every whitespace token has at most one letter ("J D", "D. S.") or when it
+    is packed: 2-4 characters once spaces and periods go, all letters, none lower-case, and
+    equal (case-insensitively) to Initials whenever Initials is present ("JD", "J.D.", "DS";
+    "JOHN" with Initials "J" is a name). Each initial is one letter of ``_letters``."""
+    if not fore:
+        return [_letters(c)[:1] for c in initials or "" if _letters(c)]
+    tokens = fore.split()
+    if all(len(_letters(t)) <= 1 for t in tokens):
+        return [_letters(t) for t in tokens if _letters(t)]
+    packed = fore.replace(" ", "").replace(".", "")
+    given = (initials or "").replace(" ", "").replace(".", "")
+    if (
+        2 <= len(packed) <= 4
+        and packed.isalpha()
+        and not any(c.islower() for c in packed)
+        and (not given or packed.casefold() == given.casefold())
+    ):
+        return [_letters(c)[:1] for c in packed if _letters(c)]
+    return None
+
+
 def _author_first_name_matches(
     fore_name: str | None,
     initials: str | None,
     expected_first: str,
     expected_middle: str | None = None,
 ) -> tuple[bool, bool]:
-    """ForeName/Initials discrimination (strict -> permissive).
+    """ForeName/Initials discrimination: ``(matched, bare_initial)``.
 
-    Returns ``(matched, bare_initial)``. ``bare_initial`` is True when the
-    ONLY identity evidence behind a positive match is a single letter — no
-    full given name and no corroborating middle name — which item 5 (D3)
-    requires the caller to additionally corroborate (own-affiliation or an
-    S1/S3 anchor) before trusting.
+    ``bare_initial`` is True when the only identity evidence behind a match is an initial;
+    item 5 (D3) has the gate corroborate it (``_corroborated``). Rules, in order (spec
+    2026-10-15 R3.3), on the letters of each name part (``_letters``):
 
-    A present ForeName that does NOT start with the expected first name is a
-    REJECT — this is what stops "Liu D[Author]" matching Daniel Liu when we
-    want David Liu, and what caught the rehearsal's OpenAlex mislink. Two
-    permissive paths sit in front of that strict check, each added for a
-    real PubMed indexing habit (D2):
-
-    1. Spaced-initials ForeName ("J D", "A L"): PubMed spells out multiple
-       initials as space-separated single letters rather than one string.
-       Every token being a single letter (after stripping periods) means
-       "this is initials, not a given name" regardless of token count, so
-       compare on the first initial rather than a doomed ``startswith``
-       ("j d".startswith("jeffrey") is always False).
-    2. Initial-plus-name ForeName ("J Marie" against a stored first name of
-       the single token "J."): guarded NARROWLY, on purpose — a blanket
-       "compare on the first initial" rule here would also match "R Lara"
-       against "Rachel" (the rehearsal's own OpenAlex mislink, pinned by
+    1. An expected first name with no letters matches nothing.
+    2. Initials win over a spelled-out reading (``_forename_initials``). A stored
+       initial-first name ("D. Scott Wilson") is known by its middle name, so a second
+       initial that differs from it ("D A", "DA", Initials "DA") is someone else; otherwise
+       the first initial decides, as a bare initial.
+    3. A spelled-out ForeName compares its first token only. Against a stored initial with a
+       middle name, "J Marie" for "J. Marie Hardwick" is a full match (the middle name
+       corroborates), "David S" a bare-initial one, and "Deborah", "Daniel R" or "Scott" are
+       other people. Against a spelled-out first name, a ForeName that starts with a lone
+       initial is rejected: comparing on the first initial would match "R Lara" against
+       "Rachel", the rehearsal's own OpenAlex mislink (pinned by
        ``tests/unit/test_corpus.py::test_a_forename_mismatch_is_not_the_pi_even_with_the_same_surname``).
-       This path fires ONLY when the EXPECTED first name is ITSELF an
-       initial, and additionally requires the forename's non-initial token
-       to equal the expected middle name — "Marie" corroborates "J Marie" is
-       J. Marie Hardwick, not just anyone whose first name starts with J.
-       Without an expected middle name to check, this path does not apply
-       and control falls through to the strict ``startswith`` below (which
-       rejects, as before).
+       Otherwise the first names must agree (``_forenames_agree``).
     """
-    if not expected_first:
+    expected = _letters(expected_first)
+    if not expected:
         return False, False
-    expected_first = expected_first.strip()
-    expected_initial = expected_first[0].lower() if expected_first else ""
-    expected_first_is_initial = len(expected_first.replace(".", "")) <= 1
+    e, e_is_initial = expected[0], len(expected) <= 1
+    m = _letters(expected_middle)[:1]
     fore = (fore_name or "").strip()
-    inits = (initials or "").strip()
-
-    if fore:
-        fore_tokens = fore.split()
-        stripped_tokens = [t.replace(".", "") for t in fore_tokens]
-        # A stored initial-first name ("D. Scott Wilson", "J. Marie Hardwick") is known by
-        # its middle name, so a ForeName must carry a second token whose initial agrees
-        # with it: "D A", "Deborah" and "Daniel R" are other people. A lone "D" stays a
-        # bare-initial match. Names whose first name is spelled out are unaffected.
-        middle_contradicted = bool(
-            expected_first_is_initial and expected_middle and (
-                len(stripped_tokens) < 2
-                or stripped_tokens[1][:1].lower() != expected_middle.strip()[:1].lower()
-            )
-        )
-        if stripped_tokens and all(len(t) <= 1 for t in stripped_tokens):
-            # Item 1: spaced initials — the whole ForeName is initials.
-            if middle_contradicted and len(stripped_tokens) > 1:
-                return False, False
-            return stripped_tokens[0].lower() == expected_initial, True
-
-        if expected_first_is_initial and expected_middle:
-            # Item 2: initial-plus-name, corroborated by the middle name.
-            if stripped_tokens and stripped_tokens[0].lower() == expected_initial:
-                remainder = [t for t in stripped_tokens[1:] if len(t) > 1]
-                if any(
-                    t.lower() == expected_middle.strip().lower() for t in remainder
-                ):
-                    return True, False
-            # Falls through to the strict check below on no match — this
-            # path never itself REJECTS, it only ever adds an acceptance.
-
-        fore_lower = fore.lower()
-        if len(fore.replace(".", "").replace(" ", "")) > 1:
-            if expected_first_is_initial:
-                # A stored initial ("D. Scott Wilson") against a spelled-out forename
-                # ("David S"): "david s".startswith("d.") would always reject it, but the
-                # initial is the only evidence either way, so it is a bare-initial match
-                # the caller must corroborate (item 5/D3) — unless the ForeName's second
-                # token contradicts the stored middle name or is absent (above).
-                if middle_contradicted:
-                    return False, False
-                return fore_lower.startswith(expected_initial), True
-            return fore_lower.startswith(expected_first.lower()), False
-        if fore_lower.startswith(expected_initial):
-            return True, True
+    found = _forename_initials(fore, initials)
+    if found is not None:
+        if not found:
+            return False, False  # an Initials-less entry, or a ForeName of punctuation only
+        if e_is_initial and m and len(found) > 1 and found[1] != m:
+            return False, False
+        return found[0] == e, True
+    tokens = [t for t in (tok.replace(".", "") for tok in fore.split()) if t]
+    first = _letters(tokens[0])
+    if e_is_initial and m:
+        if first == e and any(
+            len(_letters(t)) >= 2 and _keys_meet(t, expected_middle) for t in tokens[1:]
+        ):
+            return True, False
+        if len(tokens) < 2 or _letters(tokens[1])[:1] != m:
+            return False, False
+        return first[:1] == e, True
+    if e_is_initial:
+        return first[:1] == e, True
+    if len(first) <= 1:
         return False, False
-    if inits and inits[0].lower() == expected_initial:
-        return True, True
-    return False, False
+    return _forenames_agree(tokens[0], expected_first), False
 
 
 # Name particles PubMed sometimes strands at the END of ForeName rather than
@@ -276,59 +289,68 @@ def _split_particle_splice(fore: str) -> tuple[str, str] | None:
     return None
 
 
-# German-only expansion (D2(b)/item 3): rewrites ONLY the umlaut/eszett
-# characters themselves, never any plain ASCII letter — an ASCII-spelled
-# surname must never gain an umlaut-expanded variant, or an unrelated ASCII
-# namesake (Hermann Joseph *Muller*) would collide with the accented one
-# (Ulrich *Mueller*, PubMed-indexed "Müller"). A string with none of these
-# four characters passes through every variant below unchanged.
-_GERMAN_EXPANSION = str.maketrans(
-    {"ü": "ue", "ö": "oe", "ä": "ae", "ß": "ss",
-     "Ü": "Ue", "Ö": "Oe", "Ä": "Ae"}
-)
+#: Separators inside a surname: whitespace, "-", U+2010-U+2015, U+2212 and U+FF0D.
+_SURNAME_SPLIT = re.compile(r"[\s\-‐-―−－]+")
 
 
-def _surname_variants(surname: str) -> set[str]:
-    """Comparable spellings of a surname (D2(b)/item 3: diacritic folding).
+def _letters(text: str | None) -> str:
+    """The a-z and 0-9 of ``person_names.match_fold(text)``: "D." -> "d", "Jian-Feng" -> "jianfeng"."""
+    return re.sub(r"[^0-9a-z]", "", match_fold(text))
 
-    Three independently-derived forms — never chained — so folding one way
-    cannot also produce the other side's false positive:
 
-    - raw, lowercased;
-    - NFKD/accent-stripped, reusing ``patents._to_ascii`` for that half only
-      ("Müller" -> "Muller" — accent-stripping alone, NOT the German
-      expansion below, which ``_to_ascii`` does not perform);
-    - the German umlaut/eszett expansion applied to the ORIGINAL string
-      ("Müller" -> "Mueller"), so that variant is generated only when the
-      original text actually carries one of those four characters.
+def _keys_meet(a: str, b: str) -> bool:
+    """Whether two name parts are equal under ``person_names.match_keys``."""
+    return bool(match_keys(a) & match_keys(b))
 
-    Expected "Mueller" (plain ASCII, no umlaut) therefore yields only
-    ``{"mueller"}`` — it never generates "Muller", which is the asymmetry
-    item 3 requires. A real "Müller" record yields
-    ``{"müller", "muller", "mueller"}``, intersecting expected "Mueller"'s
-    ``{"mueller"}``.
-    """
-    if not surname:
-        return set()
-    raw = surname.strip()
-    if not raw:
-        return set()
-    return {
-        raw.lower(),
-        _to_ascii(raw).lower(),
-        raw.translate(_GERMAN_EXPANSION).lower(),
-    }
+
+def _surname_tokens(surname: str) -> list[str]:
+    """``surname`` split on whitespace, hyphens and Unicode dashes, empty parts dropped."""
+    return [t for t in _SURNAME_SPLIT.split(surname or "") if t]
+
+
+def _leading_core(tokens: list[str]) -> list[str]:
+    """``tokens`` without their leading particles ("van der Berg" -> ["Berg"]); the last
+    token is always kept."""
+    start = 0
+    while start < len(tokens) - 1 and fold(tokens[start]) in PARTICLES:
+        start += 1
+    return tokens[start:]
+
+
+def _containment_core(tokens: list[str]) -> list[str]:
+    """``tokens`` without any particle, wherever it stands; empty for "De" or "van der"."""
+    return [t for t in tokens if fold(t) not in PARTICLES]
+
+
+def _contained(inner: list[str], outer: list[str]) -> bool:
+    """Every token of ``inner`` equals (``_keys_meet``) some token of ``outer``."""
+    return all(any(_keys_meet(a, b) for b in outer) for a in inner)
 
 
 def _surname_matches(candidate: str, expected_last: str) -> bool:
-    """Whole-surname match (with folding), OR a compound surname whose LAST
-    whitespace token is the PI's surname (item 4a: "Van Dang, Chi V" vs "Chi
-    Dang")."""
-    if _surname_variants(candidate) & _surname_variants(expected_last):
+    """Whether an author's surname is the PI's (spec 2026-10-15 R3.2). Rules, cheapest first:
+
+    1. full join: ``match_keys`` meet, so "Hamacher Brady" = "Hamacher-Brady",
+       "O’Rourke" = "O'Rourke", "Vanderberg" = "van der Berg";
+    2. particle-stripped core join ("Van Dang" = "Dang");
+    3. compound tail: a multi-token author surname whose last token is the PI's (item 4a),
+       now across hyphens too;
+    4. two-way core-token containment (F23): every non-particle token of one side equals a
+       token of the other ("Garcia" for "Garcia-Lopez" and the reverse). A particle is never
+       the shared token, and a lone particle surname never matches this way. The forename
+       check still applies to the author (``_name_candidates``)."""
+    if _keys_meet(candidate, expected_last):
         return True
-    tokens = candidate.split()
-    return len(tokens) > 1 and bool(
-        _surname_variants(tokens[-1]) & _surname_variants(expected_last)
+    cand, exp = _surname_tokens(candidate), _surname_tokens(expected_last)
+    if not cand or not exp:
+        return False
+    if _keys_meet("".join(_leading_core(cand)), "".join(_leading_core(exp))):
+        return True
+    if len(cand) >= 2 and _keys_meet(cand[-1], expected_last):
+        return True
+    cand_core, exp_core = _containment_core(cand), _containment_core(exp)
+    return bool(cand_core and exp_core) and (
+        _contained(cand_core, exp_core) or _contained(exp_core, cand_core)
     )
 
 
@@ -373,115 +395,264 @@ def build_pubmed_query(name: str, affiliations: list[str]) -> str:
     return author_term
 
 
-def _match_pi_author_detail(
-    record: dict, name: str, orcid: str | None = None
-) -> tuple[str, list[str], bool]:
-    """Locate the PI in a record's author list (full detail).
+@dataclass(frozen=True)
+class MatchedAuthor:
+    """One author entry the name pass accepted: its 0-based ``index`` in ``record["authors"]``,
+    its own affiliations, whether only an initial matched, and the iD it carries (or None)."""
 
-    Returns ``(kind, pi_affiliations, bare_initial)``. ``kind`` is
-    ``"individual"`` (surname + forename match; affiliations are the MATCHED
-    author's own — never a co-author's, finding H2), ``"consortium"`` (no
-    individual match but a CollectiveName is present), or ``"no_match"``.
-    ``bare_initial`` is True only for an ``"individual"`` match whose sole
-    forename evidence was a single letter (item 5/D3) — callers that need
-    that distinction (``resolve_corpus``) use this function directly;
-    ``match_pi_author`` is the stable 2-tuple form everything else keeps
-    using.
+    index: int
+    affiliations: tuple[str, ...]
+    bare_initial: bool
+    orcid: str | None
 
-    The name is parsed with ``person_names.parse_person_name``; an ORCID-iD name
-    matches nobody, even when ``orcid`` is given.
 
-    When ``orcid`` is given, an author whose ``author["orcid"]`` equals it
-    (case-insensitive) is the PI regardless of forename ("Wilson, D Scott" for "Scott
-    Wilson"); that pass runs first and returns that author's own affiliations with
-    ``bare_initial`` False. The surname must still match: publishers occasionally tag
-    the wrong author with an ORCID, and the surname is the check that keeps such a
-    paper out. With no ORCID-bearing match the name pass below runs unchanged.
-    """
-    tokens = parse_person_name(name).full.split()
+@dataclass(frozen=True)
+class AuthorMatch:
+    """Where the PI is in a record's author list (spec 2026-10-15 R3.8). ``kind`` is one of:
+
+    - ``"individual"``: one author is the PI; ``affiliations`` are that author's own (never a
+      co-author's, finding H2) and ``index`` is its position;
+    - ``"ambiguous"``: several authors match; ``affiliations`` is empty, ``candidates`` holds
+      them and ``bare_initial`` is True when any matched on an initial only;
+    - ``"incomplete_list"``: nobody matches and PubMed marks the list incomplete
+      (``CompleteYN="N"``);
+    - ``"consortium"``: nobody matches and a valid CollectiveName is listed;
+    - ``"no_match"``: anything else.
+
+    ``candidates`` holds the matched author for ``"individual"`` too."""
+
+    kind: str
+    affiliations: list[str]
+    bare_initial: bool
+    candidates: tuple[MatchedAuthor, ...] = ()
+    index: int | None = None
+
+
+@dataclass(frozen=True)
+class _PiName:
+    """The PI's name as the gate reads it: first and middle given names, every surname
+    candidate, and the name the S4 search sends (``resolve_corpus``)."""
+
+    first: str
+    middle: str | None
+    surnames: tuple[str, ...]
+    search_name: str
+
+
+def _pi_name(name: str) -> _PiName:
+    """``name`` read for matching. "Surname, Given" (``person_names.split_comma_form``) is
+    read given name first, with the whole pre-comma surname among the candidates. Otherwise
+    the shared parser's derivation (spec 2026-10-05 §4.1): "Jane Doe, PhD" is a Doe, "John
+    Smith Jr." a Smith, "Iris van 't Erve" also "van 't Erve", and a one-word name keeps a
+    surname-only match. An ORCID-iD name has no surname, so it matches nobody."""
+    comma = split_comma_form(name)
+    if comma is not None:
+        surname, given = comma
+        ordered = f"{given} {surname}"
+        surnames = surname_candidates(ordered)
+        if surname not in surnames:
+            surnames = (*surnames, surname)
+        given_tokens = given.split()
+        return _PiName(
+            first=given_tokens[0],
+            middle=given_tokens[1] if len(given_tokens) > 1 else None,
+            surnames=surnames,
+            search_name=parse_person_name(ordered).full,
+        )
+    full = parse_person_name(name).full
+    tokens = full.split()
     if is_orcid_like(name):
         surnames: tuple[str, ...] = ()
     else:
-        # The shared parser's surname candidates (spec 2026-10-05 §4.1, §6.3): "Jane Doe,
-        # PhD" is a Doe, "John Smith Jr." a Smith, "Iris van 't Erve" also "van 't Erve".
-        # A one-word name keeps today's surname-only match.
         surnames = surname_candidates(name) or ((tokens[-1],) if tokens else ())
-    first_name = tokens[0] if len(tokens) > 1 else ""
-    middle_name = tokens[1] if len(tokens) > 2 else None
+    return _PiName(
+        first=tokens[0] if len(tokens) > 1 else "",
+        middle=tokens[1] if len(tokens) > 2 else None,
+        surnames=surnames,
+        search_name=full,
+    )
 
-    def _surname_and_fore(author: dict) -> tuple[str, str] | None:
-        """The author's (surname, forename) as compared, or None when it has no
-        surname. Item 4b: a particle stranded at the end of ForeName is spliced onto
-        the surname only if that actually turns into a surname match — a ForeName
-        that merely ends in a particle-like token for an unrelated reason must
-        change nothing."""
-        last = (author.get("last") or "").strip()
-        if not last:
-            return None
-        fore = (author.get("fore") or "").strip()
-        splice = _split_particle_splice(fore) if fore else None
-        if splice:
-            particle, remainder = splice
-            spliced_last = f"{particle}{last}"
-            if any(_surname_matches(spliced_last, s) for s in surnames):
-                return spliced_last, remainder
-        return last, fore
 
-    wanted = orcid.strip().upper() if orcid else ""
-    if wanted and surnames:
-        for author in record.get("authors") or []:
-            if author.get("collective"):
-                continue
-            if (author.get("orcid") or "").strip().upper() != wanted:
-                continue
-            pair = _surname_and_fore(author)
-            if pair and any(_surname_matches(pair[0], s) for s in surnames):
-                return "individual", list(author.get("affiliations") or []), False
+def _author_orcid(author: dict) -> str | None:
+    """The iD an author entry carries, stripped, or None."""
+    raw = author.get("orcid")
+    return raw.strip() if isinstance(raw, str) and raw.strip() else None
 
+
+def _usable(author: dict) -> bool:
+    """A valid (``ValidYN`` not "N") individual author entry."""
+    return author.get("valid", True) is not False and not author.get("collective")
+
+
+def _surname_and_fore(author: dict, surnames: tuple[str, ...]) -> tuple[str, str] | None:
+    """The author's (surname, forename) as compared, or None when it has no surname. Item 4b:
+    a particle stranded at the end of ForeName is spliced onto the surname only if that
+    turns it into a surname match; a ForeName that merely ends in a particle-like token for
+    an unrelated reason changes nothing."""
+    last = (author.get("last") or "").strip()
+    if not last:
+        return None
+    fore = (author.get("fore") or "").strip()
+    splice = _split_particle_splice(fore) if fore else None
+    if splice:
+        particle, remainder = splice
+        spliced_last = f"{particle}{last}"
+        if any(_surname_matches(spliced_last, s) for s in surnames):
+            return spliced_last, remainder
+    return last, fore
+
+
+def _author_pair(author: dict, pi: _PiName, *, swapped: bool) -> tuple[str, str] | None:
+    """The (surname, forename) an entry is compared by. Swapped (R3.11, F16): its ForeName as
+    the surname and its LastName as the forename, both required, with no particle splice."""
+    if not swapped:
+        return _surname_and_fore(author, pi.surnames)
+    last = (author.get("last") or "").strip()
+    fore = (author.get("fore") or "").strip()
+    return (fore, last) if last and fore else None
+
+
+def _orcid_match(authors: list[dict], pi: _PiName, wanted: str) -> AuthorMatch | None:
+    """The ORCID pass: the first valid author carrying the PI's iD whose surname matches is
+    the PI, whatever the forename ("Wilson, D Scott" for "Scott Wilson"). The surname still
+    has to match: publishers occasionally tag the wrong author with an iD."""
+    for index, author in enumerate(authors):
+        if not _usable(author) or normalize_orcid(_author_orcid(author)) != wanted:
+            continue
+        pair = _surname_and_fore(author, pi.surnames)
+        if pair and any(_surname_matches(pair[0], s) for s in pi.surnames):
+            hit = MatchedAuthor(
+                index, tuple(author.get("affiliations") or ()), False, _author_orcid(author)
+            )
+            return AuthorMatch("individual", list(hit.affiliations), False, (hit,), index)
+    return None
+
+
+def _name_candidates(
+    authors: list[dict], pi: _PiName, *, swapped: bool
+) -> tuple[list[MatchedAuthor], bool]:
+    """Every valid individual author whose surname matches one of the PI's and whose forename
+    is compatible, and whether a valid CollectiveName was seen. ``swapped`` reads each entry
+    with LastName and ForeName exchanged (``_author_pair``) and no Initials."""
+    candidates: list[MatchedAuthor] = []
     saw_collective = False
-    for author in record.get("authors") or []:
+    for index, author in enumerate(authors):
+        if author.get("valid", True) is False:
+            continue
         if author.get("collective"):
             saw_collective = True
             continue
-        pair = _surname_and_fore(author)
-        if pair is None:
+        pair = _author_pair(author, pi, swapped=swapped)
+        if pair is None or not any(_surname_matches(pair[0], s) for s in pi.surnames):
             continue
-        candidate_last, candidate_fore = pair
-
-        if not any(_surname_matches(candidate_last, s) for s in surnames):
-            continue
-        if wanted and author.get("orcid") and author["orcid"].strip().upper() != wanted:
-            # The author carries a different, checksum-valid ORCID iD: someone else with
-            # the PI's surname, whatever the forename says.
-            continue
-
-        bare_initial = False
-        if first_name:
-            matched, bare_initial = _author_first_name_matches(
-                candidate_fore, author.get("initials"), first_name, middle_name
+        bare = False
+        if pi.first:
+            matched, bare = _author_first_name_matches(
+                pair[1], None if swapped else author.get("initials"), pi.first, pi.middle
             )
             if not matched:
                 continue
-        return "individual", list(author.get("affiliations") or []), bare_initial
+        candidates.append(MatchedAuthor(
+            index, tuple(author.get("affiliations") or ()), bare, _author_orcid(author)
+        ))
+    return candidates, saw_collective
+
+
+def _drop_foreign(
+    candidates: list[MatchedAuthor], authors: list[dict], wanted: str | None, *, anchored: bool
+) -> list[MatchedAuthor]:
+    """Q15 (R3.7). A candidate carrying an iD other than the PI's is foreign. Off an ORCID
+    anchor every foreign candidate is dropped. On an anchored record (s1/s3) they are dropped
+    only when a non-foreign candidate exists (tie-break 1) or the PI's own iD sits on another
+    valid author entry (one the ORCID pass rejected for its surname); a different iD alone
+    never disqualifies. With no usable PI iD (None, or a bad check digit) nothing is foreign."""
+    if wanted is None:
+        return candidates
+    own = [c for c in candidates if c.orcid is None or normalize_orcid(c.orcid) == wanted]
+    if not anchored or own:
+        return own
+    if any(_usable(a) and normalize_orcid(_author_orcid(a)) == wanted for a in authors):
+        return own
+    return candidates
+
+
+def _spelled_out_winner(
+    candidates: list[MatchedAuthor], authors: list[dict], pi: _PiName, *, swapped: bool
+) -> list[MatchedAuthor]:
+    """Tie-break 2 (R3.6): with several candidates and a spelled-out PI first name, the unique
+    candidate whose first ForeName token is spelled out and equal to it wins."""
+    if len(candidates) < 2 or len(_letters(pi.first)) <= 1:
+        return candidates
+
+    def spelled_out_and_equal(candidate: MatchedAuthor) -> bool:
+        pair = _author_pair(authors[candidate.index], pi, swapped=swapped)
+        tokens = [t for t in (x.replace(".", "") for x in (pair[1] if pair else "").split()) if t]
+        return bool(tokens) and len(_letters(tokens[0])) >= 2 and _keys_meet(tokens[0], pi.first)
+
+    winners = [c for c in candidates if spelled_out_and_equal(c)]
+    return winners if len(winners) == 1 else candidates
+
+
+def _match_pi_author_full(
+    record: dict, name: str, orcid: str | None = None, *, anchored: bool = False
+) -> AuthorMatch:
+    """Locate the PI in a record's author list (spec 2026-10-15 R3.1-R3.8, R3.11).
+
+    Names compare folded (``person_names.match_keys``: accents, ø/æ/ł, the German umlaut
+    expansion, hyphens, spaces, apostrophes); one part of a double surname matches the whole,
+    never a particle alone (``_surname_matches``); "Surname, Given" names and packed initials
+    are read as such (``_pi_name``, ``_author_first_name_matches``); entries PubMed marks
+    ``ValidYN="N"`` are ignored. The ORCID pass runs first (``_orcid_match``). The name pass
+    then collects every candidate; on an ORCID-anchored record (``anchored``: stage s1 or s3)
+    with none, it runs once more with LastName and ForeName swapped. Foreign iDs are settled
+    by ``_drop_foreign`` and several candidates by ``_spelled_out_winner``; what remains is one
+    author (``"individual"``) or several (``"ambiguous"``). With none, an author list PubMed
+    marks incomplete is ``"incomplete_list"``, then ``"consortium"``, then ``"no_match"``."""
+    pi = _pi_name(name)
+    authors = list(record.get("authors") or [])
+    wanted = normalize_orcid(orcid)
+    if wanted and pi.surnames:
+        hit = _orcid_match(authors, pi, wanted)
+        if hit is not None:
+            return hit
+    candidates, saw_collective = _name_candidates(authors, pi, swapped=False)
+    swapped = not candidates and anchored
+    if swapped:
+        candidates, _seen = _name_candidates(authors, pi, swapped=True)
+    candidates = _drop_foreign(candidates, authors, wanted, anchored=anchored)
+    candidates = _spelled_out_winner(candidates, authors, pi, swapped=swapped)
+    if len(candidates) == 1:
+        (only,) = candidates
+        return AuthorMatch(
+            "individual", list(only.affiliations), only.bare_initial, (only,), only.index
+        )
+    if candidates:
+        return AuthorMatch(
+            "ambiguous", [], any(c.bare_initial for c in candidates), tuple(candidates)
+        )
+    if record.get("author_list_complete", True) is False:
+        return AuthorMatch("incomplete_list", [], False)
     if saw_collective:
-        return "consortium", [], False
-    return "no_match", [], False
+        return AuthorMatch("consortium", [], False)
+    return AuthorMatch("no_match", [], False)
+
+
+def _match_pi_author_detail(
+    record: dict, name: str, orcid: str | None = None, *, anchored: bool = False
+) -> tuple[str, list[str], bool]:
+    """``(kind, pi_affiliations, bare_initial)`` of ``_match_pi_author_full``, whose docstring
+    and ``AuthorMatch`` give the rules and the five kinds. ``orcid`` is the PI's iD (optional;
+    an unusable one identifies and disqualifies nobody); ``anchored`` is True for a record an
+    ORCID stage (s1 or s3) returned, which enables the swap retry and the anchored iD rule."""
+    match = _match_pi_author_full(record, name, orcid, anchored=anchored)
+    return match.kind, list(match.affiliations), match.bare_initial
 
 
 def match_pi_author(
-    record: dict, name: str, orcid: str | None = None
+    record: dict, name: str, orcid: str | None = None, *, anchored: bool = False
 ) -> tuple[str, list[str]]:
-    """Locate the PI in a record's author list.
-
-    Returns ``(kind, pi_affiliations)`` where kind is ``"individual"``
-    (surname + forename match; affiliations are the MATCHED author's own —
-    never a co-author's, finding H2), ``"consortium"`` (no individual match
-    but a CollectiveName is present), or ``"no_match"``. See
-    ``_match_pi_author_detail`` for the bare-initial corroboration flag
-    ``resolve_corpus`` needs and this wrapper drops, and for how ``orcid`` (the
-    PI's iD, optional) identifies an author whose forename differs from ``name``.
-    """
-    kind, affs, _bare_initial = _match_pi_author_detail(record, name, orcid)
+    """``(kind, pi_affiliations)``: the stable 2-tuple form of ``_match_pi_author_detail``."""
+    kind, affs, _bare_initial = _match_pi_author_detail(record, name, orcid, anchored=anchored)
     return kind, affs
 
 
@@ -549,6 +720,50 @@ def _pmid_sort_key(pmid: str) -> int:
         return 0
 
 
+def _settle_ambiguity(match: AuthorMatch, institution: str | None) -> AuthorMatch:
+    """An ``"ambiguous"`` match whose candidates include exactly one with an affiliation that
+    ``_aff_match``es ``institution`` becomes that candidate's ``"individual"`` match, with its
+    own affiliations and bare flag (R3.6). Anything else is returned unchanged."""
+    if match.kind != "ambiguous" or not institution:
+        return match
+    hits = [
+        c for c in match.candidates
+        if any(_aff_match(institution, a) for a in c.affiliations)
+    ]
+    if len(hits) != 1:
+        return match
+    (only,) = hits
+    return AuthorMatch(
+        "individual", list(only.affiliations), only.bare_initial, (only,), only.index
+    )
+
+
+def _corroborated(match: AuthorMatch, rec_stages: set[str], institution: str | None) -> bool:
+    """Item 5/D3 corroboration for weak identity evidence: a bare-initial match, several
+    matching authors (R3.6), or an S4-only record of any match. The affiliations checked are
+    the matched author's own, or every candidate's for ``"ambiguous"``. True when any holds:
+
+    - an S1/S3 anchor (ORCID-curated, or PubMed's own ORCID field);
+    - an institution is set and one of those affiliations matches it (``_aff_match``);
+    - an institution is set, the record came back from S4 (whose term is ``author AND
+      institution``, so PubMed has already confirmed the paper is from the PI's institution)
+      and no affiliation is present at all. An absent affiliation is absence of evidence:
+      PubMed recorded one for the first author only until ~2014 and none before ~1988. A
+      present one that does not match is evidence against, and still rejects: that is the
+      case (a co-author supplies the Hopkins string) the gate exists to catch. Measured
+      2026-09-22: without this route corroboration re-dropped all 12 of Rothstein's landmark
+      papers. Accepted residual risk: a different J. Rothstein at Hopkins in those years."""
+    if rec_stages & {"s1", "s3"}:
+        return True
+    if match.kind == "ambiguous":
+        affs = [a for c in match.candidates for a in c.affiliations]
+    else:
+        affs = list(match.affiliations)
+    if institution and any(_aff_match(institution, a) for a in affs):
+        return True
+    return bool(institution) and "s4" in rec_stages and not affs
+
+
 def _gate_records(
     records: list[dict[str, Any]],
     stages: dict[str, set[str]],
@@ -570,89 +785,58 @@ def _gate_records(
     for rec in records:
         rec_stages = stages.get(str(rec.get("pmid")), set())
         rec["stages"] = sorted(rec_stages)
-        kind, pi_affs, bare_initial = _match_pi_author_detail(rec, name, orcid)
-        rec["authorship"] = kind
-        rec["pi_affiliations"] = pi_affs
+        anchored = bool(rec_stages & {"s1", "s3"})
+        match = _settle_ambiguity(
+            _match_pi_author_full(rec, name, orcid, anchored=anchored), institution
+        )
+        rec["authorship"] = match.kind
+        rec["pi_affiliations"] = list(match.affiliations)
 
         pub_types = {t.lower() for t in rec.get("pub_types") or []}
         if pub_types & EXCLUDED_TYPES:
             dropped["excluded_type"] += 1
             continue
-        if kind == "consortium":
+        if match.kind == "consortium":
             dropped["consortium"] += 1
             continue
-        if kind == "no_match":
+        if match.kind == "no_match" or (match.kind == "incomplete_list" and not anchored):
+            # An anchored incomplete list (R3.5) is kept with no affiliations; unanchored, the
+            # missing PI is unconfirmable.
             dropped["identity"] += 1
             flagged.append(
                 {
                     "pmid": rec.get("pmid"),
-                    "reason": "no_individual_author_match",
+                    "reason": (
+                        "no_individual_author_match"
+                        if match.kind == "no_match"
+                        else "author_list_incomplete"
+                    ),
                     "title": rec.get("title", ""),
                     "stages": rec["stages"],
                 }
             )
             continue
-        # Item 5/D3: a single-letter forename is not, on its own, enough
-        # identity evidence to trust — corroboration is now required on ANY
-        # stage combination for a bare-initial match, not just the old
-        # S4-only gate. The S4-only gate itself is KEPT for a full-forename
-        # match too (an S4-only candidate has no ORCID anchor at all, so an
-        # affiliation match is the rehearsal's own mandatory disambiguation
-        # regardless of how specific the name match was) — ``rec_stages ==
-        # {"s4"}`` is folded into the same check below since it can never be
-        # "anchored" (s1/s3 are absent from the set by construction).
-        if bare_initial or rec_stages == {"s4"}:
-            anchored = bool(rec_stages & {"s1", "s3"})
-            aff_confirmed = bool(institution) and any(
-                _aff_match(institution, a) for a in pi_affs
+        weak = match.kind == "ambiguous" or match.bare_initial or rec_stages == {"s4"}
+        if weak and not _corroborated(match, rec_stages, institution):
+            dropped["identity"] += 1
+            flagged.append(
+                {
+                    "pmid": rec.get("pmid"),
+                    # Different evidence, kept apart in the progress text: several matching
+                    # authors, an initial-only name, or an S4-only hit whose author
+                    # affiliation did not match.
+                    "reason": (
+                        "ambiguous_author_unconfirmed"
+                        if match.kind == "ambiguous"
+                        else "bare_initial_unconfirmed"
+                        if match.bare_initial
+                        else "s4_affiliation_mismatch"
+                    ),
+                    "title": rec.get("title", ""),
+                    "stages": rec["stages"],
+                }
             )
-            # Third route, and the one that carries the pre-2000 corpus:
-            # the record came back from S4 — whose term is `author AND
-            # institution` (`build_pubmed_query`), so PubMed has already
-            # confirmed the paper is FROM the PI's institution — AND the
-            # matched author entry carries NO affiliation string at all.
-            #
-            # The `not pi_affs` clause is what keeps this from gutting the
-            # rehearsal's S4-only disambiguation. An ABSENT affiliation is
-            # absence of evidence: PubMed recorded an affiliation for the
-            # first author only until ~2014 and none whatsoever before
-            # ~1988, so a last-author 1996 paper can never satisfy the
-            # strict `aff_confirmed` form no matter who wrote it. A PRESENT
-            # affiliation that does not match is evidence against, and still
-            # rejects — which is the case (a co-author supplies the Hopkins
-            # string while the named author sits elsewhere) the original
-            # gate existed to catch.
-            #
-            # Measured 2026-09-22: without this route, corroboration
-            # re-dropped every one of Rothstein's 12 landmark papers that
-            # items 1-4 had just recovered — the widening and the
-            # containment exactly cancelling. Residual risk, accepted and
-            # recorded in the plan: a DIFFERENT J. Rothstein publishing out
-            # of Johns Hopkins in those same years would also pass. Surname
-            # + first initial + institution-on-the-paper is the strongest
-            # signal these records physically carry.
-            inst_searched = (
-                bool(institution) and "s4" in rec_stages and not pi_affs
-            )
-            if not anchored and not aff_confirmed and not inst_searched:
-                dropped["identity"] += 1
-                flagged.append(
-                    {
-                        "pmid": rec.get("pmid"),
-                        # The two misses are different evidence: an
-                        # initial-only name nobody corroborated, versus a
-                        # full-name S4-only hit whose author affiliation did
-                        # not match. Keep them apart in the progress text.
-                        "reason": (
-                            "bare_initial_unconfirmed"
-                            if bare_initial
-                            else "s4_affiliation_mismatch"
-                        ),
-                        "title": rec.get("title", ""),
-                        "stages": rec["stages"],
-                    }
-                )
-                continue
+            continue
         kept.append(rec)
     return kept, flagged, dropped
 
@@ -864,7 +1048,7 @@ async def resolve_corpus(
             truncated.append("s3")
 
         if institution and institution.strip():
-            term = build_pubmed_query(parse_person_name(name).full, [institution])
+            term = build_pubmed_query(_pi_name(name).search_name, [institution])
             s4_pmids = await _stage(
                 "s4_pubmed_name_affiliation",
                 search_pmids(term, retmax=SEARCH_RETMAX),

@@ -13,6 +13,9 @@ Hermann Joseph Muller / Ulrich Mueller collision the plan names directly.
 NOT duplicated or modified here.
 """
 
+import pytest
+
+from src.services import corpus
 from src.services.corpus import match_pi_author
 
 
@@ -200,8 +203,8 @@ def test_an_author_carrying_the_pi_orcid_matches_despite_a_different_forename():
 
 
 def test_the_orcid_pass_compares_case_insensitively():
-    record = _rec(1, [_orcid_author("Wilson", "D Scott", "0000-0002-1825-009X")])
-    assert match_pi_author(record, "Scott Wilson", "0000-0002-1825-009x")[0] == "individual"
+    record = _rec(1, [_orcid_author("Wilson", "D Scott", "0000-0000-0000-001X")])
+    assert match_pi_author(record, "Scott Wilson", "0000-0000-0000-001x")[0] == "individual"
 
 
 def test_an_orcid_match_still_needs_the_surname():
@@ -272,3 +275,251 @@ def test_an_author_with_a_different_orcid_is_not_the_pi():
     assert match_pi_author(record, "D. Scott Wilson", "0000-0001-8029-1036")[0] == "no_match"
     # Without the PI's ORCID to compare, the name pass is unchanged.
     assert match_pi_author(record, "D. Scott Wilson")[0] == "individual"
+
+
+# ---------------------------------------------------------------------------
+# Spec 2026-10-15 Phase 3 (R3.1-R3.8, R3.11)
+# ---------------------------------------------------------------------------
+
+_FOREIGN_ORCID = "0000-0001-5133-7373"
+
+
+def _kind(last, fore, name, initials=None, **kwargs):
+    return match_pi_author(_rec(1, [_author(last, fore, initials)]), name, **kwargs)[0]
+
+
+@pytest.mark.parametrize(("name", "last", "fore"), [
+    ("Chi Kjaer", "Kjær", "Chi"),
+    ("Søren Kjær", "Kjaer", "Soren"),
+    ("Hans Orsted", "Ørsted", "Hans"),
+    ("Jan Lopuszanski", "Łopuszański", "Jan"),
+    ("Hans Brondsted", "Brøndsted", "Hans"),
+])
+def test_surnames_fold_the_letters_nfkd_keeps(name, last, fore):
+    assert _kind(last, fore, name) == "individual"
+
+
+@pytest.mark.parametrize(("name", "last", "fore"), [
+    ("Jose Garcia", "García", "José"),
+    ("Søren Brage", "Brage", "Soren"),
+    ("Jürgen Schmidt", "Schmidt", "Juergen"),
+    ("Juergen Schmidt", "Schmidt", "Jürgen"),
+])
+def test_given_names_are_folded(name, last, fore):
+    assert _kind(last, fore, name) == "individual"
+
+
+@pytest.mark.parametrize(("name", "last", "fore", "kind"), [
+    ("Anne Hamacher-Brady", "Hamacher Brady", "Anne", "individual"),
+    ("Brian O’Rourke", "O'Rourke", "Brian", "individual"),
+    ("Anna van der Berg", "Vanderberg", "Anna", "individual"),
+    ("Anne Brady", "Hamacher-Brady", "Anne", "individual"),
+    ("Chi Dang", "Van Dang", "Chi V", "individual"),
+    ("Rachel Green", "Greenberg", "Rachel", "no_match"),
+])
+def test_surname_joins(name, last, fore, kind):
+    assert _kind(last, fore, name) == kind
+
+
+@pytest.mark.parametrize(("name", "last", "fore"), [
+    ("José Garcia", "Garcia-Lopez", "José"),
+    ("Gabriel Garcia Marquez", "Garcia", "Gabriel"),
+    ("Carolina Gonzalez-Cavazos", "Gonzalez Cavazos", "Carolina"),
+])
+def test_surname_containment_works_both_ways(name, last, fore):
+    assert _kind(last, fore, name) == "individual"
+
+
+@pytest.mark.parametrize(("name", "last"), [
+    ("Anna de Souza", "De"),
+    ("Anna de Souza", "de Oliveira"),
+    ("Anna van der Berg", "Van"),
+    ("Anna van der Berg", "van den Bosch"),
+])
+def test_containment_never_matches_on_a_particle(name, last):
+    assert _kind(last, "Anna", name) == "no_match"
+
+
+def test_containment_still_needs_the_forename():
+    assert _kind("Garcia-Lopez", "Juan", "José Garcia") == "no_match"
+
+
+def test_packed_initials_are_initials():
+    for fore in ("JD", "J.D."):
+        record = _rec(1, [_author("Rothstein", fore, "JD")])
+        assert corpus._match_pi_author_detail(record, "Jeffrey Rothstein") == ("individual", [], True)
+
+
+def test_an_all_caps_forename_with_other_initials_is_a_name():
+    assert _kind("Rothstein", "JOHN", "Jeffrey Rothstein", "J") == "no_match"
+
+
+@pytest.mark.parametrize("fore", ["DS", "D.S.", "D. S."])
+def test_p6_packed_initials_corroborate_the_middle_name(fore):
+    record = _rec(1, [_author("Wilson", fore, "DS")])
+    assert corpus._match_pi_author_detail(record, "D. Scott Wilson") == ("individual", [], True)
+
+
+def test_p6_initials_without_a_forename_need_the_middle_initial():
+    name = "D. Scott Wilson"
+    assert _kind("Wilson", None, name, "DA") == "no_match"
+    for initials in ("DS", "D"):
+        record = _rec(1, [_author("Wilson", None, initials)])
+        assert corpus._match_pi_author_detail(record, name) == ("individual", [], True)
+
+
+@pytest.mark.parametrize(("fore", "initials"), [
+    ("D A", "DA"), ("DA", "DA"), ("Deborah", "D"), ("Daniel R", "DR"),
+])
+def test_p6_commit_intent_still_holds(fore, initials):
+    assert _kind("Wilson", fore, "D. Scott Wilson", initials) == "no_match"
+
+
+def test_a_shorter_spelled_out_forename_agrees():
+    record = _rec(1, [_author("Vogelstein", "Bert")])
+    assert corpus._match_pi_author_detail(record, "Bertram Vogelstein") == ("individual", [], False)
+    assert _kind("Smith", "Al", "Alan Smith") == "no_match"
+
+
+def test_hyphenated_and_joined_given_names_agree():
+    assert _kind("Li", "Jian-Feng", "Jianfeng Li") == "individual"
+    assert _kind("Li", "Jianfeng", "Jian-Feng Li") == "individual"
+
+
+def test_named_cases_from_main_am_8():
+    assert _kind("Wu", "Wei", "Di Wu") == "no_match"
+    assert _kind("Zhang", "Wei", "Zhang Wen") == "no_match"
+    assert _kind("Zhang", "Wen", "Wei Zhang") == "no_match"
+    record = _rec(1, [_author("Wu", "D", "D")])
+    assert corpus._match_pi_author_detail(record, "Di Wu") == ("individual", [], True)
+
+
+def test_a_comma_form_name_matches():
+    assert _kind("Doe", "Jane", "Doe, Jane") == "individual"
+    assert _kind("Doe", "John", "Doe, Jane") == "no_match"
+    assert _kind("Garcia Marquez", "Gabriel", "Garcia Marquez, Gabriel") == "individual"
+    record = _rec(1, [_author("Wilson", "DS", "DS")])
+    assert corpus._match_pi_author_detail(record, "Wilson, D. Scott") == ("individual", [], True)
+    assert _kind("Wilson", "D A", "Wilson, D. Scott", "DA") == "no_match"
+
+
+def _invalid(last, fore, initials=None, affs=(), orcid=None):
+    author = {**_author(last, fore, initials, affs), "valid": False}
+    if orcid:
+        author["orcid"] = orcid
+    return author
+
+
+def test_an_invalid_author_entry_is_never_the_pi():
+    assert match_pi_author(_rec(1, [_invalid("Green", "Rachel")]), "Rachel Green")[0] == "no_match"
+    record = _rec(1, [_invalid("Green", "Rachel", affs=["X"]), _author("Green", "Rachel", affs=["Y"])])
+    assert match_pi_author(record, "Rachel Green") == ("individual", ["Y"])
+
+
+def test_an_invalid_entry_carrying_the_pi_orcid_is_skipped():
+    record = _rec(1, [_invalid("Wilson", "D Scott", "DS", orcid=_WILSON_ORCID)])
+    assert match_pi_author(record, "Scott Wilson", _WILSON_ORCID)[0] == "no_match"
+
+
+def test_an_incomplete_list_without_the_pi():
+    def kind(*authors, complete):
+        record = {**_rec(1, authors), "author_list_complete": complete}
+        return match_pi_author(record, "Rachel Green")[0]
+
+    collective = {**_author(), "collective": "The X Consortium"}
+    assert kind(_author("Smith", "Ann"), complete=False) == "incomplete_list"
+    assert kind(_author("Smith", "Ann"), _author("Green", "Rachel"), complete=False) == "individual"
+    assert kind(collective, complete=False) == "incomplete_list"
+    assert kind(collective, complete=True) == "consortium"
+
+
+def test_the_unique_spelled_out_forename_wins_over_an_initial():
+    record = _rec(1, [_author("Doe", "J", affs=["X"]), _author("Doe", "Jane", affs=["Y"])])
+    assert corpus._match_pi_author_detail(record, "Jane Doe") == ("individual", ["Y"], False)
+
+
+def test_two_identical_candidates_are_ambiguous():
+    record = _rec(1, [_author("Doe", "Jane", affs=["X"]), _author("Doe", "Jane", affs=["Y"])])
+    match = corpus._match_pi_author_full(record, "Jane Doe")
+    assert match.kind == "ambiguous"
+    assert match.affiliations == []
+    assert tuple(c.affiliations for c in match.candidates) == (("X",), ("Y",))
+
+
+def test_p3_a_foreign_orcid_does_not_veto_an_anchored_record():
+    record = _rec(1, [_orcid_author("Dang", "Chi V", _FOREIGN_ORCID)])
+    pi_orcid = "0000-0002-4031-2522"
+    assert match_pi_author(record, "Chi Dang", pi_orcid, anchored=True)[0] == "individual"
+    assert match_pi_author(record, "Chi Dang", pi_orcid, anchored=False)[0] == "no_match"
+
+
+def test_tie_break_1_prefers_the_candidate_without_an_orcid():
+    record = _rec(1, [_orcid_author("Zhang", "Wei", _FOREIGN_ORCID, affs=["A"]),
+                      _author("Zhang", "Wei", affs=["B"])])
+    assert match_pi_author(record, "Wei Zhang", "0000-0002-1825-0097", anchored=True) == (
+        "individual", ["B"],
+    )
+
+
+def test_two_foreign_candidates_on_an_anchored_record_are_ambiguous():
+    record = _rec(1, [_orcid_author("Zhang", "Wei", _FOREIGN_ORCID),
+                      _orcid_author("Zhang", "Wei", _WILSON_ORCID)])
+    assert match_pi_author(record, "Wei Zhang", "0000-0002-1825-0097", anchored=True)[0] == "ambiguous"
+
+
+def test_the_pis_orcid_elsewhere_disqualifies_a_foreign_namesake():
+    pi_orcid = "0000-0002-1825-0097"
+    record = _rec(1, [_orcid_author("Doe", "Jane", pi_orcid),
+                      _orcid_author("Roe", "Jane", _FOREIGN_ORCID)])
+    assert match_pi_author(record, "Jane Roe", pi_orcid, anchored=True)[0] == "no_match"
+
+
+def test_an_invalid_pi_orcid_neither_matches_nor_vetoes():
+    record = _rec(1, [_orcid_author("Wilson", "David S", _FOREIGN_ORCID)])
+    assert corpus._match_pi_author_detail(record, "D. Scott Wilson", "0000-0002-1825-0098") == (
+        "individual", [], True,
+    )
+
+
+_R33_CASES = [
+    ("Rothstein", "JD", "JD", "Jeffrey Rothstein"),
+    ("Rothstein", "JOHN", "J", "Jeffrey Rothstein"),
+    ("Wilson", "D.S.", "DS", "D. Scott Wilson"),
+    ("Wilson", None, "DA", "D. Scott Wilson"),
+    ("Wilson", "Daniel R", "DR", "D. Scott Wilson"),
+    ("Vogelstein", "Bert", None, "Bertram Vogelstein"),
+    ("Li", "Jian-Feng", None, "Jianfeng Li"),
+    ("Wu", "D", "D", "Di Wu"),
+]
+
+
+@pytest.mark.parametrize(("last", "fore", "initials", "name"), _R33_CASES)
+def test_detail_and_two_tuple_mirror_the_full_match(last, fore, initials, name):
+    record = _rec(1, [_author(last, fore, initials, affs=["Somewhere"])])
+    match = corpus._match_pi_author_full(record, name)
+    assert corpus._match_pi_author_detail(record, name) == (
+        match.kind, match.affiliations, match.bare_initial,
+    )
+    assert match_pi_author(record, name) == (match.kind, match.affiliations)
+
+
+def test_a_swapped_name_matches_on_an_anchored_record():
+    assert _kind("Wen", "Zhang", "Wen Zhang", anchored=True) == "individual"
+
+
+def test_a_swapped_name_never_matches_unanchored():
+    assert _kind("Wen", "Zhang", "Wen Zhang", anchored=False) == "no_match"
+
+
+def test_the_swap_runs_only_after_zero_candidates():
+    record = _rec(1, [_author("Wilson", "Scott", affs=["X"]), _author("Scott", "Wilson", affs=["Y"])])
+    assert corpus._match_pi_author_detail(record, "Scott Wilson", anchored=True) == (
+        "individual", ["X"], False,
+    )
+
+
+@pytest.mark.parametrize(("name", "last", "fore"), [
+    ("Di Wu", "Wu", "Wei"), ("Zhang Wen", "Zhang", "Wei"), ("Wei Zhang", "Zhang", "Wen"),
+])
+def test_named_cases_stay_mismatches_when_anchored(name, last, fore):
+    assert _kind(last, fore, name, anchored=True) == "no_match"
