@@ -21,8 +21,8 @@ from pathlib import Path
 from src.agent.tools import _execute_retrieve_profile
 
 
-def _run(agent_id: str, role: str = "pi_lab") -> str:
-    return asyncio.run(_execute_retrieve_profile(agent_id, role))
+def _run(agent_id: str, role: str = "pi_lab", profile_ids=None) -> str:
+    return asyncio.run(_execute_retrieve_profile(agent_id, role, profile_ids=profile_ids))
 
 
 class TestTraversalIsRefused:
@@ -63,7 +63,7 @@ class TestLegitimateReadsStillWork:
             import pytest
             pytest.skip("no public profiles on this host to read")
         agent_id = available[0].stem
-        out = _run(agent_id)
+        out = _run(agent_id, profile_ids={agent_id.lower(): agent_id})
         assert "<agent_profile>" in out
         assert len(out) > 50
 

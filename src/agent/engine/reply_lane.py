@@ -18,7 +18,7 @@ from src.agent.engine.sidecar import _extract_slack_message, _reply_closes_threa
 from src.agent.role_capabilities import capabilities_for, hub_role_names
 from src.agent.state import ThreadState
 from src.agent.thread_guidance import phase4_guidance
-from src.agent.tools import execute_tool, tools_for_role
+from src.agent.tools import execute_tool, live_profile_ids, tools_for_role
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE
 
 if TYPE_CHECKING:
@@ -797,6 +797,7 @@ class ReplyLane:
                     aid: a.role for aid, a in self.agents.items() if a.role in hub_role_names()
                 },
                 allowed_sender_ids=agent.allowed_sender_ids,
+                profile_ids=live_profile_ids(self.agents.values()),
             )
         return tool_executor
 

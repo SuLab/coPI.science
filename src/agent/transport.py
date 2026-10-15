@@ -57,7 +57,8 @@ class Transport(Protocol):
     # entry, which is what keeps the database in bijection with Slack. A backend
     # that never splits may omit the key; ``SimulationEngine._mirrored_messages``
     # falls back to treating the response as a single message.
-    def post_message(self, channel: str, text: str, thread_ts: str | None = None) -> dict | None: ...
+    # ``escape`` (default True) asks the backend to Slack-escape the text; ``NullTransport`` ignores it.
+    def post_message(self, channel: str, text: str, thread_ts: str | None = None, *, escape: bool = True) -> dict | None: ...
     def create_channel(self, name: str) -> dict | None: ...
     def join_channel(self, channel_id: str) -> bool: ...
     # The engine awaits this form (``_phase1_channel_discovery``); the real
@@ -126,7 +127,7 @@ class NullTransport:
         return False
 
     # Outbound — no external side effects
-    def post_message(self, channel: str, text: str, thread_ts: str | None = None) -> dict | None:
+    def post_message(self, channel: str, text: str, thread_ts: str | None = None, *, escape: bool = True) -> dict | None:
         return None
 
     def create_channel(self, name: str) -> dict | None:

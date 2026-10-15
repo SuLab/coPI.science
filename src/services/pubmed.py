@@ -15,34 +15,15 @@ import httpx
 
 from src.config import get_settings
 from src.services.http_pacing import Pacer
+from src.services.secret_redaction import install_log_redaction, redact_api_keys
 
 logger = logging.getLogger(__name__)
 
-_API_KEY_QUERY = re.compile(r"(?i)(\bapi_key=)[^&\s\"']+")
-
-
-class _RedactApiKey(logging.Filter):
-    """Redact ``api_key=`` query values from log lines: httpx's INFO request lines log
-    the full URL, and ``_ncbi_get`` puts the NCBI key there. Only arguments whose text
-    contains a key are rewritten (to str), so a ``%d`` status code still formats; the
-    lines themselves are kept because operators grep them."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        if isinstance(record.msg, str) and "api_key=" in record.msg:
-            record.msg = _API_KEY_QUERY.sub(r"\1REDACTED", record.msg)
-        if isinstance(record.args, tuple):
-            record.args = tuple(
-                _API_KEY_QUERY.sub(r"\1REDACTED", str(arg))
-                if not isinstance(arg, int | float) and "api_key=" in str(arg)
-                else arg
-                for arg in record.args
-            )
-        return True
-
-
-# httpx's own request lines, and this module's lines that log an exception or URL.
-for _name in ("httpx", __name__):
-    logging.getLogger(_name).addFilter(_RedactApiKey())
+# httpx's request lines and this module's own lines are redacted by a logger filter,
+# and every other record by the log-record factory, traceback text included
+# (src/services/secret_redaction.py). Every process that holds the NCBI key imports
+# this module: the app (pi_profile), the worker (profile_pipeline) and the agent (tools).
+install_log_redaction("httpx", __name__)
 
 EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 # The trailing slash is load-bearing: without it NCBI answers 301 to the same path
@@ -211,51 +192,91 @@ async def _ncbi_get(url: str, params: dict[str, Any]) -> httpx.Response:
     Pacing runs BEFORE raise_for_status — the old order skipped pacing
     exactly when NCBI was already 429-ing us. Retries cover the transient
     statuses NCBI actually emits under load *and* the transport failures in
-    ``_RETRYABLE_TRANSPORT``; anything else raises as before.
+    ``_RETRYABLE_TRANSPORT``; anything else raises as before. The caller's ``params``
+    dict is copied, never mutated, so it never carries the key.
     """
     settings = get_settings()
+    query = dict(params)
     if settings.ncbi_api_key:
-        params["api_key"] = settings.ncbi_api_key
-    params.setdefault("tool", _NCBI_TOOL)
-    params.setdefault("email", settings.ncbi_contact_email or settings.ses_sender_email)
+        query["api_key"] = settings.ncbi_api_key
+    query.setdefault("tool", _NCBI_TOOL)
+    query.setdefault("email", settings.ncbi_contact_email or settings.ses_sender_email)
     async with _request_semaphore:
         shared = _SHARED_CLIENT.get()
         if shared is not None:
-            return await _ncbi_attempts(shared, url, params)
+            return await _ncbi_attempts(shared, url, query)
         async with _make_client() as client:
-            return await _ncbi_attempts(client, url, params)
+            return await _ncbi_attempts(client, url, query)
+
+
+def _redacted_request(request: httpx.Request) -> httpx.Request:
+    """A bare copy of ``request`` (method and redacted URL; no headers, no body)."""
+    return httpx.Request(request.method, redact_api_keys(str(request.url)))
+
+
+def _redacted_http_error(exc: httpx.HTTPError) -> httpx.HTTPError:
+    """``exc`` rebuilt with no key in its message, request or response. The class is
+    kept, so ``_RETRYABLE_TRANSPORT`` and every caller's ``except`` still match; a
+    status error keeps only its status (``_per_item_4xx`` reads it)."""
+    message = redact_api_keys(str(exc))
+    try:
+        req: httpx.Request | None = _redacted_request(exc.request)
+    except RuntimeError:  # httpx raises it when no request is attached
+        req = None
+    if isinstance(exc, httpx.HTTPStatusError):
+        return httpx.HTTPStatusError(
+            message, request=req,
+            response=httpx.Response(exc.response.status_code, request=req),
+        )
+    try:
+        return type(exc)(message, request=req)
+    except TypeError:
+        if isinstance(exc, httpx.TransportError):
+            return httpx.TransportError(message, request=req)
+        return httpx.RequestError(message, request=req)
 
 
 async def _ncbi_attempts(
     client: httpx.AsyncClient, url: str, params: dict[str, Any]
 ) -> httpx.Response:
-    """The paced, retried GET loop of `_ncbi_get`, on a given client."""
+    """The paced, retried GET loop of `_ncbi_get`, on a given client.
+
+    Invariant: an ``httpx.HTTPError`` leaving this function (so ``_ncbi_get``) carries
+    no key in its ``str``, ``repr``, ``.request``, ``.response.request``, ``__cause__``
+    or ``__context__``: it is rebuilt by ``_redacted_http_error`` inside the ``except``
+    and raised after the block ``from None``, so its context is never the original.
+    httpx exceptions outside ``HTTPError`` (``InvalidURL``, ``StreamError``) are not
+    rebuilt: NCBI URLs are module constants and params are percent-encoded. Frame
+    locals (``query`` in ``_ncbi_get``) are not redacted; no locals-capturing
+    reporter is configured.
+    """
     for attempt in range(3):
         await _pace()
+        failure: httpx.HTTPError | None = None
+        retryable = False
         try:
             resp = await client.get(url, params=params)
-        except _RETRYABLE_TRANSPORT as exc:
-            if attempt == 2:
-                raise
-            logger.info(
-                "NCBI transport failure on attempt %d (%s: %s) — retrying",
-                attempt + 1, type(exc).__name__, exc,
-            )
-            await asyncio.sleep(1.0 * (2 ** attempt))
-            continue
+        except httpx.HTTPError as exc:
+            failure = _redacted_http_error(exc)
+            retryable = isinstance(exc, _RETRYABLE_TRANSPORT)
+        if failure is not None:
+            if retryable and attempt < 2:
+                logger.info(
+                    "NCBI transport failure on attempt %d (%s: %s) — retrying",
+                    attempt + 1, type(failure).__name__, failure,
+                )
+                await asyncio.sleep(1.0 * (2 ** attempt))
+                continue
+            raise failure from None
         if resp.status_code in (429, 500, 502, 503) and attempt < 2:
             await asyncio.sleep(1.0 * (2 ** attempt))
             continue
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            # httpx puts the request URL, which carries the NCBI api_key, into the message;
-            # callers log and store str(exc) (job errors), so it is redacted here. The
-            # request and response stay attached for status checks (_per_item_4xx).
-            raise httpx.HTTPStatusError(
-                _API_KEY_QUERY.sub(r"\1REDACTED", str(exc)),
-                request=exc.request, response=exc.response,
-            ) from None
+            failure = _redacted_http_error(exc)
+        if failure is not None:
+            raise failure from None
         return resp
 
 

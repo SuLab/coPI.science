@@ -259,7 +259,8 @@ class RunAnnouncer:
                             )
                             failed.append(name)
                             continue
-                        result = await client.apost_message(ch_id, text)
+                        # The announcement is admin-written (run_marker.py), so any Slack syntax its template carries is kept (F10). The only caller that passes escape.
+                        result = await client.apost_message(ch_id, text, escape=False)
                     except Exception:  # noqa: BLE001 — per-channel isolation
                         logger.warning(
                             "Run-start announcement to #%s (%s) raised — skipping",

@@ -396,14 +396,14 @@ def _channel_guard(client, allowed_name, allowed_id, sink):
     """Refuse (loudly) to post anywhere but the probe channel."""
     real = client.post_message
 
-    def _post(channel, text, thread_ts=None):
+    def _post(channel, text, thread_ts=None, **kwargs):
         if channel not in (allowed_name, allowed_id):
             sink.append((client.agent_id, channel, (text or "")[:120]))
             raise RuntimeError(
                 f"[{client.agent_id}] refusing to post outside the test channel: "
                 f"{channel!r} (would have written into the real workspace)"
             )
-        return real(channel, text, thread_ts=thread_ts)
+        return real(channel, text, thread_ts=thread_ts, **kwargs)
 
     return _post
 

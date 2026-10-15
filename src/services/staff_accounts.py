@@ -48,7 +48,7 @@ from src.services.person_names import (
 )
 from src.services.pi_onboarding import validate_orcid
 from src.services.session_epoch import bump_session_epoch
-from src.services.user_deletion import DeletionReport, delete_user_account
+from src.services.user_deletion import DeletionReport, delete_user_account, research_data_for
 from src.services.user_email import assign_user_email
 from src.services.user_roles import RoleChangeRefused, change_user_role
 
@@ -89,6 +89,7 @@ REFUSAL_MESSAGES: dict[str, str] = {
     "never_signed_in": "This reviewer has never signed in. Delete the unused account instead, or ask an admin.",
     "not_allowed": "That reviewer's access is not active.",
     "not_denied": "That reviewer's access is not revoked.",
+    "has_research_data": "This account holds research data (a researcher profile, publications or a lab agent). Ask an admin to delete it.",
     "create_failed": "Could not complete that. See the server log.",
 }
 
@@ -468,8 +469,20 @@ async def delete_reviewer(
     db: AsyncSession, *, actor: User, user_id: uuid.UUID,
 ) -> DeletionReport:
     """Delete a reviewer account through ``delete_user_account(remove_from_allowlist=True)``;
-    the audit row is added first so both commit in its in-transaction phase. Commits."""
+    the audit row is added first so both commit in its in-transaction phase. Commits.
+    A non-admin actor is refused with ``has_research_data`` when the account holds research
+    data (``research_data_for``); nothing is written."""
     target = await _locked_reviewer(db, actor, user_id)
+    # Q5: a manager may not destroy research data. The target's users row is locked
+    # FOR UPDATE above, which conflicts with the FOR KEY SHARE an FK check takes, so no
+    # profile, publication or agent row can be added to it before this decision.
+    if actor.user_role != USER_ROLE_ADMIN and (
+        await research_data_for(db, [target.id])
+    )[target.id].has_any:
+        logger.info(
+            "Staff delete of %s refused for %s: it holds research data", target.id, actor.id,
+        )
+        raise StaffAccountRefused("has_research_data")
     # Added before the call: delete_user_account commits inside, so a row added after it
     # would land in a separate transaction and could outlive (or miss) the delete.
     db.add(_audit(AUDIT_DELETE, actor, target))
@@ -480,10 +493,12 @@ async def delete_reviewer(
 
 
 async def list_staff_accounts(db: AsyncSession, *, viewer: User) -> list[dict[str, Any]]:
-    """Every manager, reviewer and admin, by name: ``{"user": User, "is_self": bool,
-    "has_agent": bool, "can_revoke": bool, "can_restore": bool, "can_delete": bool}``.
-    The ``can_*`` flags say which reviewer actions ``viewer`` may take on the row
-    (``can_revoke`` is False for a manager viewer on a never-signed-in reviewer)."""
+    """Every manager, reviewer and admin, by name: ``{"user", "is_self", "has_agent",
+    "has_profile", "publication_count", "has_research_data", "delete_needs_admin",
+    "can_revoke", "can_restore", "can_delete"}``. The ``can_*`` flags say which reviewer
+    actions ``viewer`` may take on the row. ``can_revoke`` is False for a manager viewer on
+    a never-signed-in reviewer. ``delete_needs_admin`` is True on a reviewer row holding
+    research data when the viewer is not an admin, and ``can_delete`` is then False."""
     users = (
         await db.execute(
             select(User)
@@ -491,27 +506,28 @@ async def list_staff_accounts(db: AsyncSession, *, viewer: User) -> list[dict[st
             .order_by(User.name, User.id)
         )
     ).scalars().all()
-    ids = [u.id for u in users]
-    with_agent: set[uuid.UUID] = set()
-    if ids:
-        with_agent = set(
-            (await db.scalars(
-                select(AgentRegistry.user_id).where(AgentRegistry.user_id.in_(ids))
-            )).all()
-        )
+    data = await research_data_for(db, [u.id for u in users])
     rows: list[dict[str, Any]] = []
     for user in users:
         is_self = _is_self(viewer, user)
         actionable = viewer.is_staff and user.user_role == USER_ROLE_REVIEWER and not is_self
+        held = data[user.id]
+        delete_needs_admin = (
+            actionable and held.has_any and viewer.user_role != USER_ROLE_ADMIN
+        )
         rows.append({
             "user": user,
             "is_self": user.id == viewer.id,
-            "has_agent": user.id in with_agent,
+            "has_agent": held.agent_id is not None,
+            "has_profile": held.has_profile,
+            "publication_count": held.publication_count,
+            "has_research_data": held.has_any,
+            "delete_needs_admin": delete_needs_admin,
             "can_revoke": actionable and user.access_status == "allowed" and (
                 user.last_login_at is not None or _may_revoke_unseen(viewer)
             ),
             "can_restore": actionable and user.access_status == "denied",
-            "can_delete": actionable,
+            "can_delete": actionable and not delete_needs_admin,
         })
     return rows
 

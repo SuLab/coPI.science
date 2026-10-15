@@ -144,13 +144,13 @@
 
 <h3>Delete</h3>
 <p>
-    <strong>Delete</strong> appears on every reviewer row except your own. Your browser asks
-    you to confirm, and the dialog says what deletion does: "Their reviews and
-    approve/disapprove history are kept, with the name …. Their review assignments and their
-    assessment-chat history are deleted, and the ORCID iD is removed from the access
-    allowlist." In the rare case the account still owns a lab agent, the dialog adds that the
-    full teardown runs: its persona files are removed and its Slack bot token is revoked. The
-    page then shows "Reviewer account deleted."
+    <strong>Delete</strong> appears on every reviewer row except your own, unless the
+    account holds research data (a researcher profile, publications or a lab agent). That
+    row says "Holds research data: an admin deletes it" instead, and only an admin can
+    delete it. Your browser asks you to confirm, and the dialog says what deletion does:
+    "Removed: the account, its review assignments, its assessment-chat history and its
+    ORCID iD on the access allowlist." and "Kept: its reviews and approve/disapprove
+    history, with the name …". The page then shows "Reviewer account deleted."
 </p>
 {% call careful() %}
 <p>

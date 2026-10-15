@@ -24,6 +24,7 @@ from src.models import (
     AssessmentReviewAssignment,
     Job,
     OpportunityAssessment,
+    Publication,
     ResearcherProfile,
     User,
 )
@@ -40,6 +41,7 @@ from src.services.staff_accounts import (
     StaffAccountRefused,
     StaffPreview,
 )
+from src.services.user_deletion import ResearchData, research_data_for
 from tests import factories
 
 pytestmark = pytest.mark.integration
@@ -840,6 +842,7 @@ async def test_restore_needs_a_denied_reviewer(db_session, status):
 async def test_delete_keeps_reviews_drops_assignments_and_chat_and_tears_down_an_agent(
     db_session, monkeypatch, tmp_path,
 ):
+    """The actor is an admin: the reviewer owns an agent, which Q5 refuses to a manager."""
     from src.services import user_deletion
     from src.services.slack_tokens import is_valid_token
 
@@ -857,7 +860,7 @@ async def test_delete_keeps_reviews_drops_assignments_and_chat_and_tears_down_an
     monkeypatch.setattr(user_deletion, "revoke_token_async", fake_revoke)
     token = "xoxb-staff-delete-teardown"
     assert is_valid_token(token)
-    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     rev = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER, name="Rae Viewer")
     agent = await factories.make_agent(db_session, user=rev, status="suspended",
                                        slack_bot_token=token)
@@ -936,7 +939,8 @@ async def test_list_staff_accounts_rows_and_flags(db_session):
     flags = ("is_self", "has_agent", "can_revoke", "can_restore", "can_delete")
     assert tuple(by_id[admin.id][f] for f in flags) == (False, False, False, False, False)
     assert tuple(by_id[allowed.id][f] for f in flags) == (False, False, True, False, True)
-    assert tuple(by_id[denied.id][f] for f in flags) == (False, True, False, True, True)
+    assert tuple(by_id[denied.id][f] for f in flags) == (False, True, False, True, False)
+    assert by_id[denied.id]["delete_needs_admin"] is True
     assert tuple(by_id[pending.id][f] for f in flags) == (False, False, False, False, True)
     assert tuple(by_id[viewer.id][f] for f in flags) == (True, False, False, False, False)
     assert by_id[allowed.id]["user"].access_status == "allowed"
@@ -951,6 +955,9 @@ async def test_list_staff_accounts_rows_and_flags(db_session):
     (row,) = [r for r in await staff_accounts.list_staff_accounts(db_session, viewer=admin)
               if r["user"].id == allowed.id]
     assert row["can_revoke"] is True
+    (row,) = [r for r in await staff_accounts.list_staff_accounts(db_session, viewer=admin)
+              if r["user"].id == denied.id]
+    assert row["can_delete"] is True and row["delete_needs_admin"] is False
 
     # A non-staff viewer gets no actions.
     rows = await staff_accounts.list_staff_accounts(db_session, viewer=allowed)
@@ -979,3 +986,73 @@ async def test_recent_staff_changes_newest_first_with_actor_names(db_session):
                           "created_at": changes[0]["created_at"]}
     assert changes[1]["actor_name"] == "Mona Manager"
     assert len(await staff_accounts.recent_staff_changes(db_session, limit=1)) == 1
+
+
+# ---- research-data guard (Q5, R1.7) -----------------------------------------------------
+
+
+async def _research_reviewer(db, kind: str) -> User:
+    rev = await factories.make_user(db, user_role=USER_ROLE_REVIEWER)
+    if kind == "profile":
+        await factories.make_profile(db, user=rev)
+    elif kind == "publication":
+        db.add(Publication(user_id=rev.id, pmid="31000001", title="A stored paper"))
+        await db.flush()
+    else:
+        await factories.make_agent(db, user=rev, status="suspended")
+    return rev
+
+
+async def test_research_data_for_reports_profile_publications_and_agent(db_session):
+    a = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    await factories.make_profile(db_session, user=a)
+    db_session.add_all([Publication(user_id=a.id, pmid="31000001", title="One"),
+                        Publication(user_id=a.id, pmid="31000002", title="Two")])
+    b = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    agent = await factories.make_agent(db_session, user=b, status="suspended")
+    c = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    await db_session.flush()
+    got = await research_data_for(db_session, [a.id, b.id, c.id])
+    assert got == {
+        a.id: ResearchData(True, 2, None),
+        b.id: ResearchData(False, 0, agent.agent_id),
+        c.id: ResearchData(False, 0, None),
+    }
+    assert [got[u.id].has_any for u in (a, b, c)] == [True, True, False]
+
+
+@pytest.mark.parametrize("kind", ["profile", "publication", "agent"])
+async def test_a_manager_may_not_delete_a_reviewer_with_research_data(db_session, kind):
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    rev = await _research_reviewer(db_session, kind)
+    exc = await _refused(staff_accounts.delete_reviewer(db_session, actor=mgr, user_id=rev.id))
+    assert exc.code == "has_research_data"
+    assert await db_session.scalar(
+        select(func.count()).select_from(User).where(User.id == rev.id)) == 1
+    assert await _audits(db_session, AUDIT_DELETE) == []
+
+
+async def test_an_admin_deletes_a_reviewer_with_research_data(db_session):
+    admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+    rev = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    await factories.make_profile(db_session, user=rev)
+    db_session.add_all([Publication(user_id=rev.id, pmid="31000001", title="One"),
+                        Publication(user_id=rev.id, pmid="31000002", title="Two")])
+    await db_session.flush()
+    rev_id = rev.id
+    await staff_accounts.delete_reviewer(db_session, actor=admin, user_id=rev_id)
+    for model, column in ((User, User.id), (ResearcherProfile, ResearcherProfile.user_id),
+                          (Publication, Publication.user_id)):
+        assert await db_session.scalar(
+            select(func.count()).select_from(model).where(column == rev_id)) == 0
+    (event,) = await _audits(db_session, AUDIT_DELETE)
+    assert event.actor_user_id == admin.id
+
+
+async def test_a_manager_deletes_a_reviewer_without_research_data(db_session):
+    mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    rev = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    rev_id = rev.id
+    await staff_accounts.delete_reviewer(db_session, actor=mgr, user_id=rev_id)
+    assert await db_session.scalar(
+        select(func.count()).select_from(User).where(User.id == rev_id)) == 0

@@ -30,7 +30,7 @@ from src.services.tenure_scope import (
     publication_order_by,
     scoped_publications_for,
 )
-from src.services.user_deletion import delete_user_account
+from src.services.user_deletion import delete_user_account, research_data_for
 from src.web.flash import flash
 from src.web.templating import make_templates
 from src.web.page_context import page_context
@@ -195,13 +195,17 @@ async def profile_refresh(
 @router.get("/delete-account", response_class=HTMLResponse)
 async def delete_account_confirm(
     request: Request,
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Account deletion confirmation page."""
     return templates.TemplateResponse(
         request,
         "profile/delete_account.html",
-        _template_context(request, current_user),
+        _template_context(
+            request, current_user,
+            research_data=(await research_data_for(db, [current_user.id]))[current_user.id],
+        ),
     )
 
 
@@ -218,12 +222,28 @@ async def delete_account(
     impersonation is on a support path, and account deletion is the one
     action there that cannot be undone (2026-08-22 audit §2.13; deletion
     audit F8). Admins delete accounts through /admin/users/{id}/delete,
-    which logs the actor.
+    which logs the actor. A manager or reviewer whose account holds research data
+    (``research_data_for``) is refused (``?error=research_data``) and sent to an admin;
+    PIs and admins are not (F18).
     """
     refuse_impersonation(current_user, "Account deletion is disabled while impersonating.")
 
     if confirm.lower() != "delete":
         return RedirectResponse(url="/profile/delete-account?error=1", status_code=302)
+
+    # F18: a manager or reviewer whose account holds research data (a converted PI's
+    # profile, publications or agent) may not destroy it; an admin deletes the account.
+    # The users row is locked first, so no profile, publication or agent row can be
+    # added before the decision (the FK check takes FOR KEY SHARE on it).
+    if not current_user.may_use_pi_surfaces:
+        user_id = current_user.id
+        await db.execute(select(User.id).where(User.id == user_id).with_for_update())
+        if (await research_data_for(db, [user_id]))[user_id].has_any:
+            logger.info("Self-delete of %s refused: the account holds research data", user_id)
+            await db.rollback()
+            return RedirectResponse(
+                url="/profile/delete-account?error=research_data", status_code=302,
+            )
 
     # The same "at least one admin can still log in" invariant the role
     # route defends (src/routers/admin/users.py) — deletion is the other door out

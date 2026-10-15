@@ -77,8 +77,9 @@ async def create_revision(
             requested, linked, renamed or activated; spec 2026-10-05 §6.4). At most 20
             characters (the column is String(20)). ("slack_dm" is historical: only
             rows written before 2026-08-13 carry it. "monthly_refresh" has never
-            been written: the monthly_refresh job runs the profile pipeline, which
-            records "pipeline".)
+            been written: that job type is retired and nothing enqueues it (the worker
+            fails a legacy row); a refresh runs the profile pipeline as a
+            generate_profile job, which records "pipeline".)
         change_summary: Optional short description of what changed.
 
     Returns:

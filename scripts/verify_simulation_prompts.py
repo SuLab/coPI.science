@@ -124,6 +124,7 @@ async def _retrieve(caller: Agent, target_id: str, ctx: _Context,
     return await tools.execute_tool(
         "retrieve_profile", {"agent_id": target_id}, caller.agent_id,
         role=caller.role, hub_agent_ids=ctx.hub_agent_ids, allowed_sender_ids=gate,
+        profile_ids=tools.live_profile_ids([*ctx.hubs, *ctx.labs]),
     )
 
 

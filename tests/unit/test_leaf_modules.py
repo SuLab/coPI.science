@@ -28,7 +28,7 @@ def test_the_web_app_does_not_import_the_engine_entry_point():
 
 
 def test_leaf_modules_are_dependency_free():
-    for rel in ("src/agent/tool_definitions.py", "src/agent/dois.py"):
+    for rel in ("src/agent/tool_definitions.py", "src/agent/dois.py", "src/services/secret_redaction.py", "src/agent/slack_escape.py"):
         assert not {m for m in _src_imports(rel) if m.startswith("src.")}, rel
 
 

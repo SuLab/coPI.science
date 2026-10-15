@@ -1309,14 +1309,29 @@ def test_postflight_keeps_the_partial_predicate_in_the_expected_index_definition
 
 
 def test_postflight_expects_an_index_for_every_index_the_chain_creates():
-    # Scoped to the revisions postflight actually verifies (po.VERIFIED_REVISIONS):
-    # PLANNED_OBJECTS also carries 0025's two indexes for preflight's collision check,
-    # but postflight has no EXPECTED_INDEXES entries for them yet (see C9/VERIFIED_REVISIONS).
-    planned = {
-        o.name for o in pf.PLANNED_OBJECTS
-        if o.kind in {"index", "constraint"} and o.revision in po.VERIFIED_REVISIONS
-    }
-    assert planned <= set(po.EXPECTED_INDEXES)
+    """The pin rule for every phase (I7 of the 2026-10-15 publication-handling design).
+    For the revisions postflight verifies (po.VERIFIED_REVISIONS), every planned index is
+    in EXPECTED_INDEXES and every planned constraint is in EXPECTED_INDEXES or
+    EXPECTED_CONSTRAINTS: a CHECK or FK has no index. A later phase adds EXPECTED_*
+    entries and VERIFIED_REVISIONS members for its migration; it does not split or
+    replace this rule."""
+    planned = [o for o in pf.PLANNED_OBJECTS if o.revision in po.VERIFIED_REVISIONS]
+    indexes = {o.name for o in planned if o.kind == "index"}
+    constraints = {o.name for o in planned if o.kind == "constraint"}
+    assert indexes <= set(po.EXPECTED_INDEXES)
+    assert constraints <= set(po.EXPECTED_INDEXES) | set(po.EXPECTED_CONSTRAINTS)
+
+
+def test_postflight_pins_the_0062_and_0065_objects():
+    assert {"0062", "0065"} <= set(po.VERIFIED_REVISIONS)
+    assert {"ix_publications_excluded_by_user_id", "uq_publication_candidates_user_pmid",
+            "ix_publication_candidates_decided_by_user_id",
+            "uq_publications_user_doi_nopmid"} <= set(po.EXPECTED_INDEXES)
+    assert {"fk_publications_excluded_by_user_id_users", "ck_publications_provenance",
+            "uq_publication_candidates_user_pmid",
+            "ck_publication_candidates_status"} <= set(po.EXPECTED_CONSTRAINTS)
+    assert "publication_candidates" in po.EXPECTED_TABLES
+    assert "WHERE (pmid IS NULL)" in po.EXPECTED_INDEXES["uq_publications_user_doi_nopmid"]
 
 
 def test_postflight_expects_a_table_for_every_table_the_chain_creates():

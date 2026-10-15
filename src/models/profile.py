@@ -72,6 +72,9 @@ class ResearcherProfile(Base):
     #                         prompt. It is exact where it matters — the 0 / non-zero
     #                         boundary this column exists to draw is the same either way,
     #                         because 30 is a cap and never a floor.
+    #                         Excluded rows (publications.excluded_at set, by staff or by
+    #                         the system) are never in scope, so they never count
+    #                         (tenure_scope.publication_in_use).
     evidence_pmid_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     evidence_pub_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     #: Records the identity gates withheld in the run that wrote the counts above

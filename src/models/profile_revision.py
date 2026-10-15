@@ -35,7 +35,8 @@ class ProfileRevision(Base):
     )  # web, web_impersonated, agent, pipeline, grant_veto, orcid_veto, grant_pin,
     # paper_review, draft_accept, reexport, persona_sweep, lifecycle_export; all <= 20
     # characters. "slack_dm" only on pre-2026-08-13 rows. "monthly_refresh" is never
-    # written: that job records "pipeline".
+    # written: the job type is retired and nothing enqueues it; a refresh is a
+    # generate_profile job, which records "pipeline".
     change_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

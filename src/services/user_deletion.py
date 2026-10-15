@@ -35,11 +35,12 @@ import logging
 import re
 import shutil
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -49,6 +50,8 @@ from src.models import (
     AppSetting,
     PiDmMessage,
     ProfileRevision,
+    Publication,
+    ResearcherProfile,
     User,
 )
 from src.services.advisory_locks import lock_agent_persona
@@ -99,6 +102,66 @@ class DeletionReport:
             f"slack_revoked={self.slack_token_revoked} "
             f"errors={self.errors or 'none'}"
         )
+
+
+@dataclass(frozen=True)
+class ResearchData:
+    """What deleting an account would destroy beyond its staff-side rows (Q5, F18 of the
+    2026-10-15 publication-handling design): a researcher profile, any ``publications``
+    row of the user (excluded or not), and the ``agents`` row the user owns (any status).
+    The Staff page's delete and the self-service delete refuse a non-admin on it."""
+
+    has_profile: bool
+    publication_count: int
+    agent_id: str | None
+
+    @property
+    def has_any(self) -> bool:
+        return self.has_profile or self.publication_count > 0 or self.agent_id is not None
+
+    @property
+    def items_text(self) -> str:
+        """The data in words, in this order and only when present: "a researcher
+        profile", "{n} stored publication(s)", "a lab agent". One item stands alone, two
+        are joined with " and ", three read "a, b and c"."""
+        items: list[str] = []
+        if self.has_profile:
+            items.append("a researcher profile")
+        if self.publication_count:
+            n = self.publication_count
+            items.append(f"{n} stored publication{'' if n == 1 else 's'}")
+        if self.agent_id is not None:
+            items.append("a lab agent")
+        if len(items) <= 1:
+            return "".join(items)
+        return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+async def research_data_for(
+    db: AsyncSession, user_ids: Sequence[uuid.UUID],
+) -> dict[uuid.UUID, ResearchData]:
+    """``ResearchData`` for every id in ``user_ids``, from three grouped reads (profile,
+    publication count, owned agent). An id with none of them gets
+    ``ResearchData(False, 0, None)``; no ids, no query. Reads only."""
+    ids = list(dict.fromkeys(user_ids))
+    if not ids:
+        return {}
+    with_profile = set((await db.scalars(
+        select(ResearcherProfile.user_id).where(ResearcherProfile.user_id.in_(ids))
+    )).all())
+    counts = dict((await db.execute(
+        select(Publication.user_id, func.count())
+        .where(Publication.user_id.in_(ids))
+        .group_by(Publication.user_id)
+    )).tuples().all())
+    agents = dict((await db.execute(
+        select(AgentRegistry.user_id, AgentRegistry.agent_id)
+        .where(AgentRegistry.user_id.in_(ids))
+    )).tuples().all())
+    return {
+        uid: ResearchData(uid in with_profile, int(counts.get(uid, 0)), agents.get(uid))
+        for uid in ids
+    }
 
 
 def _agent_paths(agent_id: str) -> list[Path]:

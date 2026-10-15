@@ -29,6 +29,7 @@ Three things about the shape of this module:
 """
 
 import asyncio
+import logging
 import time
 import uuid
 from contextlib import contextmanager
@@ -1199,3 +1200,48 @@ async def test_a_failed_job_backs_off_4_then_16_minutes_then_dies(wk, monkeypatc
     assert await _one_round(wk.factory) is None
     assert worker_main.retry_delay(1) == timedelta(minutes=4)
     assert worker_main.retry_delay(2) == timedelta(minutes=16)
+
+
+_KEYED_404 = (
+    "corpus stage s1 failed: Client error '404 Not Found' for url "
+    "'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed"
+    "&api_key=SECRETKEY0123&tool=copi-science'"
+)
+
+
+async def test_a_failed_job_stores_a_redacted_last_error(wk, monkeypatch, caplog):
+    """R1.3: the worker's failure write redacts the key, and so does its ERROR line."""
+    from src.services.corpus import CorpusStageError
+
+    uid = await wk.new_user("T5 redaction")
+    jid = await wk.enqueue(uid)
+
+    async def keyed_failure(user_id, db, job_id=None, after_commit=None, followon_not_before=None):
+        raise CorpusStageError(_KEYED_404)
+
+    monkeypatch.setattr(worker_main, "run_profile_pipeline", keyed_failure)
+    claimed = await _one_round(wk.factory)
+    assert claimed is not None and claimed.id == jid
+    stored = (await wk.job(jid)).last_error or ""
+    assert "api_key=REDACTED&tool=copi-science" in stored
+    assert "SECRETKEY0123" not in stored
+    formatter = logging.Formatter("%(name)s %(message)s")
+    assert not any("SECRETKEY0123" in formatter.format(r) for r in caplog.records)
+
+
+async def test_a_deferral_reason_is_redacted(wk, monkeypatch):
+    """R1.3: the deferral note is redacted the same way."""
+    from src.services.job_queue import JobDeferred
+
+    uid = await wk.new_user("T5 deferral redaction")
+    jid = await wk.enqueue(uid)
+    not_before = datetime.now(UTC) + timedelta(hours=1)
+
+    async def defers(user_id, db, job_id=None, after_commit=None, followon_not_before=None):
+        raise JobDeferred(not_before, reason="OpenAlex api_key=SECRETKEY0123")
+
+    monkeypatch.setattr(worker_main, "run_profile_pipeline", defers)
+    await _one_round(wk.factory)
+    assert (await wk.job(jid)).last_error == (
+        f"deferred until {not_before.isoformat()}: OpenAlex api_key=REDACTED"
+    )

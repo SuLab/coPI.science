@@ -60,12 +60,7 @@ matches, whatever the forename spelling; when the PI has an ORCID on file, an au
 a different ORCID iD is never the PI. A PI stored with an initial first name
 ("D. Scott Wilson") is matched through the middle name: a ForeName whose second token is
 missing or whose initial differs ("Deborah", "D A") is someone else.
-The resolver keeps one version of a work: a preprint PubMed links to its published version
-(UpdateIn/UpdateOf) is dropped unless it is ORCID-anchored and the published version is not
-(a same-title pair is still decided by the title rule, which keeps the later year). When a
-run stores a published version that is ORCID-anchored or that staff accepted (`manual`), the
-stored preprint it supersedes is excluded by the system (no deciding user) and Restore undoes
-it; a restored system exclusion becomes `manual` (its stage provenance is not kept), so later
+The resolver keeps one version of a work: a record PubMed links to a later version is dropped as an updated or superseded version — a Preprint through its own UpdateIn, and any record (a preprint, an earlier article version, a superseded review) that a later record names in its UpdateOf — unless it is ORCID-anchored and the later version is not (a same-title pair is still decided by the title rule, which keeps the later year). When a run stores a later version that is ORCID-anchored or that staff accepted (`manual`), the stored updated or superseded version is excluded by the system (no deciding user) and Restore undoes it; a restored system exclusion becomes `manual` (its stage provenance is not kept), so later
 runs leave it alone. A pending candidate the resolver drops as superseded is rejected by the
 system. Retraction notices, retracted publications and expressions of concern are refused like
 errata. The export links a DOI only when it matches PubMed's record for the PMID
@@ -155,6 +150,11 @@ Inline corpus audit/repair and tenure-rederivation scripts require a readable fr
 meter and report deferred work as incomplete; they do not persist worker jobs for a
 later slot. The final corpus verifier also fails if any live resolve fails: newly
 indexed unstored papers are warnings, but unavailable coverage is not a passing check.
+
+**Corpus audit and repair scripts.** Run both off the current image, never `exec`: `docker compose -f docker-compose.prod.yml run --rm --no-deps -T blackbird-app python scripts/<name>.py`.
+
+- `scripts/audit_pi_corpus.py` is read-only (no database or file write). For every PI, or each `--orcid` (repeatable), it refetches each stored PMID, classifies it against the current matcher, counts excluded publication types and duplicate titles, and reports the `resolve_corpus` delta. `--skip-resolve` skips the delta and its ORCID, OpenAlex and name-search calls. It prints one JSON object per PI on stdout (redirect it to a file to compare two runs) and a summary on stderr, and exits non-zero when a live resolve was incomplete. A live resolve spends OpenAlex credits from the free daily meter.
+- `scripts/repair_pi_corpus.py` previews by default (`--review` adds the judgement-call report; `--only removals|additions|duplicate-pmids` scopes it). **Do not run it with `--apply`.** Its removals hard-delete `publications` rows, including rows staff excluded (the next run re-adds an anchored one as in use) and rows staff accepted (`manual`, lost for good), with no before-image. Use the preview only, until the repair is changed to exclude instead of delete.
 
 Company discovery (`company_discovery`) runs after every successful profile generation (a
 request while one runs flags a rerun) and on Find companies. Its Claude extraction of
@@ -587,7 +587,7 @@ Who may do what (owner decisions D1–D8, 2026-10-13):
   Such a row offers a manager Delete instead, which leaves the person free to sign in again.
   Admins may revoke any reviewer. A manager may restore any denied reviewer, including one an
   admin denied. Delete goes through
-  `delete_user_account` and always removes the ORCID from the access allowlist.
+  `delete_user_account` and always removes the ORCID from the access allowlist. A manager may not delete an account that holds research data (a `researcher_profiles` row, any `publications` row, or an agent row of any status; `src/services/user_deletion.py`'s `research_data_for`). The row shows "Holds research data: an admin deletes it" instead of Delete, and a POST is refused with `has_research_data`. An admin may delete it, on this page or on `/admin/users/{id}`.
 - **Manager and admin rows** carry no buttons: those accounts are changed only by admins,
   on `/admin/users/{id}`, which the page links for admins.
 - Every POST is refused under impersonation.
@@ -610,8 +610,8 @@ Consequences recorded with the owner:
 - **Convert, then delete** lets a manager remove a pending, profile-less PI sign-up. The
   person can sign in again, and the audit rows record both steps.
 - **A reviewer can own an agent row** (an account converted by the old Add-PI workaround
-  keeps its suspended agent). Deleting such a reviewer runs the full teardown in "Deleting a
-  PI" below: persona files removed, Slack bot token revoked. The delete confirmation says so.
+  keeps its suspended agent). Only an admin can delete such a reviewer; that runs the full teardown in "Deleting a
+  PI" below (persona files removed, Slack bot token revoked), and the confirmation lists it.
 - **A manager's delete always removes the allowlist row.** An allowlisted ORCID otherwise
   signs straight back in as an `allowed` PI and queues a profile pipeline. D8 keeps a
   manager from reaching an admin's allowlist row this way: a manager cannot create or
@@ -621,7 +621,7 @@ Consequences recorded with the owner:
 their reviews and review events (the reviewer's name is kept on them), assessment-chat usage
 and opens, prompt-suggestion status attribution, the allowlist `added_by` of rows they added,
 and audit-row actors. Removed with the account: their review assignments and their own
-assessment-chat turns.
+assessment-chat turns. For an account that holds research data, an admin's delete also removes its researcher profile, its publications, publication candidates and jobs (all `ON DELETE CASCADE`) and, for an owned agent, the agent's persona files and stored profile revisions. The agent row stays, suspended, and the simulation's `llm_call_logs` keep its persona text (D35). The Staff page's confirmation lists these.
 
 **Side effects.** The first `reviewer` account turns on the reviewer tier of the worker's
 assessment-chat opening questions (`assessment_chat_suggestions._tiers` counts any reviewer
@@ -661,7 +661,7 @@ assessments, and everything already posted to Slack — both confirmation pages
 say so. The simulation's `llm_call_logs` keep the persona text the bots were sent (D35); both deletion pages say so.
 
 Guards: an impersonating admin cannot trigger the self-service delete (403);
-the last loginable admin cannot self-delete; the admin form has a
+the last loginable admin cannot self-delete; a manager or reviewer whose account holds research data cannot self-delete either: `/profile/delete-account` says so and sends them to an admin, and the POST is refused (`?error=research_data`); the admin form has a
 default-checked "also remove from the access allowlist" checkbox — without it
 a deleted allowlisted ORCID can sign straight back in as `allowed`. Related:
 the allowlist promotes only `pending` users at login; a `denied` user stays

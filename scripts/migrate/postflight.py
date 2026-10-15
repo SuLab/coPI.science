@@ -16,7 +16,7 @@ What follows --target and what does not:
     or the comparison FAILs; a snapshot ``target`` other than --target only WARNs.
   * The pinned table/column/index/constraint expectations (EXPECTED_TABLES,
     EXPECTED_COLUMNS, EXPECTED_INDEXES, EXPECTED_CONSTRAINTS) describe the 0019-0023
-    chain and the 0056 objects only (VERIFIED_REVISIONS), whatever the target.
+    chain and the 0056, 0062 and 0065 objects only (VERIFIED_REVISIONS), whatever the target.
 
 Exit codes (contract):
 
@@ -138,19 +138,28 @@ EXPECTED_COLUMNS: tuple[tuple[str, str, str, bool, str | None], ...] = (
     ("researcher_profiles", "evidence_pub_count", "integer", True, ""),
     # 0056 — NULL means "enqueued before 0056 or without a stated priority"; never backfilled.
     ("jobs", "priority", "smallint", True, ""),
+    # 0062 (publications provenance and exclusion; profile drafts).
+    ("publications", "provenance", "character varying", True, ""),
+    ("publications", "excluded_at", "timestamp with time zone", True, ""),
+    ("publications", "excluded_by_user_id", "uuid", True, ""),
+    ("publications", "doi_verified", "boolean", True, ""),
+    ("researcher_profiles", "human_edited_at", "timestamp with time zone", True, ""),
+    ("researcher_profiles", "evidence_flagged_count", "integer", True, ""),
+    ("agents", "persona_export_failed_at", "timestamp with time zone", True, ""),
 )
 
 EXPECTED_TABLES = (
     "pi_dm_messages", "cohorts", "cohort_memberships", "cohort_audit_events", "rubric_documents",
+    "publication_candidates",
 )
 
 #: Revisions this script's EXPECTED_TABLES/EXPECTED_COLUMNS/EXPECTED_INDEXES below
-#: actually verify. Pinned: 0019-0023 and 0056. Not pinned (documented omission):
-#: 0024-0055 objects, which preflight's PLANNED_OBJECTS collision check and
+#: actually verify. Pinned: 0019-0023, 0056, 0062 and 0065. Not pinned (documented omission):
+#: the 0024-0055, 0057-0061, 0063-0064 and 0066-0067 objects, which preflight's PLANNED_OBJECTS collision check and
 #: tests/integration/test_model_migration_parity.py cover. Bump this tuple (and add the
 #: corresponding EXPECTED_* entries) to extend the pins. The row-count and enum checks
 #: do not read it: they are scoped by revision span instead.
-VERIFIED_REVISIONS: tuple[str, ...] = ("0019", "0020", "0021", "0022", "0023", "0056")
+VERIFIED_REVISIONS: tuple[str, ...] = ("0019", "0020", "0021", "0022", "0023", "0056", "0062", "0065")
 
 #: index name -> the exact pg_indexes.indexdef tail, so a same-named index on the WRONG
 #: columns (or a partial index that lost its predicate) fails too.
@@ -181,6 +190,13 @@ EXPECTED_INDEXES: dict[str, str] = {
     # 0056 unique constraints: their backing indexes, as for the 0019/0022 ones.
     "uq_slack_app_provisions_agent": "USING btree (agent_registry_id)",
     "uq_publications_user_pmid": "USING btree (user_id, pmid)",
+    # 0062 and 0065.
+    "ix_publications_excluded_by_user_id": "USING btree (excluded_by_user_id)",
+    "uq_publication_candidates_user_pmid": "USING btree (user_id, pmid)",
+    "ix_publication_candidates_decided_by_user_id": "USING btree (decided_by_user_id)",
+    "uq_publications_user_doi_nopmid": (
+        "USING btree (user_id, lower((doi)::text)) WHERE (pmid IS NULL)"
+    ),
 }
 
 #: constraint name -> (table, pg_get_constraintdef)
@@ -195,6 +211,14 @@ EXPECTED_CONSTRAINTS: dict[str, tuple[str, str]] = {
     ),
     "uq_slack_app_provisions_agent": ("slack_app_provisions", "UNIQUE (agent_registry_id)"),
     "uq_publications_user_pmid": ("publications", "UNIQUE (user_id, pmid)"),
+    "fk_publications_excluded_by_user_id_users": (
+        "publications",
+        "FOREIGN KEY (excluded_by_user_id) REFERENCES users(id) ON DELETE SET NULL",
+    ),
+    # 0065 recreates this CHECK under the same name; 'openalex' proves the 0065 version.
+    "ck_publications_provenance": ("publications", "'openalex'"),
+    "uq_publication_candidates_user_pmid": ("publication_candidates", "UNIQUE (user_id, pmid)"),
+    "ck_publication_candidates_status": ("publication_candidates", "'rejected'"),
 }
 
 EXPECTED_ENUMS: dict[str, tuple[str, ...]] = {

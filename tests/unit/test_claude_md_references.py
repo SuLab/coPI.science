@@ -33,10 +33,28 @@ MAX_CLAUDE_MD_LINES = 200
 
 REPO_PREFIXES = ("src", "scripts", "tests", "templates", "prompts", "alembic", "docs", "specs")
 
-# Repo paths the runbook names on purpose although they do not exist in a clean
-# checkout, each with the reason. Keep it empty unless a path is deliberately
-# untracked or removed; a stale entry fails `test_allowlist_entries_are_needed`.
-ALLOWLIST: dict[str, str] = {}
+# Repo paths the runbook names on purpose although a clean checkout does not have them,
+# each with the reason. Every entry is deliberately untracked: present in the live checkout
+# on the host, absent from a clean worktree. An entry is stale once nothing names it, or
+# once git tracks it (`test_allowlist_entries_are_needed`).
+ALLOWLIST: dict[str, str] = {
+    "docs/specs/2026-10-05-pi-profile-remediation-design.md": (
+        "kept untracked on the host by its own D72 (its spec, phase plans and audit "
+        "report stay uncommitted)"
+    ),
+    "docs/specs/2026-10-09-thin-profile-fallback-design.md": (
+        "kept untracked on the host: its status line marks it uncommitted, following "
+        "the repository's convention for specs"
+    ),
+    "docs/specs/2026-10-02-hub-1-10-summary-risks-gates-design.md": (
+        "the scout_hub 1.10.0 design, kept untracked on the host by the convention that "
+        "design specs stay uncommitted"
+    ),
+    "docs/plans/2026-10-09-sim-drain-hang-rca-and-remediation.md": (
+        "an RCA and remediation plan, kept untracked on the host by the convention that "
+        "plans stay uncommitted"
+    ),
+}
 
 # An optional leading `./` is consumed, so `./scripts/ci.sh` is checked as
 # `scripts/ci.sh`; any other `.` or `/` before the prefix means a longer path.
@@ -178,9 +196,18 @@ def test_line_references_are_in_range():
     assert not bad, f"the runbook cites lines past the end of the file: {bad}"
 
 
+def _git_tracked(path: str) -> bool:
+    return bool(subprocess.run(
+        ["git", "ls-files", "--", path], cwd=ROOT, capture_output=True, text=True, check=True,
+    ).stdout.strip())
+
+
 def test_allowlist_entries_are_needed():
+    # Stale = no longer named, or tracked by git. Disk presence cannot be the test: these
+    # files are deliberately untracked, so they are present in the live checkout on the
+    # host and absent from a clean worktree, and the test must pass in both.
     named = {path for text in _texts().values() for _, path, _ in _repo_refs(text)}
-    stale = [p for p in ALLOWLIST if p not in named or _resolves(ROOT, p)]
+    stale = [p for p in ALLOWLIST if p not in named or _git_tracked(p)]
     assert not stale, f"ALLOWLIST entries the runbook no longer needs: {stale}"
     assert all(reason.strip() for reason in ALLOWLIST.values()), "every ALLOWLIST entry needs a reason"
 
@@ -245,3 +272,9 @@ def test_the_scanner_flags_planted_bad_references():
     assert flagged.startswith("src/main.py:999999 ")
     [flagged] = _out_of_range("`Dockerfile:1-999999`", ROOT)
     assert flagged.startswith("Dockerfile:1-999999 ")
+
+
+def test_the_fence_parser_sees_past_blackbird_hub():
+    text = (OPERATIONS / "blackbird-hub.md").read_text(encoding="utf-8")
+    paths = {path for _, path, _ in _repo_refs(text)}
+    assert "docs/specs/2026-10-02-hub-1-10-summary-risks-gates-design.md" in paths

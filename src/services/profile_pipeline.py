@@ -606,15 +606,16 @@ async def _store_corpus_publications(run: PipelineRun) -> None:
     if outcome.superseded_excluded:
         await run.progress(
             "corpus_superseded_excluded",
-            f"Excluded {len(outcome.superseded_excluded)} earlier versions (preprints) "
-            "superseded by their published versions; Restore on the manager PI page undoes "
-            "it: " + ", ".join(outcome.superseded_excluded[:10]),
+            f"Excluded {len(outcome.superseded_excluded)} updated or superseded versions "
+            "whose later version is stored; Restore on the manager PI page undoes it: "
+            + ", ".join(outcome.superseded_excluded[:10]),
         )
     if outcome.candidates_superseded:
         await run.progress(
             "corpus_candidates_superseded",
-            f"Rejected {len(outcome.candidates_superseded)} pending candidates superseded "
-            "by a published version: " + ", ".join(outcome.candidates_superseded[:10]),
+            f"Rejected {len(outcome.candidates_superseded)} pending candidates that are "
+            "updated or superseded versions of a stored paper: "
+            + ", ".join(outcome.candidates_superseded[:10]),
         )
     if outcome.non_pubmed_superseded:
         await run.progress(
@@ -873,7 +874,9 @@ async def _step9_store(run: PipelineRun) -> None:
     #     /onboarding/retry, or the manager's POST /manager/pis/{id}/profile/retry).
     #
     # What it will NOT do is let a worse synthesis overwrite a better stored one.
-    # A monthly refresh that fails validation, or one that runs while PubMed is
+    # A regeneration (Regenerate or Retry on the staff PI page, the PI's refresh,
+    # /onboarding/retry, or a bulk re-run through scripts/_bulk_enqueue.py) that fails
+    # validation, or one that runs while PubMed is
     # down, keeps the profile that is already there. Nor does it overwrite a
     # person's edit: a profile edited since its last generation gets a draft (D19).
     await run.progress("step9", "Saving profile to database...")

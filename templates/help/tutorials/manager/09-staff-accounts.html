@@ -61,7 +61,9 @@ Restore undoes it, but the reviewer has to sign in again.</p>
 {% call careful("Careful: Delete") %}
 <p>Delete asks first. The reviewer's reviews and approve/disapprove history are kept, with their
 name. Their review assignments and their assessment-chat history are deleted, and the ORCID iD
-is removed from the access allowlist. It cannot be undone.</p>
+is removed from the access allowlist. It cannot be undone. An account that holds research data
+(a researcher profile, publications or a lab agent) shows "Holds research data: an admin deletes
+it" instead of Delete; only an admin can delete it.</p>
 {% endcall %}
 
 <h3 id="telling-new-staff">Telling the new reviewer</h3>

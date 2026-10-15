@@ -168,12 +168,13 @@
                         {% endif %}
                         {% if row.can_delete %}
                         <form method="post" action="{{ page_url(request, 'workspace_delete_reviewer', user_id=u.id) }}"
-                              data-confirm="Delete reviewer {{ u.name }}? Their reviews and approve/disapprove history are kept, with the name {{ u.name }}. Their review assignments and their assessment-chat history are deleted, and the ORCID iD is removed from the access allowlist.{% if row.has_agent %} This account owns a lab agent, so the full teardown runs: its persona files are removed and its Slack bot token is revoked.{% endif %} This cannot be undone.">
+                              data-confirm="Delete reviewer {{ u.name }}? Removed: the account, its review assignments, its assessment-chat history and its ORCID iD on the access allowlist{% if row.has_profile %}; its researcher profile{% endif %}{% if row.publication_count %}; its {{ row.publication_count }} stored publication{{ '' if row.publication_count == 1 else 's' }}{% endif %}{% if row.has_agent %}; its lab agent's persona files and the profile revisions stored for that agent (the agent is suspended and its Slack bot token revoked){% endif %}. Kept: its reviews and approve/disapprove history, with the name {{ u.name }}{% if row.has_research_data %}; and, in the simulation record, messages its agent posted, completed assessments and copies of its profile text in the model-call logs{% endif %}. This cannot be undone.">
                             <button type="submit" aria-label="Delete {{ u.name }}"
                                     class="text-xs px-2 py-1 rounded bg-red-600 text-white hover:bg-red-700">Delete</button>
                         </form>
                         {% endif %}
-                        {% if not (row.can_revoke or row.can_restore or row.can_delete) %}
+                        {% if row.delete_needs_admin %}<span class="text-xs text-gray-600">Holds research data: an admin deletes it</span>{% endif %}
+                        {% if not (row.can_revoke or row.can_restore or row.can_delete or row.delete_needs_admin) %}
                             {% if permissions.admin and not row.is_self %}
                             <a href="/admin/users/{{ u.id }}" class="text-xs text-indigo-700 underline">Account page</a>
                             {% else %}

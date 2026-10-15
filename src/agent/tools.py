@@ -2,7 +2,7 @@
 
 import logging
 import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from collections.abc import Set as AbstractSet
 from pathlib import Path
 from typing import Any
@@ -39,6 +39,13 @@ PROFILES_DIR = Path("profiles")
 # nothing that could walk out of the directory it is joined onto. Used to validate
 # the model-supplied argument to retrieve_profile.
 _SAFE_AGENT_ID = re.compile(r"[A-Za-z0-9_-]+")
+
+#: What a ``retrieve_profile`` argument may look like before it is looked up on the
+#: live roster: an optional "@", then an agent id or bot name of at most 64 characters.
+_PROFILE_ID_SHAPE = re.compile(r"@?[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+
+#: The most characters of the model's argument a not-found result echoes (E-D4).
+PROFILE_ID_ECHO_CHARS = 64
 
 # The placeholder every prompts/specialists/*.md carries, filled from the rubric
 # document at consult time (_execute_consult_specialist). Held to all eight files
@@ -136,6 +143,7 @@ async def execute_tool(
     own_paper_ids: AbstractSet[str] | None = None,
     hub_agent_ids: Mapping[str, str] | None = None,
     allowed_sender_ids: AbstractSet[str] | None = None,
+    profile_ids: Mapping[str, str] | None = None,
 ) -> str:
     """
     Execute a tool call and return the result as a string.
@@ -168,6 +176,9 @@ async def execute_tool(
     ``retrieve_profile`` on one of them returns that role's brief for labs.
     ``allowed_sender_ids`` is the caller's cohort gate (None: gate off); a non-hub
     caller cannot ``retrieve_profile`` outside it (D30).
+    ``profile_ids`` is the live roster's id map (``live_profile_ids``);
+    ``retrieve_profile`` resolves the model's argument through it, and None means no
+    id resolves.
     """
     if tool_name not in role_spec(role).tools:
         logger.warning("[tools] %s: role %r may not call %s", agent_id, role, tool_name)
@@ -176,6 +187,7 @@ async def execute_tool(
         if tool_name == "retrieve_profile":
             return await _execute_retrieve_profile(
                 _require_arg(tool_input, "agent_id", tool_name), role,
+                profile_ids=profile_ids,
                 caller_id=agent_id,
                 hub_agent_ids=hub_agent_ids,
                 allowed_sender_ids=allowed_sender_ids,
@@ -283,7 +295,7 @@ _RECORD_ESCAPES = str.maketrans({"<": "&lt;", ">": "&gt;"})
 
 def _staff_company_record(agent_id: str) -> str | None:
     """The PI's staff company record, or None when there is none, it is blank,
-    or it cannot be read. ``agent_id`` has already passed ``_SAFE_AGENT_ID``;
+    or it cannot be read. ``agent_id`` is a roster id (``resolve_profile_id``);
     the containment check is repeated here for the same reason as the
     profile's."""
     base = _companies_dir().resolve()
@@ -309,10 +321,64 @@ def _staff_company_record(agent_id: str) -> str | None:
     return text if text.strip() else None
 
 
-def _not_found(agent_id: str) -> str:
-    """The one refusal text ``retrieve_profile`` returns, for a malformed id, a missing
-    file, a missing hub brief and an out-of-gate id alike, so a refusal reveals nothing."""
-    return f"No public profile found for agent '{agent_id}'."
+def live_profile_ids(agents: Iterable[Any]) -> dict[str, str]:
+    """Lower-cased bot name and agent id -> agent id, for every agent on the live
+    roster; an agent-id key wins over an equal bot-name key. Duck-typed (``agent_id``,
+    ``bot_name``), so this module still does not import ``src.agent.agent``
+    (tests/unit/test_leaf_modules.py)."""
+    roster = list(agents)
+    ids = {a.bot_name.lower(): a.agent_id for a in roster if a.bot_name}
+    ids.update({a.agent_id.lower(): a.agent_id for a in roster})
+    return ids
+
+
+def _profile_id_shaped(raw: object) -> bool:
+    return isinstance(raw, str) and _PROFILE_ID_SHAPE.fullmatch(raw.strip()) is not None
+
+
+def resolve_profile_id(raw: str, profile_ids: Mapping[str, str] | None) -> str | None:
+    """The roster's agent id for a model-supplied id or bot name, else None. The
+    stripped argument must match ``_PROFILE_ID_SHAPE``; one leading "@" is dropped and
+    the rest is looked up lower-cased. None too when ``profile_ids`` is None."""
+    if profile_ids is None or not _profile_id_shaped(raw):
+        return None
+    return profile_ids.get(raw.strip().removeprefix("@").lower())
+
+
+def _echo(raw: object) -> str:
+    return (raw if isinstance(raw, str) else str(raw))[:PROFILE_ID_ECHO_CHARS]
+
+
+def _not_found(raw: object) -> str:
+    """The one refusal text ``retrieve_profile`` returns: for a malformed id, an id not
+    on the roster, an out-of-gate id, a missing or unreadable file and a missing hub
+    brief alike, so a refusal reveals nothing. It echoes at most
+    ``PROFILE_ID_ECHO_CHARS`` characters of the model's argument."""
+    return f"No public profile found for agent '{_echo(raw)}'."
+
+
+def _read_public_profile(agent_id: str) -> str | None:
+    """The fenced public profile of a roster id, or None when its file is missing or
+    unreadable. ``_SAFE_AGENT_ID`` and the containment check stay as a second guard;
+    no path or OS error text ever reaches the tool result."""
+    if not _SAFE_AGENT_ID.fullmatch(agent_id):
+        logger.warning("[tools] retrieve_profile refused a roster id %r", agent_id)
+        return None
+    base = (PROFILES_DIR / "public").resolve()
+    path = (base / f"{agent_id}.md").resolve()
+    if not path.is_relative_to(base):
+        logger.warning("[tools] retrieve_profile refused an out-of-tree path for %r", agent_id)
+        return None
+    try:
+        # Profiles are user-editable text — fence as untrusted data (SEC-14).
+        return delimit(path.read_text(encoding="utf-8"), "agent_profile")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning(
+            "[tools] retrieve_profile could not read the profile for %r: %s", agent_id, exc,
+        )
+        return None
 
 
 def _outside_gate(agent_id: str, role: str, caller_id: str | None,
@@ -352,6 +418,7 @@ def _requested_paper_ids(ref: str) -> set[str]:
 
 async def _execute_retrieve_profile(
     agent_id: str, role: str, *,
+    profile_ids: Mapping[str, str] | None = None,
     caller_id: str | None = None,
     hub_agent_ids: Mapping[str, str] | None = None,
     allowed_sender_ids: AbstractSet[str] | None = None,
@@ -359,13 +426,14 @@ async def _execute_retrieve_profile(
     """Read a public profile from disk; for the hub, append the PI's staff
     company record when there is one.
 
-    ``agent_id`` comes straight from the model, so it is validated before it
-    reaches the filesystem. Unvalidated, it escaped ``profiles/public/``
-    entirely: ``../private/blackbird`` returned the hub's private screening
-    rubric and ``../memory/<id>/public`` returned another lab's working memory
-    — a confidentiality hole one tool call wide. Real agent ids are lowercase
-    identifiers (``wu``, ``pwu``, ``hamacherbrady``), so anything with a
-    separator or a dot is not a lookup, it is an escape attempt.
+    ``agent_id`` comes straight from the model and is never joined onto a path. It is
+    resolved against the live roster first (``resolve_profile_id`` over ``profile_ids``,
+    which ``live_profile_ids`` builds per call). An argument that is malformed, or names
+    no agent on the roster, gets the not-found text. The gate, the hub brief, the file
+    read and the company record all use the roster's own id. ``profile_ids=None``
+    resolves nothing. The disk read stays (not ``Agent.public_profile``): the in-memory
+    profile substitutes a placeholder for a missing file, which would turn not-found
+    into a fake profile, and the read keeps every golden byte-identical.
 
     ``role`` is the CALLER's role. Only ``scout_hub`` gets the appendix (O5 of
     docs/specs/2026-10-02-hub-1-10-summary-risks-gates-design.md): when
@@ -382,48 +450,38 @@ async def _execute_retrieve_profile(
     brief for labs from the start-time snapshot (D26), never a file under
     ``profiles/public/``; a missing brief is reported as not found.
     """
-    if not isinstance(agent_id, str) or not _SAFE_AGENT_ID.fullmatch(agent_id):
-        logger.warning(
-            "[tools] retrieve_profile refused a malformed agent_id: %r", agent_id
-        )
+    canonical = resolve_profile_id(agent_id, profile_ids)
+    if canonical is None:
+        if _profile_id_shaped(agent_id):
+            logger.info("[tools] retrieve_profile: %r is not on the live roster", _echo(agent_id))
+        else:
+            logger.warning(
+                "[tools] retrieve_profile refused a malformed agent_id: %r", _echo(agent_id)
+            )
         return _not_found(agent_id)
 
-    if _outside_gate(agent_id, role, caller_id, allowed_sender_ids):
+    if _outside_gate(canonical, role, caller_id, allowed_sender_ids):
         logger.info(
             "[tools] retrieve_profile refused %r for %r: outside its cohort gate",
-            agent_id, caller_id,
+            canonical, caller_id,
         )
         return _not_found(agent_id)
 
-    if hub_agent_ids and agent_id in hub_agent_ids:
-        brief = _lab_brief(hub_agent_ids[agent_id])
+    if hub_agent_ids and canonical in hub_agent_ids:
+        brief = _lab_brief(hub_agent_ids[canonical])
         if brief is None:
             logger.warning(
                 "[tools] retrieve_profile: no brief for labs for hub %r (role %r)",
-                agent_id, hub_agent_ids[agent_id],
+                canonical, hub_agent_ids[canonical],
             )
             return _not_found(agent_id)
         return delimit(brief, "agent_profile")
 
-    base = (PROFILES_DIR / "public").resolve()
-    profile_path = (base / f"{agent_id}.md").resolve()
-    # Belt and braces: the pattern above already excludes separators, but a
-    # containment check keeps this safe if that pattern is ever loosened.
-    if not profile_path.is_relative_to(base):
-        logger.warning(
-            "[tools] retrieve_profile refused an out-of-tree path for %r", agent_id
-        )
-        return _not_found(agent_id)
-
-    try:
-        # Profiles are user-editable text — fence as untrusted data (SEC-14).
-        result = delimit(profile_path.read_text(encoding="utf-8"), "agent_profile")
-    except FileNotFoundError:
-        result = _not_found(agent_id)
+    result = _read_public_profile(canonical) or _not_found(agent_id)
     # The hub role comes from the capability registry, never a role literal (§8.5).
     if role not in hub_role_names():
         return result
-    record = _staff_company_record(agent_id)
+    record = _staff_company_record(canonical)
     if record is None:
         return result
     # Staff-confirmed company data, fenced as data like the profile (SEC-14),

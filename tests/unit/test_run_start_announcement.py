@@ -243,3 +243,19 @@ async def test_start_announces_only_fresh_runs_after_validation(monkeypatch, tmp
         if fresh:
             assert calls.index("_validate") < calls.index("_announce_run_start")
             assert calls.index("_announce_run_start") < calls.index("_run_main_loop")
+
+
+async def test_the_marker_is_posted_unescaped(monkeypatch, tmp_path):
+    """F10: the admin-written announcement is the one post that keeps its Slack syntax."""
+    eng, clients = _engine(monkeypatch, tmp_path)
+    hub = clients["blackbird"]
+    real = hub.post_message
+    seen: list[tuple[str, dict]] = []
+
+    def recording(channel, text, thread_ts=None, **kwargs):
+        seen.append((channel, kwargs))
+        return real(channel, text, thread_ts, **kwargs)
+
+    monkeypatch.setattr(hub, "post_message", recording)
+    await eng._announce_run_start()
+    assert seen == [("C-GENERAL", {"escape": False}), ("C-SUMMARY", {"escape": False})]

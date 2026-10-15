@@ -477,3 +477,19 @@ async def test_the_pi_directory_points_staff_at_the_staff_page(client, db_sessio
         assert _STAFF_PAGE in body
         if user_id == mgr_id:
             assert "/admin/" not in body
+
+
+async def test_a_manager_delete_of_a_research_data_reviewer_is_refused(client, db_session):
+    mgr_id = await _user(db_session, user_role=USER_ROLE_MANAGER)
+    rev = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    rev_id = rev.id
+    await factories.make_agent(db_session, user=rev, status="suspended")
+    await db_session.commit()
+
+    r = await client.post(f"/workspace/staff/{rev_id}/delete", headers=auth_headers(mgr_id),
+                          follow_redirects=False)
+    assert r.status_code == 302 and r.headers["location"] == _STAFF_PAGE
+    assert session_from_response(r)[FLASH_SESSION_KEY][-1] == {
+        "text": REFUSAL_MESSAGES["has_research_data"], "kind": "error",
+    }
+    assert await _state(db_session, rev_id) is not None

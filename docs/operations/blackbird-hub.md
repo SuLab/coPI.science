@@ -269,7 +269,7 @@ and since v3.0.0 / 2026-08-27 the second key is `credible_science`, not
 - **Inside an interview thread the hub is reply-only — it never makes a top-level post
   there.** An Opportunity Assessment is not a post type: it is an `<assessment_json>`
   sidecar carried inside the hub's CONCLUDING reply in the interview thread (bare JSON, *no*
-  ``` fence). It is stripped from the Slack body before anything is posted and written to
+  code fence). It is stripped from the Slack body before anything is posted and written to
   `opportunity_assessments`, visible at `/admin/assessments`. To the MODEL, `:mag:` names
   the sidecar and is never a post label it may write
   (`prompts/roles/scout_hub/agent-system.md`); it never appears on anything a PI or another
@@ -567,3 +567,11 @@ appendix below (owner decisions O1 and O5, recorded there as B25 and D20).
   starting with `#` is exported as `\#`.
 - The owner's first run after this release starts FRESH (both prompt sets were bumped);
   the agent image was rebuilt (`src/agent/` changed).
+
+**Slack escaping, `retrieve_profile` and fences (2026-10, publication-handling Phase 1).** Spec: the 2026-10-15 publication-handling design, §6.
+
+- **Escaping.** `AgentSlackClient` sends every message (replies, pitches, panel notes and `#assessments-summary` headlines) through `escape_for_slack` (`src/agent/slack_escape.py`) after the mrkdwn conversion. `<@U…>`, `<#C…>`, `<https://…>` and `<mailto:…>` tokens are kept; an `&` in their label becomes `&amp;`. `<!here>`, `<!channel>`, `<!everyone>`, `<!subteam^…>` and every other `<`, `>` and `&` are entity-escaped, except an `&amp;`, `&lt;` or `&gt;` already there. In a doi.org URL, the DOI's `<`, `>`, `#` and `&` are percent-encoded. A message whose escaped form passes 4,000 characters is split further, so one database row still matches one Slack message; the database keeps the unescaped text. The one exemption is the run-start announcement, which an admin writes: `RunAnnouncer` posts it with `escape=False` (F10), so its template keeps any Slack syntax.
+- **`retrieve_profile`.** The model's argument is resolved against the live roster before anything else (`live_profile_ids` and `resolve_profile_id` in `src/agent/tools.py`): it is stripped, one leading `@` is dropped, and it is looked up lower-cased among the roster's agent ids and bot names. An argument that is not an optional `@` plus 1–64 letters, digits, `_` or `-`, or that names no agent on the roster, gets "No public profile found for agent '…'", echoing at most 64 characters. No path is built from the argument: the file is read by the roster's own id, and a read failure is logged and returns the same text. The cohort gate and the hub brief apply to the resolved id. An inactive PI's persona is no longer readable, even by the hub.
+- **`delimit`.** The fence-tag prefix also matches whitespace between `<` and `/`, so `< /agent_profile>` is stripped. Once stripping is stable, a remaining fence-tag prefix with no later `>` has its `<` escaped as `&lt;`. The 16-pass fallback is unchanged.
+- **Tool description (F13).** The `retrieve_profile` description in `src/agent/tool_definitions.py` now says a bot name works and that an unreachable or unknown id returns the not-found text. `prompts/` is unchanged (I9).
+- The agent image is rebuilt (`src/agent/` changed). No prompt-set version changed, so no fresh start is required by this release.

@@ -5,9 +5,9 @@ plus the corpus advisory lock both writers take around publication writes (SC-6)
 Storage reads the resolver's uncapped ``ranked`` list (the 50-cap bounds only the
 reported ``kept`` set): only ORCID-anchored records (stage s1 or s3) are stored, first
 ingest included; unanchored ones are held as pending ``publication_candidates`` for
-staff review. Nothing is ever deleted (D15); a stored earlier version (preprint) that a
-stored published version supersedes is excluded, which keeps the row. ``apply_non_pubmed_works``
-stores a PubMed-thin PI's non-PubMed works without a PMID and without review (spec
+staff review. Nothing is ever deleted (D15); a stored updated or superseded version that a
+stored later version supersedes (PubMed UpdateIn/UpdateOf) is excluded, which keeps the row.
+``apply_non_pubmed_works`` stores a PubMed-thin PI's non-PubMed works without a PMID and without review (spec
 2026-10-09 §5.3)."""
 
 from __future__ import annotations
@@ -363,7 +363,7 @@ def _exclude_pmid_less_duplicates(
     in-use PubMed row of the PI, indexed by PubMed since it was stored, when the two share a
     DOI, or a normalised title with years at most _SAME_PAPER_YEARS apart (so a generic
     title such as "Introduction" years later is not mistaken for it). It is excluded by the
-    system (no deciding user; staff Restore undoes it), as a superseded preprint is. A
+    system (no deciding user; staff Restore undoes it), as an updated or superseded version is. A
     ``manual`` row is never touched."""
     pubmed = [p for p in by_pmid.values() if p.excluded_at is None]
     dois = {_doi_key(p.doi) for p in pubmed if p.doi}

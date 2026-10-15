@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import Job
 from src.models.job import BULK_PRIORITY, ONE_ACTIVE_PER_USER_TYPE_WHERE, PER_USER_JOB_TYPES
+from src.services.secret_redaction import redact_api_keys
 
 #: A step the worker runs on the handler's session after the handler's commit
 #: (`JobContext.after_commit`, spec §4.3).
@@ -40,6 +41,18 @@ REQUEST_JOB_ROUNDS = 3
 #: `jobs.last_error` of a job the OpenAlex gate deferred (src/services/openalex_budget.py
 #: reasons start "OpenAlex "; the worker writes "deferred until <time>: <reason>").
 OPENALEX_GATE_DEFERRAL = "deferred until %: OpenAlex %"
+
+
+#: The longest ``jobs.last_error`` the worker stores (the cut it has always made).
+LAST_ERROR_MAX_CHARS = 2000
+
+
+def job_error_text(error: BaseException | str) -> str:
+    """The text the worker stores in ``jobs.last_error``: ``str(error)`` with every
+    ``api_key=`` value redacted, then cut to ``LAST_ERROR_MAX_CHARS``. Redacting first
+    means a cut can never leave a key's start behind. Text with no key is unchanged
+    apart from the cut, so ``OPENALEX_GATE_DEFERRAL`` still matches a deferral note."""
+    return redact_api_keys(str(error))[:LAST_ERROR_MAX_CHARS]
 
 
 class NonRetryableJobError(Exception):

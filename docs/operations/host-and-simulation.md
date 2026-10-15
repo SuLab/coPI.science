@@ -424,6 +424,25 @@ edited `.env`. For the web tier the equivalent is `$DC up -d --force-recreate
 blackbird-app` — and one `.env` key now fails the site closed if it is wrong,
 see "The Origin guard" in `docs/operations/pis-and-access.md`.
 
+**The NCBI API key.** Blackbird uses a key from its own NCBI account, never one shared with another deployment. Every NCBI request goes through `src/services/pubmed.py`. `src/services/secret_redaction.py` rewrites `api_key=<value>` to `api_key=REDACTED` in three places: every log record of a process that imported `pubmed` (the app, the worker and the agent), every NCBI exception (its message, request and response), and `jobs.last_error` before it is written. After a key change, recreate `blackbird-app` and `worker` (`$DC up -d --force-recreate blackbird-app worker`). Recreate `agent` only when `/admin/simulation` shows no live run. Then run the zero-leak check in each container, with the exec prefix `$DC exec -T blackbird-app`, `$DC exec -T worker` or `docker exec -i copi-blackbird-agent-1`:
+
+```bash
+out=$(<exec prefix> python - <<'PY' 2>&1
+import asyncio, logging
+logging.basicConfig(level=logging.INFO)
+from src.config import get_settings
+from src.services import pubmed
+assert get_settings().ncbi_api_key, "NCBI_API_KEY is not set in this container"
+asyncio.run(pubmed.fetch_pubmed_records(["31234567"]))
+PY
+)
+printf '%s\n' "$out" | grep -c 'eutils.ncbi'      # >= 1
+printf '%s\n' "$out" | grep -oE 'api_key=[^&"[:space:]]*' \
+  | awk '{print ($0 == "api_key=REDACTED") ? "redacted" : "LEAK"}' | sort | uniq -c   # only "N redacted"
+```
+
+A `LEAK` line stops the rollout; the pipeline prints the word, never the value. Another deployment that shared the key is told only once all three containers run on the new key (F17). `scripts/scrub_job_error_api_keys.py` scrubs stored values: it previews by default, writes only with `--apply`, and prints counts only.
+
 **Graceful web shutdown (LC-01, operator step, compose file stays uncommitted — D5).**
 In the working tree's `docker-compose.prod.yml`, under `blackbird-app`, add
 `UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN=5` to `environment:` and `stop_grace_period: 20s`,

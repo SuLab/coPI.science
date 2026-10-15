@@ -51,6 +51,7 @@ from src.services.job_queue import (
     JobDeferred,
     NonRetryableJobError,
     insert_job_if_absent,
+    job_error_text,
 )
 from src.services.persona_sweep import (
     PERSONA_SWEEP_RECHECK_SECONDS,
@@ -162,7 +163,7 @@ async def requeue_stale_processing_jobs(
     dead = await db.execute(
         update(Job)
         .where(*stale, Job.attempts >= Job.max_attempts)
-        .values(status="dead", last_error=note, completed_at=now)
+        .values(status="dead", last_error=job_error_text(note), completed_at=now)
         .returning(Job.type, Job.user_id, Job.payload, Job.priority,
                    Job.rerun_requested_at, Job.rerun_not_before, Job.rerun_priority)
     )
@@ -170,7 +171,7 @@ async def requeue_stale_processing_jobs(
     pending = await db.execute(
         update(Job)
         .where(*stale, Job.attempts < Job.max_attempts)
-        .values(status="pending", last_error=note,
+        .values(status="pending", last_error=job_error_text(note),
                 rerun_requested_at=None, rerun_not_before=None, rerun_priority=None)
     )
     for row in dead_rows:
@@ -352,7 +353,7 @@ async def _mark_failed(
                 "dropping the result", job_id,
             )
             return
-        job.last_error = str(exc)[:2000]
+        job.last_error = job_error_text(exc)
 
         job.completed_at = datetime.now(UTC)
         if isinstance(exc, NonRetryableJobError) or job.attempts >= job.max_attempts:
@@ -398,7 +399,7 @@ async def _mark_deferred(
         job.rerun_requested_at = None
         job.rerun_not_before = None
         job.rerun_priority = None
-        job.last_error = f"deferred until {exc.not_before.isoformat()}: {exc.reason}"[:2000]
+        job.last_error = job_error_text(f"deferred until {exc.not_before.isoformat()}: {exc.reason}")
         await db.commit()
     logger.info("Job %s deferred until %s", job_id, exc.not_before)
 

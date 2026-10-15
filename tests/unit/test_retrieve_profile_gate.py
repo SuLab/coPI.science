@@ -9,6 +9,7 @@ from src.agent.prompt_safety import delimit
 
 BRIEF = "# Blackbird Laboratories — Brief for Labs\n\nIncubation grants: $100K–$1M.\n"
 HUBS = {"blackbird": "scout_hub"}
+ROSTER = {"wang": "wang", "gordy": "gordy", "blackbird": "blackbird"}
 
 
 @pytest.fixture
@@ -30,7 +31,7 @@ def tree(tmp_path, monkeypatch):
 async def _rp(target, *, caller="wang", role="pi_lab", gate=None):
     return await tools.execute_tool(
         "retrieve_profile", {"agent_id": target}, caller, None, role=role,
-        hub_agent_ids=HUBS, allowed_sender_ids=gate,
+        hub_agent_ids=HUBS, allowed_sender_ids=gate, profile_ids=ROSTER,
     )
 
 

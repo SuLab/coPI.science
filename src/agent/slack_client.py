@@ -28,6 +28,8 @@ from typing import Any
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
+from src.agent.slack_escape import escape_for_slack
+
 logger = logging.getLogger(__name__)
 
 
@@ -112,7 +114,9 @@ def markdown_to_mrkdwn(text: str) -> str:
     ``split_for_slack`` relies on that — it splits the *source* markdown and each
     resulting chunk is still within the limit after conversion. (That contract is
     also why the tilde fix is a substitution and not a backtick wrap: wrapping
-    would lengthen the string and silently break the split.)
+    would lengthen the string and silently break the split.) The Slack escape that
+    follows the conversion on the wire (``wire_text``) can lengthen a string up to
+    ``WIRE_MAX_GROWTH`` times; ``split_for_wire`` absorbs that growth.
 
     **Why the tilde pass exists.** Slack mrkdwn strikethrough is a SINGLE tilde,
     ``~strike~`` (docs.slack.dev/messaging/formatting-message-text, confirmed
@@ -250,7 +254,8 @@ def split_for_slack(text: str, limit: int = SLACK_MAX_TEXT_CHARS) -> list[str]:
     ``limit`` characters is one message, as measured live. Guarantees:
 
     - no chunk exceeds ``limit`` characters (before *or* after
-      ``markdown_to_mrkdwn``, which never lengthens a string);
+      ``markdown_to_mrkdwn``, which never lengthens a string; the wire escape can, and
+      ``split_for_wire`` re-splits a chunk whose wire form passes ``limit``);
     - no non-whitespace character is lost or duplicated;
     - cuts land on a paragraph/line/sentence/word boundary where one exists
       within the budget, and a fenced code block spanning a cut is closed and
@@ -280,6 +285,37 @@ def split_for_slack(text: str, limit: int = SLACK_MAX_TEXT_CHARS) -> list[str]:
         chunks.append(rest)
     chunks = [c for c in chunks if c.strip()]
     return _repair_fences(chunks) if fenced else chunks
+
+
+#: The most one source character grows on the wire (``&`` -> ``&amp;``).
+WIRE_MAX_GROWTH = 5
+
+
+def wire_text(text: str) -> str:
+    """What Slack receives for ``text``: the mrkdwn conversion, then ``escape_for_slack``."""
+    return escape_for_slack(markdown_to_mrkdwn(text))
+
+
+def split_for_wire(text: str, limit: int = SLACK_MAX_TEXT_CHARS) -> list[str]:
+    """``split_for_slack``, then any chunk whose ``wire_text`` passes ``limit`` split
+    again: at the budget its own growth implies (never below ``limit //
+    WIRE_MAX_GROWTH``), and a piece still over ``limit`` once more at ``limit //
+    WIRE_MAX_GROWTH``, which always fits. The chunks stay source text, so one chunk is
+    still one ``agent_messages`` row and one Slack message; text with nothing to
+    escape splits exactly as ``split_for_slack`` does."""
+    chunks: list[str] = []
+    for chunk in split_for_slack(text, limit):
+        wired = len(wire_text(chunk))
+        if wired <= limit:
+            chunks.append(chunk)
+            continue
+        budget = max(limit // WIRE_MAX_GROWTH, len(chunk) * limit // wired)
+        for piece in split_for_slack(chunk, budget):
+            if len(wire_text(piece)) <= limit:
+                chunks.append(piece)
+            else:
+                chunks.extend(split_for_slack(piece, limit // WIRE_MAX_GROWTH))
+    return chunks
 
 
 def normalize_inbound_message(msg: dict[str, Any]) -> dict[str, Any]:
@@ -709,6 +745,7 @@ class AgentSlackClient:
         thread_ts: str | None,
         *,
         may_raise_thread_not_found: bool,
+        escape: bool = True,
         _rejoined: bool = False,
     ) -> dict | None:
         """Post exactly one chat.postMessage and normalise the response.
@@ -718,8 +755,12 @@ class AgentSlackClient:
         ``thread_ts`` is the parent **Slack reports**, not the one we asked for —
         so the recorded row always describes the message Slack actually made.
         Returns None on a handled failure.
+
+        It sends ``wire_text(text)`` (mrkdwn, then ``escape_for_slack``), or the mrkdwn
+        conversion alone when ``escape`` is False; the returned ``text`` is always the
+        source.
         """
-        slack_text = markdown_to_mrkdwn(text)
+        slack_text = wire_text(text) if escape else markdown_to_mrkdwn(text)
         kwargs: dict[str, Any] = {"channel": channel_id, "text": slack_text}
         if thread_ts:
             kwargs["thread_ts"] = thread_ts
@@ -736,7 +777,8 @@ class AgentSlackClient:
                 self._try_autojoin(channel_id)
                 return self._post_one(
                     channel_id, channel_label, text, thread_ts,
-                    may_raise_thread_not_found=may_raise_thread_not_found, _rejoined=True,
+                    may_raise_thread_not_found=may_raise_thread_not_found, escape=escape,
+                    _rejoined=True,
                 )
             logger.error("[%s] Failed to post to #%s: %s", self.agent_id, channel_label, exc)
             return None
@@ -813,6 +855,7 @@ class AgentSlackClient:
         *,
         landed_check: bool = False,
         known_ts: str | None = None,
+        escape: bool = True,
     ) -> dict | None:
         """Post a message to a Slack channel (accepts name or ID).
 
@@ -841,6 +884,11 @@ class AgentSlackClient:
         Safe because a bot has at most one reply or pitch in flight per
         destination (replies post under the thread lock; pitches come from the
         one-at-a-time post lane).
+
+        ``escape`` (default True) sends each chunk through ``escape_for_slack`` after the
+        mrkdwn conversion and splits with ``split_for_wire`` so every chunk fits on the
+        wire; the records keep the source text. Only ``RunAnnouncer`` passes False, for
+        the admin-written run-start announcement (F10).
         """
         if not self._client:
             # Not connected: report "not posted" so the engine mints a unique
@@ -854,7 +902,7 @@ class AgentSlackClient:
         # Ensure bot is in the channel.
         self._try_autojoin(channel_id)
 
-        chunks = split_for_slack(text)
+        chunks = split_for_wire(text) if escape else split_for_slack(text)
         if len(chunks) > 1:
             logger.info(
                 "[%s] Splitting a %d-char post to #%s into %d Slack messages "
@@ -873,7 +921,7 @@ class AgentSlackClient:
             try:
                 result = self._post_one(
                     channel_id, channel, chunk, parent,
-                    may_raise_thread_not_found=(index == 0),
+                    may_raise_thread_not_found=(index == 0), escape=escape,
                 )
             except ThreadNotFound:
                 raise
@@ -899,7 +947,7 @@ class AgentSlackClient:
                     try:
                         result = self._post_one(
                             channel_id, channel, chunk, parent,
-                            may_raise_thread_not_found=(index == 0),
+                            may_raise_thread_not_found=(index == 0), escape=escape,
                         )
                     except ThreadNotFound:
                         raise

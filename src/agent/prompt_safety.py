@@ -46,6 +46,13 @@ def _strip_fences_once(text: str, prefix: re.Pattern[str]) -> str:
     return "".join(chunks)
 
 
+def _escape_dangling(text: str, prefix: re.Pattern[str]) -> str:
+    """On a text the strip leaves unchanged, every remaining fence-tag prefix is
+    dangling (the first one with no later '>' ends a pass, so no later one has one
+    either). Its '<' becomes '&lt;', so it cannot pair with the '>' of the fence."""
+    return prefix.sub(lambda m: "&lt;" + m.group(0)[1:], text)
+
+
 def delimit(content: object, tag: str = "untrusted_content") -> str:
     """Fence ``content`` in ``<tag>…</tag>`` for safe inclusion in a prompt.
 
@@ -55,13 +62,17 @@ def delimit(content: object, tag: str = "untrusted_content") -> str:
     (``</agent_<agent_profile>profile>``) cannot reassemble. After 16 changing
     passes, residual '<' characters are escaped instead of rescanning indefinitely.
     Other markup is kept except in that adversarial-depth fallback.
+    The tag prefix allows whitespace on both sides of the '/' (``< /agent_profile>`` is
+    stripped). Once the strip is stable, a remaining tag prefix with no later '>'
+    (``x </agent_profile``) has its '<' escaped as '&lt;'.
     """
     text = "" if content is None else str(content)
     names = "|".join(re.escape(name) for name in sorted(FENCE_TAGS | {tag}))
-    prefix = re.compile(rf"</?\s*(?:{names})\b", re.IGNORECASE)
+    prefix = re.compile(rf"<\s*/?\s*(?:{names})\b", re.IGNORECASE)
     for _ in range(_MAX_STRIP_PASSES):
         stripped = _strip_fences_once(text, prefix)
         if stripped == text:
+            text = _escape_dangling(text, prefix)
             break
         text = stripped
     else:

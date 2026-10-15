@@ -9,11 +9,12 @@ from types import SimpleNamespace
 
 import pytest
 from itsdangerous import TimestampSigner
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from src.config import get_settings
-from src.models import User
+from src.models import Publication, User
 from src.services import user_deletion
+from src.services.user_deletion import research_data_for
 from tests import factories
 from tests.session_support import session_cookie_name, session_headers
 
@@ -201,3 +202,49 @@ async def test_admin_delete_is_refused_while_impersonating(client, db_session):
     )
     assert r.status_code == 403
     assert (await db_session.get(User, pi.id)) is not None
+
+
+async def _give(db, user_id, kind: str) -> None:
+    if kind == "profile":
+        await factories.make_profile(db, user_id=user_id)
+    elif kind == "publication":
+        db.add(Publication(user_id=user_id, pmid="31000001", title="A stored paper"))
+        await db.flush()
+    else:
+        await factories.make_agent(db, user_id=user_id, status="suspended")
+
+
+@pytest.mark.parametrize("role", ["reviewer", "manager"])
+@pytest.mark.parametrize("kind", ["profile", "publication", "agent"])
+async def test_a_non_pi_with_research_data_cannot_delete_their_own_account(
+    client, db_session, role, kind,
+):
+    user = await factories.make_user(db_session, user_role=role, access_status="allowed")
+    uid = user.id
+    await _give(db_session, uid, kind)
+    await db_session.commit()
+    r = await client.post("/profile/delete-account", headers=_auth(uid), data={"confirm": "delete"})
+    assert r.status_code == 302
+    assert r.headers["location"] == "/profile/delete-account?error=research_data"
+    assert await db_session.scalar(
+        select(func.count()).select_from(User).where(User.id == uid)) == 1
+    assert (await research_data_for(db_session, [uid]))[uid].has_any
+
+
+async def test_a_non_pi_without_research_data_still_deletes_their_own_account(client, db_session):
+    rev = await factories.make_user(db_session, user_role="reviewer", access_status="allowed")
+    uid = rev.id
+    await db_session.commit()
+    r = await client.post("/profile/delete-account", headers=_auth(uid), data={"confirm": "delete"})
+    assert r.status_code == 302 and r.headers["location"] == "/login?deleted=1"
+    assert (await db_session.get(User, uid)) is None
+
+
+async def test_a_pi_with_research_data_still_deletes_their_own_account(client, db_session):
+    pi = await factories.make_user(db_session, access_status="allowed")
+    uid = pi.id
+    await _give(db_session, uid, "profile")
+    await _give(db_session, uid, "publication")
+    await db_session.commit()
+    r = await client.post("/profile/delete-account", headers=_auth(uid), data={"confirm": "delete"})
+    assert r.status_code == 302 and r.headers["location"] == "/login?deleted=1"

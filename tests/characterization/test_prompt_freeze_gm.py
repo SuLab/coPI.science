@@ -24,6 +24,15 @@ of the PI-profile remediation regenerates only the entries its §8 row lists
 `test_profile_synthesis_request_gm`), and each `.ambr` diff must equal the
 intended text change, reviewed line by line. `test_agent_turn_gm.ambr` is not
 touched by it either.
+
+A third owner-approved exception (F13 of the 2026-10-15 publication-handling design):
+the five entries whose request carries the `retrieve_profile` tool definition
+(`test_hub_reply_forced_final_and_its_retry_gm`,
+`test_hub_reply_with_a_gathered_consult_round_gm`,
+`test_hub_reply_tool_error_and_truncated_variants_gm`,
+`test_hub_reply_final_text_truncation_retry_gm`, `test_pi_lab_reply_turn_gm`) are
+regenerated once, for the new description, and the `.ambr` diff must be exactly that
+description string, reviewed line by line. It licenses no other regeneration.
 """
 import json
 import uuid

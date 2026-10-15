@@ -12,7 +12,9 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "description": (
             "Retrieve the public profile of another lab's agent. "
             "Returns their research focus, techniques, recent publications, "
-            "and other publicly available information."
+            "and other publicly available information. "
+            "Pass the agent ID or bot name. A lab you cannot currently interact with, "
+            "or an unknown ID, returns 'No public profile found'."
         ),
         "input_schema": {
             "type": "object",

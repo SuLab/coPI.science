@@ -430,7 +430,8 @@ class FakeSlackClient:
         self._ts += 1
         return f"{self._ts}.000000"
 
-    def post_message(self, channel: str, text: str, thread_ts: str | None = None) -> dict:
+    def post_message(self, channel: str, text: str, thread_ts: str | None = None, *, escape: bool = True) -> dict:
+        # escape is accepted and ignored: the record keeps the mrkdwn source, so engine goldens are unchanged by the wire escape (R1.10).
         ts = self._next_ts()
         # Mirror the real AgentSlackClient, which converts markdown -> Slack mrkdwn
         # before posting (slack_client.py), so posted[..]["text"] reflects what Slack

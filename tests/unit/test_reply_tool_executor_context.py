@@ -31,6 +31,8 @@ async def test_the_executor_passes_gate_hub_ids_and_own_ids(monkeypatch):
     assert seen["hub_agent_ids"] == {"blackbird": "scout_hub"}
     assert seen["allowed_sender_ids"] == {"blackbird"}
     assert seen["own_paper_ids"] == {"38980071"}
+    assert seen["profile_ids"] == {"blackbird": "blackbird", "blackbirdbot": "blackbird",
+                                   "wang": "wang", "wangbot": "wang"}
 
 
 async def test_the_preflight_history_carries_each_sender_agent_id():
