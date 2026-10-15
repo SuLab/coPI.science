@@ -75,6 +75,7 @@
                     {% endif %}
                     {% if effective_user.is_staff or effective_user.is_reviewer %}
                     <a href="{{ page_url(request, 'workspace_root') }}" class="text-gray-600 hover:text-indigo-600 px-3 py-2 rounded-md text-sm font-medium {% if active_page == 'workspace' %}text-indigo-600 font-semibold{% endif %}">Workspace</a>
+                    <a href="{{ page_url(request, 'help_index') }}" class="text-gray-600 hover:text-indigo-600 px-3 py-2 rounded-md text-sm font-medium {% if active_page == 'help' %}text-indigo-600 font-semibold{% endif %}">Help</a>
                     {% endif %}
                 </div>
                 {% endif %}
@@ -126,10 +127,36 @@
     </div>
 </nav>
 {% endif %}
+
+<!-- Help sub-navigation (src/web/help_pages.py::navigation_for) -->
+{% if active_page == 'help' and help_navigation %}
+<nav aria-label="Help sections" class="bg-gray-50 border-b border-gray-200">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="flex flex-wrap gap-x-6 gap-y-1 min-h-10 py-2 items-center text-sm">
+            {% for item in help_navigation %}
+            <a href="{{ item.url }}" {% if active_section == item.section %}aria-current="page" class="text-indigo-600 font-semibold"{% else %}class="text-gray-600 hover:text-gray-800"{% endif %}>{{ item.label }}</a>
+            {% endfor %}
+        </div>
+    </div>
+</nav>
+{% endif %}
 </header>
 
 <!-- Main content -->
 <main id="main-content" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    {# First-sign-in prompt (src/web/help_intro.py). No heading element: it precedes the
+       page's <h1>, and the rendered-page gate checks heading order. #}
+    {% if active_page == 'workspace' and help_intro %}
+    <div role="region" aria-label="Getting started" class="mb-6 rounded-md border border-indigo-200 bg-indigo-50 p-4 text-indigo-900 flex flex-wrap items-center gap-3">
+        <p class="flex-1 min-w-0"><strong>New to Blackbird?</strong> Take the {{ 'Manager' if help_intro == 'manager' else 'Reviewer' }} tutorial — a read-only tour of the pages you'll use.</p>
+        <a href="{{ page_url(request, 'help_tutorial', tutorial=help_intro) }}" class="bg-indigo-600 text-white px-3 py-1.5 rounded text-sm hover:bg-indigo-700">Start the tutorial</a>
+        <form method="post" action="{{ page_url(request, 'help_intro_dismiss') }}">
+            <input type="hidden" name="via" value="dismiss">
+            <input type="hidden" name="next" value="{{ request.url.path }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
+            <button type="submit" class="text-sm text-indigo-800 underline hover:text-indigo-950">Don't show again</button>
+        </form>
+    </div>
+    {% endif %}
     <!-- Flash messages (src/web/flash.py): shown once, then gone from the session.
          Inside <main>, so they sit in a landmark (X-04); <main> supplies the width
          and side padding. -->

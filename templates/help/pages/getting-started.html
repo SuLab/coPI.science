@@ -1,0 +1,155 @@
+{% extends "help/_layout.html" %}
+{% from "help/_figure.html" import figure %}
+{% from "help/_callouts.html" import careful, note %}
+{% block help_body %}
+<h1>Getting started</h1>
+<p>How to sign in, where you land, how to find your way around the Workspace and Help, what
+Settings holds, and what to do when Blackbird will not let you in. Words you have not met
+before are in the <a href="{{ page_url(request, 'help_page', slug='glossary') }}">Glossary</a>.</p>
+
+<h2 id="signing-in">Signing in</h2>
+<p>Blackbird identifies you by your ORCID iD. On the sign-in page, press <strong>Sign in with
+ORCID</strong>, sign in on ORCID's own page, and ORCID sends you back to Blackbird. Use the
+ORCID iD your account was created with: a different iD is a different account.</p>
+<p>If you followed a link to a Blackbird page before you were signed in, that page opens as
+soon as you have signed in. Otherwise you land on your usual first page (see
+<a href="{{ page_url(request, 'help_page', slug='getting-started', fragment='first-sign-in') }}">Your first sign-in</a>).</p>
+<p>If the sign-in page shows a red message instead, look it up under
+<a href="{{ page_url(request, 'help_page', slug='troubleshooting', fragment='sign-in') }}">Troubleshooting: signing in</a>.</p>
+
+{% if microsoft_sign_in %}
+<h2 id="microsoft">Signing in with Microsoft</h2>
+<p>Managers and reviewers can also sign in with their organisation's Microsoft account, as a
+second way in. ORCID keeps working. Microsoft works only once you have linked it to your
+account, so your first sign-in is always with ORCID. Only a member account of an
+organisation Blackbird accepts can be used, not a guest account.</p>
+<h3>Linking your Microsoft account</h3>
+<ol>
+    <li>Sign in with ORCID and open <strong>Settings</strong>.</li>
+    <li>In the <strong>Microsoft sign-in</strong> section, press <strong>Sign in with ORCID
+    again to link</strong>. ORCID asks you to sign in again, to confirm it is you, and sends
+    you back to Settings.</li>
+    <li>Press <strong>Link Microsoft account</strong> straight away and pick your Microsoft
+    account. The link must follow soon after that ORCID sign-in; if you wait too long,
+    Settings asks you to sign in with ORCID again first.</li>
+    <li>Settings confirms: "Microsoft sign-in linked. You can now use it on the sign-in
+    page." It then shows the linked account, when you linked it, and when you last used
+    it.</li>
+</ol>
+<h3>Signing in with Microsoft</h3>
+<p>On the sign-in page, press <strong>Sign in with Microsoft (staff)</strong> and pick the
+Microsoft account you linked. You land where an ORCID sign-in would take you.</p>
+<h3>Unlinking</h3>
+<p>In Settings, <strong>Unlink Microsoft account</strong> removes the link. It asks you to
+confirm first, and then signs you out on every device, this one included. Sign in again
+with ORCID afterwards; you can link a Microsoft account again at any time.</p>
+{% endif %}
+
+<h2 id="first-sign-in">Your first sign-in</h2>
+<p>Managers and reviewers have no lab and no research profile of their own, so there is no
+profile set-up to go through: you go straight into the Workspace. A manager lands on the
+<strong>PIs</strong> page and a reviewer on the <strong>Assessments</strong> page, unless
+sign-in is taking you back to a page you were trying to open.</p>
+<p>Until you answer it, each Workspace page shows a box at the top: <strong>New to
+Blackbird?</strong> It offers the tutorial for your role, a read-only tour of the pages you
+will use.</p>
+{{ figure(request, "intro-prompt", "The box on a Workspace page that offers your role's tutorial.") }}
+<ul>
+    <li><strong>Start the tutorial</strong> opens its first step. The box stays on Workspace
+    pages until you press <strong>Finish</strong> on the tutorial's last step.</li>
+    <li><strong>Don't show again</strong> hides the box for good. You stay on the page you
+    were on, with the note "The tutorials are always under Help."</li>
+</ul>
+<p><strong>Don't show again</strong>, or <strong>Finish</strong> on the tutorial's last step,
+hides the box for good; <strong>Start the tutorial</strong> records nothing. You can take any
+tutorial for your role from Help at any time.</p>
+
+<h2 id="navigation">Finding your way around</h2>
+<p>The bar along the top of every page holds:</p>
+<ul>
+    <li><strong>Settings</strong>: your account (see
+    <a href="{{ page_url(request, 'help_page', slug='getting-started', fragment='settings') }}">Settings</a> below);</li>
+    <li><strong>Workspace</strong>: the pages you work in. It opens on
+    {% if permissions.staff %}<strong>PIs</strong>{% else %}<strong>Assessments</strong>{% endif %};</li>
+    <li><strong>Help</strong>: these pages and the tutorials;</li>
+    <li>your name, and <strong>Sign out</strong>.</li>
+</ul>
+{{ figure(request, "topbar-help", "The top bar, with Help beside Workspace.") }}
+<p>Inside the Workspace, a second row of links moves between its pages. Everyone sees:</p>
+<ul>
+    <li><a href="{{ page_url(request, 'workspace_pis') }}">PIs</a>: the PI directory and each
+    PI's page. See <a href="{{ page_url(request, 'help_page', slug='pis') }}">PIs</a>.</li>
+    <li><a href="{{ page_url(request, 'workspace_assessments') }}">Assessments</a>:
+    BlackbirdBot's screening verdicts, where reviews are recorded. See
+    <a href="{{ page_url(request, 'help_page', slug='assessments') }}">Assessments</a>.</li>
+</ul>
+{% if permissions.staff %}
+<p>Managers also see:</p>
+<ul>
+    <li><a href="{{ page_url(request, 'workspace_slack_bots') }}">Slack Bots</a>: every PI
+    lab bot and where it is in Slack onboarding. See
+    <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='slack-bots') }}">The Slack Bots page</a>.</li>
+    <li><a href="{{ page_url(request, 'workspace_staff') }}">Staff</a>: adding reviewers and
+    turning their access off and on. See
+    <a href="{{ page_url(request, 'help_page', slug='staff-accounts') }}">Staff accounts</a>.</li>
+    <li><a href="{{ page_url(request, 'workspace_discussions') }}">Discussions</a> and
+    <a href="{{ page_url(request, 'workspace_activity') }}">Activity</a>: the simulation's
+    threads and its runs. See
+    <a href="{{ page_url(request, 'help_page', slug='discussions-activity') }}">Discussions and Activity</a>.</li>
+    <li><a href="{{ page_url(request, 'workspace_prompt_suggestions') }}">Prompt Suggestions</a>:
+    prompt changes proposed from review feedback. See
+    <a href="{{ page_url(request, 'help_page', slug='prompt-suggestions') }}">Prompt suggestions</a>.</li>
+</ul>
+{% else %}
+<p>A manager can also open further Workspace pages, for lab bots, staff accounts and the
+simulation's records. If a link takes you to one of them, the page shows "Manager access
+required".</p>
+{% endif %}
+<p>Most Workspace pages have a <strong>Help with this page</strong> link in their header,
+which opens the matching part of Help. In Help itself, the row of links under the top bar
+lists the Overview, the tutorials for your role and every Help page you can open.</p>
+
+<h2 id="settings">Settings</h2>
+<p><a href="{{ page_url(request, 'settings_page') }}">Settings</a> holds your account.</p>
+<ul>
+    <li><strong>Account</strong> has the <strong>Delete account</strong> link.</li>
+    {% if microsoft_sign_in %}
+    <li><strong>Microsoft sign-in</strong> links or unlinks a Microsoft account (see
+    <a href="{{ page_url(request, 'help_page', slug='getting-started', fragment='microsoft') }}">Signing in with Microsoft</a>).</li>
+    {% endif %}
+</ul>
+{% call careful("Deleting your account is permanent") %}
+<p><strong>Delete account</strong> opens a page that lists what deleting your account
+removes and what it keeps. To go ahead you type the word <strong>delete</strong> and press
+<strong>Delete My Account</strong>; you are then signed out. Nothing in Blackbird can undo
+it. <strong>Cancel</strong> takes you back to Settings.</p>
+{% endcall %}
+
+<h2 id="signing-out">Signing out</h2>
+<p><strong>Sign out</strong>, at the top right, signs you out on every device and browser
+where you are signed in, not only this one. You will need to sign in again everywhere.</p>
+<p>Some changes to your account sign you out everywhere in the same way: a change to your
+account's role, your access being turned off{% if microsoft_sign_in %}, and unlinking your
+Microsoft account{% endif %}.</p>
+
+<h2 id="access-problems">When you can't get in</h2>
+<h3>"Thanks for signing in" and a place in the queue</h3>
+<p>The page says Blackbird is in pre-release and that you are in the queue for access. It
+means the ORCID iD you signed in with has no approved account. Check that you used the ORCID
+iD your account was created with. If you did, ask the person who set up your account:
+{% if permissions.staff %}an admin{% else %}a manager or an admin{% endif %}.</p>
+<h3>"Access turned off"</h3>
+<p>Your account's access has been turned off, and you are signed out. The page says who can
+restore it: for a reviewer, a manager or an admin; for a manager, an admin.</p>
+<h3>"Cross-site request refused."</h3>
+<p>Blackbird refused a form because your browser did not show that it came from a Blackbird
+page at Blackbird's usual address: for example the page was opened at a different address
+for Blackbird or from a saved copy, or a browser extension or privacy setting removed that
+information. The message is plain text on an otherwise empty page. Use your browser's Back
+button, open Blackbird at its usual address, and try again. If it keeps happening, try
+another browser and tell an admin.</p>
+{% call note("More messages") %}
+<p>The messages you are most likely to see, with what each means and what to do, are in
+<a href="{{ page_url(request, 'help_page', slug='troubleshooting', fragment='access') }}">Troubleshooting</a>.</p>
+{% endcall %}
+{% endblock %}

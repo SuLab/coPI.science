@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import select
 
 from src.models import AssessmentReviewAssignment, OpportunityAssessment, User
+from src.models.help import HelpIntroDismissal
 from src.routers import manager, workspace
 from src.services.directory import MAX_PAGE, list_assessments
 from tests import factories
@@ -112,6 +113,10 @@ async def test_reviewer_pi_loader_html_and_filters_are_research_only(client, db_
     assert 'RESEARCH_SENTINEL' in response.text
     for secret in ('PI_CONTACT_SECRET', 'PRIVATE_SENTINEL', 'Onboarding', 'Joined', 'Agent activated', 'Job History', 'Save Profile', '/verify-email'):
         assert secret not in response.text
+    # The first-sign-in prompt's return path echoes the query string; answer it first so
+    # the two pages differ only if the staff-only filters leak.
+    db_session.add(HelpIntroDismissal(user_id=reviewer.id, via='dismiss'))
+    await db_session.flush()
     normal = await client.get('/workspace/pis', headers=auth_headers(reviewer.id))
     crafted = await client.get('/workspace/pis?status_filter=dead&claimed_filter=unclaimed', headers=auth_headers(reviewer.id))
     assert normal.text == crafted.text

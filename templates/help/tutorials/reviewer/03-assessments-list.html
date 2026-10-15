@@ -1,0 +1,79 @@
+{% extends "help/_layout.html" %}
+{% from "help/_figure.html" import figure %}
+{% from "help/_callouts.html" import careful, note %}
+{% block help_body %}
+<p class="text-sm text-gray-600">Reviewer tutorial</p>
+<h1>{{ step.title }}</h1>
+
+<h2 id="where">Where</h2>
+<p><strong>Workspace → Assessments</strong>. The page is headed
+<strong>Opportunity Assessments</strong>.</p>
+
+<h2 id="what-you-see">What you'll see</h2>
+{{ figure(request, "assessments-list", "The Opportunity Assessments page: the filters at the top right, the Unreviewed, Reviewed and All tabs, the summary cards and the first assessment cards.") }}
+
+<h2 id="what-it-means">What it means</h2>
+<p>The list is your work queue. Each card is one assessment: one verdict BlackbirdBot wrote
+at the end of one interview.</p>
+
+<h3>The sentence under the heading</h3>
+<p>It names the rubric version in use and prints the band lines: the weighted score a
+verdict needs for <strong>advance</strong>, for <strong>conditional</strong>, and the label
+used below that. Read the thresholds there; they come from the rubric and can change. The
+weighted score is computed by the app from the dimension scores, not taken from the
+model.</p>
+
+<h3>The filters</h3>
+<p>The controls at the top right change what the list shows. They take effect when you press
+<strong>Apply</strong>.</p>
+<ul>
+    <li><strong>Run:</strong> which simulation run to show. The latest run is selected at
+    first and is marked "— current". Each option also shows the run's status, how many
+    assessments it stored and its rubric version. <strong>All Runs</strong> shows every run
+    on record.</li>
+    <li><strong>Sort:</strong> <strong>Score (triage)</strong>, <strong>Most recent</strong>,
+    <strong>Recommendation</strong> or <strong>Lab</strong>.</li>
+    <li><strong>Assignment:</strong> <strong>All</strong>, or <strong>Assigned to me</strong>
+    for only the assessments assigned to you.</li>
+    <li><strong>Lab:</strong> <strong>All labs</strong>, or one lab.</li>
+</ul>
+<p>When more assessments match than the page shows, a line under the heading says so: it
+shows the top of the current sort order, and the rest sit further down that order.</p>
+
+<h3>The tabs</h3>
+<p><strong>Unreviewed</strong>, <strong>Reviewed</strong> and <strong>All</strong> each show
+a count. You land on Unreviewed. <strong>Reviewed</strong> means someone has written
+feedback on the assessment. Being assigned to someone does not make it reviewed, and neither
+does an approval decision. The counts follow the run, lab and assignment you have
+selected.</p>
+
+<h3>The banners</h3>
+<ul>
+    <li>An amber banner counts <strong>verdicts lost</strong>: verdicts that were generated
+    and never stored, or never produced at all. It lists each reason with a short
+    explanation. None of them can be recovered.</li>
+    <li>An orange banner counts verdicts with an <strong>incomplete, unverified or
+    unrecorded specialist panel</strong>. Those verdicts were stored but not fully vetted:
+    treat their scores as provisional, and read each card's panel badge to see which case
+    applies. This count covers every lab and assignment in the run, so it can be larger
+    than what your filters show.</li>
+</ul>
+
+<h3>The summary and the distribution</h3>
+<p>The summary cards count the assessments shown below by the hub's recommendation:
+<strong>Total</strong>, <strong>Advance</strong>, <strong>Conditional</strong>,
+<strong>Route-to-incubation</strong> and <strong>Decline</strong>.</p>
+<p><strong>Dimension distribution</strong>, when you open it, lists each rubric dimension with
+its weight, the specialist who covers it, and how the shown assessments scored on it. It
+also counts the bands. It follows the tab you are on.</p>
+<p>A short legend explains the gating symbols: met, not met, and unconfirmed (the question
+was never answered, which is not the same as a gate that failed). The symbols themselves
+are inside each card, as the next step shows.</p>
+
+<p>More detail:
+<a href="{{ page_url(request, 'help_page', slug='assessments', fragment='list') }}">The assessment list</a>
+and
+<a href="{{ page_url(request, 'help_page', slug='troubleshooting', fragment='assessments') }}">Troubleshooting: assessments</a>.</p>
+
+{% include "help/_step_nav.html" %}
+{% endblock %}

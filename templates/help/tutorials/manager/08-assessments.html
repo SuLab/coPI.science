@@ -1,0 +1,45 @@
+{% extends "help/_layout.html" %}
+{% from "help/_figure.html" import figure %}
+{% from "help/_callouts.html" import careful, note %}
+{% block help_body %}
+<p class="text-sm text-gray-600">Manager tutorial</p>
+<h1>{{ step.title }}</h1>
+<h2 id="where">Where</h2>
+<p>Workspace → <strong>Assessments</strong> → <strong>detail →</strong> on any assessment. The
+<strong>Assigned</strong> block is at the end of the <strong>Human review</strong> section,
+just before the Interview timeline.</p>
+
+<h2 id="what-you-see">What you'll see</h2>
+{{ figure(request, "assign-to", "The Assigned block on an assessment's detail page, with Assign to.") }}
+
+<h2 id="what-it-means">What it means</h2>
+<p>A manager reads and reviews assessments as a reviewer does, and can also assign them.</p>
+
+<h3 id="assigning">Assigning</h3>
+<ul>
+    <li><strong>Assigned</strong> lists who is assigned, or says <em>No one assigned.</em> A
+    manager sees <strong>Remove</strong> beside each name.</li>
+    <li><strong>Assign to</strong> picks from every admin, manager and reviewer account whose
+    access is approved, and <strong>Assign</strong> adds that person. Assigning someone twice
+    changes nothing.</li>
+    <li>On the Assessments list, the <strong>Assignment</strong> menu's <strong>Assigned to
+    me</strong> narrows the list to your own assignments, and each card names who is
+    assigned.</li>
+</ul>
+<p>An assignment is workflow metadata only. It grants no access, since reviewers can already read
+every assessment, and Blackbird sends no notification, so the person hears of it only from you. It also does
+not count as a review: the list's <em>Reviewed</em> tab means written feedback exists, not that
+someone is assigned.{% if permissions.admin %} Assign and Remove are hidden while an admin is
+viewing the site as someone else.{% endif %}</p>
+{% call careful("Careful: Assign and Remove") %}
+<p>Assign and Remove change who is listed on the assessment for everyone who opens it. Each undoes
+the other.</p>
+{% endcall %}
+
+<h3 id="everything-else">Everything else</h3>
+<p>The list, the cards, the detail page, the assessment chat and recording feedback are covered
+by the <a href="{{ page_url(request, 'help_tutorial', tutorial='reviewer') }}">Reviewer tutorial</a>,
+which walks through them in the same read-only way.</p>
+<p>More detail: <a href="{{ page_url(request, 'help_page', slug='assessments', fragment='assigning') }}">Assigning assessments</a>.</p>
+{% include "help/_step_nav.html" %}
+{% endblock %}

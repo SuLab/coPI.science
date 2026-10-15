@@ -1,7 +1,8 @@
 {% extends "base.html" %}
-{% block title %}Workspace — Activity — CoPI{% endblock %}
+{% from "help/_link.html" import help_link %}
+{% block title %}Workspace — Activity — Blackbird{% endblock %}
 {% block content %}
-<h1 class="text-2xl font-bold text-gray-900 mb-6">Agent Activity</h1>
+<div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 mb-6"><h1 class="text-2xl font-bold text-gray-900">Agent Activity</h1>{{ help_link(request, effective_user, 'discussions-activity', 'activity') }}</div>
 <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
 {% for value, label, color_class in [(total_runs, 'Simulation Runs', 'text-indigo-600'), (total_messages, 'Total Messages', 'text-green-700'), (total_channels, 'Channels Created', 'text-blue-600')] %}<div class="bg-white rounded-xl border border-gray-200 p-4 text-center"><div class="text-3xl font-bold {{ color_class }}">{{ value }}</div><div class="text-sm text-gray-500 mt-1">{{ label }}</div></div>{% endfor %}
 <div class="bg-white rounded-xl border border-gray-200 p-4 text-center"><div class="text-lg font-bold text-purple-600">{{ most_active_agent or '—' }}</div><div class="text-sm text-gray-500 mt-1">Most Active Agent</div>{% if most_active_count %}<div class="text-xs text-gray-600">{{ most_active_count }} msgs</div>{% endif %}</div>

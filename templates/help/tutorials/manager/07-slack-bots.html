@@ -1,0 +1,41 @@
+{% extends "help/_layout.html" %}
+{% from "help/_figure.html" import figure %}
+{% from "help/_callouts.html" import careful, note %}
+{% block help_body %}
+<p class="text-sm text-gray-600">Manager tutorial</p>
+<h1>{{ step.title }}</h1>
+<h2 id="where">Where</h2>
+<p>Workspace → <strong>Slack Bots</strong>. Reviewers cannot open it.</p>
+
+<h2 id="what-you-see">What you'll see</h2>
+{{ figure(request, "slack-bots", "The Slack Bots page: every PI lab bot, its status, its Slack token and its next action.") }}
+
+<h2 id="what-it-means">What it means</h2>
+<p>The page lists every PI lab bot and where it is in Slack setup. The header counts the bots that are active, pending and muted, and
+any in another state.</p>
+<ul>
+    <li><strong>PI</strong> links to the PI's page. A bot with no linked PI account shows the
+    PI's name with <em>(no linked PI)</em> and no actions.</li>
+    <li><strong>Bot</strong> is the lab bot's name and its short identifier.</li>
+    <li><strong>Status</strong> is <strong>Active</strong>, <strong>Pending</strong> or
+    <strong>Muted</strong>; any other status, such as Suspended, is shown by name.</li>
+    <li><strong>Slack token</strong> says <em>installed</em> once the Slack bot is installed, else
+    <em>not installed</em>.</li>
+    <li><strong>Actions</strong> holds the one next step for the bot: <strong>Install Slack
+    bot</strong> for a pending bot without a token, <strong>Activate</strong> for a pending bot
+    with one, <strong>Mute</strong> for an active bot and <strong>Unmute</strong> for a muted one.
+    A bot in any other state shows only its status; only an admin can manage it.</li>
+</ul>
+<p>These are the same controls as on the PI's page, with the same checks, and each lands on that
+PI's page afterwards, with any refusal at the top — except Install, which goes through Slack's
+install screen; if the install fails or is cancelled there, you land on the PIs list with the
+message instead.</p>
+{% call careful("Careful: the actions on this page") %}
+<p><strong>Install Slack bot</strong> creates a real Slack app for the PI and starts Slack's
+install; nothing in the Workspace removes it. <strong>Activate</strong> puts the bot on the
+running simulation's roster at its next roster sync; <strong>Mute</strong> takes it off and
+<strong>Unmute</strong> puts it back, each undoing the other.</p>
+{% endcall %}
+<p>More detail: <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='slack-bots') }}">The Slack Bots page</a>.</p>
+{% include "help/_step_nav.html" %}
+{% endblock %}

@@ -1,0 +1,67 @@
+{% extends "help/_layout.html" %}
+{% from "help/_figure.html" import figure %}
+{% from "help/_callouts.html" import careful, note %}
+{% block help_body %}
+<p class="text-sm text-gray-600">Manager tutorial</p>
+<h1>{{ step.title }}</h1>
+<h2 id="where">Where</h2>
+<p>The top bar of every page: <strong>Settings</strong>, <strong>Workspace</strong> and
+<strong>Help</strong> on the left, your name and <strong>Sign out</strong> on the right. The
+<strong>Open this page</strong> link at the bottom of this step opens the PIs page in a new
+tab.</p>
+
+<h2 id="what-you-see">What you'll see</h2>
+{{ figure(request, "topbar-help", "The top bar as a manager sees it, with Settings, Workspace and Help.") }}
+
+<h2 id="what-it-means">What it means</h2>
+<h3 id="signing-in">Signing in</h3>
+<p>You sign in with ORCID, using the ORCID iD your account was created with. A manager lands on
+the <strong>PIs</strong> page, unless you were trying to open another page before signing in:
+sign-in then takes you to that page instead.</p>
+{% if microsoft_sign_in %}
+<p>Microsoft sign-in is a second way in once it is linked. The <strong>Microsoft sign-in</strong>
+section of Settings asks you to confirm it's you by signing in with ORCID again, then offers
+<strong>Link Microsoft account</strong>. Until a Microsoft account is linked, sign in with
+ORCID. See <a href="{{ page_url(request, 'help_page', slug='getting-started', fragment='microsoft') }}">Microsoft sign-in</a>.</p>
+{% endif %}
+
+<h3 id="first-sign-in">The tutorial prompt</h3>
+<p>Until you answer it, Workspace pages open with a box headed <strong>New to Blackbird?</strong>
+offering <strong>Start the tutorial</strong> and <strong>Don't show again</strong>. Starting the
+tutorial records nothing. <strong>Don't show again</strong>, or <strong>Finish</strong> on the
+last step of this tutorial, stops the box for good; the tutorials stay under Help.</p>
+
+<h3 id="workspace-tabs">The Workspace tabs</h3>
+<p><strong>Workspace</strong> opens the PIs page, and a row of tabs under the top bar leads to the
+rest:</p>
+<ul>
+    <li><strong>PIs</strong>: every PI, with profile and lab bot status, and the Add PI form.</li>
+    <li><strong>Assessments</strong>: the hub's assessments of lab pitches, to read, review and
+    assign.</li>
+    <li><strong>Slack Bots</strong>: every PI's lab bot and where it is in Slack setup.</li>
+    <li><strong>Staff</strong>: manager, reviewer and admin accounts, and adding reviewers.</li>
+    <li><strong>Discussions</strong>: the simulation's threads and how each ended.</li>
+    <li><strong>Activity</strong>: simulation runs and their message statistics.</li>
+    <li><strong>Prompt Suggestions</strong>: suggested prompt changes distilled from review
+    feedback.</li>
+</ul>
+<p>A reviewer sees only the PIs and Assessments tabs.</p>
+
+<h3 id="settings">Settings</h3>
+<p>Settings holds your own account's <strong>Delete account</strong> link{% if microsoft_sign_in %}
+and the Microsoft sign-in section{% endif %}.</p>
+{% call careful() %}
+<p><strong>Delete account</strong> deletes your own account. The page it opens explains what
+deleting does and asks you to type <em>delete</em> to confirm. It cannot be undone.</p>
+{% endcall %}
+
+<h3 id="signing-out">Signing out</h3>
+<p><strong>Sign out</strong> signs you out on every device, not only the one you are using.</p>
+
+<h3 id="help">Help</h3>
+<p>The Help tab has an overview, the tutorials for your role and the reference pages. Many
+Workspace pages also carry a <strong>Help with this page</strong> link in their header, which
+opens the matching reference section. See
+<a href="{{ page_url(request, 'help_page', slug='getting-started', fragment='navigation') }}">Finding your way around</a>.</p>
+{% include "help/_step_nav.html" %}
+{% endblock %}

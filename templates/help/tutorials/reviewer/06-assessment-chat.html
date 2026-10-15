@@ -1,0 +1,76 @@
+{% extends "help/_layout.html" %}
+{% from "help/_figure.html" import figure %}
+{% from "help/_callouts.html" import careful, note %}
+{% block help_body %}
+<p class="text-sm text-gray-600">Reviewer tutorial</p>
+<h1>{{ step.title }}</h1>
+
+<h2 id="where">Where</h2>
+<p>On an assessment's detail page (<strong>Workspace → Assessments</strong>, then
+<strong>detail →</strong> or <strong>chat</strong> on a card).</p>
+
+<h2 id="what-you-see">What you'll see</h2>
+{{ figure(request, "chat-drawer", "The assessment chat open beside the detail page: a question, an answer with its Sources list, and the question box with Ask and Clear conversation.") }}
+
+<h2 id="what-it-means">What it means</h2>
+<p>The chat answers questions about one assessment from that assessment's record: the
+verdict, the interview transcript, the specialist panel's findings, the human reviews and
+the scoring rubric. Fields that are not shown to your role are left out of what it reads,
+as they are left off the page.</p>
+
+<h3>Opening it</h3>
+<ul>
+    <li>The round speech-bubble button at the bottom right of the detail page (its tooltip
+    reads "Ask about this assessment").</li>
+    <li>The <strong>chat</strong> button on a card in the list, which opens the detail page
+    with the chat already open.</li>
+    <li>An <strong>Ask:</strong> button at the end of a page section. It opens the chat and
+    sends that question straight away.</li>
+</ul>
+<p><strong>Close</strong> or the Escape key closes it. The panel shows who you are signed in
+as. On a wide screen you can drag its left edge to resize it; on a narrow screen it fills
+the screen.</p>
+
+<h3>Asking</h3>
+<p>Until you have asked anything, the panel lists questions about this assessment under
+"Questions about this assessment. A click sends one:". A click sends that question at once.
+Otherwise type in the box: Enter sends, and Shift+Enter starts a new line. Under the box,
+a counter shows the length of your question against its limit, and a line shows how many
+questions you have used today against your allowance. Those limits can change, so read
+them in the panel rather than here.</p>
+
+<h3>Reading an answer</h3>
+<ul>
+    <li>An answer that cites the record has a <strong>Sources</strong> list under it.
+    <strong>Show in page</strong> next to a source scrolls to that part of the page,
+    opens it if it was collapsed, and highlights it. On a narrow screen the chat closes so
+    you can see it.</li>
+    <li><strong>Verdict updated after this point</strong> marks where the hub updated the
+    verdict after your earlier questions. While an interview may still be running, a note
+    at the top of the panel warns that this can happen. Earlier questions stay visible but
+    are no longer used as context.</li>
+    <li>In a long conversation, a line says when earlier turns are no longer part of what
+    the model sees.</li>
+</ul>
+
+<h3>Clear conversation</h3>
+<p><strong>Clear conversation</strong> deletes your whole conversation on this assessment,
+after asking you to confirm. It cannot be undone. It deletes only your own conversation, and
+it does not give back the questions you have used today.</p>
+
+<h3>Who can read it</h3>
+<p>Your conversation is saved for you, and the panel says so: "Saved for you; administrators
+with database access can read it."</p>
+
+<h3>When the chat is unavailable</h3>
+<p>The chat can be switched off, and then no chat controls appear.{% if permissions.admin %} It
+is also unavailable while an admin is viewing the app as another user; the detail page then
+says "Chat unavailable while impersonating".{% endif %}</p>
+
+<p>More detail:
+<a href="{{ page_url(request, 'help_page', slug='assessments', fragment='chat') }}">The assessment chat</a>
+and the chat's messages in
+<a href="{{ page_url(request, 'help_page', slug='troubleshooting', fragment='assessment-chat') }}">Troubleshooting</a>.</p>
+
+{% include "help/_step_nav.html" %}
+{% endblock %}

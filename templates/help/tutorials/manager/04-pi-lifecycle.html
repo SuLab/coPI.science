@@ -1,0 +1,95 @@
+{% extends "help/_layout.html" %}
+{% from "help/_figure.html" import figure %}
+{% from "help/_callouts.html" import careful, note %}
+{% block help_body %}
+<p class="text-sm text-gray-600">Manager tutorial</p>
+<h1>{{ step.title }}</h1>
+<h2 id="where">Where</h2>
+<p>Workspace → <strong>PIs</strong> → a PI's name. The lab bot's state and its next control sit
+in the top right of the PI's page, beside the name.</p>
+
+<h2 id="what-you-see">What you'll see</h2>
+{{ figure(request, "pi-header-pending", "The header of a PI whose lab bot is still pending, with its state and the next control.") }}
+
+<h2 id="what-it-means">What it means</h2>
+<p>A PI goes from being added to having a live lab bot in this order. Each stage below names what
+the PI's page shows.</p>
+
+<h3 id="added">Added</h3>
+<p><strong>Add PI</strong> on the PIs page creates the account, queues a profile generation and
+creates a lab bot in the Pending state. When the ORCID record lists employment that gives a JHU
+tenure start, that year is recorded too.</p>
+{% call careful("Careful: Add PI") %}
+<p>Add PI creates a real PI account and queues work for it at once. Nothing in the Workspace
+undoes it: only an admin can delete a PI's account.</p>
+{% endcall %}
+
+<h3 id="profile-generation">Profile generation</h3>
+<p>The profile is generated in the background from the PI's publications. While it runs, the
+header says <em>Agent pending — Profile generating…</em>, and the page shows the change when
+it is reloaded.
+When generation failed, when no profile exists yet, or when the profile is not grounded in any
+publication abstract, the header says so in red and offers <strong>Retry profile
+generation</strong>, which queues the generation again. The step <em>Reviewing a PI's profile</em> covers the profile itself.</p>
+{% call careful("Careful: Retry profile generation") %}
+<p>Retry queues a full profile generation, which runs in the background and cannot be cancelled
+from the page.</p>
+{% endcall %}
+
+<h3 id="install">Install Slack bot</h3>
+<p>With the profile done, the header says <em>Agent pending — Awaiting Slack install.</em> It
+keeps saying so after the install; the button below it shows the real next step. Until the bot
+is installed the button is <strong>Install Slack bot</strong>, which creates this PI's Slack app and takes you to Slack's
+install screen. When Slack sends you back, the PI's page says <em>Slack bot installed — the token
+is saved on this PI's agent. Activate the agent to bring it live.</em> If it fails, a message
+starting <em>Slack provisioning failed</em> says why: on the PI's page, or on the PIs list when
+the install failed or was cancelled in Slack.</p>
+{% call careful("Careful: Install Slack bot") %}
+<p>Install Slack bot creates a real Slack app for this PI's lab bot and starts Slack's install.
+Nothing in the Workspace removes the app again.</p>
+{% endcall %}
+
+<h3 id="activate">Activate agent</h3>
+<p>Once the Slack bot is installed, the button becomes <strong>Activate agent</strong>. Activating
+first runs a check. A profile or persona problem refuses it with a red box headed
+<em>Activation refused — this PI's profile is not ready:</em> that lists each reason; a lab that
+cannot be connected to the hub is refused with a message starting <em>Activation refused:</em>
+instead. The check refuses a lab bot when:</p>
+<ul>
+    <li>the PI has no profile, or it is not grounded in any publication abstract, or it has no
+    Research Summary;</li>
+    <li>the newest profile generation failed for good;</li>
+    <li>the persona the simulation reads is missing or has no Research Summary;</li>
+    <li>the account is not a PI account;</li>
+    <li>the lab could not be connected to the hub.</li>
+</ul>
+<p>There is no override for managers. Only an admin can override the profile checks; nobody can
+override the persona, account or hub checks. The refusal box itself names the way forward: retrying the profile
+generation, fixing the profile, or asking an admin.</p>
+<p>On success a green box says <em>Agent activated — the running simulation picks it up on its
+next roster sync</em>, and the box itself says how soon that is.</p>
+{% call careful("Careful: Activate agent") %}
+<p>Activate puts the lab bot on the live roster: a running simulation picks it up at its next
+roster sync and the bot starts taking part in Slack. To take it back off, use
+<strong>Mute</strong>.</p>
+{% endcall %}
+
+<h3 id="mute">Mute and Unmute</h3>
+<p>An active lab bot shows <strong>Mute</strong>. Muting takes it off the simulation, and the
+header then shows <strong>Unmute</strong> and, after a manager's mute, when it was muted. <em>Muted</em> also covers a
+bot an admin has parked; Unmute works on both.</p>
+<p>Unmute runs the same activation check again, and also needs the Slack bot to be installed and
+the lab to connect to the hub. When it is refused, a red box at the top of the page says which of
+these failed.</p>
+{% call careful("Careful: Mute and Unmute") %}
+<p>Mute takes the lab bot off a running simulation at its next roster sync; Unmute puts it back.
+Each undoes the other.</p>
+{% endcall %}
+
+<p>Mute is offered only for an active or muted bot. A suspended bot shows its status instead, and
+only an admin can manage it. The same controls appear on the Slack Bots page (the step <em>The Slack Bots page</em>).</p>
+<p>More detail: <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='slack-bot') }}">Installing the Slack bot</a>,
+<a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='activation') }}">Activation</a>
+and <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='mute') }}">Muting</a>.</p>
+{% include "help/_step_nav.html" %}
+{% endblock %}

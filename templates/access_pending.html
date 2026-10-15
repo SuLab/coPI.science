@@ -1,12 +1,26 @@
 {% extends "base.html" %}
-{% block title %}Access pending — CoPI{% endblock %}
+{% block title %}Access pending — Blackbird{% endblock %}
 
 {% block content %}
 <div class="max-w-xl mx-auto mt-8">
     <div class="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+        {# A revoked admin, manager or reviewer gets its own message and no email box. The keys
+           come from src/dependencies.py::pending_access_payload; a session saved before they
+           existed lacks them and falls through to the pending copy. Only an admin restores a
+           manager or admin; the Staff page's Restore also lets a manager restore a reviewer. #}
+        {% if pending_info.access_status == 'denied' and pending_info.user_role in ('admin', 'manager', 'reviewer') %}
+        <h1 class="text-2xl font-bold text-gray-800 mb-3">Access turned off</h1>
+        <p class="text-gray-600 mb-6">
+            {% if pending_info.user_role == 'reviewer' %}
+            Your access to Blackbird has been turned off. Ask a manager or an admin to restore it.
+            {% else %}
+            Your access to Blackbird has been turned off. Ask an admin to restore it.
+            {% endif %}
+        </p>
+        {% else %}
         <h1 class="text-2xl font-bold text-gray-800 mb-3">Thanks for signing in</h1>
         <p class="text-gray-600 mb-4">
-            CoPI is in pre-release. We've received your ORCID
+            Blackbird is in pre-release. We've received your ORCID
             {% if pending_info.orcid %}
             (<span class="font-mono text-sm">{{ pending_info.orcid }}</span>)
             {% endif %}
@@ -43,6 +57,7 @@
                 </button>
             </form>
         </div>
+        {% endif %}
         {% endif %}
 
         <div class="mt-6 text-center">

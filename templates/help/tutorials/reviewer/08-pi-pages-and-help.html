@@ -1,0 +1,83 @@
+{% extends "help/_layout.html" %}
+{% from "help/_figure.html" import figure %}
+{% from "help/_callouts.html" import careful, note %}
+{% block help_body %}
+<p class="text-sm text-gray-600">Reviewer tutorial</p>
+<h1>{{ step.title }}</h1>
+
+<h2 id="where">Where</h2>
+<p><strong>Workspace → PIs</strong>, then a PI's name. An assessment's <strong>Lab</strong>
+link also opens that PI's page.</p>
+
+<h2 id="what-you-see">What you'll see</h2>
+{{ figure(request, "pis-list-reviewer", "The PIs directory as a reviewer sees it: name, institution, ORCID, publications and industry interest.") }}
+{{ figure(request, "pi-detail-reviewer", "The top of a PI's page as a reviewer sees it: Details, Research Profile and the start of Grants.") }}
+
+<h2 id="what-it-means">What it means</h2>
+<p>The PI pages give you context for an assessment: who the lab is, what it works on, and
+what it has published and been funded for. You read them; you do not change them.</p>
+
+<h3>The directory</h3>
+<p>The heading shows how many PIs there are. The columns:</p>
+<ul>
+    <li><strong>Name</strong>, with the department below it. Click the name or the row to
+    open the PI's page.</li>
+    <li><strong>Institution</strong>.</li>
+    <li><strong>ORCID</strong>, which links to the PI's ORCID record.</li>
+    <li><strong>Pubs (tenure)</strong>: publications counted inside the PI's JHU tenure, or
+    marked <strong>full career</strong> when no tenure start is recorded.</li>
+    <li><strong>Industry interest</strong>: the PI's cohort percentile, or "—" when there is
+    no score.</li>
+</ul>
+<p>On a narrow screen some columns are hidden. Long lists are split into pages, with
+<strong>← Prev</strong> and <strong>Next →</strong> links.</p>
+{% if permissions.staff %}
+<p>As staff, you also see Add PI, the Profile Status and Claimed filters, and more
+columns; see <a href="{{ page_url(request, 'help_page', slug='pis', fragment='directory') }}">The PI directory</a>.</p>
+{% endif %}
+
+<h3>A PI's page</h3>
+<ul>
+    <li><strong>Details</strong>: the PI's keywords and JHU tenure start.</li>
+    <li><strong>Research Profile</strong>: a research summary, then techniques, disease
+    areas, model systems and key targets.</li>
+    <li><strong>Grants</strong>: whether the PI's NIH RePORTER identity is settled, the NIH
+    RePORTER awards and the ORCID fundings stored for them.</li>
+    <li><strong>Industry interest</strong>: the cohort percentile and raw score, and an
+    <strong>Evidence</strong> list you can open to see what the score is based on.</li>
+    <li><strong>Companies</strong>: companies a manager has confirmed that the PI founded or
+    co-founded, advises, or serves as a board member of. Confirmed companies reach
+    BlackbirdBot and the assessment pages.</li>
+    <li><strong>Publications</strong>: within the PI's tenure, or the full career when no
+    tenure start is recorded, with PubMed links.</li>
+</ul>
+<p>A manager can correct a PI's profile, grants, industry evidence and companies. You see the
+result.</p>
+
+<h3>Getting help</h3>
+<ul>
+    <li>The <strong>Help</strong> tab in the top bar opens the Help overview: this tutorial,
+    then the reference pages.</li>
+    <li><strong>Help with this page</strong>, in a page's header, opens the reference for
+    that page.</li>
+    <li>The <a href="{{ page_url(request, 'help_page', slug='glossary') }}">Glossary</a>
+    explains every term the pages use.</li>
+    <li><a href="{{ page_url(request, 'help_page', slug='troubleshooting') }}">Troubleshooting</a>
+    lists the messages you may see, what they mean and what to do.</li>
+</ul>
+
+<h3>Finishing</h3>
+{% if impersonation_banner %}
+<p>While an admin is viewing the app as another user, <strong>Back to Help</strong> below
+replaces <strong>Finish</strong> and records nothing.</p>
+{% else %}
+<p><strong>Finish</strong> below ends the tutorial, stops the "New to Blackbird?" box from
+appearing and takes you to the Help overview.</p>
+{% endif %}
+<p>The tutorial stays under Help, so you can come back to any step.</p>
+
+<p>More detail: <a href="{{ page_url(request, 'help_page', slug='pis', fragment='directory') }}">The PI directory</a>
+and <a href="{{ page_url(request, 'help_page', slug='pis', fragment='detail') }}">A PI's page</a>.</p>
+
+{% include "help/_step_nav.html" %}
+{% endblock %}

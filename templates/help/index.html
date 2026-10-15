@@ -1,0 +1,27 @@
+{% extends "help/_layout.html" %}
+{# The Help index (spec 2026-10-14 §4.4): the viewer's tutorials, then the role's reference
+   pages, both from src/web/help_pages.py. #}
+{% block help_body %}
+<h1>Help</h1>
+<p>{% if permissions.staff %}Guides to every page managers and reviewers use, with a tutorial for each role.{% else %}Guides to the pages reviewers use, with a tutorial that walks through them.{% endif %}</p>
+
+<h2 id="tutorials">Start here</h2>
+<ul>
+    {% for t in tutorials %}
+    <li>
+        <a href="{{ page_url(request, 'help_tutorial', tutorial=t.key) }}">{{ t.title }}</a>
+        — {{ t.summary }} {{ t.steps|length }} steps.
+    </li>
+    {% endfor %}
+</ul>
+
+<h2 id="reference">Reference</h2>
+<ul>
+    {% for p in pages %}
+    <li>
+        <a href="{{ page_url(request, 'help_page', slug=p.slug) }}">{{ p.title }}</a>
+        — {{ p.summary }}
+    </li>
+    {% endfor %}
+</ul>
+{% endblock %}

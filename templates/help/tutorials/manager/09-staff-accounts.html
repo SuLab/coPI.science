@@ -1,0 +1,82 @@
+{% extends "help/_layout.html" %}
+{% from "help/_figure.html" import figure %}
+{% from "help/_callouts.html" import careful, note %}
+{% block help_body %}
+<p class="text-sm text-gray-600">Manager tutorial</p>
+<h1>{{ step.title }}</h1>
+<h2 id="where">Where</h2>
+<p>Workspace → <strong>Staff</strong>. Reviewers cannot open it.</p>
+
+<h2 id="what-you-see">What you'll see</h2>
+{{ figure(request, "staff-form", "The Add a staff account form.") }}
+{{ figure(request, "staff-preview", "The Confirm box that a Preview shows before anything is created.") }}
+{{ figure(request, "staff-table", "The Accounts table with its Revoke, Restore and Delete actions.") }}
+
+<h2 id="what-it-means">What it means</h2>
+<p>The Staff page lists every manager, reviewer and admin account. A staff account has no lab bot
+and no research profile; the person signs in with the account's ORCID iD. A manager can add
+reviewer accounts only, and only an admin can change an admin or manager account.</p>
+
+<h3 id="add">Preview, then Confirm</h3>
+<p><strong>Add a staff account</strong> takes an <strong>ORCID iD</strong>, a
+<strong>Role</strong> (for a manager, only Reviewer) and, only when the ORCID record shows no
+public name, <strong>Name (only if ORCID shows none)</strong>. <strong>Preview</strong> creates
+nothing. It shows a <strong>Confirm</strong> box saying who the iD belongs to:</p>
+<ul>
+    <li>for a new person, the name and institution from their public ORCID record and their current
+    employment, with <strong>Create account</strong>;</li>
+    <li>for someone who already has a PI account that may be converted, that account's access and
+    whether it has a profile, with <strong>Convert account</strong>.</li>
+</ul>
+<p><strong>Cancel</strong> drops the preview. If anything shown changed before you confirm, the
+box comes back with <em>Something changed since the preview. Review it again before
+confirming.</em> and nothing is written.</p>
+<p>A manager is told <em>That ORCID iD already belongs to an account. Ask an admin to change
+it.</em> when the iD belongs to a PI account that has a lab bot, helps run one as a delegate,
+has a profile or already has approved access, and when an admin has pre-approved the iD on the
+access allowlist. Other refusals each say why in their own message.</p>
+{% call careful("Careful: Create account and Convert account") %}
+<p>Create account makes a reviewer account whose access is already approved, so the person can
+sign in at once. Convert account turns the existing PI account into a reviewer account with
+approved access. Both are listed under Recent changes. Neither can be undone from the page:
+Delete removes the account entirely (for a converted account, the person's former PI account
+too); Revoke becomes available once the person has signed in.</p>
+{% endcall %}
+
+<h3 id="accounts">The Accounts table</h3>
+<p>Each row shows the name, ORCID iD, role, <strong>Access</strong> (approved, pending or
+revoked) and <strong>Last sign-in</strong> (a date or <em>never</em>). The actions appear only on
+reviewer rows, never on your own:</p>
+<ul>
+    <li><strong>Revoke</strong> turns off a reviewer's access. A manager can revoke only a reviewer
+    who has signed in at least once; for one who never has, Revoke is not offered, and the choice
+    is to delete the unused account or ask an admin.</li>
+    <li><strong>Restore</strong> gives a revoked reviewer access again.</li>
+    <li><strong>Delete</strong> removes a reviewer account.</li>
+</ul>
+{% call careful("Careful: Revoke and Restore") %}
+<p>Revoke asks first, then signs the reviewer out everywhere; they cannot sign in until restored.
+Restore undoes it, but the reviewer has to sign in again.</p>
+{% endcall %}
+{% call careful("Careful: Delete") %}
+<p>Delete asks first. The reviewer's reviews and approve/disapprove history are kept, with their
+name. Their review assignments and their assessment-chat history are deleted, and the ORCID iD
+is removed from the access allowlist. It cannot be undone.</p>
+{% endcall %}
+
+<h3 id="telling-new-staff">Telling the new reviewer</h3>
+<p>Blackbird sends no notification when an account is created or converted. The person learns of
+it only from you: they go to this site's address and sign in with ORCID using the iD the account
+was created with (signing in with any other iD lands them on an access-pending page instead),
+land in the Workspace, and find their tutorial under Help.</p>
+
+<h3 id="recent-changes">Recent changes</h3>
+<p>The last section lists the newest staff account changes: <em>Created</em>, <em>Converted from
+PI</em>, <em>Access revoked</em>, <em>Access restored</em> and <em>Deleted</em>, each with who
+made it and when.</p>
+<p>More detail: <a href="{{ page_url(request, 'help_page', slug='staff-accounts', fragment='add') }}">Adding a staff account</a>,
+<a href="{{ page_url(request, 'help_page', slug='staff-accounts', fragment='revoke-restore-delete') }}">Revoke, Restore and Delete</a>,
+<a href="{{ page_url(request, 'help_page', slug='staff-accounts', fragment='telling-new-staff') }}">Telling new staff</a> and
+<a href="{{ page_url(request, 'help_page', slug='staff-accounts', fragment='recent-changes') }}">Recent changes</a>.</p>
+{% include "help/_step_nav.html" %}
+{% endblock %}

@@ -1,11 +1,15 @@
 {% extends "base.html" %}
-{% block title %}Workspace — PIs — CoPI{% endblock %}
+{% from "help/_link.html" import help_link %}
+{% block title %}Workspace — PIs — Blackbird{% endblock %}
 
 {% block content %}
 {% set pi_base = page_url(request, 'workspace_pis') %}
 <div class="flex items-center justify-between mb-6">
     <h1 class="text-2xl font-bold text-gray-900">PIs</h1>
-    <span class="text-sm text-gray-500">{{ user_total }} PIs</span>
+    <div class="flex items-center gap-4">
+        {{ help_link(request, effective_user, 'pis', 'directory') }}
+        <span class="text-sm text-gray-500">{{ user_total }} PIs</span>
+    </div>
 </div>
 
 <!-- Add PI -->
@@ -55,8 +59,10 @@
 {% endif %}
 
 <!-- Filters -->
+{# Staff only: a reviewer's form would have no controls (spec 2026-10-14 §7.3).
+   institution_filter still applies from the URL for everyone. #}
+{% if permissions.staff %}
 <form method="get" action="{{ page_url(request, 'workspace_create_pi') }}" class="bg-white rounded-lg border border-gray-200 p-4 mb-4 flex flex-wrap items-end gap-4">
-    {% if permissions.staff %}
     <div>
         <label for="status-filter" class="text-xs font-medium text-gray-600 block mb-1">Profile Status</label>
         <select id="status-filter" name="status_filter" class="border border-gray-300 rounded px-2 py-1 text-sm">
@@ -64,7 +70,7 @@
             <option value="no_profile" {% if status_filter == 'no_profile' %}selected{% endif %}>No Profile</option>
             <option value="generating" {% if status_filter == 'generating' %}selected{% endif %}>Generating</option>
             <option value="complete" {% if status_filter == 'complete' %}selected{% endif %}>Complete</option>
-            <option value="pending_update" {% if status_filter == 'pending_update' %}selected{% endif %}>Pending Update</option>
+            <option value="pending_update" {% if status_filter == 'pending_update' %}selected{% endif %}>Pending draft</option>
         </select>
     </div>
     <div>
@@ -74,9 +80,10 @@
             <option value="claimed" {% if claimed_filter == 'claimed' %}selected{% endif %}>Claimed</option>
             <option value="unclaimed" {% if claimed_filter == 'unclaimed' %}selected{% endif %}>Unclaimed</option>
         </select>
-    </div>{% endif %}
+    </div>
     <button type="submit" class="px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">Apply</button>
 </form>
+{% endif %}
 
 <!-- PIs table -->
 <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto" tabindex="0" role="region" aria-label="PI directory">
@@ -121,22 +128,35 @@
                         'complete': 'bg-green-100 text-green-700',
                         'pending_update': 'bg-amber-100 text-amber-700'
                     } %}
+                    {# "Pending draft" matches the PI page's staged-draft card (spec 2026-10-14 §7.1). #}
+                    {% set status_labels = {
+                        'no_profile': 'No Profile',
+                        'generating': 'Generating',
+                        'complete': 'Complete',
+                        'pending_update': 'Pending draft'
+                    } %}
                     <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium
-                        {{ status_colors.get(item.profile_status, 'bg-gray-100 text-gray-600') }}">
-                        {{ item.profile_status | replace('_', ' ') | title }}
-                    </span>
+                        {{ status_colors.get(item.profile_status, 'bg-gray-100 text-gray-600') }}">{{ status_labels.get(item.profile_status, item.profile_status | replace('_', ' ') | title) }}</span>
                 </td>
                 <td class="px-4 py-3 hidden md:table-cell">
                     {% set agent_colors = {
                         'not_requested': 'bg-gray-100 text-gray-600',
                         'awaiting_token': 'bg-amber-100 text-amber-700',
                         'active': 'bg-green-100 text-green-700',
+                        'inactive': 'bg-gray-200 text-gray-700',
                         'suspended': 'bg-red-100 text-red-700'
                     } %}
+                    {# The Slack Bots page's words: an `inactive` agent is muted, and
+                       `awaiting_token` is every pending agent, token or not. #}
+                    {% set agent_labels = {
+                        'not_requested': 'Not requested',
+                        'awaiting_token': 'Pending',
+                        'active': 'Active',
+                        'inactive': 'Muted',
+                        'suspended': 'Suspended'
+                    } %}
                     <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium
-                        {{ agent_colors.get(item.agent_status, 'bg-gray-100 text-gray-600') }}">
-                        {{ item.agent_status | replace('_', ' ') | title }}
-                    </span>
+                        {{ agent_colors.get(item.agent_status, 'bg-gray-100 text-gray-600') }}">{{ agent_labels.get(item.agent_status, item.agent_status | replace('_', ' ') | title) }}</span>
                 </td>{% endif %}
                 <td class="px-4 py-3 text-sm text-gray-600 hidden md:table-cell">
                     {% if item.pub_scope and item.pub_scope.scoped %}

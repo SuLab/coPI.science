@@ -97,7 +97,8 @@ async def test_container_is_migrated(engine):
         # 0064 researcher_profiles.full_career_fallback (thin-record fallback)
         # 0065 'openalex' provenance, uq_publications_user_doi_nopmid (non-PubMed corpus)
         # 0066 user_microsoft_identities (Microsoft sign-in for staff)
-        assert v == "0066"
+        # 0067 help_intro_dismissals (the Help tab's first-sign-in prompt)
+        assert v == "0067"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

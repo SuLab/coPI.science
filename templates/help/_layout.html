@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{# Every help page and tutorial step extends this (spec §6.2). Content is semantic HTML
+   inside .help-prose, styled once in static/css/input.css. #}
+{% block title %}{{ help_title }} — Help — Blackbird{% endblock %}
+{% block content %}
+<article class="help-prose max-w-3xl">
+{% block help_body %}{% endblock %}
+</article>
+{% endblock %}

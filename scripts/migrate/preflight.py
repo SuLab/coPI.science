@@ -75,7 +75,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0066"
+DEFAULT_TARGET = "0067"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -112,7 +112,7 @@ DEFAULT_TARGET = "0066"
 #: tables, no backfill), and the 0036-0062 objects enumerated in PLANNED_OBJECTS (and
 #: PLANNED_RECREATES) below, plus 0063's two nullable columns, 0064's one, 0065's
 #: index (its CHECK swap recreates an existing constraint, which the collision check must
-#: not list), and 0066's table. 0063's ADD VALUE on
+#: not list), 0066's table, and 0067's table. 0063's ADD VALUE on
 #: thread_outcome_enum enumerates nothing: adding a value to an existing type creates
 #: no object to collide with — the same reason 0058's job_type_enum ADD VALUE has no
 #: entry either.
@@ -121,7 +121,7 @@ SUPPORTED_START_REVISIONS = (
     "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040",
     "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
     "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060",
-    "0061", "0062", "0063", "0064", "0065",
+    "0061", "0062", "0063", "0064", "0065", "0066",
 )
 
 #: Tables whose row counts are snapshotted for postflight. Empty = every user table.
@@ -565,11 +565,16 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
         "0066", "constraint", "uq_user_microsoft_identities_tenant_object",
         "user_microsoft_identities",
     ),
+    # 0067_help_intro_dismissals (spec 2026-10-14 §5.1).
+    PlannedObject("0067", "table", "help_intro_dismissals"),
+    PlannedObject(
+        "0067", "constraint", "ck_help_intro_dismissals_via", "help_intro_dismissals"
+    ),
 )
 
 #: What ``upgrade()`` DROPS. Kept apart from PLANNED_OBJECTS because the collision check
 #: must never treat a drop's precondition (the object exists) as a collision. 0026 is
-#: the only upgrade-time ``drop_table`` in 0019-0065.
+#: the only upgrade-time ``drop_table`` in 0019-0067.
 PLANNED_DROPS: tuple[PlannedObject, ...] = (
     PlannedObject("0026", "table", "grantbot_posted_foas"),
 )
@@ -588,7 +593,7 @@ REVISION_ORDER = (
     "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039",
     "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
     "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060",
-    "0061", "0062", "0063", "0064", "0065", "0066",
+    "0061", "0062", "0063", "0064", "0065", "0066", "0067",
 )
 
 

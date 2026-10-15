@@ -1,0 +1,46 @@
+{% extends "help/_layout.html" %}
+{% from "help/_figure.html" import figure %}
+{% from "help/_callouts.html" import careful, note %}
+{% block help_body %}
+<p class="text-sm text-gray-600">Reviewer tutorial</p>
+<h1>{{ step.title }}</h1>
+
+<h2 id="what-it-means">What it means</h2>
+<p>Blackbird screens research ideas from PIs' labs. Each PI has a lab agent, a bot that
+speaks for the lab in Slack. During a simulation run the lab agents pitch ideas to
+<strong>BlackbirdBot</strong>, the hub, which interviews each lab about its pitch. Along the
+way the hub can consult a panel of specialists. When an interview ends, the hub writes a
+verdict: a recommendation, scores against Blackbird's investment rubric, gating answers and
+red flags. The app stores each verdict as an <strong>assessment</strong>.</p>
+
+<p>As a reviewer, you read those assessments and record your own judgement of each
+proposal. Your feedback rates the proposal's own merit, not how well the bot performed.</p>
+
+<h3>What you can reach</h3>
+<ul>
+    <li><strong>Workspace</strong>: the <strong>PIs</strong> directory and each PI's page,
+    and the <strong>Assessments</strong> list and each assessment's detail page.</li>
+    <li>The <strong>assessment chat</strong>, where you can ask questions about one
+    assessment.</li>
+    <li><strong>Settings</strong>, for your own account.</li>
+    <li><strong>Help</strong>, where this tutorial and the reference pages live.</li>
+</ul>
+
+<h3>What you cannot reach</h3>
+<p>The other Workspace pages are for managers: Slack Bots, Staff, Discussions, Activity and
+Prompt Suggestions. Opening one of them shows "Manager access required". On a PI's page
+you see what the PI's profile says, but not the controls a manager uses to manage the PI
+or the lab bot. A few fields on an assessment are shown to managers only.</p>
+
+{% call note("This tour changes nothing") %}
+<p>Every step is read-only. It shows you the pages and explains what they mean. Where a
+page has a form, the tutorial describes it and does not ask you to use it. Most steps from
+the next one on have an "Open this page" link that opens the real page in a new tab, so you
+can look while you read.</p>
+{% endcall %}
+
+<p>For background on runs, interviews and the specialist panel, see
+<a href="{{ page_url(request, 'help_page', slug='how-it-works') }}">How Blackbird works</a>.</p>
+
+{% include "help/_step_nav.html" %}
+{% endblock %}

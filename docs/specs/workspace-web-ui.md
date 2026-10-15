@@ -11,6 +11,8 @@ prefixes are compatibility endpoints, not separate implementations or navigation
 | Global assessments, feedback/status, assessment chat | Yes | Yes | Yes |
 | PI operational information and all PI management commands | No | Yes | Yes |
 | Assignments, Slack bot directory, discussions, activity, prompt-change queue | No | Yes | Yes |
+| Help: general pages and the reviewer tutorial | Yes | Yes | Yes |
+| Help: manager pages and the manager tutorial | No | Yes | Yes |
 | All-role account/agent management, raw verdicts/opinions, LLM diagnostics, discussion exports | No | No | Yes |
 
 These are capability ceilings, not bypasses of business rules. Feedback edits are

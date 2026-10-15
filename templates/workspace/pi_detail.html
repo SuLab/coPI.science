@@ -1,8 +1,9 @@
 {% extends "base.html" %}
 {% from "_tag_field.html" import profile_tag_fields %}
-{% from "_profile_errors.html" import profile_error_text %}
+{% from "pis/_detail_errors.html" import pi_detail_error_text %}
 {% from "pis/_bot_action.html" import pi_bot_action %}
-{% block title %}Workspace — {{ target_user.name }} — CoPI{% endblock %}
+{% from "help/_link.html" import help_link %}
+{% block title %}Workspace — {{ target_user.name }} — Blackbird{% endblock %}
 
 {% block content %}
 {% set pi_base = page_url(request, 'workspace_pis') %}
@@ -12,6 +13,7 @@
         <div>
             <a href="{{ page_url(request, 'workspace_pis') }}" class="text-sm text-gray-500 hover:text-gray-700">← All PIs</a>
             <h1 class="text-2xl font-bold text-gray-900 mt-1">{{ target_user.name }}</h1>
+            {{ help_link(request, effective_user, 'pis', 'detail') }}
         </div>
         {% if effective_user.is_staff %}
         {% if target_user.agent and target_user.agent.status == 'inactive' %}
@@ -94,31 +96,7 @@
     {% if permissions.staff and request.query_params.get('error') %}
     <div class="bg-red-50 border border-red-200 rounded-lg p-4 mb-4">
         <p class="text-red-800 text-sm">
-            {% if request.query_params.get('error') == 'invalid_email' %}Please enter a valid email address.
-            {% elif request.query_params.get('error') == 'email_taken' %}That email address is already in use by another account.
-            {% elif request.query_params.get('error') == 'no_email' %}This account has no email address to verify.
-            {% elif request.query_params.get('error') == 'email_changed' %}The address changed after this page loaded. Check it, then verify again.
-            {% elif request.query_params.get('error') == 'invalid_tenure_year' %}JHU tenure start must be a 4-digit year (or blank to leave unchanged).
-            {% elif request.query_params.get('error') == 'profile_changed' %}This profile changed while you were editing it (a regeneration or another edit saved first). Reload the page to see the current version, then re-apply your changes.
-            {% elif request.query_params.get('error') == 'agent_not_mutable' %}This agent can't be muted or unmuted in its current state.
-            {% elif request.query_params.get('error') == 'no_token' %}This agent can't be unmuted until its Slack bot is installed.
-            {% elif request.query_params.get('error') == 'activation_blocked' %}This agent can't be unmuted yet: its profile doesn't pass the activation checks.
-            {% elif request.query_params.get('error') == 'no_spoke' %}This agent can't be unmuted: it could not be connected to the hub. Ask an admin to check its star spoke on /admin/agents.
-            {% elif request.query_params.get('error') == 'profile_generating' %}Profile is being generated — try again shortly.
-            {% elif request.query_params.get('error') == 'field_too_long' %}Name, institution and department are limited to 255 characters each.
-            {% elif request.query_params.get('error') == 'no_agent' %}This PI has no lab agent yet, so there is nothing to mute or unmute.
-            {% elif request.query_params.get('error') == 'orcid_busy' %}ORCID fundings are being refreshed — try the veto again in a moment.
-            {% elif request.query_params.get('error') == 'persona_busy' %}This PI's profile is being regenerated or updated — try again in a moment.
-            {% elif request.query_params.get('error') == 'invalid_reporter_id' %}No RePORTER project lists that profile id.
-            {% elif request.query_params.get('error') == 'reporter_unreachable' %}NIH RePORTER could not be reached — try again.
-            {% elif request.query_params.get('error') == 'no_profile_selected' %}Select a candidate or enter a RePORTER profile id.
-            {% elif request.query_params.get('error') == 'pubmed_unreachable' %}PubMed could not be reached — try again.
-            {% elif request.query_params.get('error') == 'pubmed_not_found' %}PubMed returned no record for that PMID.
-            {% elif request.query_params.get('error') == 'no_draft' %}There is no draft to accept.
-            {% elif request.query_params.get('error') == 'draft_stale' %}The profile changed since this draft was made; discard it or regenerate.
-            {% elif request.query_params.get('error') == 'regenerate_refused' %}Regeneration refused (see the message above).
-            {% elif profile_error_text(request.query_params.get('error')) %}{{ profile_error_text(request.query_params.get('error')) }}
-            {% else %}Something went wrong saving changes.{% endif %}
+            {{ pi_detail_error_text(request.query_params.get('error')) }}
         </p>
     </div>
     {% endif %}

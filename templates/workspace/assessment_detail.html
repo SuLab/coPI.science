@@ -1,9 +1,10 @@
 {% extends "base.html" %}
-{% block title %}Workspace — Assessment — CoPI{% endblock %}
+{% from "help/_link.html" import help_link %}
+{% block title %}Workspace — Assessment — Blackbird{% endblock %}
 {% block extra_head %}{% include "assessments/_head.html" %}{% endblock %}
 {% block content %}<div class="max-w-5xl mx-auto">
 <a href="{{ page_url(request, 'workspace_assessments', query={'run_id': run_id, 'sort': sort, 'lab': lab_filter or '', 'review': review, 'assignment': assignment}) }}" class="text-sm text-indigo-700 hover:underline">&larr; Opportunity Assessments</a>
-<h1 class="text-2xl font-bold text-gray-900 mt-1 mb-4">Assessment detail</h1>
+<div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 mt-1 mb-4"><h1 class="text-2xl font-bold text-gray-900">Assessment detail</h1>{{ help_link(request, effective_user, 'assessments', 'detail') }}</div>
 {% macro pi_link(a) %}{% if a.subject_agent_id and pi_user_id %}<a class="underline text-indigo-600 hover:text-indigo-800" href="{{ page_url(request, 'workspace_pi_detail', user_id=pi_user_id) }}">{{ a.subject_agent_id }}</a>{% else %}{{ a.subject_agent_id or "—" }}{% endif %}{% endmacro %}
 {% if permissions.admin %}<div class="mb-4"><a href="/admin/activity/{{ assessment.simulation_run_id }}/llm-calls?agent={{ assessment.agent_id | urlencode }}&amp;channel={{ assessment.channel_name | urlencode }}" class="inline-flex items-center px-3 py-1.5 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700">LLM calls for this interview</a></div>{% endif %}
 {% include "assessments/_detail_body.html" %}

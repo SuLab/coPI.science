@@ -76,7 +76,8 @@ async def journey_reviewer_pi_privacy(h) -> dict:
         await page.emulate_media(media='print')
         print_html = await page.content()
         await page.emulate_media(media='screen')
-        controls = await page.locator("main form button").all_text_contents()
+        controls = await page.locator(
+            'main form:not([action="/help/intro/dismiss"]) button').all_text_contents()
         clean = _healthy(log, csp)
     finally:
         await ctx.close()

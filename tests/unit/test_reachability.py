@@ -148,6 +148,10 @@ ROUTE_ALLOWLIST: dict[tuple[str, str], str] = {
         "button makes this entry stale and test_route_allowlist_has_no_stale_"
         "entries will say so."
     ),
+    ("GET", "/help/shots/{shot_id}.png"): (
+        "Help screenshots are linked by <img src> from the figure macro "
+        "(templates/help/_figure.html); the gate credits href/action/fetch, not img src."
+    ),
 }
 
 # Old role-prefixed URLs are public compatibility endpoints, never primary UI links.
@@ -157,9 +161,16 @@ for suffix in POST_SUFFIXES:
 for path in ("/manager", "/manager/pis", "/manager/pis/{user_id}", "/manager/assessments", "/manager/assessments/{assessment_id}", "/manager/slack-bots", "/manager/staff", "/manager/discussions", "/manager/activity", "/manager/activity/{run_id}", "/manager/prompt-suggestions", "/manager/prompt-suggestions/{suggestion_id}", "/admin/assessments", "/admin/assessments/{assessment_id}", "/admin/discussions", "/admin/activity", "/admin/activity/{run_id}"):
     ROUTE_ALLOWLIST[("GET", path)] = "Guarded legacy GET compatibility endpoint; canonical workspace links are primary."
 
-# Optional third-party imports that are allowed to be absent at test time. Empty
-# today: every `try:`-guarded import in src/ resolves in the app image.
-GUARDED_IMPORT_ALLOWLIST: dict[str, str] = {}
+# Optional third-party imports that are allowed to be absent at test time. Every
+# `try:`-guarded import in src/ resolves in the app image; an entry here is one the
+# test environment may lack.
+GUARDED_IMPORT_ALLOWLIST: dict[str, str] = {
+    "httpx2": (
+        "src/services/microsoft_identity.py imports it under try/except: authlib 1.8 (the "
+        "images) builds its OAuth client on httpx2, authlib 1.7 (.venv-test) on httpx, and "
+        "TOKEN_HTTP picks whichever the installed authlib uses. Absent where authlib < 1.8."
+    ),
+}
 
 # Targets of any template reference we cannot resolve statically (a dynamic
 # `{% include some_var %}`). Empty today — test_no_dynamic_template_references keeps it
@@ -1033,10 +1044,13 @@ def test_static_link_resolution_coverage_is_reported():
     # The corpus review cards add two explicit PubMed links (candidate and unanchored).
     # The Staff page (2026-10-13) adds three orcid.org links (the account rows and the
     # create and convert previews).
+    # The Help tab (spec 2026-10-14) adds four: its sub-nav's `{{ item.url }}`, a tutorial
+    # step's "Open this page" (`page_url(request, step.open_route)`, a route name from the
+    # registry), and two same-page `#reviewing` links on the Assessments help page.
     unresolvable = len(values) - len(resolvable)
-    assert unresolvable <= 58, (
+    assert unresolvable <= 62, (
         f"{unresolvable} of {len(values)} href/action values do not resolve to a "
-        "checkable local path (was 58) — the matcher probably regressed, or a new "
+        "checkable local path (was 62) — the matcher probably regressed, or a new "
         "link is built from a variable"
     )
 

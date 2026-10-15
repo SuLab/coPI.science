@@ -1,0 +1,85 @@
+{% extends "help/_layout.html" %}
+{% from "help/_figure.html" import figure %}
+{% from "help/_callouts.html" import careful, note %}
+{% block help_body %}
+<p class="text-sm text-gray-600">Reviewer tutorial</p>
+<h1>{{ step.title }}</h1>
+
+<h2 id="where">Where</h2>
+<p><strong>Workspace → Assessments</strong>: each card in the list.</p>
+
+<h2 id="what-you-see">What you'll see</h2>
+{{ figure(request, "assessment-card", "One assessment card: the headline and recommendation, In one minute, Key points, the detail and chat buttons, Why this score, the footer badges and Quick scoring.") }}
+{{ figure(request, "card-rubric-gating", "A card's “Rubric scores & gating” section opened: one bar per dimension, then one line per gate.") }}
+
+<h2 id="what-it-means">What it means</h2>
+
+<h3>The top of the card</h3>
+<ul>
+    <li>The <strong>headline</strong> is the hub's one-line story of the proposal. Older
+    assessments have none and show the short project label instead. The hub's confidence
+    follows in square brackets.</li>
+    <li>The line below gives the <strong>Lab</strong>, which links to the PI's page, the
+    date, and the rubric version that scored the assessment.</li>
+    <li>The chip on the right is the hub's <strong>recommendation</strong>: advance,
+    conditional, route-to-incubation, or the rubric's label for a pass, the same label the
+    band line under the page heading uses. It is the hub's own call, not the computed
+    band.</li>
+</ul>
+
+<h3>The body of the card</h3>
+<ul>
+    <li><strong>In one minute</strong> is the hub's short pitch of the idea, shown in
+    full.</li>
+    <li><strong>Key points</strong> is a short summary in groups. Some points carry a
+    labelled extra line, such as a risk.</li>
+    <li><strong>detail →</strong> opens the assessment's detail page.
+    <strong>chat</strong> opens the same page with the assessment chat already open. The
+    chat button is missing when the chat is switched off.</li>
+    <li><strong>Why this score</strong>, closed at first, shows the weighted score, its band
+    and the hub's own account of why it scored that way. Older assessments may have no such
+    account.</li>
+</ul>
+
+<h3>The footer</h3>
+<ul>
+    <li>The number of red flags, or "no flags".</li>
+    <li>A <strong>panel badge</strong> when the specialist panel needs your attention:
+    <strong>panel incomplete</strong> (a domain the verdict needed was never consulted),
+    <strong>panel unverified</strong> (the check could not be made),
+    <strong>panel not recorded</strong> (the assessment does not say whether a panel was
+    needed), or <strong>panel state unknown</strong>. No badge means no gap was recorded or
+    no panel was required.</li>
+    <li>An <strong>Approved</strong> or <strong>Disapproved</strong> chip, when an earlier
+    approval decision exists. No page has a control that sets one.</li>
+    <li><strong>Assigned:</strong> who the assessment is assigned to, and
+    <strong>Reviewed by:</strong> who has reviewed it.</li>
+</ul>
+
+<h3>Rubric scores &amp; gating</h3>
+<p>Closed at first. Inside, each rubric dimension has its score, a bar and its weight, or
+"not scored". The bars use the scale of the rubric revision that scored this assessment.
+Below them, each gate has a symbol, its title, and either the hub's reason or the rubric's
+definition of the gate:</p>
+<ul>
+    <li>met;</li>
+    <li>not met: asked, and failed;</li>
+    <li>unconfirmed: never asked. This is not a failed gate.</li>
+</ul>
+
+<h3>Quick scoring</h3>
+<p>Each card ends with a <strong>Quick scoring</strong> form: an overall rating, a comment
+and a feedback mode, with <strong>Submit feedback</strong>. It rates the proposal's own
+merit, not the bot's performance. It has no per-dimension scores; those are on the detail
+page. The step on recording your review explains each field.</p>
+{% call note("Look, don't submit") %}
+<p>Quick scoring saves real feedback under your name. This tour only describes it.</p>
+{% endcall %}
+
+<p>More detail:
+<a href="{{ page_url(request, 'help_page', slug='assessments', fragment='cards') }}">Assessment cards</a>.
+Terms such as band, gating and specialist panel are in the
+<a href="{{ page_url(request, 'help_page', slug='glossary') }}">Glossary</a>.</p>
+
+{% include "help/_step_nav.html" %}
+{% endblock %}

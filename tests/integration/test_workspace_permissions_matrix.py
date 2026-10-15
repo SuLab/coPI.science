@@ -398,6 +398,31 @@ async def test_all_workspace_get_and_head_routes_follow_effective_role(client, d
             assert legacy.status_code == 302, path
 
 
+_HELP_EXPECTED = {
+    "reviewer": (200, 403, 403),
+    "manager": (200, 200, 200),
+    "admin": (200, 200, 200),
+    "pi": (403, 403, 403),
+}
+
+
+@pytest.mark.parametrize("role,as_role", [
+    ("reviewer", None), ("manager", None), ("admin", None), ("pi", None),
+    ("admin", "reviewer"), ("admin", "manager"), ("admin", "pi"),
+], ids=["reviewer", "manager", "admin", "pi", "admin-as-reviewer", "admin-as-manager", "admin-as-pi"])
+async def test_help_routes_follow_effective_role(client, db_session, role, as_role):
+    """/help has no /manager twin, so it is checked here rather than in the workspace loop."""
+    actor = await factories.make_user(db_session, user_role=role)
+    effective = await factories.make_user(db_session, user_role=as_role) if as_role else None
+    headers = auth_headers(actor.id, impersonate=effective.id if effective else None)
+    paths = ("/help", "/help/managing-pis", "/help/tutorials/manager/1")
+    statuses = []
+    for path in paths:
+        response = await client.get(path, headers=headers, follow_redirects=False)
+        statuses.append(response.status_code)
+    assert tuple(statuses) == _HELP_EXPECTED[as_role or role]
+
+
 def _admin_path(path, ids):
     values = {key: str(value) for key, value in ids.items()}
     return "/admin" + path.format(**values)

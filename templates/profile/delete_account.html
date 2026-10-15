@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Delete Account — CoPI{% endblock %}
+{% block title %}Delete Account — Blackbird{% endblock %}
 
 {% block content %}
 <div class="max-w-lg mx-auto">
@@ -7,6 +7,26 @@
         <h1 class="text-2xl font-bold text-red-700 mb-4">Delete Account</h1>
         <div class="bg-red-50 border border-red-200 rounded-lg p-4 mb-6 text-sm text-red-700">
             <p class="font-medium mb-2">This action is permanent and cannot be undone.</p>
+            {% if not effective_user.may_use_pi_surfaces %}
+            {# A manager's or reviewer's account. Each clause follows from
+               src/services/user_deletion.py::delete_user_account with its default
+               remove_from_allowlist=False and the ondelete rule of each users.id foreign key:
+               reviews and approval events keep their name columns (SET NULL id); assignments
+               to the user and chat turns CASCADE; assignments made and prompt-suggestion
+               statuses keep the actor's name; other manager attributions are SET NULL.
+               Self-deletion leaves the ORCID iD on the access allowlist, so the copy never
+               says it is removed. #}
+            <ul class="list-disc list-inside mt-2 space-y-1">
+                <li>Your account is deleted, along with any Microsoft sign-in linked to it.</li>
+                <li>Assessment reviews you wrote and your approve/disapprove history are kept, with your name.</li>
+                <li>Your review assignments are deleted.</li>
+                <li>Your assessment-chat history is deleted.</li>
+                {% if effective_user.is_manager %}
+                <li>Assignments you gave to others and the statuses you set on prompt suggestions are kept, with your name.</li>
+                <li>Other changes you made, such as to PI pages, lab bots and staff accounts, are kept, but no longer linked to your account.</li>
+                {% endif %}
+            </ul>
+            {% else %}
             <p>The following will be permanently deleted:</p>
             <ul class="list-disc list-inside mt-2 space-y-1">
                 <li>Your research profile, all of its stored revisions, and the copy your agent reads</li>
@@ -19,6 +39,7 @@
             workspace and completed assessments stay part of the simulation record,
             and may still show your name. Copies of your profile text inside the simulation's
             model-call logs are also kept as part of the run record.</p>
+            {% endif %}
         </div>
         {% if request.query_params.get('error') == 'last_admin' %}
         <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-3 mb-4 text-sm text-yellow-800">
@@ -44,10 +65,19 @@
                         class="bg-red-600 text-white px-6 py-2 rounded-lg hover:bg-red-700 font-medium">
                     Delete My Account
                 </button>
+                {# Two literal links rather than one computed href, so the reachability gate
+                   can check both targets. #}
+                {% if effective_user.may_use_pi_surfaces %}
                 <a href="/profile/edit"
                    class="text-gray-600 px-6 py-2 rounded-lg border border-gray-300 hover:bg-gray-50">
                     Cancel
                 </a>
+                {% else %}
+                <a href="/settings"
+                   class="text-gray-600 px-6 py-2 rounded-lg border border-gray-300 hover:bg-gray-50">
+                    Cancel
+                </a>
+                {% endif %}
             </div>
         </form>
     </div>

@@ -1,0 +1,50 @@
+{% extends "help/_layout.html" %}
+{% from "help/_figure.html" import figure %}
+{% from "help/_callouts.html" import careful, note %}
+{% block help_body %}
+<p class="text-sm text-gray-600">Manager tutorial</p>
+<h1>{{ step.title }}</h1>
+<h2 id="what-it-means">What it means</h2>
+<p>This tutorial is a read-only tour of the pages a manager uses: the PIs and their lab bots,
+staff accounts for reviewers, and the records the simulation leaves behind. Each step says where
+a page is, shows it, and explains what it means. Nothing in the tutorial changes any data.</p>
+
+{% call note("How to read this tutorial") %}
+<p>Some controls on the real pages change things for real: they create accounts, contact Slack,
+put a lab bot on the running simulation or remove evidence for good. Every step that describes
+one introduces it with a <strong>Careful</strong> box saying what happens and whether a page in
+Blackbird can undo it. The tutorial never asks you to press any of them.</p>
+{% endcall %}
+
+<h3 id="three-roles">Managers, reviewers and admins</h3>
+<p>In one line each, and filled in by the rest of this tutorial:</p>
+<ul>
+    <li><strong>Reviewer:</strong> views PI research and reviews assessments; assignments are
+    workflow metadata. A reviewer's Workspace has only the PIs and Assessments tabs, and the
+    staff pages answer "Manager access required".</li>
+    <li><strong>Manager:</strong> manages PI research and lab operations, and reviews assessments
+    like a reviewer. A manager adds PIs, reviews and corrects their profiles and evidence,
+    installs, activates and mutes their lab bots, assigns assessments, adds reviewer accounts,
+    and reads the Discussions, Activity and Prompt Suggestions pages.</li>
+    <li><strong>Admin:</strong> every manager feature, plus account, agent and system
+    administration.</li>
+</ul>
+<p>A manager account has no research profile and no lab bot of its own, so it has no My Profile
+or My Agent page and skips the PI onboarding pages.</p>
+
+<h3 id="admin-only">What only an admin can do</h3>
+<p>These come up later where they limit what a manager can do. Only an admin can:</p>
+<ul>
+    <li>create a manager account, or change an admin or manager account;</li>
+    <li>revoke a reviewer who has never signed in;</li>
+    <li>override the profile checks that refuse to activate a lab bot;</li>
+    <li>suspend a lab bot, or manage one that is suspended;</li>
+    <li>delete a PI's account;</li>
+    <li>delete review feedback;</li>
+    <li>export Discussions, read a specialist's reply verbatim, and see a run's model-call logs.</li>
+</ul>
+<p>The concepts behind these pages (lab agents, simulation runs, interviews, the specialist
+panel and assessments) are explained in
+<a href="{{ page_url(request, 'help_page', slug='how-it-works') }}">How Blackbird works</a>.</p>
+{% include "help/_step_nav.html" %}
+{% endblock %}

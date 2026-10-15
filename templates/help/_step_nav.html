@@ -1,0 +1,26 @@
+{# Tutorial step navigation (spec §6.2). Finish posts the prompt answer; while
+   impersonating that POST is refused, so a plain link replaces it. #}
+<nav aria-label="Tutorial steps" class="mt-10 border-t border-gray-200 pt-4 text-sm">
+    <p class="text-gray-600" aria-current="step">Step {{ step_number }} of {{ step_count }}</p>
+    <div class="mt-3 flex flex-wrap items-center gap-3">
+        {% if step.open_route %}
+        <a href="{{ page_url(request, step.open_route) }}" target="_blank" rel="noopener"
+           class="text-indigo-700 hover:text-indigo-900">Open this page ↗ (opens in a new tab)</a>
+        {% endif %}
+        {% if step_number > 1 %}
+        <a href="{{ page_url(request, 'help_tutorial_step', tutorial=tutorial.key, step=step_number - 1) }}"
+           class="text-indigo-700 hover:text-indigo-900">← Previous step</a>
+        {% endif %}
+        {% if step_number < step_count %}
+        <a href="{{ page_url(request, 'help_tutorial_step', tutorial=tutorial.key, step=step_number + 1) }}"
+           class="bg-indigo-600 text-white px-3 py-1.5 rounded hover:bg-indigo-700">Next step →</a>
+        {% elif impersonation_banner %}
+        <a href="{{ page_url(request, 'help_index') }}" class="text-indigo-700 hover:text-indigo-900">Back to Help</a>
+        {% else %}
+        <form method="post" action="{{ page_url(request, 'help_intro_dismiss') }}">
+            <input type="hidden" name="via" value="finish">
+            <button type="submit" class="bg-indigo-600 text-white px-3 py-1.5 rounded hover:bg-indigo-700">Finish</button>
+        </form>
+        {% endif %}
+    </div>
+</nav>

@@ -33,16 +33,17 @@ def _login_location(request: Request) -> str:
 
     Only GET navigations to a real page are worth resuming after sign-in, so
     we skip POSTs (replaying them as a GET would be wrong), the login/root
-    pages (no point looping back to them), and anything under
-    /assessment-chat/ (those are JSON endpoints the drawer polls in the
-    background, not a page to resume — remembering one as `next` would land a
-    freshly signed-in user on raw JSON). The destination is consumed and
-    re-validated in auth.py once the ORCID round-trip completes.
+    pages (no point looping back to them), anything under /assessment-chat/
+    (those are JSON endpoints the drawer polls in the background, not a page to
+    resume — remembering one as `next` would land a freshly signed-in user on
+    raw JSON), and anything under /help/shots/ (help screenshots a page loads
+    lazily; resuming one would land the user on a raw image). The destination
+    is consumed and re-validated in auth.py once the ORCID round-trip completes.
     """
     if request.method != "GET":
         return "/login"
     target = request.url.path
-    if target.startswith("/assessment-chat/"):
+    if target.startswith(("/assessment-chat/", "/help/shots/")):
         return "/login"
     if request.url.query:
         target += "?" + request.url.query
@@ -53,8 +54,13 @@ def _login_location(request: Request) -> str:
 
 def pending_access_payload(user: User) -> dict:
     """What /access-pending shows for an account that may not sign in. One shape for the login
-    gate (src/routers/auth.py::complete_sign_in) and the revocation check below."""
-    return {"user_id": str(user.id), "orcid": user.orcid, "email": user.email, "name": user.name}
+    gate (src/routers/auth.py::complete_sign_in) and the revocation check below.
+
+    ``user_role`` and ``access_status`` let the page word a staff account's refusal; a
+    session payload written before they existed lacks them, so readers must not assume
+    either key."""
+    return {"user_id": str(user.id), "orcid": user.orcid, "email": user.email, "name": user.name,
+            "user_role": user.user_role, "access_status": user.access_status}
 
 
 async def get_current_user(

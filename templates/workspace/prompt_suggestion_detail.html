@@ -1,5 +1,6 @@
 {% extends "base.html" %}
-{% block title %}Workspace — Prompt Suggestion — CoPI{% endblock %}
+{% from "help/_link.html" import help_link %}
+{% block title %}Workspace — Prompt Suggestion — Blackbird{% endblock %}
 
 {% block extra_head %}
 {% include "_head_assets.html" %}
@@ -15,8 +16,9 @@
 {% endblock %}
 
 {% block content %}
-<div class="mb-4">
+<div class="mb-4 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
     <a href="{{ page_url(request, 'workspace_prompt_suggestions') }}" class="text-sm text-indigo-600 hover:underline">&larr; Prompt Suggestions</a>
+    {{ help_link(request, effective_user, 'prompt-suggestions', 'detail') }}
 </div>
 
 <div class="flex items-start justify-between mb-4 gap-4">

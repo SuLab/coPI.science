@@ -1,0 +1,87 @@
+{% extends "help/_layout.html" %}
+{% from "help/_figure.html" import figure %}
+{% from "help/_callouts.html" import careful, note %}
+{% block help_body %}
+<p class="text-sm text-gray-600">Manager tutorial</p>
+<h1>{{ step.title }}</h1>
+<h2 id="where">Where</h2>
+<p>Workspace → <strong>Discussions</strong>, <strong>Activity</strong> and <strong>Prompt
+Suggestions</strong>. Reviewers cannot open any of them. The <strong>Open this page</strong> link
+opens Discussions.</p>
+
+<h2 id="what-you-see">What you'll see</h2>
+{{ figure(request, "discussions", "The Discussions page: the run selector, the status cards, the filters and the thread table.") }}
+{{ figure(request, "activity", "The Agent Activity page: summary cards and the Simulation Runs table.") }}
+{{ figure(request, "prompt-suggestions", "The Prompt Suggestions page with its Generate button and suggestion list.") }}
+
+<h2 id="what-it-means">What it means</h2>
+<h3 id="discussions">Discussions</h3>
+<p>Every thread started in the simulation, and how it ended.</p>
+<ul>
+    <li><strong>Run:</strong> picks one simulation run or <strong>All Runs</strong>.</li>
+    <li>The status cards count the run's threads: <strong>No Replies</strong>,
+    <strong>Active</strong> (replies, no outcome yet), and the recorded outcomes
+    <strong>Proposal</strong>, <strong>No Proposal</strong> and <strong>Timeout</strong>. A card
+    filters the table to that status; pressing it again clears the filter.</li>
+    <li>The filters narrow by channel, status and one or more agents; <strong>Clear</strong>
+    removes them.</li>
+    <li>Each thread row shows its status, channel, who posted it, the reply count, who replied, the
+    outcome and when it started. A row with more to show opens to reveal the outcome's summary and
+    the <strong>Specialist panel</strong> cards: each specialist's signal, how many concerns it
+    filed, its confidence, how its reply was read, and <em>reply cut off</em> when a reply stopped
+    before it finished.</li>
+</ul>
+<p>Only an admin can export Discussions or read a specialist's reply verbatim.</p>
+
+<h3 id="activity">Activity</h3>
+<p>The <strong>Agent Activity</strong> page opens with cards for the number of simulation runs,
+total messages, channels created and the most active agent. The <strong>Simulation Runs</strong>
+table lists each run's start, end, status, messages, API calls and configuration. A run opens its
+<strong>Simulation Run</strong> page: its message, API call and channel counts, messages by agent
+and by channel, the channels created, and a message timeline that shows who posted, where, when
+and how long each message was, never the message text. Only an admin sees a run's model-call logs
+and the controls for stopped runs.</p>
+
+<h3 id="prompt-suggestions">Prompt Suggestions</h3>
+<p>Suggested changes to the simulation's prompts, distilled from review feedback marked
+<strong>Learn</strong>. Nothing on this page ever changes a prompt file.</p>
+<ul>
+    <li><strong>Generate suggestions from current reviews</strong> queues an analysis for each
+    assessment whose Learn feedback no suggestion has used yet. The line under it says how many are
+    eligible, or <em>Nothing to analyse</em>. One press analyses only a limited number, which that
+    line states when it applies; pressing again continues with the rest. The analyses run in the
+    background, and the page shows new suggestions once they finish and the page is reloaded.{% if permissions.admin %} The
+    button is hidden while an admin is viewing the site as someone else.{% endif %}</li>
+    <li><strong>Status:</strong> filters the list by <strong>Open</strong>,
+    <strong>Dismissed</strong> or <strong>Implemented</strong>.</li>
+    <li>A suggestion's subject opens its page: the <strong>Suggested Change</strong>, the
+    <strong>Raw model response</strong>, the feedback it was <strong>Distilled From</strong>, and
+    the <strong>Prompt Files Read</strong>, each marked <em>current</em>, <em>STALE</em> (the file
+    has changed since) or <em>file missing</em>. <strong>Reopen</strong>,
+    <strong>Dismiss</strong> and <strong>Mark Implemented</strong> set its status.</li>
+</ul>
+{% call careful("Careful: Generate suggestions from current reviews") %}
+<p>Each press queues real analyses by a large model, which cost money, and they cannot be
+cancelled from the page. A second press while earlier ones are still queued does not queue those
+assessments again.</p>
+{% endcall %}
+{% call careful("Careful: suggestion status") %}
+<p>Reopen, Dismiss and Mark Implemented only record who set which status. They never edit a prompt
+file, and setting another status replaces them.</p>
+{% endcall %}
+
+<h3 id="finishing">Finishing the tutorial</h3>
+{% if impersonation_banner %}
+<p><strong>Back to Help</strong> below returns to the Help overview. While an admin is viewing the
+site as someone else, finishing the tutorial is not recorded.</p>
+{% else %}
+<p><strong>Finish</strong> below records that you have taken the tutorial, stops the tutorial prompt
+on Workspace pages, and takes you to the Help overview, where the tutorials and reference pages
+stay available.</p>
+{% endif %}
+<p>More detail: <a href="{{ page_url(request, 'help_page', slug='discussions-activity', fragment='discussions') }}">Discussions</a>,
+<a href="{{ page_url(request, 'help_page', slug='discussions-activity', fragment='activity') }}">Activity</a>,
+<a href="{{ page_url(request, 'help_page', slug='discussions-activity', fragment='run-detail') }}">A run's page</a>
+and <a href="{{ page_url(request, 'help_page', slug='prompt-suggestions', fragment='generate') }}">Generating suggestions</a>.</p>
+{% include "help/_step_nav.html" %}
+{% endblock %}

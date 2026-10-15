@@ -1,0 +1,116 @@
+{% extends "help/_layout.html" %}
+{% from "help/_figure.html" import figure %}
+{% from "help/_callouts.html" import careful, note %}
+{% block help_body %}
+<p class="text-sm text-gray-600">Manager tutorial</p>
+<h1>{{ step.title }}</h1>
+<h2 id="where">Where</h2>
+<p>Workspace → <strong>PIs</strong> → any PI's name. The cards described here run down the PI's
+page below the header; reviewers do not see them.</p>
+
+<h2 id="what-you-see">What you'll see</h2>
+{{ figure(request, "pi-account-edit", "The Account card and the Edit Profile form on a PI's page.") }}
+{{ figure(request, "pi-paper-review", "The Corpus and profile review card: candidate, unanchored and excluded papers.") }}
+
+<h2 id="what-it-means">What it means</h2>
+<h3 id="account">The Account card</h3>
+<p>It shows the PI's email, ORCID, institution and department, and:</p>
+<ul>
+    <li><strong>Verified</strong> with a date, or <strong>Unverified</strong> beside the email.
+    An unverified address offers <strong>Mark verified</strong>. Blackbird sends no verification
+    email: the button records that you vouch for the address.</li>
+    <li>A <strong>Name</strong> note when the name was cleaned from its ORCID form, asking you to
+    check the spelling.</li>
+    <li><strong>Onboarding Complete</strong>: <em>Yes</em> once the PI has saved their own profile
+    in Blackbird's onboarding pages. A PI who never signed in shows <em>No</em>.</li>
+    <li><strong>Claimed At</strong>: when the PI first signed in to an account that already
+    existed (such as one Add PI created), or <em>Unclaimed</em>.</li>
+    <li><strong>Joined</strong>: when the account was created.</li>
+</ul>
+{% call careful("Careful: Mark verified") %}
+<p>Mark verified stamps the address as verified and records that you vouched for it. There is
+no button to unverify; changing the address clears the stamp.</p>
+{% endcall %}
+
+<h3 id="edit-profile">Edit Profile</h3>
+<p>The form appears once the PI has a profile; before that the page says <em>The Edit Profile form
+appears once the profile exists.</em> It holds the display name, email, institution, department,
+Research Summary, the profile's keyword lists and <strong>JHU tenure start (year)</strong>.</p>
+<p>The tenure year decides which publications ground the profile and the lab bot's publication
+list: those from that year on. It is filled in automatically from ORCID employment or the
+earliest Hopkins-affiliated paper. Leaving the field blank leaves it unchanged, and a PI whose
+year was never set is treated as full career. When no year is recorded but the last profile run
+assumed one, a note under the field names that year as provisional.</p>
+{% call careful("Careful: Save Changes") %}
+<p>Save Changes writes a new profile version and updates the persona the lab bot works from. A
+name change also renames the lab bot in the simulation, but not the Slack app's display name. A
+changed tenure year also queues a profile regeneration. Once the profile text has been edited,
+later regenerations arrive as a draft to review instead of overwriting it. To undo a save, edit
+and save again.</p>
+{% endcall %}
+
+<h3 id="regenerate">Regenerate profile and Retry profile generation</h3>
+<p><strong>Regenerate profile</strong>, at the top of the Corpus and profile review card, queues a
+new generation for any PI. It is disabled, with its reason printed under it, while a generation
+is queued or running and for a while after one finishes. <strong>Retry profile
+generation</strong> appears only in the header of a PI whose lab bot is still pending, and only
+when generation failed or produced no usable profile.</p>
+{% call careful("Careful: Regenerate and Retry") %}
+<p>Both queue a profile generation, which runs in the background and cannot be cancelled from
+the page.</p>
+{% endcall %}
+
+<h3 id="drafts">Pending draft</h3>
+<p>A regeneration of an edited profile is staged as a <strong>Pending draft</strong>, listing each
+field that differs as <em>Stored</em> and <em>Draft</em>, and marked when it failed the quality
+checks. <strong>Accept draft</strong> writes it into the profile; <strong>Discard draft</strong>
+drops it. If the profile changed after the draft was made, only Discard is offered and the card
+says <em>The profile changed since this draft was made; discard it or regenerate.</em></p>
+{% call careful("Careful: Accept or Discard draft") %}
+<p>Accept draft replaces the stored profile fields with the draft's and updates the persona.
+Discard draft deletes the draft. Neither can be undone from the page.</p>
+{% endcall %}
+
+<h3 id="papers">Candidate, unanchored and excluded papers</h3>
+<ul>
+    <li><strong>Candidate papers</strong> were found by name with no ORCID anchor.
+    <strong>Accept</strong> fetches the paper from PubMed and stores it;
+    <strong>Reject</strong> sets it aside.</li>
+    <li><strong>Unanchored papers</strong> are stored papers no ORCID anchor confirms.
+    <strong>Keep</strong> marks one as checked: the paper stays in the profile, leaves this list
+    and is no longer offered for Exclude;
+    <strong>Exclude</strong> removes it from the profile and the persona.</li>
+    <li><strong>Excluded papers</strong>, under a disclosure, list every excluded paper with
+    <strong>Restore</strong>, which brings it back.</li>
+</ul>
+{% call careful("Careful: paper decisions") %}
+<p>Accept adds the paper to the PI's corpus and updates the persona; no button removes it again.
+Reject is permanent: a rejected candidate is never offered again. Keep is permanent too: a kept
+paper is no longer offered for Exclude. Exclude takes the paper out of the profile and the
+persona; Restore undoes it.</p>
+{% endcall %}
+
+<h3 id="persona">The persona file and its revisions</h3>
+<p>The persona is the profile text the PI's lab bot works from. When the saved persona no longer
+matches what the profile would produce, or its last write failed, the card says <strong>Persona file out of date</strong> and offers
+<strong>Re-export</strong>, which writes it again. The <strong>Persona revisions</strong> card
+lists the newest revisions, newest first: when, how it was changed, by whom, and the full text
+under <em>view text</em>.</p>
+{% call careful("Careful: Re-export") %}
+<p>Re-export rewrites the persona from the current profile and records a revision. It changes
+nothing in the profile itself.</p>
+{% endcall %}
+
+<h3 id="jobs">Jobs</h3>
+<p>The <strong>Jobs</strong> table at the bottom lists the background work run for this PI: its
+type, status (Pending, Processing, Completed or Dead; a job whose attempt failed waits as Pending
+until it is retried), attempts, and when it was queued and completed. A job that failed shows the start of its error under its row.</p>
+<p>More detail: <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='account') }}">The Account card</a>,
+<a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='edit-profile') }}">Editing a profile</a>,
+<a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='paper-review') }}">Reviewing papers</a>,
+<a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='drafts') }}">Drafts</a>,
+<a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='regenerate') }}">Regenerating</a>,
+<a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='persona') }}">The persona</a> and
+<a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='jobs') }}">Jobs</a>.</p>
+{% include "help/_step_nav.html" %}
+{% endblock %}

@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% from "_profile_errors.html" import profile_error_text %}
 {% from "_tag_field.html" import profile_tag_fields %}
-{% block title %}Review Your Profile — CoPI{% endblock %}
+{% block title %}Review Your Profile — Blackbird{% endblock %}
 
 {% block content %}
 <div class="max-w-3xl mx-auto">
@@ -88,7 +88,7 @@
                 <input type="email" name="email" id="onboarding-email" required value="{{ user.email or '' }}"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
                        placeholder="you@institution.edu">
-                <p class="text-xs text-gray-600 mt-1">Required. Where CoPI sends collaboration proposals and notifications.</p>
+                <p class="text-xs text-gray-600 mt-1">Required. Where Blackbird sends collaboration proposals and notifications.</p>
             </div>
 
             <!-- Research Summary -->

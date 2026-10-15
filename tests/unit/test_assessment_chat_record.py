@@ -385,7 +385,16 @@ def test_review_blocks_name_the_reviewer_safely_and_split_off_the_comment():
     assert _blocks(record, 3)[1] == (
         "[Human review 1 of 1 — the reviewer's comment]\n> REVIEW-COMMENT-TEXT"
     )
-    assert labels[2] == "[Review status — Approved by Manny Manager]"
+    assert labels[2] == "[Approval status — Approved by Manny Manager]"
+
+
+def test_a_cleared_approval_reads_as_no_approval_decision():
+    detail = synthetic_detail()
+    detail["review_status"] = SimpleNamespace(action="cleared", actor_name="Manny Manager")
+    labels = _labels(build_chat_record(detail, tier="staff"), 3)
+    assert labels[2] == (
+        "[Approval status — No approval decision (the last approve or disapprove was cleared)]"
+    )
 
 
 def test_the_rubric_document_carries_the_review_form_scale_definitions():

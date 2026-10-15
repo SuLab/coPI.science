@@ -34,7 +34,7 @@ MUST_EXCLUDE = (
 # pattern may name or glob any of them.
 MUST_KEEP = (
     ".git", "src", "templates", "static", "prompts", "scripts", "alembic",
-    "alembic.ini", "pyproject.toml",
+    "alembic.ini", "pyproject.toml", "help_assets",
 )
 
 

@@ -22,6 +22,7 @@ def make_templates() -> Jinja2Templates:
         plain_with_citation_links,
     )
     from src.web.flash import flash_context
+    from src.web.help_pages import shot_meta
 
     # `get_flashes()` for base.html's flash block (src/web/flash.py). A context
     # processor, not a global, because it closes over the request.
@@ -46,6 +47,8 @@ def make_templates() -> Jinja2Templates:
     templates.env.globals["staff_only_verdict_fields"] = STAFF_ONLY_VERDICT_FIELDS
     templates.env.globals["band_class"] = band_class
     templates.env.globals["band_label"] = band_label
+    # help/_figure.html reads a screenshot's alt, width and height through this.
+    templates.env.globals["help_shot_meta"] = shot_meta
     from src.web.urls import page_url
 
     templates.env.globals["page_url"] = page_url

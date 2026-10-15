@@ -1,0 +1,13 @@
+{# Callouts for help content (spec §6.3 rule 7). Use with {% call careful() %}…{% endcall %}. #}
+{% macro careful(title="Careful") -%}
+<div class="help-callout my-4 rounded-md border border-amber-300 bg-amber-50 p-4 text-amber-900" role="note">
+    <p class="font-semibold">{{ title }}</p>
+    <div class="mt-1">{{ caller() }}</div>
+</div>
+{%- endmacro %}
+{% macro note(title="Note") -%}
+<div class="help-callout my-4 rounded-md border border-blue-200 bg-blue-50 p-4 text-blue-900" role="note">
+    <p class="font-semibold">{{ title }}</p>
+    <div class="mt-1">{{ caller() }}</div>
+</div>
+{%- endmacro %}

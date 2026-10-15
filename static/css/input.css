@@ -86,3 +86,21 @@ main table {
 select {
   max-width: 100%;
 }
+
+/* Help pages (templates/help/, spec 2026-10-14 §6.2): content templates are plain semantic
+   HTML inside .help-prose; Tailwind's preflight strips heading and list styles, so they are
+   restored here once instead of on every element. */
+.help-prose h1 { @apply text-2xl font-bold text-gray-900 mb-4; }
+.help-prose h2 { @apply text-xl font-semibold text-gray-900 mt-10 mb-3 scroll-mt-4; }
+.help-prose h3 { @apply text-lg font-semibold text-gray-800 mt-6 mb-2 scroll-mt-4; }
+.help-prose p { @apply text-gray-700 mb-4 leading-relaxed; }
+.help-prose ul { @apply list-disc pl-6 mb-4 space-y-1 text-gray-700; }
+.help-prose ol { @apply list-decimal pl-6 mb-4 space-y-1 text-gray-700; }
+.help-prose dt { @apply font-semibold text-gray-900 mt-4 scroll-mt-4; }
+.help-prose dd { @apply text-gray-700 mb-2; }
+/* Button-styled links (a bg-* class, e.g. the step nav's "Next step") keep their own
+   colours, as the main p a rule above does. */
+.help-prose a:not([class*="bg-"]) { @apply text-indigo-700; }
+.help-prose a:not([class*="bg-"]):hover { @apply text-indigo-900; }
+.help-prose strong { @apply font-semibold text-gray-900; }
+.help-prose .help-callout p { @apply mb-1 text-inherit; }

@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse
 
 from src.dependencies import get_review_user
+from src.web.help_intro import load_help_intro
 from src.web.urls import page_url
 
 from . import (
@@ -18,7 +19,9 @@ from . import (
     staff,
 )
 
-router = APIRouter()
+# load_help_intro sets the first-sign-in prompt's state for every workspace page; it never
+# refuses a request, so each route's own gate still decides access.
+router = APIRouter(dependencies=[Depends(load_help_intro)])
 _REVIEW = Depends(get_review_user)
 
 

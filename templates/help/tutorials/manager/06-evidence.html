@@ -1,0 +1,95 @@
+{% extends "help/_layout.html" %}
+{% from "help/_figure.html" import figure %}
+{% from "help/_callouts.html" import careful, note %}
+{% block help_body %}
+<p class="text-sm text-gray-600">Manager tutorial</p>
+<h1>{{ step.title }}</h1>
+<h2 id="where">Where</h2>
+<p>Workspace → <strong>PIs</strong> → a PI's name, then the <strong>Grants</strong>,
+<strong>Industry interest</strong> and <strong>Companies</strong> sections further down the page.
+Reviewers see these sections read-only; the controls described here are for managers and
+admins.</p>
+
+<h2 id="what-you-see">What you'll see</h2>
+{{ figure(request, "pi-grants", "The Grants section: the RePORTER identity, NIH RePORTER awards and ORCID fundings.") }}
+{{ figure(request, "pi-industry", "The Industry interest section with its score and evidence list.") }}
+{{ figure(request, "pi-companies", "The Companies section: confirmed companies, Add a company and suggestions.") }}
+
+<h2 id="what-it-means">What it means</h2>
+<h3 id="reporter-identity">The RePORTER identity</h3>
+<p>The first line of Grants says which NIH RePORTER profile is this PI's:
+<em>not evaluated yet</em>, <em>resolved</em> (found automatically), <em>pinned by staff</em>,
+<em>staff confirmed: no RePORTER profile</em>, or another state that ends <em>no RePORTER grants
+are shown</em>. Unless it is resolved, a manager sees the candidate profiles with checkboxes, a
+<strong>RePORTER profile id</strong> field, <strong>This is the PI</strong> and <strong>PI has no
+RePORTER profile</strong>. A pin or a "no profile" mark offers <strong>Unpin</strong>.</p>
+{% call careful("Careful: This is the PI, PI has no RePORTER profile, Unpin") %}
+<p>This is the PI pins the chosen RePORTER profiles; PI has no RePORTER profile shows no RePORTER
+grants for this PI. Each records a persona revision and queues a refresh of the PI's grants.
+Unpin removes the pin or the mark and lets the automatic match run again.</p>
+{% endcall %}
+
+<h3 id="grants">NIH RePORTER awards and ORCID fundings</h3>
+<p>The awards list shows each award's title, project number, activity code, fiscal years and the
+evidence that linked it to this PI. The tenure filter line says whether awards are limited to
+the organisation only (no JHU tenure start recorded) or to the organisation and fiscal years
+from the tenure start on. A line above the lists counts the active and past grants in the
+persona. The <strong>ORCID fundings</strong> list below shows the fundings on the PI's ORCID
+record. Each award or funding offers <strong>Not this PI</strong>; a vetoed one is greyed out
+and marked <em>vetoed</em>.</p>
+{% call careful("Careful: Not this PI") %}
+<p>Not this PI takes the award or funding out of the persona at once, and later refreshes keep it
+out. It cannot be undone: no button brings a vetoed grant or funding back.</p>
+{% endcall %}
+
+<h3 id="industry">Industry interest</h3>
+<p>The section shows the PI's cohort percentile, the raw score, the number of evidence rows and,
+for a manager, how each kind of evidence contributed. It may instead say <em>Not computed
+yet</em>, <em>Rescoring</em> (the scorer changed and a new score is on its way) or
+<em>Unscored</em> with the reason. A <em>partial</em> tag means some evidence sources were
+unavailable or truncated. The score is for reading only: it never enters the profile or the lab
+bot's prompts.</p>
+<p><strong>Evidence</strong> opens the list of evidence rows: company, kind, year, the PI's role
+and the source. Each row offers <strong>Not this PI / not industry</strong>.</p>
+{% call careful("Careful: Not this PI / not industry") %}
+<p>This veto removes the evidence row from the score, and the PI is rescored at once. It cannot be
+undone: no button brings a vetoed row back.</p>
+{% endcall %}
+
+<h3 id="companies">Companies</h3>
+<p>The companies the PI founded or co-founded, advises, or serves as a board member. Only
+<strong>Confirmed</strong> entries reach BlackbirdBot's profile lookup and the assessment pages; a
+suggestion reaches neither until a manager confirms it.</p>
+<ul>
+    <li><strong>Add a company</strong> takes a company name, the PI's role, optional funding in US
+    dollars with the date it was true, and a source link. An entry added by hand is confirmed at
+    once.</li>
+    <li><strong>Suggested</strong> lists what discovery found in the PI's own competing-interest
+    statements and in Wikidata, with funding from SEC Form D filings where one matched. Each
+    suggestion can be corrected (role, funding, or <strong>Clear funding</strong>) and then
+    <strong>Confirm</strong>ed, or <strong>Reject</strong>ed.</li>
+    <li><strong>Delete</strong> removes a confirmed company, after a confirmation dialog.</li>
+    <li><strong>Find companies</strong> queues discovery for this PI. While it runs the button is
+    disabled, and the line under it can say discovery is waiting for the daily extraction budget,
+    with the time it resumes.</li>
+</ul>
+{% call careful("Careful: Add company and Confirm") %}
+<p>An added or confirmed company becomes visible to BlackbirdBot and on the assessment pages
+straight away. Delete takes it back off.</p>
+{% endcall %}
+{% call careful("Careful: Reject and Delete") %}
+<p>A deleted company leaves BlackbirdBot's view at once (a suggestion never reached it). Both are
+recorded as rejected, and discovery never suggests them again; the only way back is to add the
+company by hand. Delete asks first; Reject does not.</p>
+{% endcall %}
+{% call careful("Careful: Find companies") %}
+<p>Find companies queues a discovery job in the background. Its suggestions appear on this page
+when it finishes; nothing reaches BlackbirdBot until a suggestion is confirmed.</p>
+{% endcall %}
+<p>More detail: <a href="{{ page_url(request, 'help_page', slug='pi-evidence', fragment='reporter-identity') }}">The RePORTER identity</a>,
+<a href="{{ page_url(request, 'help_page', slug='pi-evidence', fragment='grants') }}">Grants</a>,
+<a href="{{ page_url(request, 'help_page', slug='pi-evidence', fragment='orcid-fundings') }}">ORCID fundings</a>,
+<a href="{{ page_url(request, 'help_page', slug='pi-evidence', fragment='industry') }}">Industry interest</a> and
+<a href="{{ page_url(request, 'help_page', slug='pi-evidence', fragment='companies') }}">Companies</a>.</p>
+{% include "help/_step_nav.html" %}
+{% endblock %}

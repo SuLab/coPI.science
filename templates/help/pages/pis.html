@@ -1,0 +1,150 @@
+{% extends "help/_layout.html" %}
+{% from "help/_figure.html" import figure %}
+{% from "help/_callouts.html" import careful %}
+{% block help_body %}
+<h1>PIs</h1>
+<p>A PI is a principal investigator whose lab takes part in Blackbird. The
+<a href="{{ page_url(request, 'workspace_pis') }}">PIs</a> page lists them, and each PI has a
+page with their research profile, grants, industry interest, companies and publications.
+These pages give you the background to the labs behind the assessments you review. See
+<a href="{{ page_url(request, 'help_page', slug='how-it-works', fragment='pis-and-lab-agents') }}">How Blackbird works</a>
+for how PIs and their lab agents fit together.</p>
+
+<h2 id="directory">The PI directory</h2>
+<p>The directory lists PIs by name, with the total number of PIs at the top right. When the
+list runs to more than one page, <strong>← Prev</strong> and <strong>Next →</strong> at the
+bottom move between pages. Click a PI's name, or anywhere on their row, to open their
+page.</p>
+{{ figure(request, "pis-list-reviewer", "The PI directory as a reviewer sees it.") }}
+<p>The columns everyone sees:</p>
+<dl>
+    <dt>Name</dt>
+    <dd>The PI's name, with their department under it when it is recorded.</dd>
+    <dt>Institution</dt>
+    <dd>The PI's institution, or a dash.</dd>
+    <dt>ORCID</dt>
+    <dd>The PI's ORCID iD, which opens their ORCID record in a new tab.</dd>
+    <dt>Pubs (tenure)</dt>
+    <dd>How many of the PI's publications fall inside their JHU tenure window. When no JHU
+    tenure start is recorded, the column counts the whole career and says <strong>full
+    career</strong>. Publications with no recorded year cannot be placed in the window, so
+    they are left out of the count, and the column notes how many are undated.</dd>
+    <dt>Industry interest</dt>
+    <dd>The PI's industry-interest cohort percentile: how their industry evidence ranks
+    against the other scored PIs. A dash means there is no score to show.</dd>
+</dl>
+<p>On a narrow screen some of these columns are hidden; open a PI's page to see
+everything.</p>
+{% if permissions.staff %}
+<h3>What managers and admins also see</h3>
+<p>Staff get more columns:</p>
+<ul>
+    <li><strong>Status</strong>: the profile status, <strong>No Profile</strong>,
+    <strong>Generating</strong>, <strong>Complete</strong> or <strong>Pending draft</strong>.
+    See <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='profile-status') }}">Profile status</a>.</li>
+    <li><strong>Agent</strong>: the lab agent's status, <strong>Not requested</strong>,
+    <strong>Pending</strong>, <strong>Active</strong>, <strong>Muted</strong> or
+    <strong>Suspended</strong>.</li>
+    <li><strong>Version</strong>: the profile version.</li>
+    <li><strong>Claimed</strong>: the date a sign-in claimed the account, or "No". A PI added
+    by a manager claims it at their first sign-in; a PI who created their own account by
+    signing in, at their second.</li>
+    <li><strong>Joined</strong> and <strong>Last Login</strong>.</li>
+</ul>
+<p>In the <strong>Industry interest</strong> column, staff also see why a PI has no
+percentile ("rescoring" or "unscored"), and "partial" when some evidence sources were
+unavailable.</p>
+<p>The filter bar above the table has <strong>Profile Status</strong> and
+<strong>Claimed</strong> (Claimed or Unclaimed) menus; press <strong>Apply</strong>.</p>
+{% call careful() %}
+<p><strong>Add PI</strong> at once creates the PI's account, starts profile generation and
+creates a pending lab bot. Nothing in the Workspace undoes it.</p>
+{% endcall %}
+<p>The <strong>Add a PI by ORCID iD</strong> form at the top adds a PI and creates their lab
+bot. Read <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='add-pi') }}">Adding a PI</a>
+before using it. To add a manager or reviewer instead, use the
+<a href="{{ page_url(request, 'workspace_staff') }}">Staff</a> page.</p>
+{% endif %}
+
+<h2 id="detail">A PI's page</h2>
+<p><strong>← All PIs</strong> at the top returns to the directory. The page shows these
+sections.</p>
+{{ figure(request, "pi-detail-reviewer", "The top of a PI's page as a reviewer sees it: Details, Research Profile and the start of Grants.") }}
+<dl>
+    <dt>Details</dt>
+    <dd>The PI's <strong>Keywords</strong> and <strong>JHU tenure start</strong>. A year marked
+    "provisional" was inferred from an incomplete record and has not been confirmed.</dd>
+    <dt>Research Profile</dt>
+    <dd>Shown once the PI's profile has been generated. It has the profile's version, the
+    research summary, and the <strong>Techniques</strong>, <strong>Disease Areas</strong>,
+    <strong>Model Systems</strong> and <strong>Key Targets</strong> it lists.</dd>
+    <dt>Grants</dt>
+    <dd>
+        <p>The <strong>RePORTER identity</strong> line says whether the PI's NIH RePORTER profile
+        has been identified: "resolved", "pinned by staff", "staff confirmed: no RePORTER
+        profile", "not evaluated yet", or another state with "no RePORTER grants are shown".
+        The line under it says how many active and past grants the lab agent's description of
+        the PI includes. Past grants are not shown when no JHU tenure start is recorded.</p>
+        <p><strong>NIH RePORTER awards</strong> lists each award's title, project number,
+        activity code and fiscal years, and how it was linked to this PI.
+        <strong>ORCID fundings</strong> lists the funding the PI's ORCID record shows. A greyed
+        entry marked "vetoed" was ruled out by staff and is kept out of the lab agent's
+        description.</p>
+    </dd>
+    <dt>Industry interest</dt>
+    <dd>The PI's <strong>cohort percentile</strong>, the raw score behind it and how many
+    evidence rows it counts, or "No score available." <strong>Evidence</strong> opens the list
+    of industry evidence: the company, the kind of tie, the year, the PI's role and the
+    source, with the quoted text where there is one. Greyed entries marked "vetoed" were ruled
+    out by staff.</dd>
+    <dt>Companies</dt>
+    <dd>Companies the PI founded or co-founded, advises, or serves on the board of, as
+    confirmed by staff. Each entry shows the PI's role, whether it was added by hand or
+    discovered, when it was confirmed, any funding figure, and links to its
+    <strong>Source</strong>. Confirmed companies reach BlackbirdBot's profile lookup and also
+    appear on the assessment pages.</dd>
+    <dt>Publications</dt>
+    <dd>The PI's publications inside their JHU tenure window. The heading says the year the
+    window starts, or "full career — no JHU tenure start recorded". Each publication shows its
+    journal, year, whether its methods text was found ("Methods ✓" or "No methods"), and a
+    <strong>PubMed</strong> link where there is one. Undated publications are excluded and
+    counted under the heading. Publications from before the tenure window are not listed
+    anywhere.</dd>
+</dl>
+{% if permissions.staff %}
+<h3>The manager-only parts of a PI's page</h3>
+<p>Managers and admins see the same sections with controls added, and these extra cards:</p>
+<ul>
+    <li>the lab agent's status and its button in the page header (<strong>Install Slack
+    bot</strong>, <strong>Activate agent</strong>, <strong>Mute</strong> or
+    <strong>Unmute</strong>): see
+    <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='slack-bot') }}">Installing the Slack bot</a>,
+    <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='activation') }}">Activation</a> and
+    <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='mute') }}">Muting</a>;</li>
+    <li>the <strong>Account</strong> card: see
+    <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='account') }}">The Account card</a>;</li>
+    <li><strong>Edit Profile</strong>, which replaces the Details card once a profile exists:
+    see <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='edit-profile') }}">Editing a profile</a>;</li>
+    <li><strong>Corpus and profile review</strong>, with the pending draft and the candidate,
+    unanchored and excluded papers: see
+    <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='paper-review') }}">Reviewing papers</a> and
+    <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='drafts') }}">Drafts</a>;</li>
+    <li><strong>Retry profile generation</strong>, when generation needs another try: see
+    <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='regenerate') }}">Regenerating a profile</a>;</li>
+    <li><strong>Persona revisions</strong>: see
+    <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='persona') }}">The persona</a>;</li>
+    <li>the RePORTER identity controls and the <strong>Not this PI</strong> vetoes under
+    Grants: see
+    <a href="{{ page_url(request, 'help_page', slug='pi-evidence', fragment='reporter-identity') }}">RePORTER identity</a>,
+    <a href="{{ page_url(request, 'help_page', slug='pi-evidence', fragment='grants') }}">Grants</a> and
+    <a href="{{ page_url(request, 'help_page', slug='pi-evidence', fragment='orcid-fundings') }}">ORCID fundings</a>;</li>
+    <li>the industry score's details and the evidence veto: see
+    <a href="{{ page_url(request, 'help_page', slug='pi-evidence', fragment='industry') }}">Industry interest</a>;</li>
+    <li>suggested companies, <strong>Add a company</strong>, <strong>Delete</strong> and
+    <strong>Find companies</strong>: see
+    <a href="{{ page_url(request, 'help_page', slug='pi-evidence', fragment='companies') }}">Companies</a>;</li>
+    <li>the <strong>Jobs</strong> table: see
+    <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='jobs') }}">Jobs</a>.</li>
+</ul>
+{% endif %}
+{% endblock %}

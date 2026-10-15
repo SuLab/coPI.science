@@ -18,6 +18,9 @@ def page_context(request, viewer, *, active_page="workspace", section="", **cont
         "active_page": active_page,
         "active_section": section,
         "role_descriptions": ROLE_DESCRIPTIONS,
+        # The first-sign-in prompt's tutorial key, set by src/web/help_intro.py on
+        # workspace GETs; None everywhere else.
+        "help_intro": getattr(request.state, "help_intro", None),
         **content,
     }
 

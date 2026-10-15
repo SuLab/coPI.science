@@ -123,6 +123,9 @@ PAGES: dict[str, Callable[[GateWorld], str]] = {
     "/profile/delete-account": lambda w: "/profile/delete-account",
     "/profile/edit": lambda w: "/profile/edit",
     "/settings": lambda w: "/settings",
+    "/help": lambda w: "/help",
+    "/help/{slug}": lambda w: "/help/assessments",
+    "/help/tutorials/{tutorial}/{step}": lambda w: "/help/tutorials/reviewer/1",
 }
 
 SKIPPED: dict[str, str] = {
@@ -135,6 +138,8 @@ SKIPPED: dict[str, str] = {
     "/assessment-chat/{assessment_id}": "JSON for static/js/assessment_chat.js",
     "/api/health": "JSON health probe",
     "/admin/activity/{run_id}/llm-calls/{call_id}/bodies": "HTML fragment for the llm_calls page; no layout",
+    "/help/tutorials/{tutorial}": "redirects to step 1",
+    "/help/shots/{shot_id}.png": "PNG image, renders no HTML page",
 }
 
 #: Walked (any HTML they return is still checked) but expected to answer every role with a

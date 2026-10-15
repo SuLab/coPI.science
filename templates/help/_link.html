@@ -1,0 +1,8 @@
+{# help_link(request, viewer, slug, anchor): the "Help with this page" link in a page header
+   (spec §6.6). Renders only for the roles that can open Help. #}
+{% macro help_link(request, viewer, slug, anchor="") -%}
+{%- if viewer and (viewer.is_staff or viewer.is_reviewer) -%}
+<a href="{{ page_url(request, 'help_page', slug=slug, fragment=anchor) }}"
+   class="text-sm text-indigo-700 hover:text-indigo-900 whitespace-nowrap"><span aria-hidden="true">?</span> Help with this page</a>
+{%- endif -%}
+{%- endmacro %}

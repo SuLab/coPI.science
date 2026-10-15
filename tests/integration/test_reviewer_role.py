@@ -436,9 +436,10 @@ async def test_admin_impersonating_a_reviewer_sees_no_staff_forms(client, db_ses
 
     pis_body = (await client.get("/workspace/pis", headers=headers)).text
     assert pis_body  # sanity: the page actually rendered (200, not a redirect body)
-    # The Add-PI write form; the GET filter form (FN-04 Apply button) is a read.
+    # Neither the Add-PI write form nor the GET filter form: the filter form has only
+    # staff controls, so it renders for staff alone (spec 2026-10-14 §7.3).
     assert '<form method="post" action="/workspace/pis"' not in pis_body
-    assert '<form method="get" action="/workspace/pis"' in pis_body
+    assert '<form method="get" action="/workspace/pis"' not in pis_body
 
     detail_body = (await client.get(f"/workspace/pis/{pi.id}", headers=headers)).text
     assert 'action="/workspace/pis/' not in detail_body

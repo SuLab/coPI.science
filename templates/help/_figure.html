@@ -1,0 +1,11 @@
+{# figure(request, shot_id, caption): one screenshot from help_assets/shots (spec §6.2, §8.3).
+   `request` is passed explicitly: an imported macro does not see the caller's context. #}
+{% macro figure(request, shot_id, caption) -%}
+{%- set meta = help_shot_meta(shot_id) -%}
+<figure class="my-6">
+    <img src="{{ page_url(request, 'help_shot', shot_id=shot_id) }}" alt="{{ meta.alt }}"
+         width="{{ meta.width }}" height="{{ meta.height }}" loading="lazy"
+         class="max-w-full h-auto rounded border border-gray-200 shadow-sm">
+    <figcaption class="mt-2 text-sm text-gray-600">{{ caption }}</figcaption>
+</figure>
+{%- endmacro %}

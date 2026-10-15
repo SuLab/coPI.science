@@ -1,14 +1,18 @@
 {% extends "base.html" %}
 {% from "pis/_bot_action.html" import pi_bot_action %}
-{% block title %}Workspace — Slack Bots — CoPI{% endblock %}
+{% from "help/_link.html" import help_link %}
+{% block title %}Workspace — Slack Bots — Blackbird{% endblock %}
 
 {% block content %}
 <div class="flex items-center justify-between mb-2">
     <h1 class="text-2xl font-bold text-gray-900">Slack Bots</h1>
-    <span class="text-sm text-gray-500">
-        {{ counts.active }} active · {{ counts.pending }} pending · {{ counts.inactive }} muted
-        {%- if counts.other %} · {{ counts.other }} other{% endif %}
-    </span>
+    <div class="flex items-center gap-4">
+        {{ help_link(request, effective_user, 'managing-pis', 'slack-bots') }}
+        <span class="text-sm text-gray-500">
+            {{ counts.active }} active · {{ counts.pending }} pending · {{ counts.inactive }} muted
+            {%- if counts.other %} · {{ counts.other }} other{% endif %}
+        </span>
+    </div>
 </div>
 <p class="text-sm text-gray-500 mb-6">
     Every PI lab bot and where it is in Slack onboarding. A new PI (added on the
@@ -42,13 +46,13 @@
                 <td class="px-4 py-3 text-sm text-gray-700">{{ agent.bot_name }} <span class="text-xs text-gray-600">{{ agent.agent_id }}</span></td>
                 <td class="px-4 py-3 text-sm">
                     {% if agent.status == 'active' %}
-                        <span class="px-2 py-0.5 rounded text-xs bg-green-100 text-green-800">active</span>
+                        <span class="px-2 py-0.5 rounded text-xs bg-green-100 text-green-800">Active</span>
                     {% elif agent.status == 'pending' %}
-                        <span class="px-2 py-0.5 rounded text-xs bg-yellow-100 text-yellow-800">pending</span>
+                        <span class="px-2 py-0.5 rounded text-xs bg-yellow-100 text-yellow-800">Pending</span>
                     {% elif agent.status == 'inactive' %}
-                        <span class="px-2 py-0.5 rounded text-xs bg-gray-200 text-gray-700">muted</span>
+                        <span class="px-2 py-0.5 rounded text-xs bg-gray-200 text-gray-700">Muted</span>
                     {% else %}
-                        <span class="px-2 py-0.5 rounded text-xs bg-red-100 text-red-800">{{ agent.status }}</span>
+                        <span class="px-2 py-0.5 rounded text-xs bg-red-100 text-red-800">{{ agent.status | title }}</span>
                     {% endif %}
                 </td>
                 <td class="px-4 py-3 text-sm">

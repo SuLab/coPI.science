@@ -1,0 +1,138 @@
+{% extends "help/_layout.html" %}
+{% from "help/_figure.html" import figure %}
+{% from "help/_callouts.html" import careful, note %}
+{% block help_body %}
+<h1>Prompt suggestions</h1>
+<p>
+    The <a href="{{ page_url(request, 'workspace_prompt_suggestions') }}">Prompt Suggestions</a>
+    page in the Workspace holds suggested changes to the prompts the simulation's bots work
+    from. A bot drafts each suggestion from reviewers' feedback; people decide what, if
+    anything, to do with it. Reviewers cannot see this page.
+</p>
+
+<h2 id="what-they-are">What suggestions are</h2>
+<p>
+    When a reviewer records feedback on an assessment and chooses <strong>Learn</strong>, that
+    feedback becomes eligible for analysis (see
+    <a href="{{ page_url(request, 'help_page', slug='assessments', fragment='reviewing') }}">Recording a review</a>).
+    Feedback marked "Don't learn — log only" never is. Choosing Learn does not create a
+    suggestion by itself: suggestions are made only when a manager or admin presses the
+    generate button described below.
+</p>
+<p>
+    Each analysis reads the eligible feedback on one assessment, together with the interview
+    and the current prompt files, and drafts one or more suggestions. Each suggestion names a
+    <strong>Target</strong>, the prompt it is about, shown as <code>scout_hub</code> (BlackbirdBot,
+    the hub), <code>pi_lab</code> (the lab agents), <code>specialist:</code> followed by a
+    specialist's domain, <code>rubric</code>, or <code>out_of_scope</code>.
+    <code>out_of_scope</code> means the analysis found
+    nothing in the prompts or rubric it could fix, or its reply could not be read; the
+    suggestion's page then still shows what the model said.
+</p>
+{% call note() %}
+<p>
+    Nothing ever edits a prompt file automatically. A suggestion is text for people to read;
+    changing a prompt is a separate, deliberate step outside Blackbird's pages.
+</p>
+{% endcall %}
+{{ figure(request, "prompt-suggestions", "The Prompt Suggestions page: the generate button, the status filter and the list of suggestions.") }}
+<p>
+    The list shows each suggestion's <strong>Created</strong> time, <strong>Subject</strong>
+    (the assessment it came from; click it to open the suggestion), <strong>Target</strong> and
+    <strong>Status</strong>, newest first. Use the <strong>Status:</strong> selector
+    (<strong>All</strong>, <strong>Open</strong>, <strong>Dismissed</strong>,
+    <strong>Implemented</strong>) and <strong>Apply</strong> to narrow it. When there are more
+    suggestions than the page displays, a line above the list says so; narrow by status to
+    reach the rest. "(assessment no longer available)" means the assessment the suggestion came
+    from has since been removed; the suggestion itself is kept.
+</p>
+
+<h2 id="generate">Generating suggestions</h2>
+<p>
+    Press <strong>Generate suggestions from current reviews</strong> at the top of the page.
+    The line under the button says how many assessments have review feedback marked Learn
+    that no suggestion has consumed yet. When there is none it reads "Nothing to analyse" and
+    the button is disabled.
+</p>
+<ul>
+    <li>
+        One press queues analysis for a limited number of assessments, those with the oldest
+        feedback first. When more are waiting, the line under the button says how many one
+        press analyses; press again for the rest.
+    </li>
+    <li>
+        The analyses run in the background. After a press, the page says how many of the
+        eligible assessments it queued; refresh it after a minute to see new suggestions. An
+        assessment already queued for analysis is skipped, so pressing again while earlier
+        work is waiting queues nothing twice.
+    </li>
+    <li>
+        Once an analysis has used a piece of feedback, that feedback no longer counts as
+        waiting. If the reviewer later edits it, it becomes eligible again.
+    </li>
+    {% if permissions.admin %}<li>
+        While an admin is viewing the site as someone else, the button is not shown.
+    </li>{% endif %}
+</ul>
+{% call careful() %}
+<p>
+    Each press starts real model work on the queued assessments, which costs money and
+    cannot be cancelled from the page. It never changes a prompt file.
+</p>
+{% endcall %}
+
+<h2 id="status">Status: Open, Dismissed, Implemented</h2>
+<p>
+    Every suggestion starts as <strong>Open</strong>. On a suggestion's page, the buttons
+    <strong>Reopen</strong> (back to Open), <strong>Dismiss</strong> and
+    <strong>Mark Implemented</strong> set its status. Next to them the page shows who last set the status and
+    when.
+</p>
+<p>
+    The status is a record for people only: it says what someone decided about the
+    suggestion. Marking a suggestion Implemented does not apply it, and Dismiss does not
+    delete it. Use Mark Implemented once the change has actually been made to the prompts.
+</p>
+{% call careful() %}
+<p>
+    Setting a status records your name and the time on the suggestion, for everyone with
+    access to this page to see. Any status can be changed again with another button.
+</p>
+{% endcall %}
+
+<h2 id="detail">A suggestion's page</h2>
+<p>
+    Click a suggestion's Subject to open it. Its heading is the assessment it came from, and
+    the line under it gives the Target, the model that drafted it, when it was created and,
+    when recorded, the rubric version. These warnings can appear there: "no interview
+    transcript" (the interview could not be found, so the analysis worked without it) and
+    "input truncated" (the interview was too long, so the analysis read only part of it).
+</p>
+{{ figure(request, "prompt-suggestion-detail", "A suggestion's page: the status buttons, the suggested change and where it came from.") }}
+<ul>
+    <li>
+        <strong>Suggested Change</strong>: the drafted change, in the bot's words. Open
+        <strong>Raw model response</strong> to see the full reply it came from.
+    </li>
+    <li>
+        <strong>Distilled From</strong>: the review feedback the suggestion was drafted from,
+        one row per piece of feedback, with the Reviewer, the overall Score (out of 5), the
+        Mode, the Comment and When it was first written.
+    </li>
+    <li>
+        <strong>Prompt Files Read</strong>: every prompt file the analysis read, each with a
+        badge comparing it with the file as it is now:
+        <ul>
+            <li><strong>current</strong>: the file is unchanged since the suggestion was drafted;</li>
+            <li>
+                <strong>STALE</strong>: the file has changed since then, so the suggestion may
+                describe text that is no longer there. Read it against the current file;
+            </li>
+            <li>
+                <strong>file missing</strong>: the file no longer exists, or the analysis
+                could not read it at the time.
+            </li>
+        </ul>
+    </li>
+</ul>
+{% endblock %}

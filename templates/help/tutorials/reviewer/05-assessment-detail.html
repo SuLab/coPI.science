@@ -1,0 +1,105 @@
+{% extends "help/_layout.html" %}
+{% from "help/_figure.html" import figure %}
+{% from "help/_callouts.html" import careful, note %}
+{% block help_body %}
+<p class="text-sm text-gray-600">Reviewer tutorial</p>
+<h1>{{ step.title }}</h1>
+
+<h2 id="where">Where</h2>
+<p><strong>Workspace → Assessments</strong>, then <strong>detail →</strong> on any card. The
+page is headed <strong>Assessment detail</strong>, and
+<strong>← Opportunity Assessments</strong> takes you back to the list with your filters
+kept. "Open this page" below opens the list; open any card's detail from there.</p>
+
+<h2 id="what-you-see">What you'll see</h2>
+{{ figure(request, "detail-brief", "The brief: headline, In one minute, Why this score and Key points.") }}
+{{ figure(request, "detail-panel-gating", "The row of section links with Expand all and Collapse all, the specialist panel banner and the Gating criteria section opened.") }}
+{{ figure(request, "detail-timeline", "The Interview timeline opened: the thread's messages with specialist consult cards between them.") }}
+
+<h2 id="what-it-means">What it means</h2>
+<p>The detail page holds everything stored for one verdict. A row of links (Brief,
+Evidence, Panel, Gating, Scores, Review, Timeline, plus Ask and Rationale when the verdict has
+them) stays at the top as you scroll and jumps to each section.
+<strong>Expand all</strong> and <strong>Collapse all</strong> open or close every collapsed
+section at once. The sections, in page order:</p>
+
+<h3>Brief</h3>
+<p>The headline with the hub's confidence, then <strong>In one minute</strong> and
+<strong>Key points</strong> side by side, and <strong>Why this score</strong> when the hub
+wrote one. When a manager has confirmed companies for the PI, they are listed as
+<strong>Companies (staff-confirmed)</strong>, with the date the list was taken from. The brief
+is BlackbirdBot's own summary of the verdict, not an independent account.</p>
+
+<h3>Evidence summary</h3>
+<p>The stored verdict sorted into <strong>Strengths</strong>, <strong>Risks</strong>,
+<strong>Mid-scale</strong> (dimensions that are neither) and <strong>Not established</strong>.
+Inside each, rows are grouped by where they come from: dimension scores, gating criteria,
+red flags and specialist consults. A "Hub's reason:" line is the hub's own reason; a
+"Rubric definition:" line is the rubric's text, shown when the hub gave no reason.
+<strong>show</strong> opens a row's quoted text.</p>
+{% if permissions.staff %}
+<p>As staff, you also see <strong>In the hub's words</strong>,
+<strong>Competitive landscape</strong> and <strong>Evidence maturity</strong> here. Reviewers
+do not see them.</p>
+{% endif %}
+
+<h3>The ask</h3>
+<p>The next experiment the hub recommends, when it recorded one. <strong>Show the full
+plan</strong> opens the rest.</p>
+
+<h3>Verdict</h3>
+<p>The lab, the agent that screened it, the date and the Slack channel. On the right, the
+<strong>Hub recommendation</strong> and the <strong>Score and band</strong>, which the app
+computes rather than takes from the model, with that revision's band lines. A line below
+names the rubric revision that scored the verdict. Scores from different revisions are not
+directly comparable.</p>
+
+<h3>Specialist panel</h3>
+<p>A banner that is always open. It reads <strong>Specialist panel: no gap recorded</strong>,
+<strong>Specialist panel incomplete</strong> (with the domains never consulted),
+<strong>Specialist panel unverified</strong>, <strong>Specialist panel: not required</strong>
+or <strong>Specialist panel: not recorded</strong>, with a sentence saying what that state
+means. Only "no gap recorded" says that nothing the verdict needed from a specialist was left
+unconsulted. Chips below summarise each domain's signals. "No gap recorded" is only about
+coverage: it says nothing about what the specialists found. A consulted specialist can still
+signal gap or blocking, as the domain chips below the banner show.</p>
+
+<h3>Gating criteria</h3>
+<p>Closed at first. Each gate shows met, not met or unconfirmed, the rubric's definition
+where it is known and, when recorded, the hub's reason. "Not met" (asked and failed) and "unconfirmed" (never asked)
+are different answers; only the first can justify discounting an idea.</p>
+
+<h3>Red flags</h3>
+<p>Always open, because these are warnings. "None recorded." when there are none.</p>
+
+<h3>Full rationale</h3>
+<p>The hub's full reasoning, when it wrote one. Read it before you score.</p>
+
+<h3>Dimension scores</h3>
+<p>One bar per rubric dimension, in the order the rubric lists them, with the weight beside it and the
+hub's one-sentence reason below when it gave one. An unscored dimension says "not scored"
+and counts as zero in the weighted score.</p>
+
+<h3>Human review</h3>
+<p>Where feedback is recorded. The step on recording your review covers it.</p>
+
+<h3>Interview timeline</h3>
+<p>Closed at first. The Slack thread the verdict came from, with the specialist panel's
+consults placed between the messages. The message that <strong>carried this verdict</strong>
+is marked. Long messages are cut short; <strong>Show full message</strong> shows the rest.
+Each consult card shows the domain, its signal, the number of concerns, the question asked,
+the concerns, and the questions the specialist suggests asking the PI. A <strong>reply cut
+off</strong> chip means the specialist's reply stopped before it finished. If the thread is
+not stored, the section says the messages are unavailable; everything above it is
+unaffected.</p>
+
+<h3>Printing</h3>
+<p>When you print the page from your browser, every collapsed section opens first, so the
+printout is complete.</p>
+
+<p>More detail:
+<a href="{{ page_url(request, 'help_page', slug='assessments', fragment='detail') }}">The detail page</a>,
+and <a href="{{ page_url(request, 'help_page', slug='how-it-works', fragment='specialist-panel') }}">The specialist panel</a>.</p>
+
+{% include "help/_step_nav.html" %}
+{% endblock %}

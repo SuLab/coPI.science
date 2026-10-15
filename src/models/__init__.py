@@ -46,6 +46,7 @@ from src.models.enrichment import (
     PiIndustryScore,
     PiOrcidFunding,
 )
+from src.models.help import HelpIntroDismissal
 from src.models.job import Job
 from src.models.microsoft_identity import UserMicrosoftIdentity
 from src.models.opportunity import AssessmentDrop, OpportunityAssessment
@@ -145,4 +146,5 @@ __all__ = [
     "AssessmentChatSuggestionSet",
     "AssessmentChatOpen",
     "RubricDocument",
+    "HelpIntroDismissal",
 ]

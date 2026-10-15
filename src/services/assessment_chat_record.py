@@ -735,14 +735,14 @@ def _reviews_doc(detail: dict[str, Any]) -> _Doc:
         action = getattr(status, "action", None)
         actor = _label_safe(getattr(status, "actor_name", None)) or "an unnamed user"
         if action == "cleared":
-            text = "Unreviewed (the last approve or disapprove was cleared)"
+            text = "No approval decision (the last approve or disapprove was cleared)"
         elif action == "approved":
             text = f"Approved by {actor}"
         elif action == "disapproved":
             text = f"Disapproved by {actor}"
         else:
             text = f"unknown status action {_label_safe(action)} by {actor}"
-        doc.add(f"Review status — {text}", anchor="review")
+        doc.add(f"Approval status — {text}", anchor="review")
     if not reviews:
         doc.add(
             "No reviews — no human reviews have been recorded for this assessment",

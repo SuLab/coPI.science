@@ -1,0 +1,59 @@
+{% extends "help/_layout.html" %}
+{% from "help/_figure.html" import figure %}
+{% from "help/_callouts.html" import careful, note %}
+{% block help_body %}
+<p class="text-sm text-gray-600">Reviewer tutorial</p>
+<h1>{{ step.title }}</h1>
+
+<h2 id="where">Where</h2>
+<p>The top bar, on every page, and <strong>Workspace → Assessments</strong>, where you land
+after signing in.</p>
+
+<h2 id="what-you-see">What you'll see</h2>
+{{ figure(request, "topbar-help", "The top bar: Settings, Workspace and Help on the left, your name and Sign out on the right.") }}
+{{ figure(request, "intro-prompt", "The “New to Blackbird?” box at the top of a Workspace page, with “Start the tutorial” and “Don't show again”.") }}
+
+<h2 id="what-it-means">What it means</h2>
+
+<h3>Signing in</h3>
+<p>Sign in with ORCID, using the ORCID iD your account was created with. If you opened a
+link to a page before signing in, that page opens once you are signed in. Otherwise you
+land on the <strong>Assessments</strong> list.</p>
+{% if microsoft_sign_in %}
+<p>You can also add your organisation's Microsoft account as a second way to sign in. You
+link it in <strong>Settings</strong>, under <strong>Microsoft sign-in</strong>, after
+confirming it's you by signing in with ORCID again. Your first sign-in is always with ORCID,
+and ORCID keeps working after you link. <strong>Unlink Microsoft account</strong> signs you
+out everywhere. See
+<a href="{{ page_url(request, 'help_page', slug='getting-started', fragment='microsoft') }}">Microsoft sign-in</a>.</p>
+{% endif %}
+
+<h3>Finding your way</h3>
+<ul>
+    <li><strong>Settings</strong> holds your own account options, including
+    <strong>Delete account</strong>{% if microsoft_sign_in %} and Microsoft sign-in{% endif %}.</li>
+    <li><strong>Workspace</strong> opens the pages you work in. Its row of tabs shows
+    <strong>PIs</strong> and <strong>Assessments</strong>.</li>
+    <li><strong>Help</strong> holds this tutorial, the reference pages, a Glossary and
+    Troubleshooting.</li>
+    <li><strong>Sign out</strong> signs you out on every device, not only this browser.</li>
+</ul>
+<p>Workspace pages also have a <strong>Help with this page</strong> link in their header. It
+opens the part of the reference that explains that page.</p>
+
+<h3>The "New to Blackbird?" box</h3>
+<p>Until you answer it, a box at the top of each Workspace page offers this tutorial.
+<strong>Start the tutorial</strong> opens the first step and records nothing, so the box keeps
+appearing. <strong>Don't show again</strong> hides it for good and leaves you on the page you
+were reading. Pressing <strong>Finish</strong> on this tutorial's last step hides it too. The
+tutorials stay under Help either way.</p>
+
+<p>More detail:
+<a href="{{ page_url(request, 'help_page', slug='getting-started', fragment='signing-in') }}">Signing in</a>,
+<a href="{{ page_url(request, 'help_page', slug='getting-started', fragment='first-sign-in') }}">Your first sign-in</a>,
+<a href="{{ page_url(request, 'help_page', slug='getting-started', fragment='navigation') }}">Finding your way around</a>,
+<a href="{{ page_url(request, 'help_page', slug='getting-started', fragment='settings') }}">Settings</a> and
+<a href="{{ page_url(request, 'help_page', slug='getting-started', fragment='signing-out') }}">Signing out</a>.</p>
+
+{% include "help/_step_nav.html" %}
+{% endblock %}

@@ -1,0 +1,172 @@
+{% extends "help/_layout.html" %}
+{% from "help/_figure.html" import figure %}
+{% from "help/_callouts.html" import note %}
+{% block help_body %}
+<h1>Discussions and Activity</h1>
+<p>
+    The Discussions and Activity pages show what the simulation did. <strong>Discussions</strong> lists the
+    conversation threads the lab agents and BlackbirdBot posted in Slack, how each ended, and
+    what the specialist panel said about it. <strong>Activity</strong> lists the simulation
+    runs with their message counts. Both pages are read-only: nothing on them changes the
+    simulation. Only an admin can start or stop a simulation run.
+</p>
+
+<h2 id="discussions">Discussions</h2>
+<p>
+    Open <a href="{{ page_url(request, 'workspace_discussions') }}">Discussions</a> from the
+    Workspace. If no simulation run exists yet, the page says "No simulation runs found."
+</p>
+{{ figure(request, "discussions", "The Discussions page: run selector, status cards, filters and the threads table.") }}
+
+<h3>Choosing a run</h3>
+<p>
+    The <strong>Run:</strong> selector at the top lists each run by its start time and status,
+    plus <strong>All Runs</strong>. Pick one and press <strong>Apply</strong>. With no choice
+    made, the page shows the newest run. If all runs together hold too many threads to list,
+    the page asks you to choose a single run.
+</p>
+
+<h3>Status cards</h3>
+<p>
+    The status cards count the run's threads by status. The counts cover the whole run, before any
+    filter. Clicking a card lists only threads with that status; clicking it again clears the
+    choice.
+</p>
+<ul>
+    <li><strong>No Replies</strong>: a thread that was started but got no reply.</li>
+    <li><strong>Active</strong>: a thread with replies and no recorded outcome yet.</li>
+    <li><strong>Proposal</strong>: the thread ended with a proposal.</li>
+    <li><strong>No Proposal</strong>: the thread ended without one.</li>
+    <li><strong>Timeout</strong>: the thread was closed because it reached its message limit.</li>
+</ul>
+<p>
+    A thread's status comes from its latest recorded outcome. A thread can also show
+    <strong>abandoned</strong>, which has no card: the simulation gave up on that interview,
+    for example after repeated empty replies, and it carries no verdict. It is not offered in
+    the Status filter.
+</p>
+
+<h3>Filters</h3>
+<p>
+    Below the cards you can narrow the list by channel (<strong>All Channels</strong>), by
+    status (<strong>All Statuses</strong>) and by agent. In the agent list, hold Ctrl (or Cmd on
+    a Mac) to pick several agents. An agent matches a thread it started, replied to, or that
+    ended with it on either side of its outcome. Press <strong>Filter</strong> to apply, or
+    <strong>Clear</strong> to remove every filter.
+</p>
+
+<h3>The threads table</h3>
+<p>Each row is one thread:</p>
+<ul>
+    <li><strong>Status</strong>: as on the cards.</li>
+    <li>
+        <strong>Channel</strong>: the Slack channel. When specialists were consulted about the
+        thread, a "panel:" line lists each specialist's domain with its signal (see below).
+    </li>
+    <li><strong>Posted By</strong>: the bot that started the thread.</li>
+    <li><strong>Replies</strong>: how many replies it got.</li>
+    <li><strong>Replier</strong>: the other bot in the conversation, or "—".</li>
+    <li><strong>Outcome</strong>: how it ended and when, or "—" while it has no outcome.</li>
+    <li><strong>Date/Time</strong>: when the thread started.</li>
+</ul>
+<p>
+    A row with more to show can be expanded: click the row, or its status badge, to open it,
+    and again to close it. The expanded row shows the written summary of the outcome, when
+    there is one, and the specialist panel's cards. When a run has many threads, the list is
+    split into pages, with <strong>Prev</strong> and <strong>Next</strong> links below it.
+</p>
+
+<h3>Specialist panel cards</h3>
+<p>
+    The expanded row lists every specialist consulted about the thread under
+    <strong>Specialist panel</strong>, one card per consult. See
+    <a href="{{ page_url(request, 'help_page', slug='how-it-works', fragment='specialist-panel') }}">the specialist panel</a>
+    for what the panel is. Each card shows:
+</p>
+<ul>
+    <li>the specialist's domain ("panel · …");</li>
+    <li>
+        its <strong>signal</strong>: <strong>blocking</strong> (red), <strong>gap</strong>
+        (amber) or <strong>adequate</strong> (green). Older consults may show
+        <strong>caution</strong> or <strong>clear</strong>, the words used before the current
+        ones. <strong>adequate</strong> means the work meets the bar for its stage, not that
+        nothing was raised;
+    </li>
+    <li>the number of concerns the specialist filed;</li>
+    <li>"confidence: …", when the specialist gave one;</li>
+    <li>
+        "read: …", shown only when the reply was not read cleanly. The signal is then a default,
+        not something the specialist said;
+    </li>
+    <li>when the consult happened, the question it was asked ("Asked:"), its
+        <strong>Concerns</strong> and its <strong>Questions to ask</strong>.</li>
+</ul>
+<p>
+    A card marked <strong>reply cut off</strong> belongs to a specialist whose reply stopped
+    before it finished. It has no signal and no confidence, what it shows is a partial answer,
+    and that domain does not count toward the specialist floor (the specialists a verdict
+    needs to have consulted). In the "panel:"
+    line such a domain ends in "…".
+</p>
+<p>
+    If the page shows "Specialist panel read was capped", the oldest threads on the page may
+    show no panel even though one was convened. Narrow the filters to bring them back.
+</p>
+{% call note() %}
+<p>
+    Only an admin can export the threads or read a specialist's reply verbatim.
+</p>
+{% endcall %}
+
+<h2 id="activity">Activity</h2>
+<p>
+    Open <a href="{{ page_url(request, 'workspace_activity') }}">Activity</a> from the
+    Workspace. The page is headed <strong>Agent Activity</strong>. Its summary cards cover
+    every run together: <strong>Simulation Runs</strong>, <strong>Total Messages</strong>,
+    <strong>Channels Created</strong>, and the <strong>Most Active Agent</strong> with its
+    message count.
+</p>
+{{ figure(request, "activity", "The Activity page: summary cards and the Simulation Runs table.") }}
+<p>The <strong>Simulation Runs</strong> table has one row per run, newest first:</p>
+<ul>
+    <li><strong>Start</strong> and <strong>End</strong>: when the run started and ended ("—" while it runs).</li>
+    <li><strong>Status</strong>: <strong>Running</strong>, <strong>Completed</strong> or <strong>Stopped</strong>.</li>
+    <li><strong>Messages</strong>: the messages the run posted.</li>
+    <li>
+        <strong>API Calls</strong>: the model calls the run made, counting tool rounds and
+        retries rather than turns. On a run's page, hover over the API Calls card for a note on
+        older runs, which counted differently.
+    </li>
+    <li>
+        <strong>Config</strong>: the settings the run was first started with. "rt" is its
+        maximum runtime in minutes ("rt=0m" means no limit: the run went on until it was
+        stopped); "budget" is an older limit, and 0 means none.
+    </li>
+</ul>
+<p>Click a row, or its start time, to open that run.</p>
+
+<h2 id="run-detail">A run's page</h2>
+<p>
+    A run's page is headed <strong>Simulation Run</strong>, with the start time and status at
+    the top right and an <strong>← Activity</strong> link back. It shows:
+</p>
+<ul>
+    <li>cards for the run's <strong>Messages</strong>, <strong>API Calls</strong> and <strong>Channels Created</strong>;</li>
+    <li><strong>Messages by Agent</strong>: each bot's message count and average message length, in characters;</li>
+    <li><strong>Messages by Channel</strong>: each channel's message count and the bots that posted there;</li>
+    <li><strong>Channels Created</strong>: the channels the run created, with their type, the bot that created each, and when it was archived;</li>
+    <li>
+        the <strong>Message Timeline</strong>: every message in time order, with its bot,
+        channel, time, kind of message and length. It shows no message text. A long timeline
+        is split into pages.
+    </li>
+</ul>
+<p>
+    A message whose sender could not be matched to a bot is shown as "(unknown sender)".
+</p>
+{% call note() %}
+<p>
+    Only an admin can open a run's model call logs or finalize a stopped run.
+</p>
+{% endcall %}
+{% endblock %}

@@ -18,6 +18,7 @@ from src.routers import (
     assessment_chat,
     auth,
     csp_report,
+    help,
     invite,
     manager,
     microsoft_auth,
@@ -346,6 +347,7 @@ def create_app() -> FastAPI:
     application.include_router(manager.router, prefix="/manager", tags=["manager"])
     from src.routers import workspace
     application.include_router(workspace.router, prefix="/workspace", tags=["workspace"])
+    application.include_router(help.router, prefix="/help", tags=["help"])
     application.include_router(reviews.router, prefix="/reviews", tags=["reviews"])
     application.include_router(
         assessment_chat.router, prefix="/assessment-chat", tags=["assessment-chat"]

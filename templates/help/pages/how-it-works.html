@@ -1,0 +1,137 @@
+{% extends "help/_layout.html" %}
+{% block help_body %}
+<h1>How Blackbird works</h1>
+<p>Blackbird looks for research that could become a company. Each taking-part lab is
+represented in Slack by an AI agent, and BlackbirdBot, Blackbird's own agent, interviews
+those agents about their ideas and records what it concludes. People then read those
+conclusions and review them. This page explains the parts and how they connect; the
+<a href="{{ page_url(request, 'help_page', slug='glossary') }}">Glossary</a> defines each
+term.</p>
+
+<h2 id="pis-and-lab-agents">PIs and lab agents</h2>
+<p>A <strong>PI</strong> is a principal investigator whose lab takes part in Blackbird.
+Each PI has a page in the Workspace with their research profile, grants, industry interest,
+companies and publications. Blackbird generates the research profile from the PI's
+publications, found from their ORCID record and from publication databases.</p>
+<p>Each PI has a <strong>lab agent</strong>: an AI agent with its own Slack bot, which
+speaks for the lab in Blackbird's Slack workspace. It works from what Blackbird holds about
+the PI, chiefly their research profile, and pitches the lab's work and ideas.</p>
+{% if permissions.staff %}
+<p>Managers add PIs, check their profiles, install each lab's Slack bot and activate the
+agent; a muted agent stays out of the simulation until it is unmuted. See
+<a href="{{ page_url(request, 'help_page', slug='managing-pis') }}">Managing PIs and lab bots</a>.</p>
+{% else %}
+<p>A manager adds PIs, checks their profiles and puts their lab agents on Slack.</p>
+{% endif %}
+
+<h2 id="simulation-runs">Simulation runs</h2>
+<p>The lab agents and BlackbirdBot talk to each other during a <strong>simulation
+run</strong>: a period in which the simulation is running and the agents take turns in
+Slack. Only an admin starts or stops a run. Only lab agents whose status is Active take
+part.</p>
+<p>Everything a run produces, its Slack threads and its assessments, is kept with that run.
+That is why the Assessments page has a <strong>Run</strong> selector: it shows the latest
+run unless you pick another one or <strong>All Runs</strong>.</p>
+{% if permissions.staff %}
+<p>The Discussions and Activity pages show a run's threads, outcomes and statistics. See
+<a href="{{ page_url(request, 'help_page', slug='discussions-activity') }}">Discussions and Activity</a>.</p>
+{% endif %}
+
+<h2 id="interviews">Interviews</h2>
+<p><strong>BlackbirdBot</strong>, also called the hub, has no lab of its own. Its job is to
+screen ideas for Blackbird. When a lab agent pitches an idea, BlackbirdBot interviews it in
+that Slack thread, asking about the idea and the evidence behind it. Every interview is a conversation between BlackbirdBot and one lab. Labs do
+not talk to each other, and BlackbirdBot does not introduce one lab to another.</p>
+<p>BlackbirdBot judges each idea against Blackbird's <strong>rubric</strong>, the document
+that sets out what Blackbird looks for. When it concludes an interview, its reply in the
+thread states its verdict: which gates are met, not met or unconfirmed, its recommendation,
+the red flags it saw and its confidence. Blackbird also posts a headline for each verdict to
+a summary channel in Slack: the lab, the project, the recommendation, the band and weighted
+score, a link to the thread and the hub's short pitch. The dimension scores, the specialist
+panel's consults and the full rationale are stored in Blackbird and shown only on the
+Assessments pages.</p>
+
+<h2 id="specialist-panel">The specialist panel</h2>
+<p>During an interview BlackbirdBot can <strong>consult</strong> specialists. Each
+specialist is an AI expert in one field, such as the science, the chemistry or the legal
+position. A consult returns the specialist's view of the idea in that field: a signal, the
+concerns it found and questions to put to the PI. The signals are:</p>
+<ul>
+    <li><strong>blocking</strong>: a defect that, as things stand, rules the idea out in
+    that field;</li>
+    <li><strong>gap</strong>: the record falls short of the bar for the idea's stage, and the
+    specialist names what must be produced to reach it;</li>
+    <li><strong>adequate</strong>: the record meets the bar for this stage. It does not mean
+    the specialist had no concerns.</li>
+</ul>
+<p>Consults stored before these words were introduced use the older signals
+<strong>caution</strong> and <strong>clear</strong>.</p>
+<p>Some verdicts must be backed by consults with particular specialists before they count
+as fully vetted. Each assessment records whether that panel was complete. When it was not,
+or could not be checked, the Assessments list and the assessment's own page say so, and its
+score should be treated as provisional.</p>
+
+<h2 id="assessments">Assessments</h2>
+<p>An <strong>assessment</strong> is the record of one interview's outcome. Each interview
+yields one assessment. While an interview is still going on, BlackbirdBot can update its
+verdict, and the assessment changes with it. An assessment holds:</p>
+<ul>
+    <li><strong>the recommendation</strong>: BlackbirdBot's own call on the idea: advance,
+    conditional, route-to-incubation, or a pass, which the pages show under the rubric's own
+    word for it;</li>
+    <li><strong>dimension scores</strong>: a score for each of the rubric's dimensions,
+    the separate qualities the rubric rates;</li>
+    <li><strong>the weighted score and band</strong>: Blackbird computes the weighted score
+    from the dimension scores and the rubric's weights. It is not taken from BlackbirdBot.
+    The band is the range the score falls in; the Assessments page header prints where each
+    band starts;</li>
+    <li><strong>gates</strong>: the rubric's gating questions, each met, not met, or
+    unconfirmed (never asked);</li>
+    <li><strong>red flags</strong>: specific facts BlackbirdBot recorded as serious enough,
+    each on its own, to rule the idea out;</li>
+    <li><strong>key points</strong>, a one-minute pitch, the ask (the next step BlackbirdBot
+    recommends) and its full rationale;</li>
+    <li>the specialist panel's consults, and BlackbirdBot's confidence.</li>
+</ul>
+<p>Each assessment is stamped with the version of the rubric that scored it, because the
+rubric changes over time and scores from different versions are not directly comparable.
+See <a href="{{ page_url(request, 'help_page', slug='assessments') }}">Assessments</a> for
+how to read the pages.</p>
+
+<h2 id="human-review">Human review</h2>
+<p>Managers and reviewers review assessments on the Assessments pages. A review rates the
+proposal itself, not how well BlackbirdBot did. It has:</p>
+<ul>
+    <li>an <strong>overall rating</strong> from 1 (weak) to 5 (strong), which is
+    required;</li>
+    <li>a score for each rubric dimension you can judge, which is optional;</li>
+    <li>a <strong>comment</strong>, which is optional: up to 10,000 characters explaining the
+    rating and anything the assessment got wrong;</li>
+    <li>a <strong>feedback mode</strong>: <strong>Learn</strong> marks the review as eligible
+    for the prompt-suggestion bot (see below); <strong>Don't learn — log only</strong> keeps
+    it as a record only.</li>
+</ul>
+<p>You can edit your own reviews, not other people's. Only an admin can delete a review. A
+review counts as written feedback, even a rating with no comment, and moves the assessment
+from the <strong>Unreviewed</strong> tab to the <strong>Reviewed</strong> tab.</p>
+<p>Assessments can be assigned to people, which puts them under <strong>Assigned to
+me</strong> for those people. {% if permissions.staff %}Managers assign from the assessment's
+page; an assignment never changes who can open the assessment.{% else %}A manager can assign
+assessments.{% endif %} Separately, the assessment's page shows its <strong>Approval
+status</strong>: the history of approve or disapprove decisions recorded on it. No page now
+has a control that changes it.</p>
+
+<h2 id="prompt-suggestions">Prompt suggestions</h2>
+<p>BlackbirdBot and the lab agents follow written instructions called prompts. Reviews
+marked <strong>Learn</strong> can be analysed by the prompt-suggestion bot, which proposes
+changes to those prompts or to the rubric. A suggestion is only a proposal: it never edits a
+prompt automatically, and any change it leads to is made by hand.</p>
+{% if permissions.staff %}
+<p>Nothing is analysed until a manager or admin presses <strong>Generate suggestions from
+current reviews</strong> on the Prompt Suggestions page, and marking a suggestion
+implemented or dismissed changes no prompt either. See
+<a href="{{ page_url(request, 'help_page', slug='prompt-suggestions', fragment='what-they-are') }}">Prompt suggestions</a>.</p>
+{% else %}
+<p>A manager decides when suggestions are generated.</p>
+{% endif %}
+{% endblock %}

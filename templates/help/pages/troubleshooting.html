@@ -1,0 +1,638 @@
+{% extends "help/_layout.html" %}
+{% from "help/_callouts.html" import note %}
+{% block help_body %}
+<h1>Troubleshooting</h1>
+<p>Messages you may see, grouped by where they appear, with what each one means and what to
+do. Each heading is the message as Blackbird shows it. Where a message states a limit, the
+heading leaves the number out (…), because the message on screen gives it.</p>
+{% call note("Error pages") %}
+<p>Some messages appear on a page of their own, under a heading such as "Access denied" or
+"Bad request", with <strong>Back</strong> and <strong>Home</strong> links. Others appear in a
+coloured box at the top of the page you were on. A few, such as "Cross-site request
+refused.", are plain text on an otherwise empty page.</p>
+{% endcall %}
+
+<h2 id="sign-in">Signing in</h2>
+<p>These appear in a red box on the sign-in page{% if microsoft_sign_in %}, or on Settings
+while you link a Microsoft account{% endif %}.</p>
+
+<h3>"Authentication was cancelled or failed. Please try again."</h3>
+<p><strong>What it means:</strong> ORCID did not complete the sign-in, for example because
+you cancelled it on ORCID's page.</p>
+<p><strong>What to do:</strong> press <strong>Sign in with ORCID</strong> again.</p>
+
+<h3>"No authorization code received. Please try again."</h3>
+<p><strong>What it means:</strong> ORCID sent you back without confirming who you are.</p>
+<p><strong>What to do:</strong> sign in again from the sign-in page.</p>
+
+<h3>"Security check failed. Please try again."</h3>
+<p><strong>What it means:</strong> the sign-in that came back did not match the one this
+browser started. This happens when a sign-in page was left open too long, or a sign-in was
+started in another tab.</p>
+<p><strong>What to do:</strong> close other sign-in tabs and sign in again from the sign-in
+page.</p>
+
+<h3>"Could not complete authentication. Please try again."</h3>
+<p><strong>What it means:</strong> Blackbird could not finish the sign-in with ORCID.</p>
+<p><strong>What to do:</strong> try again. If it keeps happening, tell an admin.</p>
+
+<h3>"Sign in failed. Please try again."</h3>
+<p><strong>What it means:</strong> the sign-in failed for another reason, for example ORCID
+did not return an ORCID iD.</p>
+<p><strong>What to do:</strong> try again. If it keeps happening, tell an admin.</p>
+
+{% if microsoft_sign_in %}
+<h3>"Microsoft sign-in was cancelled or not approved."</h3>
+<p><strong>What it means:</strong> you cancelled on Microsoft's page, or did not approve
+the request.</p>
+<p><strong>What to do:</strong> press <strong>Sign in with Microsoft (staff)</strong>
+again, or sign in with ORCID.</p>
+
+<h3>"Microsoft sign-in failed. If your organisation must approve Blackbird first, ask its IT team."</h3>
+<p><strong>What it means:</strong> Microsoft refused the sign-in. Some organisations must
+approve an app before their staff can use it.</p>
+<p><strong>What to do:</strong> sign in with ORCID meanwhile, and ask your organisation's IT
+team whether Blackbird needs their approval.</p>
+
+<h3>"Microsoft sign-in failed. Please try again or use ORCID."</h3>
+<p><strong>What it means:</strong> Blackbird could not confirm the Microsoft sign-in, or the
+account is not a member account of an organisation Blackbird accepts.</p>
+<p><strong>What to do:</strong> try once more. If it fails again, sign in with ORCID and ask
+an admin whether your organisation's accounts can be used.</p>
+
+<h3>"Microsoft needs you to sign in again. Please try again."</h3>
+<p><strong>What it means:</strong> Microsoft wants you to sign in to it again before it
+confirms who you are.</p>
+<p><strong>What to do:</strong> press <strong>Sign in with Microsoft (staff)</strong>
+again.</p>
+
+<h3>"No Blackbird account is linked to this Microsoft account. Sign in with ORCID, then link it in Settings."</h3>
+<p><strong>What it means:</strong> this Microsoft account has not been linked to a Blackbird
+account. Your first sign-in is always with ORCID.</p>
+<p><strong>What to do:</strong> sign in with ORCID and link the Microsoft account in
+Settings (see
+<a href="{{ page_url(request, 'help_page', slug='getting-started', fragment='microsoft') }}">Signing in with Microsoft</a>).</p>
+
+<h3>"Microsoft sign-in is only for staff accounts. Please use ORCID."</h3>
+<p><strong>What it means:</strong> the Microsoft account is linked to an account that may
+not use Microsoft sign-in.</p>
+<p><strong>What to do:</strong> sign in with ORCID.</p>
+
+<p>The next messages appear on the Settings page while you link a Microsoft account.</p>
+
+<h3>"Could not confirm your ORCID sign-in. Please try again."</h3>
+<p><strong>What it means:</strong> the ORCID sign-in you made to confirm it is you did not
+pass: it was for a different ORCID account, it was cancelled, or it took too long.</p>
+<p><strong>What to do:</strong> press <strong>Sign in with ORCID again to link</strong> and
+sign in with your own ORCID iD.</p>
+
+<h3>"Sign in with ORCID again, then link your Microsoft account."</h3>
+<p><strong>What it means:</strong> linking needs a recent ORCID sign-in made for the purpose,
+and yours is missing or too old.</p>
+<p><strong>What to do:</strong> press <strong>Sign in with ORCID again to link</strong>, then
+<strong>Link Microsoft account</strong> straight away.</p>
+
+<h3>"That Microsoft account is already linked to a Blackbird account."</h3>
+<p><strong>What it means:</strong> another Blackbird account uses that Microsoft
+account.</p>
+<p><strong>What to do:</strong> pick a different Microsoft account, or ask an admin.</p>
+
+<h3>"Unlink your current Microsoft account first."</h3>
+<p><strong>What it means:</strong> your account already has a Microsoft account linked, and
+it can have only one.</p>
+<p><strong>What to do:</strong> press <strong>Unlink Microsoft account</strong>, sign in
+again, then link the other one.</p>
+{% endif %}
+
+<h2 id="access">Access</h2>
+
+<h3>"Thanks for signing in" … "you're in the queue for access."</h3>
+<p><strong>What it means:</strong> the ORCID iD you signed in with has no approved account.
+Usually the account was created with a different ORCID iD, or it has not been created
+yet.</p>
+<p><strong>What to do:</strong> check that you signed in with the ORCID iD your account was
+created with. If you did, ask the person who set up your account:
+{% if permissions.staff %}an admin{% else %}a manager or an admin{% endif %}.</p>
+
+<h3>"Access turned off"</h3>
+<p><strong>What it means:</strong> your account's access has been turned off, and you have
+been signed out.</p>
+<p><strong>What to do:</strong> the page says who can restore it. A reviewer asks a manager
+or an admin; a manager asks an admin.</p>
+
+<h3>"Manager access required"</h3>
+<p><strong>What it means:</strong> that page is for managers and admins only.{% if not permissions.staff %}
+Reviewers can open the PIs and Assessments pages, and the Help pages listed in Help.{% endif %}</p>
+<p><strong>What to do:</strong> {% if permissions.staff %}if you are a manager and see this,
+your account's role may have changed; ask an admin.{% else %}nothing: you have not done
+anything wrong. Go back and carry on from the PIs or Assessments page.{% endif %}</p>
+
+<h3>"Review access required"</h3>
+<p><strong>What it means:</strong> the Workspace and Help are for admins, managers and
+reviewers, and the account you are signed in with is none of these.</p>
+<p><strong>What to do:</strong> check that you signed in with the ORCID iD your account was
+created with. If you did, ask the person who set up your account.</p>
+
+<h3>"Cross-site request refused."</h3>
+<p><strong>What it means:</strong> Blackbird refused a form because your browser did not
+show that it came from a Blackbird page at Blackbird's usual address: for example the page
+was opened at a different address for Blackbird or from a saved copy, or a browser extension
+or privacy setting removed that information. The message is plain text on an otherwise empty
+page.</p>
+<p><strong>What to do:</strong> use your browser's Back button, open Blackbird at its usual
+address, and try again. If it keeps happening, try another browser and tell an admin.</p>
+
+{% if permissions.admin %}
+<h3>"Help changes are disabled while impersonating."</h3>
+<p><strong>What it means:</strong> while viewing the site as someone else, you tried to
+answer their first-sign-in prompt or finish a tutorial for them. Only they can do that.</p>
+<p><strong>What to do:</strong> nothing; it changed nothing on their account.</p>
+{% endif %}
+
+<h2 id="assessments">Assessments</h2>
+
+<h3>"That feedback was already recorded a moment ago; it was not saved twice."</h3>
+<p><strong>What it means:</strong> you submitted a review identical to one you had just
+submitted on the same assessment, usually by pressing the button twice. The first one was
+saved.</p>
+<p><strong>What to do:</strong> nothing. To change the review, use <strong>Edit</strong> on
+it in the assessment's <strong>Human review</strong> section.</p>
+
+<h3>"Moved to Reviewed."</h3>
+<p><strong>What it means:</strong> your review was saved from the <strong>Unreviewed</strong>
+tab, so the assessment now has written feedback and has moved to the
+<strong>Reviewed</strong> tab. The list shows the next card.</p>
+<p><strong>What to do:</strong> nothing; open the <strong>Reviewed</strong> tab to see
+it.</p>
+
+<h3>"score must be between 1 and 5"</h3>
+<p><strong>What it means:</strong> the overall rating sent was outside 1 to 5.</p>
+<p><strong>What to do:</strong> go back, choose an overall rating from 1 to 5, and submit
+again.</p>
+
+<h3>"comment is longer than 10000 characters"</h3>
+<p><strong>What it means:</strong> the comment is over the limit of 10,000 characters.</p>
+<p><strong>What to do:</strong> go back, shorten the comment, and submit again.</p>
+
+<h3>"comment contains a NUL character"</h3>
+<p><strong>What it means:</strong> the comment contains an invisible control character,
+usually from text pasted from another program.</p>
+<p><strong>What to do:</strong> go back, retype the comment or paste it as plain text, and
+submit again.</p>
+
+<h3>"unknown rubric dimension: …" or "dimension score for … must be between …"</h3>
+<p><strong>What it means:</strong> the dimension scores did not match the current rubric,
+usually because the rubric changed after you opened the page.</p>
+<p><strong>What to do:</strong> reload the assessment's page and enter the review
+again.</p>
+
+<h3>"Only the author may edit this feedback"</h3>
+<p><strong>What it means:</strong> the review you tried to edit was written by someone
+else. You can edit only your own.</p>
+<p><strong>What to do:</strong> add a review of your own instead.</p>
+
+<h2 id="assessment-chat">Assessment chat</h2>
+<p>These appear in red under the question box in the chat.</p>
+
+<h3>"The assessment chat is switched off."</h3>
+<p><strong>What it means:</strong> the chat has been turned off for everyone.</p>
+<p><strong>What to do:</strong> read the assessment's page instead, and try the chat
+later.</p>
+
+{% if permissions.admin %}
+<h3>"The chat is unavailable while impersonating."</h3>
+<p><strong>What it means:</strong> while viewing the site as someone else, you cannot use the
+chat.</p>
+<p><strong>What to do:</strong> stop viewing as them to use the chat as yourself.</p>
+{% endif %}
+
+<h3>"This assessment no longer exists."</h3>
+<p><strong>What it means:</strong> the assessment was removed after you opened its
+page.</p>
+<p><strong>What to do:</strong> go back to the Assessments page.</p>
+
+<h3>"Your account can no longer use the chat. Reload the page."</h3>
+<p><strong>What it means:</strong> your account changed while the page was open.</p>
+<p><strong>What to do:</strong> reload the page.</p>
+
+<h3>"The request was refused. Reload the page and try again."</h3>
+<p><strong>What it means:</strong> the question was sent in a form Blackbird did not
+accept, usually from a page that was open for a long time.</p>
+<p><strong>What to do:</strong> reload the page and ask again.</p>
+
+<h3>"A question must not be empty and must fit the character limit shown below the box."</h3>
+<p><strong>What it means:</strong> the question was empty or too long.</p>
+<p><strong>What to do:</strong> type a question, or shorten it until the count below the box
+is within the limit.</p>
+
+<h3>"This conversation is full. Clear it to start a new one."</h3>
+<p><strong>What it means:</strong> the conversation on this assessment has reached its
+length limit.</p>
+<p><strong>What to do:</strong> press <strong>Clear conversation</strong>, which deletes
+your conversation on this assessment, and ask again.</p>
+
+<h3>"You have used today's questions." …</h3>
+<p><strong>What it means:</strong> you have asked as many questions as one person may in a
+day. The rest of the message says when the limit resets; the chat also shows how many of
+today's questions you have used.</p>
+<p><strong>What to do:</strong> wait until then.</p>
+
+<h3>"You have reached today's spending limit for the chat."</h3>
+<p><strong>What it means:</strong> your questions today have used up the chat's daily
+budget for one person.</p>
+<p><strong>What to do:</strong> try again tomorrow.</p>
+
+<h3>"The chat has reached today's spending limit for everyone."</h3>
+<p><strong>What it means:</strong> the chat's daily budget for all users together is used
+up.</p>
+<p><strong>What to do:</strong> try again tomorrow.</p>
+
+<h3>"An answer is still being written. Wait for it to finish."</h3>
+<p><strong>What it means:</strong> you asked while the previous answer was still
+arriving.</p>
+<p><strong>What to do:</strong> wait for it, then ask again.</p>
+
+<h3>"The model is busy. Try again in a minute."</h3>
+<p><strong>What it means:</strong> the AI model is handling too many requests.</p>
+<p><strong>What to do:</strong> wait a minute and ask again.</p>
+
+<h3>"The model is overloaded. Try again in a minute."</h3>
+<p><strong>What it means:</strong> the AI model is overloaded.</p>
+<p><strong>What to do:</strong> wait a minute and ask again.</p>
+
+<h3>"The model could not be reached. Try again."</h3>
+<p><strong>What it means:</strong> Blackbird could not reach the AI model.</p>
+<p><strong>What to do:</strong> ask again. If it keeps happening, tell an admin.</p>
+
+<h3>"The model stopped before finishing an answer. Try again."</h3>
+<p><strong>What it means:</strong> the answer was cut off.</p>
+<p><strong>What to do:</strong> ask again.</p>
+
+<h3>"The answer took too long and was stopped."</h3>
+<p><strong>What it means:</strong> the answer ran past the time allowed.</p>
+<p><strong>What to do:</strong> ask again, perhaps a narrower question.</p>
+
+<h3>"The model returned no answer. Try rephrasing."</h3>
+<p><strong>What it means:</strong> the AI model gave an empty answer.</p>
+<p><strong>What to do:</strong> ask the question in other words.</p>
+
+<h3>"The answer could not be saved. Try again."</h3>
+<p><strong>What it means:</strong> the answer was written but could not be stored.</p>
+<p><strong>What to do:</strong> ask again.</p>
+
+<h3>"The chat is busy. Try again in a moment."</h3>
+<p><strong>What it means:</strong> the chat could not take your question just then.</p>
+<p><strong>What to do:</strong> wait a moment and ask again.</p>
+
+<h3>"Your session has ended — reload the page."</h3>
+<p><strong>What it means:</strong> you were signed out, for example by signing out on
+another device.</p>
+<p><strong>What to do:</strong> reload the page and sign in again.</p>
+
+<h3>"The connection was lost. Reopen the chat to see whether the answer was saved."</h3>
+<p><strong>What it means:</strong> the connection dropped while the answer was
+arriving.</p>
+<p><strong>What to do:</strong> close the chat and open it again; the saved conversation
+shows whether the answer arrived.</p>
+
+<h3>"The model rejected the request. Tell an administrator."</h3>
+<p><strong>What it means:</strong> the AI model refused the request, which points to a
+problem in how the chat is set up.</p>
+<p><strong>What to do:</strong> tell an admin which assessment you were on.</p>
+
+<h3>"The chat is misconfigured (its model has no price). Tell an administrator." or "The chat is misconfigured (its instructions are missing). Tell an administrator."</h3>
+<p><strong>What it means:</strong> the chat is not set up correctly.</p>
+<p><strong>What to do:</strong> tell an admin.</p>
+
+<h3>"Something went wrong. Try again."</h3>
+<p><strong>What it means:</strong> an unexpected error.</p>
+<p><strong>What to do:</strong> ask again. If it keeps happening, tell an admin.</p>
+
+{% if permissions.staff %}
+<h2 id="pi-pages">PI pages</h2>
+<p>These appear in a red box near the top of a PI's page, after an action on that page,
+unless noted.</p>
+
+<h3>"Activation refused — this PI's profile is not ready:"</h3>
+<p><strong>What it means:</strong> <strong>Activate agent</strong> found problems, listed
+under the heading. A message starting "Activation refused:" also names them.</p>
+<p><strong>What to do:</strong> fix what the list names (if it offers it, use
+<strong>Retry profile generation</strong>, after correcting the PI's name if it is wrong).
+Managers cannot activate past these checks. Only an admin can override the profile checks;
+nobody can override the persona file, account or hub checks. If a reason names the persona
+file, press <strong>Re-export</strong> on the PI's page.</p>
+
+<h3>"Activation refused: this lab could not be connected to the hub: …"</h3>
+<p><strong>What it means:</strong> the agent passed its checks, but its hub spoke could not
+be set up, so it was not activated. This message appears on its own, without the list of
+reasons.</p>
+<p><strong>What to do:</strong> ask an admin to check it.</p>
+
+<h3>"Slack provisioning failed: …"</h3>
+<p><strong>What it means:</strong> creating or installing the Slack bot failed; the rest of
+the message says why. "Install the Slack bot first." means <strong>Activate agent</strong>
+was pressed before the bot was installed; "the installation was cancelled in Slack" means
+the install was not approved on Slack's screen. When the install fails or is cancelled on
+Slack's screen, the message appears at the top of the PIs list instead of the PI's page.
+"This install was started by a different account." means the install must be finished from
+the account that pressed Install Slack bot.</p>
+<p><strong>What to do:</strong> press <strong>Install Slack bot</strong> and finish
+installing it in Slack, then activate.</p>
+
+<h3>"This agent changed while you were activating it (someone else acted first). Reload the page and check its status."</h3>
+<p><strong>What it means:</strong> someone changed the agent at the same moment.</p>
+<p><strong>What to do:</strong> reload the page and check the agent's status before acting
+again.</p>
+
+<h3>"This agent can't be muted or unmuted in its current state."</h3>
+<p><strong>What it means:</strong> only an active agent can be muted, and only a muted one
+unmuted.</p>
+<p><strong>What to do:</strong> reload the page to see its current status.</p>
+
+<h3>"This agent can't be unmuted until its Slack bot is installed."</h3>
+<p><strong>What it means:</strong> the agent has no installed Slack bot.</p>
+<p><strong>What to do:</strong> ask an admin to check its Slack bot.</p>
+
+<h3>"This agent can't be unmuted yet: its profile doesn't pass the activation checks."</h3>
+<p><strong>What it means:</strong> unmuting runs the same checks as activating, and the
+profile fails them.</p>
+<p><strong>What to do:</strong> fix the profile, then unmute again.</p>
+
+<h3>"This agent can't be unmuted: it could not be connected to the hub." …</h3>
+<p><strong>What it means:</strong> its hub spoke could not be set up.</p>
+<p><strong>What to do:</strong> ask an admin to check it, as the message says.</p>
+
+<h3>"This PI has no lab agent yet, so there is nothing to mute or unmute."</h3>
+<p><strong>What it means:</strong> the PI has no lab agent.</p>
+<p><strong>What to do:</strong> nothing to mute; see
+<a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='add-pi') }}">Adding a PI</a>.</p>
+
+<h3>"Please enter a valid email address."</h3>
+<p><strong>What it means:</strong> the email in Edit Profile is not a valid address.</p>
+<p><strong>What to do:</strong> correct it and save again.</p>
+
+<h3>"That email address is already in use by another account."</h3>
+<p><strong>What it means:</strong> another account has that email.</p>
+<p><strong>What to do:</strong> check the address; each account needs its own.</p>
+
+<h3>"This account has no email address to verify."</h3>
+<p><strong>What it means:</strong> <strong>Mark verified</strong> was pressed for an account
+with no email.</p>
+<p><strong>What to do:</strong> add the email in Edit Profile first.</p>
+
+<h3>"The address changed after this page loaded. Check it, then verify again."</h3>
+<p><strong>What it means:</strong> the email changed between loading the page and pressing
+<strong>Mark verified</strong>.</p>
+<p><strong>What to do:</strong> check the address shown, then press <strong>Mark
+verified</strong> again.</p>
+
+<h3>"JHU tenure start must be a …-digit year (or blank to leave unchanged)."</h3>
+<p><strong>What it means:</strong> the tenure year is not a year.</p>
+<p><strong>What to do:</strong> enter a year, or leave the field blank to keep the current
+one.</p>
+
+<h3>"This profile changed while you were editing it (a regeneration or another edit saved first). Reload the page to see the current version, then re-apply your changes."</h3>
+<p><strong>What it means:</strong> the profile was saved by something else while your form
+was open, so your changes were not saved.</p>
+<p><strong>What to do:</strong> as the message says.</p>
+
+<h3>"This form was opened before the profile existed (or is out of date). Reload the page and make your changes again."</h3>
+<p><strong>What it means:</strong> the form no longer matches the stored profile.</p>
+<p><strong>What to do:</strong> as the message says.</p>
+
+<h3>"Name, institution and department are limited to … characters each.", "Names may contain letters, spaces, hyphens, apostrophes, periods and commas, at most … characters.", "The research summary is limited to … words." and the list limits</h3>
+<p><strong>What it means:</strong> a field in Edit Profile is too long, or holds characters
+it may not; the message gives the limit. The list limits are "Each list is limited to …
+items.", "Each list item is limited to … characters." and "A list item may not contain a
+line break or start with #."</p>
+<p><strong>What to do:</strong> shorten or correct the field and save again.</p>
+
+<h3>"There is nothing to save yet — fill in at least one field."</h3>
+<p><strong>What it means:</strong> the form was saved empty.</p>
+<p><strong>What to do:</strong> fill in at least one field.</p>
+
+<h3>"Profile is being generated — try again shortly."</h3>
+<p><strong>What it means:</strong> a profile generation is running, so the profile cannot be
+changed now.</p>
+<p><strong>What to do:</strong> wait for it to finish, reload, and try again.</p>
+
+<h3>"This PI's profile is being regenerated or updated — try again in a moment."</h3>
+<p><strong>What it means:</strong> another change to this PI's profile is in progress.</p>
+<p><strong>What to do:</strong> wait a moment and try again.</p>
+
+<h3>"ORCID fundings are being refreshed — try the veto again in a moment."</h3>
+<p><strong>What it means:</strong> the ORCID fundings are being refreshed, so a veto cannot
+be recorded now.</p>
+<p><strong>What to do:</strong> wait a moment, reload, and veto again.</p>
+
+<h3>"This PI's industry evidence is being refreshed — try the veto again in a moment."</h3>
+<p><strong>What it means:</strong> the industry evidence is being refreshed, so a veto
+cannot be recorded now.</p>
+<p><strong>What to do:</strong> wait a moment, reload, and veto again.</p>
+
+<h3>"No RePORTER project lists that profile id."</h3>
+<p><strong>What it means:</strong> the RePORTER profile id you entered matched no
+project.</p>
+<p><strong>What to do:</strong> check the id and try again.</p>
+
+<h3>"NIH RePORTER could not be reached — try again."</h3>
+<p><strong>What it means:</strong> RePORTER did not answer.</p>
+<p><strong>What to do:</strong> try again later.</p>
+
+<h3>"Select a candidate or enter a RePORTER profile id."</h3>
+<p><strong>What it means:</strong> <strong>This is the PI</strong> was pressed with nothing
+chosen.</p>
+<p><strong>What to do:</strong> tick a candidate or type a profile id, then press it
+again.</p>
+
+<h3>"PubMed could not be reached — try again."</h3>
+<p><strong>What it means:</strong> PubMed did not answer.</p>
+<p><strong>What to do:</strong> try again later.</p>
+
+<h3>"PubMed returned no record for that PMID."</h3>
+<p><strong>What it means:</strong> PubMed has no paper with that PMID.</p>
+<p><strong>What to do:</strong> check the PMID.</p>
+
+<h3>"There is no draft to accept."</h3>
+<p><strong>What it means:</strong> the draft was already accepted or discarded.</p>
+<p><strong>What to do:</strong> reload the page.</p>
+
+<h3>"The profile changed since this draft was made; discard it or regenerate."</h3>
+<p><strong>What it means:</strong> the stored profile changed after the draft was made, so
+accepting it would overwrite that change.</p>
+<p><strong>What to do:</strong> press <strong>Discard draft</strong>, or regenerate the
+profile.</p>
+
+<h3>"Regeneration refused (see the message above)."</h3>
+<p><strong>What it means:</strong> <strong>Regenerate profile</strong> cannot be used yet.
+The reason is shown with the message and under the button.</p>
+<p><strong>What to do:</strong> wait until the reason no longer applies.</p>
+
+<h3>"Nothing to retry: profile generation is running, or the profile is already grounded and has a summary."</h3>
+<p><strong>What it means:</strong> <strong>Retry profile generation</strong> has nothing to
+do.</p>
+<p><strong>What to do:</strong> reload the page to see the current state.</p>
+
+<h3>"This PI has no agent or profile to export."</h3>
+<p><strong>What it means:</strong> <strong>Re-export</strong> was pressed for a PI with no lab
+agent or no profile, so there is no persona file to write.</p>
+<p><strong>What to do:</strong> nothing to export yet; the persona file is written once the PI
+has both.</p>
+
+<h3>"This account's access is denied; no profile is generated."</h3>
+<p><strong>What it means:</strong> <strong>Regenerate profile</strong> or <strong>Retry profile
+generation</strong> was pressed for an account whose access is denied, so no generation
+was queued.</p>
+<p><strong>What to do:</strong> ask an admin about the account's access.</p>
+
+<h3>"Company discovery is already queued or running for this PI."</h3>
+<p><strong>What it means:</strong> <strong>Find companies</strong> was pressed while a search
+for this PI was already waiting or running. This one appears in a blue box, not a red one.</p>
+<p><strong>What to do:</strong> nothing; its results appear under
+<strong>Suggested</strong> when it finishes.</p>
+
+<h3>"A profile generation is queueing discovery for this PI right now — try again in a moment."</h3>
+<p><strong>What it means:</strong> a profile generation was starting a company search for this
+PI at the same moment.</p>
+<p><strong>What to do:</strong> wait a moment, reload, and check whether a search is already
+waiting before pressing <strong>Find companies</strong> again.</p>
+
+<h3>"Not confirmed: …"</h3>
+<p><strong>What it means:</strong> a company was not confirmed because a field was not
+accepted; the rest of the message says which, for example the funding figure or its date.</p>
+<p><strong>What to do:</strong> correct that field and press <strong>Confirm</strong>
+again.</p>
+
+<h3>"Something went wrong saving changes."</h3>
+<p><strong>What it means:</strong> the action failed for a reason the page has no sentence
+for.</p>
+<p><strong>What to do:</strong> reload the page and check whether the change was made. If it
+keeps happening, tell an admin.</p>
+
+<p>Adding a PI on the <strong>PIs</strong> page can show these next to the
+<strong>Add PI</strong> button:</p>
+
+<h3>"That doesn't look like an ORCID iD (expected …)."</h3>
+<p><strong>What it means:</strong> the ORCID iD is not in ORCID's format.</p>
+<p><strong>What to do:</strong> copy the iD from the person's ORCID record and try
+again.</p>
+
+<h3>"A user with that ORCID already exists."</h3>
+<p><strong>What it means:</strong> the PI, or another account, already uses that ORCID
+iD.</p>
+<p><strong>What to do:</strong> look the PI up in the directory.</p>
+
+<h3>"Could not fetch that ORCID record — check the iD and try again."</h3>
+<p><strong>What it means:</strong> ORCID did not return a record for that iD.</p>
+<p><strong>What to do:</strong> check the iD and try again.</p>
+
+<h3>"This ORCID record shows no public name — enter the PI's name and add again."</h3>
+<p><strong>What it means:</strong> the ORCID record has no public name to use.</p>
+<p><strong>What to do:</strong> type the name in <strong>Name (only if ORCID shows
+none)</strong> and press <strong>Add PI</strong> again.</p>
+
+<h3>"Another PI was added at the same moment — please try again."</h3>
+<p><strong>What it means:</strong> two PIs were added at once.</p>
+<p><strong>What to do:</strong> press <strong>Add PI</strong> again.</p>
+
+<h3>"Could not create the PI — see the server log."</h3>
+<p><strong>What it means:</strong> adding the PI failed.</p>
+<p><strong>What to do:</strong> tell an admin.</p>
+{% endif %}
+
+{% if permissions.staff %}
+<h2 id="staff-pages">Staff pages</h2>
+<p>These appear at the top of the Staff page after an action there.</p>
+
+<h3>"Choose a role you may create."</h3>
+<p><strong>What it means:</strong> the role chosen is not one you may create. Managers create
+reviewer accounts only.</p>
+<p><strong>What to do:</strong> choose Reviewer, or ask an admin to create the account.</p>
+
+<h3>"That doesn't look like an ORCID iD (expected …)."</h3>
+<p><strong>What it means:</strong> the ORCID iD is not in ORCID's format.</p>
+<p><strong>What to do:</strong> copy the iD from the person's ORCID record and try
+again.</p>
+
+<h3>"Could not fetch that ORCID record. Check the iD and try again."</h3>
+<p><strong>What it means:</strong> ORCID did not return a record for that iD.</p>
+<p><strong>What to do:</strong> check the iD and try again.</p>
+
+<h3>"This ORCID record shows no public name. Enter the person's name and try again."</h3>
+<p><strong>What it means:</strong> the ORCID record has no public name to use.</p>
+<p><strong>What to do:</strong> type the person's name and preview again.</p>
+
+<h3>"Names may contain letters, spaces, hyphens, apostrophes, periods and commas (at most … characters)."</h3>
+<p><strong>What it means:</strong> the name has a character it may not, or is too long.</p>
+<p><strong>What to do:</strong> correct the name and try again.</p>
+
+<h3>"That ORCID iD already belongs to an account that cannot be converted here."</h3>
+<p><strong>What it means:</strong> the ORCID iD belongs to an account the Staff page cannot
+turn into a staff account.</p>
+<p><strong>What to do:</strong> ask an admin.</p>
+
+<h3>"That ORCID iD already belongs to an account. Ask an admin to change it."</h3>
+<p><strong>What it means:</strong> the ORCID iD belongs to an account only an admin can
+change, for example a PI with a lab agent or a profile. A manager also sees it when an admin
+has already approved that ORCID iD for access, even if no account exists yet.</p>
+<p><strong>What to do:</strong> ask an admin to change the account, or to create it.</p>
+
+<h3>"That account has profile or enrichment work running. Try again when it finishes."</h3>
+<p><strong>What it means:</strong> jobs are running for that account.</p>
+<p><strong>What to do:</strong> try again later.</p>
+
+<h3>"Something changed since the preview. Review it again before confirming."</h3>
+<p><strong>What it means:</strong> the account or the ORCID record changed between
+<strong>Preview</strong> and <strong>Confirm</strong>.</p>
+<p><strong>What to do:</strong> read the new preview, then confirm.</p>
+
+<h3>"That account no longer exists."</h3>
+<p><strong>What it means:</strong> the account was deleted.</p>
+<p><strong>What to do:</strong> reload the page.</p>
+
+<h3>"Only reviewer accounts can be changed here."</h3>
+<p><strong>What it means:</strong> Revoke, Restore and Delete on the Staff page work on
+reviewer accounts only.</p>
+<p><strong>What to do:</strong> ask an admin to change a manager or admin account.</p>
+
+<h3>"You cannot change your own account here."</h3>
+<p><strong>What it means:</strong> the Staff page does not act on your own account.</p>
+<p><strong>What to do:</strong> ask an admin.</p>
+
+<h3>"This reviewer has never signed in. Delete the unused account instead, or ask an admin."</h3>
+<p><strong>What it means:</strong> a manager cannot revoke a reviewer who has never signed
+in.</p>
+<p><strong>What to do:</strong> delete the unused account, or ask an admin to revoke
+it.</p>
+
+<h3>"That reviewer's access is not active."</h3>
+<p><strong>What it means:</strong> the reviewer's access is not currently approved, so
+there is nothing to revoke.</p>
+<p><strong>What to do:</strong> reload the page.</p>
+
+<h3>"That reviewer's access is not revoked."</h3>
+<p><strong>What it means:</strong> Restore was pressed for a reviewer whose access is not
+turned off.</p>
+<p><strong>What to do:</strong> reload the page.</p>
+
+<h3>"Could not complete that. See the server log."</h3>
+<p><strong>What it means:</strong> the action failed.</p>
+<p><strong>What to do:</strong> tell an admin.</p>
+
+{% if permissions.admin %}
+
+<p>These appear on a page of their own, headed "Access denied".</p>
+
+<h3>"Staff account changes are disabled while impersonating."</h3>
+<p><strong>What it means:</strong> an admin viewing the site as someone else tried to change
+a staff account.</p>
+<p><strong>What to do:</strong> nothing; no change was made.</p>
+
+<h3>"Review actions are disabled while impersonating."</h3>
+<p><strong>What it means:</strong> an admin viewing the site as someone else tried to assign or
+remove someone on an assessment, or to generate prompt suggestions or change a suggestion's
+status.</p>
+<p><strong>What to do:</strong> nothing; no change was made.</p>
+{% endif %}
+{% endif %}
+{% endblock %}

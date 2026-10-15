@@ -3,8 +3,9 @@
 ``src.config`` reads ``.env`` from the CURRENT WORKING DIRECTORY, and the host's
 checkout holds production secrets there. Every harness process therefore runs in a
 temporary directory that contains symlinks to the code-side directories the app
-resolves relative to its cwd (templates, static, prompts, profiles, alembic) and no
-``.env`` at all; the settings it needs come from explicit environment variables,
+resolves relative to its cwd (templates, static, prompts, alembic, help_assets), its own
+empty profiles tree, and no ``.env`` at all; the settings it needs come from explicit
+environment variables,
 which pydantic-settings prefers over a dotenv file anyway.
 """
 
@@ -18,11 +19,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 #: Relative paths the app READS from its cwd (Jinja2Templates("templates"),
-#: StaticFiles("static"), the prompt files, alembic.ini). Never "profiles": the web app
+#: StaticFiles("static"), the prompt files, alembic.ini, and the Help screenshots and their
+#: manifest, src/web/help_pages.py SHOTS_DIR). Never "profiles": the web app
 #: WRITES and DELETES there (src/services/profile_export.py PROFILES_DIR,
 #: src/services/user_deletion.py _PUBLIC_DIR/_MEMORY_DIR), and the repo's profiles/ is the
 #: live agent's mounted directory. The harness gets its own empty profiles/ instead.
-LINKED = ("templates", "static", "prompts", "alembic", "alembic.ini")
+LINKED = ("templates", "static", "prompts", "alembic", "alembic.ini", "help_assets")
 
 #: The throwaway database's name; seed.py refuses any other.
 DB_NAME = "copi_uiaudit"

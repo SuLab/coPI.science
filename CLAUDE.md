@@ -18,6 +18,7 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
 | add, provision, activate or delete a PI; touch roles, sessions or the Origin guard | `docs/operations/pis-and-access.md` |
 | touch the assessment chat | `docs/operations/assessment-chat.md` |
 | touch BlackbirdBot, the rubric, prompts, verdict capture, specialists or the review bot | `docs/operations/blackbird-hub.md` |
+| change a workspace, settings or login page, or anything under `templates/help/` | `docs/operations/help-content.md` |
 
 ## Testing
 
@@ -87,7 +88,7 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
   see a new revision.
 - Commit before building. The builder stage's `git clean -ffdx` drops untracked files
   from the image, so this must print nothing first:
-  `git status --porcelain --untracked-files=all -- src templates static prompts alembic scripts pyproject.toml alembic.ini`.
+  `git status --porcelain --untracked-files=all -- src templates static prompts alembic scripts help_assets pyproject.toml alembic.ini`.
 - The agent image bakes `src/` in; only `profiles/`, `prompts/` and `data/` are mounted.
   Any change under `src/agent/`, or to anything it imports, needs the agent image
   rebuilt, and the startup banner confirms which code is running.

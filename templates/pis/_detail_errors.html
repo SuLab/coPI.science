@@ -1,0 +1,35 @@
+{# pi_detail_error_text(code): the PI-detail error banner's sentence for an `error` code
+   (spec 2026-10-14 §7.2). Takes the code, not `request`: an imported macro does not see
+   the caller's context. Every code a PI-detail route redirects with needs its own branch
+   here or in _profile_errors.html; tests/unit/test_pi_detail_error_codes.py checks. #}
+{% from "_profile_errors.html" import profile_error_text %}
+{% macro pi_detail_error_text(code) -%}
+{%- if code == 'invalid_email' -%}Please enter a valid email address.
+{%- elif code == 'email_taken' -%}That email address is already in use by another account.
+{%- elif code == 'no_email' -%}This account has no email address to verify.
+{%- elif code == 'email_changed' -%}The address changed after this page loaded. Check it, then verify again.
+{%- elif code == 'invalid_tenure_year' -%}JHU tenure start must be a 4-digit year (or blank to leave unchanged).
+{%- elif code == 'profile_changed' -%}This profile changed while you were editing it (a regeneration or another edit saved first). Reload the page to see the current version, then re-apply your changes.
+{%- elif code == 'agent_not_mutable' -%}This agent can't be muted or unmuted in its current state.
+{%- elif code == 'no_token' -%}This agent can't be unmuted until its Slack bot is installed.
+{%- elif code == 'activation_blocked' -%}This agent can't be unmuted yet: its profile doesn't pass the activation checks.
+{%- elif code == 'no_spoke' -%}This agent can't be unmuted: it could not be connected to the hub. Ask an admin to check its star spoke on /admin/agents.
+{%- elif code == 'profile_generating' -%}Profile is being generated — try again shortly.
+{%- elif code == 'field_too_long' -%}Name, institution and department are limited to 255 characters each.
+{%- elif code == 'no_agent' -%}This PI has no lab agent yet, so there is nothing to mute or unmute.
+{%- elif code == 'orcid_busy' -%}ORCID fundings are being refreshed — try the veto again in a moment.
+{%- elif code == 'industry_busy' -%}This PI's industry evidence is being refreshed — try the veto again in a moment.
+{%- elif code == 'persona_busy' -%}This PI's profile is being regenerated or updated — try again in a moment.
+{%- elif code == 'invalid_reporter_id' -%}No RePORTER project lists that profile id.
+{%- elif code == 'reporter_unreachable' -%}NIH RePORTER could not be reached — try again.
+{%- elif code == 'no_profile_selected' -%}Select a candidate or enter a RePORTER profile id.
+{%- elif code == 'pubmed_unreachable' -%}PubMed could not be reached — try again.
+{%- elif code == 'pubmed_not_found' -%}PubMed returned no record for that PMID.
+{%- elif code == 'no_draft' -%}There is no draft to accept.
+{%- elif code == 'draft_stale' -%}The profile changed since this draft was made; discard it or regenerate.
+{%- elif code == 'regenerate_refused' -%}Regeneration refused (see the message above).
+{%- else -%}
+{%- set profile_text = profile_error_text(code) -%}
+{%- if profile_text -%}{{ profile_text }}{%- else -%}Something went wrong saving changes.{%- endif -%}
+{%- endif -%}
+{%- endmacro %}

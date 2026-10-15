@@ -1067,18 +1067,20 @@
     </p>
     {% endif %}
 
-    {# --- Status: explicit approved/disapproved branches, quiet "Unreviewed"
-       for none-or-cleared, and an alarming terminal else for anything the
-       `assessment_review_events.action` CHECK "guarantees" cannot happen —
-       same house convention as the gating rows above. A `cleared` LATEST
-       event reads as "Unreviewed" deliberately: clearing is how a reviewer
-       resets the status back to no verdict, so the two states are the same
-       fact from a reader's point of view. #}
+    {# --- Approval status: explicit approved/disapproved branches, quiet
+       "No approval decision" for none-or-cleared, and an alarming terminal
+       else for anything the `assessment_review_events.action` CHECK
+       "guarantees" cannot happen — same house convention as the gating rows
+       above. A `cleared` LATEST event reads as "No approval decision"
+       deliberately: clearing is how a reviewer resets the status back to no
+       verdict, so the two states are the same fact from a reader's point of
+       view. It says nothing about feedback, which can exist without an
+       approval event. #}
     <div class="mb-4">
-        <span class="text-sm font-semibold text-gray-600">Status</span>
+        <span class="text-sm font-semibold text-gray-600">Approval status</span>
         <div class="review-status mt-1 text-sm flex items-center gap-2 flex-wrap">
             {% if review_status is none or review_status.action == 'cleared' %}
-                <span class="text-gray-600">Unreviewed</span>
+                <span class="text-gray-600">No approval decision</span>
             {% elif review_status.action == 'approved' %}
                 <span class="review-status-approved px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-medium">Approved</span>
                 <span class="text-gray-600">by {{ review_status.actor_name }}</span>
@@ -1241,13 +1243,16 @@
             {# New copy (plan B3b / PS10): the mode select had no explanation at
                all, and "Learn" was easy to read as "analyse this now". Since
                the automatic enqueue was removed (decision D7) nothing runs off
-               this choice until a human asks for it. No absolute manager path
-               here — this file must stay free of them (see the header). #}
+               this choice until a human asks for it. Non-staff viewers cannot
+               open the prompt-suggestions page, so they are told only that a
+               manager decides. No absolute manager path here — this file must
+               stay free of them (see the header). #}
             <p class="review-mode-help text-sm text-gray-600 max-w-[68ch]">
                 Choosing <span class="font-semibold">Learn</span> marks this
                 feedback as eligible for the prompt-suggestion bot and nothing
-                more. Suggestions are generated only when a human presses the
-                button on the prompt-suggestions page.
+                more.{% if effective_user.is_staff %} Suggestions are generated only when a human presses the
+                button on the prompt-suggestions page.{% else %} A manager decides when suggestions are
+                generated.{% endif %}
             </p>
             <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Submit feedback</button>
         </form>
@@ -1284,7 +1289,7 @@
         <form method="post" action="/reviews/assessments/{{ a.id }}/assign" class="mt-2 flex items-center gap-2">
             <input type="hidden" name="surface" value="workspace">
             <input type="hidden" name="run_id" value="{{ run_id }}"><input type="hidden" name="sort" value="{{ sort }}"><input type="hidden" name="lab" value="{{ lab_filter or '' }}"><input type="hidden" name="review" value="{{ review }}"><input type="hidden" name="assignment" value="{{ assignment }}">
-            <label for="assign-user" class="text-sm text-gray-700">Assign reviewer</label>
+            <label for="assign-user" class="text-sm text-gray-700">Assign to</label>
             <select id="assign-user" name="assignee_user_id" class="border rounded px-1 py-0.5 text-sm">
                 {% for u in review_capable_users %}<option value="{{ u.id }}">{{ u.name }}</option>{% endfor %}
             </select>

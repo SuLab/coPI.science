@@ -1343,3 +1343,67 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > `docs/operations/pis-and-access.md`). Commit before building.
 >
 > Rollback: `alembic downgrade 0065` drops the table and every link; staff sign in with ORCID.
+
+> **Deploy order for `0067_help_intro_dismissals` — migrate BEFORE the new web image serves,
+> with the worker idle or stopped; rebuild all three images (for the feature, not the schema);
+> no backfill.** `0067` creates `help_intro_dismissals`: one row per manager or reviewer who
+> answered the Help tab's first-sign-in prompt, keyed on `user_id`, `ON DELETE CASCADE` from
+> `users`, with `via` (`dismiss` or `finish`) held by the CHECK `ck_help_intro_dismissals_via`.
+> Design: `docs/specs/2026-10-14-help-and-onboarding-design.md` §5.1 and §11.
+>
+> *Old code on the new schema* is safe: nothing old reads the table. *New code on the old
+> schema* is not: the workspace router looks the row up on every manager and reviewer GET, so
+> those pages 500 with `UndefinedTable`. **Agent image:** the engine never reads the table, so
+> the schema alone needs no agent rebuild, but the deploy rebuilds all three images: the worker
+> reads the assessment chat record (whose wording this change alters) when it generates opening
+> questions, and the worker and the agent both import `src.models`, which gains the model.
+> **No backfill:** no row means "never answered", so every existing manager and reviewer sees
+> the prompt once.
+>
+> **Chat notice (expected).** The same release changes the assessment chat record's
+> approval-status line ("Approval status — …", spec D17). The record's hash covers its text,
+> so every answer already stored on an assessment with an approve, disapprove or cleared event
+> shows "The record changed after this answer." in the drawer. No data changed. Count the
+> affected assessments before deploying:
+> `SELECT count(DISTINCT assessment_id) FROM assessment_review_events`.
+>
+> **Lock.** Unlike `0066`'s, this `CREATE TABLE` locks an existing table: `REFERENCES users`
+> takes a lock on `users`. The worker holds one transaction across a profile pipeline run that
+> updates `users` rows, so migrate with no `processing` `generate_profile` job (or
+> `$DC stop worker`), or the chain's 10 s `lock_timeout` rolls the apply back. Sign-ins, which
+> write `users`, queue behind the lock while the apply waits.
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     git status --porcelain --untracked-files=all -- src templates static prompts alembic \
+>         scripts help_assets pyproject.toml alembic.ini   # must print nothing (commit first)
+>     .venv-test/bin/python -m tests.e2e.help_shots.capture --check   # no stale or missing shots
+>     # Rollback point: tag the image each container RUNS, not :latest, which the build overwrites.
+>     for s in blackbird-app worker; do
+>       docker image tag "$(docker inspect -f '{{.Image}}' "$($DC ps -q $s)")" \
+>         copi-blackbird-$s:rollback-pre-help
+>     done
+>     docker image tag "$(docker inspect -f '{{.Image}}' "$($DC --profile agent ps -q agent)")" \
+>       copi-blackbird-agent:rollback-pre-help
+>     $DC build blackbird-app worker
+>     $DC --profile agent build agent
+>     docker image tag copi-blackbird-blackbird-app:latest copi-blackbird-blackbird-app:help-0067
+>     # worker idle (no processing generate_profile job) or stopped, then:
+>     ./scripts/migrate/run_migration.sh                   # rehearse
+>     ./scripts/migrate/run_migration.sh --apply
+>     $DC up -d blackbird-app worker
+>     $DC up -d agent                                      # ONLY when /admin/simulation shows no live run
+>
+> If a run is live, leave the agent on its old image: old agent code on the new schema is safe.
+>
+> Rollback: re-tag each `:rollback-pre-help` as `:latest`, then `$DC up -d blackbird-app worker`,
+> and `$DC up -d agent` only with no live run. `0067` stays applied. **Never downgrade first**:
+> the new image would then 500 on manager and reviewer workspace pages. If the feature is
+> reverted in git, keep `alembic/versions/0067_help_intro_dismissals.py` in the tree or
+> downgrade first: without the file every later preflight BLOCKs on a stamp of `0067`, which
+> is then not a supported starting point. To downgrade, after the old image serves, run
+> `alembic downgrade 0066` in a one-off `docker run --rm` container off
+> `copi-blackbird-blackbird-app:help-0067`, on the compose network with the stack's `.env`
+> (`$DC run` and `run_migration.sh` always use `:latest`, which is then the old image). The
+> downgrade drops the table and every recorded answer, so the prompt shows again. **Never reuse
+> revision id `0067`**, whatever happens to this feature: a later revision with that id would
+> count as already applied and its DDL would be skipped silently.

@@ -1,0 +1,90 @@
+{% extends "help/_layout.html" %}
+{% from "help/_figure.html" import figure %}
+{% from "help/_callouts.html" import careful, note %}
+{% block help_body %}
+<p class="text-sm text-gray-600">Reviewer tutorial</p>
+<h1>{{ step.title }}</h1>
+
+<h2 id="where">Where</h2>
+<p>On an assessment's detail page, the <strong>Human review</strong> section, below
+Dimension scores. The <strong>Review</strong> link in the row at the top of the page jumps
+there. The <strong>Quick scoring</strong> form on each card in the list is a shorter way in.</p>
+
+<h2 id="what-you-see">What you'll see</h2>
+{{ figure(request, "review-form", "The Human review section: Approval status, the feedback already recorded, and the Add feedback form.") }}
+
+{% call careful("Feedback is real review data") %}
+<p>There is no practice copy of the app. Anything you submit is saved under your name,
+shown to everyone who opens the assessment, and read by the assessment chat. This step only
+shows you the form.</p>
+{% endcall %}
+
+<h2 id="what-it-means">What it means</h2>
+<p>Your scores rate the proposal's own scientific and strategic quality, not how well the bot
+performed. The section asks you to read the full rationale before scoring: the brief at the
+top of the page is BlackbirdBot's own summary, not an independent account.</p>
+
+<h3>Approval status</h3>
+<p><strong>Approval status</strong> shows <strong>No approval decision</strong>, or an earlier
+<strong>Approved</strong> or <strong>Disapproved</strong> with the name of the person who set
+it. <strong>Status history</strong>, when there is any, lists every change. No page has a
+control to change it. It is separate from feedback: an assessment can have feedback and no
+approval decision.</p>
+
+<h3>Feedback</h3>
+<p>Every piece of feedback recorded on the assessment is listed, oldest first, with the
+reviewer's name, the overall rating out of 5, the feedback mode, any dimension scores and the
+comment. "(edited)" marks feedback changed after it was first saved.</p>
+
+<h3>Add feedback</h3>
+<ul>
+    <li><strong>Overall rating (1 = weak … 5 = strong)</strong>: required.</li>
+    <li><strong>Rubric dimensions (optional)</strong>: one score per rubric dimension. Each
+    shows the dimension's weight and BlackbirdBot's own score for comparison, and
+    <strong>What the scale means here</strong> explains the scale. Leave a dimension blank
+    if you cannot judge it.</li>
+    <li><strong>Comment</strong> (optional): up to 10,000 characters. Use it to explain your
+    score and to flag anything the assessment got wrong.</li>
+    <li><strong>Feedback mode</strong>: required.
+        <ul>
+            <li><strong>Learn</strong> marks this feedback as eligible for the
+            prompt-suggestion bot and nothing more. {% if permissions.staff %}Suggestions are
+            generated only when a human presses the button on the prompt-suggestions
+            page.{% else %}A manager decides when suggestions are generated.{% endif %}</li>
+            <li><strong>Don't learn — log only</strong> records the feedback and nothing
+            else.</li>
+        </ul>
+    </li>
+    <li><strong>Submit feedback</strong> saves it.</li>
+</ul>
+<p>Each submission adds a new piece of feedback; it does not replace your earlier one. An
+identical review submitted again straight away is not saved twice, and the page says so.</p>
+
+<h3>Quick scoring on the list</h3>
+<p>The card's <strong>Quick scoring</strong> form has the overall rating, the comment and the
+feedback mode, and no dimension scores. Feedback submitted from the
+<strong>Unreviewed</strong> tab moves that card to <strong>Reviewed</strong>: the page says
+"Moved to Reviewed." and moves on to the next card.</p>
+
+<h3>Editing and deleting</h3>
+<p>Your own feedback has an <strong>Edit</strong> control on the detail page. Saving an edit
+replaces that feedback's rating, dimension scores, comment and mode. You cannot edit anyone
+else's feedback. You cannot delete feedback: only an admin can.</p>
+
+<h3>Assigned</h3>
+<p>The end of the section lists who the assessment is assigned to, or "No one assigned." A
+manager can assign it to people, and <strong>Assigned to me</strong> on the list then finds
+it. An assignment is a note of who should review it; it never grants access to
+anything.</p>
+{% if permissions.staff %}
+<p>As staff, you assign people from here; see
+<a href="{{ page_url(request, 'help_page', slug='assessments', fragment='assigning') }}">Assigning</a>.</p>
+{% endif %}
+
+<p>More detail:
+<a href="{{ page_url(request, 'help_page', slug='assessments', fragment='reviewing') }}">Recording a review</a>,
+<a href="{{ page_url(request, 'help_page', slug='assessments', fragment='approval-status') }}">Approval status</a>
+and <a href="{{ page_url(request, 'help_page', slug='how-it-works', fragment='human-review') }}">Human review</a>.</p>
+
+{% include "help/_step_nav.html" %}
+{% endblock %}

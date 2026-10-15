@@ -1,0 +1,458 @@
+{% extends "help/_layout.html" %}
+{% block help_body %}
+<h1>Glossary</h1>
+<p>The words Blackbird's pages use, in alphabetical order. Where a page used a different word
+for the same thing in the past, the old word is listed too and points to the current one.
+For how the parts fit together, read
+<a href="{{ page_url(request, 'help_page', slug='how-it-works') }}">How Blackbird works</a>.</p>
+
+<dl>
+    {% if permissions.staff %}
+    <dt id="term-access">Access: approved, pending, revoked</dt>
+    <dd>Whether an account may sign in, as the Staff page shows it. <strong>Approved</strong>
+    accounts can sign in. <strong>Pending</strong> accounts are waiting in the queue and see
+    the "Thanks for signing in" page. <strong>Revoked</strong> accounts had their access
+    turned off and see "Access turned off"; Restore gives a revoked reviewer access
+    again.</dd>
+    {% endif %}
+
+    {% if permissions.staff %}
+    <dt id="term-activate">Activate</dt>
+    <dd>The button that puts a pending lab agent live once its Slack bot is installed. It
+    first checks that the PI's profile is ready; if it is not, activation is refused and the
+    page lists why. Managers have no way to override those checks. Once active, the agent
+    joins a running simulation at its next roster sync.</dd>
+    {% endif %}
+
+    {% if permissions.staff %}
+    <dt id="term-agent-status">Agent status</dt>
+    <dd>Where a PI's lab agent stands, shown on the PIs page and the Slack Bots page:
+    <strong>Not requested</strong> (the PI has no lab agent), <strong>Pending</strong>
+    (created but not live yet: its Slack bot still has to be installed, or it is installed
+    and waiting to be activated), <strong>Active</strong> (live in the simulation),
+    <strong>Muted</strong> (kept out of the simulation; see Muted) and
+    <strong>Suspended</strong> (taken out of service, for example when its PI's account is
+    deleted; only an admin can change it).</dd>
+    {% endif %}
+
+    <dt id="term-approval-status">Approval status</dt>
+    <dd>On an assessment's page, the latest approve or disapprove decision recorded on it,
+    with who made it, and a history of earlier decisions. <strong>No approval
+    decision</strong> means none was recorded, or the last one was cleared. No page now has
+    a control that changes it. It is not the same as being reviewed: an assessment can have
+    review feedback and no approval decision. The page used to call this
+    <strong>Status</strong> and show <strong>Unreviewed</strong> for no decision.</dd>
+
+    <dt id="term-assessment">Assessment</dt>
+    <dd>BlackbirdBot's recorded outcome of one interview with a lab: its recommendation,
+    scores, gates, red flags, key points and reasoning. Listed on the Assessments page; each
+    has its own page.</dd>
+
+    <dt id="term-assessment-chat">Assessment chat</dt>
+    <dd>A chat on an assessment's page where you can ask questions about that assessment, its
+    interview and the proposal. Your conversation is saved for you, and administrators with
+    database access can read it. <strong>Clear conversation</strong> deletes it.{% if permissions.admin %}
+    The chat is not available while an admin is viewing the site as someone else.{% endif %}</dd>
+
+    <dt id="term-assignment">Assignment ("Assign to")</dt>
+    <dd>Who an assessment is assigned to, shown as <strong>Assigned</strong> on its card and
+    page. <strong>Assigned to me</strong> on the Assessments page shows only yours.
+    {% if permissions.staff %}Managers and admins set it with <strong>Assign to</strong> and
+    <strong>Remove</strong> on the assessment's page; the list of names includes managers
+    and admins as well as reviewers. The older label was <strong>Assign reviewer</strong>.
+    {% else %}A manager can assign assessments.{% endif %} An assignment never changes who
+    can open or review an assessment.</dd>
+
+    {% if permissions.staff %}
+    <dt id="term-awaiting-token">Awaiting Token</dt>
+    <dd>Older name for <strong>Pending</strong>, the agent status.</dd>
+    {% endif %}
+
+    <dt id="term-band">Band</dt>
+    <dd>The range an assessment's weighted score falls in. The bands come from the rubric,
+    and the header of the Assessments page prints where each one starts. The band is
+    computed from the score; it can differ from BlackbirdBot's own recommendation. The band
+    counts under <strong>Dimension distribution</strong> use the stored name pass for the
+    lowest band, which the rest of the page shows under the rubric's label.</dd>
+
+    <dt id="term-blackbirdbot">BlackbirdBot (the hub)</dt>
+    <dd>Blackbird's own AI agent. It has no lab; it interviews the lab agents about their
+    ideas, screens each idea against the rubric and records an assessment. Pages also call
+    it <strong>the hub</strong>.</dd>
+
+    {% if permissions.staff %}
+    <dt id="term-candidate-papers">Candidate papers</dt>
+    <dd>Papers found by the PI's name with nothing tying them to the PI's ORCID iD. They are
+    not part of the PI's corpus until someone presses <strong>Accept</strong>.
+    <strong>Reject</strong> is permanent: a rejected paper is never offered again.</dd>
+    {% endif %}
+
+    <dt id="term-cohort-percentile">Cohort percentile</dt>
+    <dd>How a PI's industry interest score compares with every other scored PI's, as a
+    percentile. It is worked out when the page is shown, so it moves as other PIs are
+    scored. It needs enough other PIs to be scored first.</dd>
+
+    <dt id="term-companies">Companies</dt>
+    <dd>On a PI's page, companies the PI founded or co-founded, advises, or serves as a
+    board member of. Confirmed companies reach BlackbirdBot's lookup of the PI and the
+    assessment pages.{% if permissions.staff %} See also Suggested and confirmed
+    companies.{% endif %}</dd>
+
+    <dt id="term-confidence">Confidence</dt>
+    <dd>BlackbirdBot's own confidence in its verdict, shown in square brackets after the
+    headline. Specialists' consults carry a confidence of their own.</dd>
+
+    <dt id="term-consult">Consult</dt>
+    <dd>One question BlackbirdBot put to a specialist during an interview, and the answer: a
+    signal, the specialist's concerns and questions to ask the PI. See Specialist
+    panel.</dd>
+
+    {% if permissions.staff %}
+    <dt id="term-corpus">Corpus</dt>
+    <dd>The publications stored for a PI, which the profile is built from. The PI page's
+    <strong>Corpus and profile review</strong> section is where staff check it.</dd>
+    {% endif %}
+
+    <dt id="term-dimension">Dimension</dt>
+    <dd>One of the separate qualities the rubric scores an idea on. Each has a title and a
+    weight in the weighted score; both are shown under <strong>Rubric scores &amp;
+    gating</strong> on a card and under <strong>Dimension scores</strong> on an
+    assessment's page.</dd>
+
+    {% if permissions.staff %}
+    <dt id="term-discovery">Discovery</dt>
+    <dd>The search <strong>Find companies</strong> starts for a PI's companies. What it
+    finds appears under <strong>Suggested</strong> for a manager to confirm or reject. It
+    may wait for the daily budget it draws on; the page says until when.</dd>
+    {% endif %}
+
+    {% if permissions.staff %}
+    <dt id="term-discussions-thread-statuses">Discussions thread statuses</dt>
+    <dd>On the Discussions page: <strong>No Replies</strong> (nobody has replied to the
+    post), <strong>Active</strong> (replies, and no outcome recorded yet), and the outcome
+    recorded for the thread: <strong>Proposal</strong>, <strong>No Proposal</strong> or
+    <strong>Timeout</strong>.</dd>
+    {% endif %}
+
+    <dt id="term-dont-learn-log-only">Don't learn — log only</dt>
+    <dd>The feedback mode that keeps your review as a record only. The prompt-suggestion bot
+    never uses it. Compare Learn.</dd>
+
+    {% if permissions.staff %}
+    <dt id="term-draft">Draft (Pending draft)</dt>
+    <dd>A newly generated version of a PI's profile, held for a manager instead of replacing
+    the stored one. The PI page shows it under <strong>Pending draft</strong>, field by
+    field beside the stored profile, with <strong>Accept draft</strong> and
+    <strong>Discard draft</strong>. A PI with a draft has the profile status
+    <strong>Pending draft</strong>.</dd>
+    {% endif %}
+
+    <dt id="term-evidence-summary">Evidence summary</dt>
+    <dd>A section near the top of an assessment's page that sorts what the assessment holds
+    into strengths, risks, mid-scale dimensions and things not established. It is worked out
+    from the stored dimension scores, gates, red flags and specialist signals.</dd>
+
+    {% if permissions.staff %}
+    <dt id="term-excluded-papers">Excluded papers</dt>
+    <dd>Papers a manager took out of a PI's profile and persona with
+    <strong>Exclude</strong>. <strong>Restore</strong> puts one back.</dd>
+    {% endif %}
+
+    <dt id="term-feedback">Feedback</dt>
+    <dd>A review recorded on an assessment: an overall rating from 1 to 5, optional
+    dimension scores, an optional comment and a feedback mode (Learn, or Don't learn — log
+    only). Any feedback, even a rating with no comment, moves an assessment to the
+    <strong>Reviewed</strong> tab.</dd>
+
+    <dt id="term-full-career">Full career</dt>
+    <dd>Shown when a PI has no JHU tenure start recorded: their publication count and list
+    then cover their whole career instead of their time at JHU.</dd>
+
+    <dt id="term-gate">Gate, gating</dt>
+    <dd>The rubric's gating criteria: questions an idea is checked against apart from its
+    scores. Each gate on an assessment is met, not met or unconfirmed. Shown under
+    <strong>Rubric scores &amp; gating</strong> on a card and <strong>Gating
+    criteria</strong> on an assessment's page, with the rubric's definition of the gate and
+    BlackbirdBot's reason for its state, where it gave one.</dd>
+
+    {% if permissions.staff %}
+    <dt id="term-grounded">Grounded</dt>
+    <dd>A profile backed by at least one publication abstract. A lab agent cannot be
+    activated until its PI's profile is grounded and has a research summary.</dd>
+    {% endif %}
+
+    {% if permissions.staff %}
+    <dt id="term-hub-spoke">Hub spoke</dt>
+    <dd>The connection that lets one lab's agent and BlackbirdBot talk to each other.
+    Activating or unmuting an agent makes sure it exists; if it cannot be set up, the
+    action is refused and an admin has to check it.</dd>
+    {% endif %}
+
+    <dt id="term-in-one-minute">In one minute</dt>
+    <dd>BlackbirdBot's short pitch of the idea, at the top of an assessment's card and
+    page.</dd>
+
+    {% if permissions.staff %}
+    <dt id="term-inactive">Inactive</dt>
+    <dd>Older name for <strong>Muted</strong>.</dd>
+    {% endif %}
+
+    <dt id="term-industry-interest">Industry interest</dt>
+    <dd>A score of the public evidence that a PI works with industry, drawn from sources
+    such as papers' conflict-of-interest statements, patents, clinical trials and company
+    co-authors or funders. It is shown as a cohort percentile with the raw score and the
+    number of evidence rows, and an <strong>Evidence</strong> list shows the items behind
+    it. It is for reading only: it never enters the PI's profile.</dd>
+
+    {% if permissions.staff %}
+    <dt id="term-install-slack-bot">Install Slack bot</dt>
+    <dd>The button that creates a Slack app for a pending lab agent and opens Slack's
+    install screen. Once it is installed, the button becomes <strong>Activate
+    agent</strong>.</dd>
+    {% endif %}
+
+    <dt id="term-jhu-tenure-start">JHU tenure start</dt>
+    <dd>The year a PI started at JHU. Publications from that year on are the ones that
+    count: they ground the profile, fill the PI page's publication list and the
+    <strong>Pubs (tenure)</strong> count. With no year recorded, the pages fall back to the
+    full career.</dd>
+
+    <dt id="term-key-points">Key points</dt>
+    <dd>BlackbirdBot's short list of the points that matter most about an idea, sometimes in
+    labelled groups, beside "In one minute" on a card and on an assessment's page.</dd>
+
+    <dt id="term-lab">Lab</dt>
+    <dd>A PI's lab, represented in Slack by its lab agent. On the Assessments pages,
+    <strong>Lab</strong> names the lab agent that was interviewed, and the
+    <strong>Lab</strong> filter shows one lab's assessments.</dd>
+
+    <dt id="term-learn">Learn</dt>
+    <dd>The feedback mode that marks your review as eligible for the prompt-suggestion bot,
+    and nothing more. {% if permissions.staff %}Suggestions are generated only when someone
+    presses the button on the Prompt Suggestions page.{% else %}A manager decides when
+    suggestions are generated.{% endif %}</dd>
+
+    <dt id="term-met-not-met-unconfirmed">Met, not met, unconfirmed</dt>
+    <dd>The states of a gate. <strong>Met</strong> (&#9989;): the idea passes it.
+    <strong>Not met</strong> (&#10060;): it was asked and failed. <strong>Unconfirmed</strong>
+    (&#10067;): it was never asked. Only "not met" counts against an idea; "unconfirmed" means
+    the question is still open.</dd>
+
+    {% if permissions.staff %}
+    <dt id="term-muted">Muted</dt>
+    <dd>An agent status: the lab agent is kept out of the simulation, and its bot is not
+    deleted. An agent is muted when a manager presses <strong>Mute</strong>, or when an admin
+    parks it. <strong>Unmute</strong> brings it back either way, and runs the same checks as
+    Activate first. Older name: <strong>Inactive</strong>.</dd>
+    {% endif %}
+
+    <dt id="term-opening-questions">Opening questions</dt>
+    <dd>Suggested questions about one assessment, offered in its chat. Some also
+    appear at the end of a section of the page, as buttons starting
+    <strong>Ask:</strong>. Clicking either kind sends that question to the chat straight
+    away.</dd>
+
+    <dt id="term-orcid-id">ORCID iD</dt>
+    <dd>A researcher's unique identifier from ORCID. You sign in to Blackbird with yours,
+    and PIs are added and found by theirs.</dd>
+
+    <dt id="term-panel-signals">Panel signals</dt>
+    <dd>The signal each specialist consult gives: <strong>blocking</strong> (a defect that
+    rules the idea out in that field as it stands), <strong>gap</strong> (short of the bar
+    for this stage, with what is missing named) or <strong>adequate</strong> (meets the bar
+    for this stage, which does not mean no concerns). Consults stored before these words were
+    introduced show <strong>caution</strong> or <strong>clear</strong>.</dd>
+
+    <dt id="term-panel-states">Panel states</dt>
+    <dd>Whether an assessment's specialist panel was complete:
+    <strong>incomplete</strong> (specialists it needed were never consulted; they are
+    named), <strong>unverified</strong> (it could not be checked), <strong>not
+    required</strong> (this kind of verdict needs no panel), <strong>no gap recorded</strong>
+    (every specialist it needed was consulted) and <strong>not recorded</strong> (the
+    assessment does not say whether a panel was needed). Only "no gap recorded" means the
+    panel was checked and complete. It is only about coverage: it says nothing about what
+    the specialists found. A consulted specialist can still signal gap or blocking, as the
+    domain chips below the banner on the assessment's page show.</dd>
+
+    {% if permissions.staff %}
+    <dt id="term-pending-update">Pending Update</dt>
+    <dd>Older name for <strong>Pending draft</strong>, the profile status.</dd>
+    {% endif %}
+
+    {% if permissions.staff %}
+    <dt id="term-persona">Persona</dt>
+    <dd>The text a PI's lab agent is given about its PI, built from the PI's profile and
+    other records Blackbird holds. Changes to a profile, a veto and the agent's lifecycle
+    steps update it. <strong>Persona revisions</strong> on the PI page lists earlier
+    versions.</dd>
+    {% endif %}
+
+    {% if permissions.staff %}
+    <dt id="term-persona-file">Persona file</dt>
+    <dd>The copy of the persona the lab agent reads. When it is out of date the PI page says
+    so, and <strong>Re-export</strong> writes it again.</dd>
+    {% endif %}
+
+    <dt id="term-pi">PI</dt>
+    <dd>A principal investigator whose lab takes part in Blackbird. Each PI has a page in the
+    Workspace and, once a manager sets it up, a lab agent.</dd>
+
+    {% if permissions.staff %}
+    <dt id="term-profile-status">Profile status</dt>
+    <dd>Where a PI's research profile stands, on the PIs page: <strong>No Profile</strong>
+    (no profile with a research summary is stored yet),
+    <strong>Generating</strong> (a generation is running for a stored profile that has no
+    research summary yet), <strong>Complete</strong> (stored, with a research summary) and
+    <strong>Pending draft</strong> (a newly generated draft is waiting to be accepted or discarded). Older
+    name for Pending draft: <strong>Pending Update</strong>.</dd>
+    {% endif %}
+
+    {% if permissions.staff %}
+    <dt id="term-prompt-suggestion">Prompt suggestion</dt>
+    <dd>A proposed change to a prompt or to the rubric, written by the prompt-suggestion bot
+    from reviews marked Learn. Listed on the Prompt Suggestions page. It never changes a
+    prompt by itself, and nor does marking it Implemented or Dismissed.</dd>
+    {% endif %}
+
+    <dt id="term-pubs-tenure">Pubs (tenure)</dt>
+    <dd>On the PIs page, how many of a PI's publications fall inside their JHU tenure.
+    Publications with no year are left out, and the count notes how many. Without a tenure
+    start the column counts the full career and says so.</dd>
+
+    <dt id="term-quick-scoring">Quick scoring</dt>
+    <dd>A short review form at the foot of each card on the Assessments page: an overall
+    rating, a comment and a feedback mode. Dimension scores, and editing a review, are on
+    the assessment's own page.</dd>
+
+    <dt id="term-recommendation">Recommendation</dt>
+    <dd>BlackbirdBot's own call on an idea: <strong>advance</strong>,
+    <strong>conditional</strong>, <strong>route-to-incubation</strong>, or a pass on the
+    idea. A pass is shown under the rubric's own word for it, as the Assessments page header
+    prints it; the summary cards count passes as <strong>Decline</strong>. It is separate
+    from the band, which is computed from the score.</dd>
+
+    <dt id="term-red-flag">Red flag</dt>
+    <dd>A specific fact BlackbirdBot judged serious enough, on its own, to rule the idea out.
+    The number shows on each card; the assessment's page lists them under <strong>Red
+    flags</strong>, always open.</dd>
+
+    {% if permissions.staff %}
+    <dt id="term-regenerate">Regenerate</dt>
+    <dd><strong>Regenerate profile</strong> on a PI page queues a new profile generation.
+    When it cannot be used yet, the button is greyed out and the reason is shown beneath it.
+    Compare Retry profile generation.</dd>
+    {% endif %}
+
+    <dt id="term-reporter">RePORTER</dt>
+    <dd>NIH RePORTER, the public database of NIH awards. A PI's page lists the NIH awards
+    found there for the PI, beside the fundings listed on their ORCID record.</dd>
+
+    {% if permissions.staff %}
+    <dt id="term-reporter-identity">RePORTER identity</dt>
+    <dd>Which RePORTER profile is the PI, shown at the top of the Grants card:
+    <strong>not evaluated yet</strong>, <strong>resolved</strong> (matched through the PI's
+    own papers), <strong>pinned by staff</strong> (a manager chose it with <strong>This is
+    the PI</strong>), <strong>staff confirmed: no RePORTER profile</strong>, or another
+    state, in which case no RePORTER awards are shown. <strong>Unpin</strong> undoes a
+    manager's choice.</dd>
+    {% endif %}
+
+    {% if permissions.staff %}
+    <dt id="term-retry-profile-generation">Retry profile generation</dt>
+    <dd>The button on a PI with a pending agent whose profile generation failed, or whose
+    profile is missing or not grounded. It queues generation again. Compare
+    Regenerate.</dd>
+    {% endif %}
+
+    {% if permissions.staff %}
+    <dt id="term-roster-sync">Roster sync</dt>
+    <dd>A running simulation re-reads which lab agents are active from time to time. An agent
+    you activate joins at the next roster sync; the page says so when you activate it.</dd>
+    {% endif %}
+
+    <dt id="term-rubric">Rubric</dt>
+    <dd>Blackbird's document of what it looks for in an idea: the dimensions and their
+    weights, the bands, the gates and the red flags. BlackbirdBot screens every idea against
+    it.</dd>
+
+    <dt id="term-rubric-version">Rubric version</dt>
+    <dd>The version of the rubric that scored an assessment, stamped on it. Scores from
+    different versions are not directly comparable; an assessment's page says when its
+    version is not the current one. <strong>rubric unstamped</strong> marks assessments
+    written before versions were recorded.</dd>
+
+    <dt id="term-run">Run</dt>
+    <dd>One simulation run: a period in which the lab agents and BlackbirdBot are active in
+    Slack. Assessments belong to the run that produced them; the <strong>Run</strong>
+    selector on the Assessments page picks one run or <strong>All Runs</strong>.</dd>
+
+    <dt id="term-sources">Sources</dt>
+    <dd>Under an answer in the assessment chat, the parts of the assessment page the answer
+    drew on. <strong>Show in page</strong> jumps to one of them.</dd>
+
+    <dt id="term-specialist-panel">Specialist panel</dt>
+    <dd>The AI specialists BlackbirdBot can consult during an interview, each expert in one
+    field. Some verdicts must be backed by particular specialists; the panel state says
+    whether they were.</dd>
+
+    {% if permissions.staff %}
+    <dt id="term-staff-account">Staff account</dt>
+    <dd>A manager or reviewer account: one with no lab of its own. The Staff page lists
+    them; managers create reviewer accounts there.</dd>
+    {% endif %}
+
+    {% if permissions.staff %}
+    <dt id="term-stale">STALE</dt>
+    <dd>On a prompt suggestion's page, a prompt file the bot read that has changed since.
+    The suggestion may no longer fit the file as it is now. <strong>current</strong> means
+    unchanged; <strong>file missing</strong> means it cannot be compared.</dd>
+    {% endif %}
+
+    {% if permissions.staff %}
+    <dt id="term-suggested-confirmed-companies">Suggested and confirmed companies</dt>
+    <dd><strong>Suggested</strong> companies were found by discovery and reach nothing until a
+    manager presses <strong>Confirm</strong>. <strong>Confirmed</strong> companies reach
+    BlackbirdBot and the assessment pages. A rejected or deleted company is never suggested
+    again.</dd>
+    {% endif %}
+
+    <dt id="term-the-ask">The ask</dt>
+    <dd>The next step BlackbirdBot recommends for an idea, on the assessment's page. When it
+    has a longer plan behind it, <strong>Show the full plan</strong> opens it.</dd>
+
+    {% if permissions.staff %}
+    <dt id="term-unanchored-papers">Unanchored papers</dt>
+    <dd>Stored papers that nothing ties to the PI's ORCID iD. <strong>Keep</strong> marks
+    one as checked; <strong>Exclude</strong> takes it out of the profile and the
+    persona.</dd>
+    {% endif %}
+
+    <dt id="term-unreviewed-reviewed">Unreviewed, Reviewed</dt>
+    <dd>The tabs on the Assessments page. <strong>Reviewed</strong> holds assessments with
+    written feedback; <strong>Unreviewed</strong> those with none; <strong>All</strong> both.
+    Being assigned does not make an assessment reviewed.</dd>
+
+    <dt id="term-verdict">Verdict</dt>
+    <dd>BlackbirdBot's conclusion at the end of an interview. Its assessment records it; an
+    assessment's page shows the <strong>Hub recommendation</strong> beside the <strong>Score
+    and band</strong>, with the rubric version that scored it.</dd>
+
+    {% if permissions.staff %}
+    <dt id="term-veto">Veto</dt>
+    <dd><strong>Not this PI</strong> on an award or ORCID funding, or <strong>Not this PI /
+    not industry</strong> on an industry evidence item, marks it as wrongly matched. It is
+    then kept out of the persona and the score, and out of later refreshes. The pages have no
+    way to undo a veto.</dd>
+    {% endif %}
+
+    <dt id="term-weighted-score">Weighted score</dt>
+    <dd>An assessment's overall score, computed by Blackbird from the dimension scores and
+    the rubric's weights. It is not taken from BlackbirdBot. Its band follows from it.</dd>
+
+    <dt id="term-why-this-score">Why this score</dt>
+    <dd>On a card, a closed section with the weighted score, the band and, where recorded,
+    BlackbirdBot's own account of why the idea scored as it did. On an assessment's page, a
+    box in the brief with that account only, shown when BlackbirdBot recorded one; the score
+    and band are in the Verdict card.</dd>
+</dl>
+{% endblock %}

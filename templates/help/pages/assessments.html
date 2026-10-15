@@ -1,0 +1,315 @@
+{% extends "help/_layout.html" %}
+{% from "help/_figure.html" import figure %}
+{% from "help/_callouts.html" import careful, note %}
+{% block help_body %}
+<h1>Assessments</h1>
+<p>An assessment is BlackbirdBot's stored verdict on one screening interview with a lab. The
+<a href="{{ page_url(request, 'workspace_assessments') }}">Assessments</a> page lists them, each
+assessment has a detail page, and both are where you record your own review. For how
+assessments come about, see
+<a href="{{ page_url(request, 'help_page', slug='how-it-works', fragment='assessments') }}">How Blackbird works</a>.
+Unfamiliar terms are in the <a href="{{ page_url(request, 'help_page', slug='glossary') }}">Glossary</a>.</p>
+
+<h2 id="list">The Assessments list</h2>
+<p>The page is titled <strong>Opportunity Assessments</strong>. It opens on the current
+simulation run, sorted for triage, on the <strong>Unreviewed</strong> tab.</p>
+{{ figure(request, "assessments-list", "The Assessments list: the filters at the top right, the review tabs, and the summary cards.") }}
+<h3>Filters</h3>
+<p>The controls at the top right apply when you press <strong>Apply</strong>:</p>
+<ul>
+    <li><strong>Run:</strong> which simulation run to show. Each run is listed by its start
+    time and status, with how many assessments it has stored and, where recorded, the rubric
+    version it used.
+    The newest run is marked "current". <strong>All Runs</strong> shows every run on
+    record.</li>
+    <li><strong>Sort:</strong> <strong>Score (triage)</strong>, the default, puts the
+    highest weighted score first. <strong>Most recent</strong>, <strong>Recommendation</strong>
+    (advance first, then conditional, route-to-incubation, and pass under the rubric's label) and
+    <strong>Lab</strong> are the others.</li>
+    <li><strong>Assignment:</strong> <strong>All</strong>, or <strong>Assigned to me</strong>
+    for only the assessments assigned to you. A manager can assign an assessment to a
+    reviewer. An assignment does not limit what you can see: every reviewer can open and
+    review every assessment.</li>
+    <li><strong>Lab:</strong> a single lab, or <strong>All labs</strong>. The menu lists the
+    labs that have assessments under the run and assignment you picked.</li>
+</ul>
+<h3>The review tabs</h3>
+<p><strong>Unreviewed</strong>, <strong>Reviewed</strong> and <strong>All</strong> split the
+list by whether anyone has written feedback. "Reviewed" means at least one person has
+submitted feedback on the assessment. Being assigned does not make an assessment reviewed,
+and neither does an approval status. Each tab shows its count, and the counts follow the
+selected run, lab and assignment.</p>
+<h3>The header</h3>
+<p>The line under the title says which rubric version the page uses. It also prints the
+score bands: the weighted score needed for advance and for conditional, and the rubric's
+label for scores below that. The
+weighted score is computed from the dimension scores and the rubric's weights. It is not
+taken from the model. When more assessments match than the page can display, a note under
+the header says how many are shown out of how many.</p>
+<h3>Warning banners</h3>
+<ul>
+    <li>An amber banner counts <strong>lost verdicts</strong>. These are interviews whose
+    verdict was never stored, or never produced, with each reason listed separately. A lost
+    verdict cannot be recovered.</li>
+    <li>An orange banner counts verdicts whose <strong>specialist panel</strong> is
+    incomplete, unverified or not recorded. Treat those scores as provisional. Each card's
+    panel badge says which case it is.</li>
+</ul>
+<p>Both banners count the whole run, across every lab and assignment, even when you have
+picked one lab or <strong>Assigned to me</strong>. So the assessment a banner counts may not
+be in the list below it.</p>
+<h3>Summary cards and dimension distribution</h3>
+<p>The summary cards (<strong>Total</strong>, <strong>Advance</strong>,
+<strong>Conditional</strong>, <strong>Route-to-incubation</strong> and
+<strong>Decline</strong>) count the assessments shown on the page by the hub's
+recommendation, not by score band. <strong>Dimension distribution</strong> opens a table of
+each rubric dimension's weight, specialist, count, mean, minimum and maximum, plus the
+number of assessments in each band. It covers the tab you are on. Its band counts use the
+stored name pass for the lowest band, which the rest of the page shows under the rubric's
+label.</p>
+<p>The gating legend above the banners explains the met, not met and unconfirmed symbols
+used inside each card.</p>
+
+<h2 id="cards">Reading an assessment card</h2>
+<p>Each assessment in the list is a card.</p>
+{{ figure(request, "assessment-card", "One assessment card, with the recommendation chip at the top right and Quick scoring at the bottom.") }}
+<ul>
+    <li><strong>Headline:</strong> the hub's one-line summary. On older assessments that have
+    none, the project label is shown instead. The hub's confidence follows in square
+    brackets. Under it are the lab (a link to the PI's page when Blackbird knows it), the
+    date and the rubric version that scored it. With <strong>All Runs</strong> selected, the
+    run is shown too.</li>
+    <li><strong>Recommendation chip</strong> (top right): the hub's own recommendation:
+    advance, conditional or route-to-incubation. A recommendation to pass is shown with the
+    rubric's own label for it, the same word that ends the header's band line.</li>
+    <li><strong>In one minute:</strong> the hub's short pitch for the proposal. At its foot
+    (or on a row of their own when there is no pitch) are <strong>detail →</strong>,
+    which opens the detail page, and <strong>chat</strong>, which opens the detail page with
+    the assessment chat already open.</li>
+    <li><strong>Key points:</strong> the hub's summary bullets, grouped under its own
+    headings.</li>
+    <li><strong>Why this score</strong> (closed until you click it): the weighted score, its
+    band, and the hub's own explanation of the score where it recorded one.</li>
+    <li><strong>Footer badges:</strong> the number of red flags (or "no flags"), the panel
+    badge, an <strong>Approved</strong> or <strong>Disapproved</strong> chip when the
+    assessment has an approval status, and who it is <strong>Assigned</strong> to and
+    <strong>Reviewed by</strong>. The panel badge reads "panel incomplete", "panel
+    unverified", "panel not recorded" or "panel state unknown". There is no badge when the
+    panel found no gap or was not required.</li>
+    <li><strong>Rubric scores &amp; gating</strong> (closed until you click it): each
+    dimension's score as a bar, with its weight, followed by each gate's state. A gate shows
+    the hub's reason for its state, or the rubric's definition of the gate where the hub gave
+    none.</li>
+    <li><strong>Quick scoring:</strong> a short form for an overall rating, a comment and a
+    feedback mode, without opening the detail page. It rates the proposal, not the bot. It
+    has no per-dimension scores and cannot edit earlier feedback; use the detail page for
+    both. See <a href="#reviewing">Recording your review</a>.</li>
+</ul>
+<p>Some older assessments have no headline, pitch, key points or score explanation. Those
+parts are simply left out of their cards.</p>
+
+<h2 id="detail">The assessment detail page</h2>
+<p>Open an assessment with <strong>detail →</strong> on its card. <strong>←
+Opportunity Assessments</strong> at the top takes you back to the list with your filters
+kept.</p>
+<h3>Jump links and Expand all</h3>
+<p>The bar at the top stays in view as you scroll. Its links jump to <strong>Brief</strong>,
+<strong>Evidence</strong>, <strong>Ask</strong>, <strong>Rationale</strong>,
+<strong>Panel</strong>, <strong>Gating</strong>, <strong>Scores</strong>,
+<strong>Review</strong> and <strong>Timeline</strong>. Ask and Rationale appear only when the
+assessment has them. <strong>Expand all</strong> and <strong>Collapse all</strong> open or
+close every collapsible section at once.</p>
+{{ figure(request, "detail-evidence", "The detail page's Evidence summary, with its Strengths, Risks and Not established groups.") }}
+<h3>The sections, in page order</h3>
+<dl>
+    <dt>Brief</dt>
+    <dd>The headline and confidence, <strong>In one minute</strong>, <strong>Key
+    points</strong> and <strong>Why this score</strong>. When staff have confirmed companies
+    for the PI, the brief lists them as they stand today, with the date.</dd>
+    <dt>Evidence summary</dt>
+    <dd><strong>Strengths</strong>, <strong>Risks</strong> and <strong>Not
+    established</strong>, plus <strong>Mid-scale</strong> for dimensions that are neither a
+    strength nor a risk. Each is derived from the stored verdict's dimension scores, gates, red
+    flags and specialist consults, and grouped by those sources. A row may carry the hub's
+    one-sentence reason ("Hub's reason:") or, for a gate, the rubric's definition ("Rubric
+    definition:"). "show" opens a row's quoted text.</dd>
+    <dt>The ask</dt>
+    <dd>The hub's recommended next experiment. On newer assessments, <strong>Show the full
+    plan</strong> opens the plan behind it.</dd>
+    <dt>Verdict</dt>
+    <dd>The card that names the lab, which hub screened it, the date and the Slack channel.
+    It shows the <strong>Hub recommendation</strong> and the <strong>Score and band</strong>.
+    The score is computed, not taken from the model, and the card prints the band lines of the
+    rubric revision that scored it. It also says which rubric version scored this assessment,
+    and warns when that differs from the current rubric, because scores from different
+    revisions are not directly comparable.</dd>
+    <dt>Specialist panel</dt>
+    <dd>Always open. It reads <strong>Specialist panel incomplete</strong> (naming the domains
+    never consulted), <strong>Specialist panel unverified</strong>, <strong>Specialist panel:
+    not required</strong>, <strong>Specialist panel: no gap recorded</strong> or
+    <strong>Specialist panel: not recorded</strong>. Each consulted domain gets a chip with its
+    signals. <strong>No gap recorded</strong> is only about coverage: every specialist the
+    verdict needed was consulted. It says nothing about what they found: a consulted
+    specialist can still signal gap or blocking, as the domain chips below the banner show.
+    See <a href="{{ page_url(request, 'help_page', slug='how-it-works', fragment='specialist-panel') }}">the specialist panel</a>.</dd>
+    <dt>Gating criteria</dt>
+    <dd>Closed until you open it. Each gate shows met, not met or unconfirmed, with the
+    rubric's definition where available and the hub's reason where recorded. "Not met" means the question
+    was asked and failed; "unconfirmed" means it was never asked.</dd>
+    <dt>Red flags</dt>
+    <dd>Always open, with a count, or "None recorded."</dd>
+    <dt>Full rationale</dt>
+    <dd>The hub's full written reasoning.</dd>
+    <dt>Dimension scores</dt>
+    <dd>Each rubric dimension as a bar, with its weight and the hub's reason for the score
+    where it gave one. An unscored dimension shows "not scored" and counted
+    as zero in the weighted score.</dd>
+    <dt>Human review</dt>
+    <dd>Approval status, everyone's feedback, the form to add yours, and who is assigned. See
+    <a href="#reviewing">Recording your review</a>.</dd>
+    <dt>Interview timeline</dt>
+    <dd>Closed until you open it. The Slack thread the verdict came from, with the specialist
+    consults placed in order among the messages. The message that carried the verdict is
+    marked "carried this verdict". Long messages are cut short; <strong>Show full
+    message</strong> shows the rest. If the thread's messages were not kept, the section says
+    "Interview messages unavailable."; the verdict above is unaffected.</dd>
+</dl>
+<h3>Printing</h3>
+<p>Use your browser's print command. Every collapsed section opens for printing and returns
+to how you left it afterwards. The chat and its buttons are left off the printout.</p>
+{% if permissions.staff %}
+<h3>What only staff see</h3>
+<p>Managers and admins see parts of the Evidence summary that reviewers do not. Under Strengths and Risks,
+<strong>In the hub's words</strong> lists the hub's own bullets, and
+<strong>Competitive landscape</strong> and <strong>Evidence maturity</strong> sections appear
+when the hub wrote them. Reviewers' pages, and their assessment chat, leave these out
+entirely.</p>
+{% endif %}
+
+<h2 id="chat">Asking the assessment chat</h2>
+<p>The assessment chat answers questions about one assessment, from that assessment's
+record. It opens in a panel on the right of the detail page, or full screen on a narrow
+screen.</p>
+{{ figure(request, "chat-drawer", "The assessment chat panel: a question, an answer and its Sources list.") }}
+<h3>Opening it</h3>
+<ul>
+    <li>the round speech-bubble button at the bottom right of the detail page (its tooltip
+    reads "Ask about this assessment");</li>
+    <li><strong>chat</strong> on a card in the list, which opens the detail page with the chat
+    already open;</li>
+    <li>an <strong>Ask:</strong> button at the end of a page section. It opens the chat and
+    sends that question straight away.</li>
+</ul>
+<h3>Asking</h3>
+<p>Type in the box at the bottom. <strong>Enter</strong> or <strong>Ask</strong> sends;
+Shift+Enter starts a new line. In an empty conversation the chat offers opening questions
+written for this assessment ("Questions about this assessment. A click sends one:").
+Clicking one sends it at once.</p>
+<p>The bottom of the chat shows how long your question is against the limit, and how many of
+today's questions you have used ("X of Y questions used today"). Each question you send, typed
+or clicked, counts.</p>
+<h3>Sources and Show in page</h3>
+<p>Under an answer, <strong>Sources</strong> lists the parts of the record the answer cites.
+<strong>Show in page</strong> next to a source scrolls the detail page to it and highlights it,
+opening its section if needed.</p>
+<p>If the hub updates the verdict while the interview is still running, the conversation marks
+the point with <strong>Verdict updated after this point</strong>. Earlier questions stay
+visible, but they are no longer part of the conversation the model sees.</p>
+<h3>Clearing and saving</h3>
+<p><strong>Clear conversation</strong> deletes your whole conversation on this assessment,
+after you confirm. It cannot be undone, and it does not give back questions you have already
+used today. Other people's conversations are separate and not affected.</p>
+<p>Conversations are saved for you, and administrators with database access can read them.</p>
+<h3>When the chat is not there</h3>
+<p>When the chat is switched off for the site, no chat buttons appear.{% if permissions.admin %}
+While an admin is viewing the site as someone else, the page shows "Chat unavailable while
+impersonating" instead.{% endif %}
+The chat's own error messages are listed in
+<a href="{{ page_url(request, 'help_page', slug='troubleshooting', fragment='assessment-chat') }}">Troubleshooting</a>.</p>
+
+<h2 id="reviewing">Recording your review</h2>
+<p>Your review rates the proposal's own scientific and strategic quality, not how well the
+bot performed. Read the full rationale first: the brief at the top of the page is
+BlackbirdBot's own summary of it.</p>
+{{ figure(request, "review-form", "The Add feedback form in the Human review section of the detail page.") }}
+<h3>Add feedback</h3>
+<p>The <strong>Add feedback</strong> form in the <strong>Human review</strong> section has
+these parts:</p>
+<ul>
+    <li><strong>Overall rating</strong>, required: a whole number from 1 (weak) to 5
+    (strong).</li>
+    <li><strong>Rubric dimensions (optional)</strong>: one score per rubric dimension, on the
+    scale the form shows. Each shows its weight and what BlackbirdBot scored, and <strong>What
+    the scale means here</strong> explains the scale for that dimension. Leave a dimension
+    blank if you cannot judge it.</li>
+    <li><strong>Comment</strong> (optional): up to 10,000 characters. Use it to explain your
+    rating and to flag anything the assessment got wrong.</li>
+    <li><strong>Feedback mode</strong>, required: <strong>Learn</strong> or <strong>Don't
+    learn — log only</strong>.</li>
+</ul>
+<p>Press <strong>Submit feedback</strong>. Each submission adds a new entry; it does not
+replace your earlier one. Quick scoring on a card is the same form without the dimension
+scores.</p>
+{% call careful() %}
+<p>Feedback is real review data. It is saved under your name, everyone who opens the
+assessment can read it, and only an admin can delete it. You can edit your own entries.</p>
+{% endcall %}
+<h3>Learn, or Don't learn — log only</h3>
+<p><strong>Learn</strong> marks your feedback as eligible for prompt suggestions, and nothing
+more: nothing runs when you submit. <strong>Don't learn — log only</strong> records the
+feedback and never sends it there.
+{% if permissions.staff %}Suggestions are generated only when someone presses
+<strong>Generate suggestions from current reviews</strong> on the
+<a href="{{ page_url(request, 'workspace_prompt_suggestions') }}">Prompt Suggestions</a> page;
+see <a href="{{ page_url(request, 'help_page', slug='prompt-suggestions', fragment='generate') }}">Prompt
+suggestions</a>.{% else %}A manager decides when suggestions are generated.{% endif %}</p>
+<h3>Editing and deleting</h3>
+<p>Each entry in the <strong>Feedback</strong> list shows who wrote it, the rating, the mode
+and the date. <strong>Edit</strong> appears only on your own entries. It reopens the same
+fields, including the dimension scores, and <strong>Save</strong> replaces them. An edited
+entry is marked "(edited)". Nobody can edit someone else's feedback, and nobody but an admin
+can delete feedback.</p>
+<h3>What happens after you submit</h3>
+<p>Once an assessment has any feedback, even a rating with no comment, it leaves the
+<strong>Unreviewed</strong> tab and appears under <strong>Reviewed</strong>. When you submit with Quick scoring from the
+Unreviewed tab, the page says "Moved to Reviewed." and takes you to the next card.</p>
+<p>If an identical review is submitted again straight away (a double click, for example), it is
+not saved twice. The page says "That feedback was already recorded a moment ago; it was not
+saved twice." Other messages the form can show are in
+<a href="{{ page_url(request, 'help_page', slug='troubleshooting', fragment='assessments') }}">Troubleshooting</a>.</p>
+
+<h2 id="approval-status">Approval status</h2>
+<p>The <strong>Approval status</strong> line at the top of the Human review section shows the
+latest approve or disapprove decision recorded on the assessment: <strong>Approved</strong>
+or <strong>Disapproved</strong>, with who recorded it. When there is no decision, or the last
+one was cleared, it reads <strong>No approval decision</strong>. <strong>Status history</strong>
+lists every recorded decision with who made it and when. A card in the list shows the same
+Approved or Disapproved chip.</p>
+<p>No page has a control to change the approval status: it shows past decisions only.
+It is separate from feedback, and it does not decide which review tab an assessment is on.</p>
+
+{% if permissions.staff %}
+<h2 id="assigning">Assigning assessments</h2>
+<p>The <strong>Assigned</strong> list at the bottom of the Human review section shows who an
+assessment is assigned to; everyone can see it. Managers and admins also get an
+<strong>Assign to</strong> menu with <strong>Assign</strong>, and <strong>Remove</strong> next
+to each person assigned.</p>
+<p>The menu lists every reviewer, manager and admin whose access is allowed. Assigning someone
+who is already assigned changes nothing.</p>
+{% call careful() %}
+<p><strong>Assign</strong> adds the person to the assessment's <strong>Assigned</strong> list,
+which everyone can see, and to their <strong>Assigned to me</strong> filter.
+<strong>Remove</strong> undoes it.</p>
+{% endcall %}
+{% call note() %}
+<p>Assignments are workflow labels only. They never grant or limit access: every reviewer
+can open and review every assessment, assigned or not. An assignment drives the
+<strong>Assigned to me</strong> filter and the <strong>Assigned</strong> line on the card.
+<strong>Remove</strong> undoes an assignment.</p>
+{% endcall %}
+{% if permissions.admin %}
+<p>While an admin is viewing the site as someone else, the assign and remove controls are
+hidden.</p>
+{% endif %}
+{% endif %}
+{% endblock %}

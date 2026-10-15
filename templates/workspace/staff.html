@@ -1,12 +1,16 @@
 {% extends "base.html" %}
-{% block title %}Workspace — Staff — CoPI{% endblock %}
+{% from "help/_link.html" import help_link %}
+{% block title %}Workspace — Staff — Blackbird{% endblock %}
 
 {% block content %}
 {% set access_labels = {'allowed': 'approved', 'pending': 'pending', 'denied': 'revoked'} %}
 {% set refill = staff_refill or {} %}
 <div class="flex items-center justify-between mb-2">
     <h1 class="text-2xl font-bold text-gray-900">Staff</h1>
-    <span class="text-sm text-gray-500">{{ staff_rows | length }} accounts</span>
+    <div class="flex items-center gap-4">
+        {{ help_link(request, effective_user, 'staff-accounts') }}
+        <span class="text-sm text-gray-500">{{ staff_rows | length }} accounts</span>
+    </div>
 </div>
 <p class="text-sm text-gray-500 mb-6">
     Manager, reviewer and admin accounts. A staff account has no lab bot and no research

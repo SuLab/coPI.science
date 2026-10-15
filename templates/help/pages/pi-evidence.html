@@ -1,0 +1,310 @@
+{% extends "help/_layout.html" %}
+{% from "help/_figure.html" import figure %}
+{% from "help/_callouts.html" import careful, note %}
+{% block help_body %}
+<h1>Grants, industry interest and companies</h1>
+<p>
+    Below a PI's research profile, their page has cards that Blackbird fills in from
+    outside sources: <strong>Grants</strong>, <strong>Industry interest</strong> and
+    <strong>Companies</strong>. Matching people across these sources by name is error-prone,
+    so a manager checks the results and corrects them. This page explains what each card
+    shows and what each correction does. Reviewers see the same cards without the controls,
+    and see only confirmed companies. For the rest of a PI's page, see
+    <a href="{{ page_url(request, 'help_page', slug='managing-pis') }}">Managing PIs and lab bots</a>.
+</p>
+
+<h2 id="reporter-identity">The RePORTER identity</h2>
+<p>
+    NIH RePORTER lists federally funded awards by investigator, and each investigator has a
+    RePORTER profile id. Before it can show a PI's NIH awards, Blackbird has to decide which
+    RePORTER profile is this PI. It looks for investigators at Johns Hopkins with a matching
+    name and accepts one when its own awards link to papers stored for the PI. The line
+    <strong>RePORTER identity:</strong> at the top of the Grants card shows the result:
+</p>
+<ul>
+    <li><strong>not evaluated yet</strong>: grants have not been looked up for this PI
+        yet.</li>
+    <li><strong>resolved</strong> (with the profile id): exactly one RePORTER profile links
+        to the PI's papers.</li>
+    <li><strong>pinned by staff</strong> (with the profile ids): a staff member chose the
+        profile with <strong>This is the PI</strong>.</li>
+    <li><strong>staff confirmed: no RePORTER profile</strong>: a staff member pressed
+        <strong>PI has no RePORTER profile</strong>.</li>
+    <li><strong>held</strong>: more than one RePORTER profile links to the PI's papers.</li>
+    <li><strong>unconfirmed</strong>: there is one possible profile, but none of its awards
+        links to the PI's papers.</li>
+    <li><strong>no match</strong>: no candidate could be accepted — no Johns Hopkins
+        investigator matched the PI's name, or several did and none of their awards links to
+        the PI's papers.</li>
+    <li><strong>firehose</strong>: a RePORTER search returned too many results to check (the
+        name search, or the award lookup for the matched profile).</li>
+</ul>
+<p>
+    Only <strong>resolved</strong> and <strong>pinned by staff</strong> put RePORTER awards in
+    the persona, the text the lab agent works from. <strong>held</strong>,
+    <strong>unconfirmed</strong>, <strong>no match</strong> and <strong>firehose</strong> are
+    followed by "— no RePORTER grants are shown". The line also says when the identity was
+    last evaluated.
+</p>
+<h3>Correcting the identity</h3>
+<p>Unless the status is <strong>resolved</strong>, the card offers these controls:</p>
+<ul>
+    <li>
+        <strong>Candidates</strong>: the possible profiles Blackbird found, each with the name
+        on the award, its RePORTER profile id, and either the PMIDs that link it to the PI
+        or "no link to this PI's papers". Tick one or more, or type an id into
+        <strong>RePORTER profile id</strong>, then press <strong>This is the PI</strong>.
+        Ticking several is right when one person's awards are split across profiles. A typed
+        id is checked with RePORTER first. The page then says "RePORTER profile pinned;
+        grants are being refreshed."
+    </li>
+    <li>
+        <strong>PI has no RePORTER profile</strong>: the PI gets no RePORTER grants until the
+        mark is removed. The page says "Marked: this PI has no RePORTER profile."
+    </li>
+    <li>
+        <strong>Unpin</strong> (shown after either of the above) removes the pin or the mark,
+        and Blackbird works the identity out again on its own. The page says "Pin removed;
+        the RePORTER identity is being re-evaluated."
+    </li>
+</ul>
+<p>A pin can be refused with one of these messages:</p>
+<ul>
+    <li>"No RePORTER project lists that profile id."</li>
+    <li>"NIH RePORTER could not be reached — try again."</li>
+    <li>"Select a candidate or enter a RePORTER profile id."</li>
+    <li>"This PI's profile is being updated — try again in a moment."</li>
+</ul>
+{% call careful() %}
+<p>
+    This is the PI, PI has no RePORTER profile and Unpin each rewrite the PI's persona,
+    record a persona revision under your name and queue a fresh grant lookup. Unpin undoes
+    This is the PI or PI has no RePORTER profile.
+</p>
+{% endcall %}
+
+<h2 id="grants">NIH RePORTER awards</h2>
+<p>
+    <strong>NIH RePORTER awards</strong> lists the awards stored for the PI, with a count of
+    the ones not vetoed. Each shows the title, project number, activity code, fiscal years,
+    whether it is a subproject, and why it was matched: a staff pin, or the RePORTER profile
+    and the PMIDs that link it to the PI.
+</p>
+<p>The <strong>Tenure filter:</strong> line says which awards count:</p>
+<ul>
+    <li><strong>organisation and fiscal year ≥ tenure start</strong>: awards at Johns
+        Hopkins from the PI's JHU tenure start on;</li>
+    <li><strong>organisation only — no JHU tenure start recorded</strong>: awards at Johns
+        Hopkins in any year.</li>
+</ul>
+<p>
+    With no tenure start the card also says "No JHU tenure start recorded: set a tenure year
+    to show past grants." Set it in the PI's
+    <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='edit-profile') }}">Edit Profile</a>
+    form. The line "In the persona: … active, … past." counts the grants the persona lists.
+</p>
+<p>
+    <strong>Not this PI</strong> next to an award vetoes it: the award stays on the list,
+    greyed out and marked <strong>vetoed</strong>, and is kept out of the persona and out of
+    every later grant refresh. While the PI's profile is being updated the veto is refused
+    with "This PI's profile is being updated — try again in a moment."
+</p>
+{% call careful() %}
+<p>
+    <strong>Not this PI</strong> takes effect at once, with no confirmation, and rewrites the
+    persona. There is no way to undo a veto from the page.
+</p>
+{% endcall %}
+{{ figure(request, "pi-grants", "The Grants card: the RePORTER identity line, the pin controls, NIH RePORTER awards and ORCID fundings.") }}
+
+<h2 id="orcid-fundings">ORCID fundings</h2>
+<p>
+    <strong>ORCID fundings</strong> lists the funding the PI's ORCID record shows, with each
+    item's title, funder ("funder not given" when ORCID has none) and years. ORCID records
+    can list funding that was not the PI's own, so the same <strong>Not this PI</strong>
+    veto is offered here. A vetoed item is greyed out and marked <strong>vetoed</strong>,
+    and stays out of the persona when the fundings are refreshed from ORCID again.
+</p>
+<p>
+    If the fundings are being refreshed at that moment, the veto is refused with "ORCID
+    fundings are being refreshed — try the veto again in a moment."
+</p>
+{% call careful() %}
+<p>
+    An ORCID funding veto takes effect at once, with no confirmation, and rewrites the
+    persona. It cannot be undone from the page.
+</p>
+{% endcall %}
+
+<h2 id="industry">Industry interest</h2>
+<p>
+    The <strong>Industry interest</strong> card scores how much evidence of industry ties a
+    PI's record shows, such as company co-authors, company funding, competing-interest
+    statements and patents. It is an indicator for staff and reviewers only: the score and
+    its evidence are never part of the PI's profile or persona, and BlackbirdBot and the
+    assessment chat never see them.
+</p>
+<h3>Reading the score</h3>
+<ul>
+    <li>
+        The large number is the <strong>cohort percentile</strong>: where this PI's raw score
+        sits among every scored PI. It is worked out each time the page loads, so it can move
+        when other PIs are rescored even though nothing about this PI changed.
+    </li>
+    <li>
+        After it come the <strong>raw</strong> score, the number of <strong>evidence
+        rows</strong>, the scorer version and the tenure start the score used. Only evidence
+        from the tenure start on counts, and vetoed rows never count.
+    </li>
+    <li>
+        Below that, each kind of evidence shows how many distinct companies it found and what
+        it adds to the raw score.
+    </li>
+</ul>
+<p>When there is no percentile, the card says why:</p>
+<ul>
+    <li><strong>Not computed yet.</strong>: the PI has not been scored.</li>
+    <li><strong>Rescoring</strong>: the scorer changed, and the new score appears when this
+        PI's industry job finishes. The PIs list shows <strong>rescoring</strong>.</li>
+    <li><strong>Unscored</strong>, because no JHU tenure start is recorded (set one in Edit
+        Profile, which re-runs the scan), because no evidence scores above zero, or because
+        too few other PIs are scored yet. The PIs list shows <strong>unscored</strong>.</li>
+</ul>
+<p>
+    A <strong>partial</strong> badge, on the card and in the PIs list, means some evidence
+    sources were unavailable or cut short. The card names each one. Rows stored earlier from
+    a source that could not be refreshed are kept, and scored only from the tenure start
+    on.
+</p>
+<h3>The evidence list and its veto</h3>
+<p>
+    <strong>Evidence</strong> opens the list of evidence rows. Each names the company, the
+    kind of evidence, the company's class, the year, the PI's role and the source, and may
+    quote the passage it came from or name how the PI was credited.
+</p>
+<p>
+    <strong>Not this PI / not industry</strong> vetoes a row that is about someone else or is
+    not an industry tie. The row is greyed out and marked <strong>vetoed</strong>, and the
+    PI's score is recalculated immediately. If the PI's evidence is being refreshed at that
+    moment, the veto is refused with "This PI's industry evidence is being refreshed — try
+    the veto again in a moment."
+</p>
+{% call careful() %}
+<p>
+    An industry evidence veto changes the PI's score at once, with no confirmation. It
+    cannot be undone from the page.
+</p>
+{% endcall %}
+{{ figure(request, "pi-industry", "The Industry interest card with the cohort percentile, the raw score and the opened evidence list.") }}
+
+<h2 id="companies">Companies</h2>
+<p>
+    The <strong>Companies</strong> card lists companies the PI founded or co-founded,
+    advises, or serves as a board member of. Only <strong>Confirmed</strong> companies reach
+    BlackbirdBot's profile lookup and the assessment pages. A suggestion reaches neither
+    until a manager confirms it.
+</p>
+<h3>Confirmed</h3>
+<p>
+    Each confirmed company shows its name, the PI's role, whether it was added by hand or
+    discovered, when it was confirmed, any funding figure, and links to its source.
+    <strong>Delete</strong> removes it. A confirmation dialog asks first: "Remove … from this
+    PI's companies? BlackbirdBot stops seeing it at once, and discovery will not suggest it
+    again." Delete records the company as rejected, so discovery never suggests it again.
+</p>
+{% call careful() %}
+<p>
+    Delete takes the company away from BlackbirdBot and the assessment pages at once. The
+    only way back is to add it again by hand with <strong>Add a company</strong>.
+</p>
+{% endcall %}
+<h3>Add a company</h3>
+<p>The <strong>Add a company</strong> form has these fields:</p>
+<ul>
+    <li><strong>Company name</strong> (required).</li>
+    <li><strong>The PI's role</strong>: Founder, Co-founder, Board member or Advisor.</li>
+    <li><strong>Funding raised, US dollars (optional)</strong>.</li>
+    <li><strong>Funding as of (required with a figure)</strong>: leave it blank when there is
+        no figure.</li>
+    <li><strong>Source link (http or https)</strong> (required): where the tie is
+        documented.</li>
+</ul>
+<p>
+    Press <strong>Add company</strong>. A company added by hand is confirmed at once, and the
+    page says "Added …". A name the PI already has is refused: "Company not added: … is
+    already on this PI's confirmed list." or "Company not added: … is already suggested for
+    this PI: confirm it under Suggested." A company that was deleted or rejected before comes
+    back as your confirmed entry. Any other problem with the form is also shown after
+    "Company not added:".
+</p>
+{% call careful() %}
+<p>
+    A company you add or confirm is visible to BlackbirdBot and on the assessment pages
+    straight away. Delete removes it again.
+</p>
+{% endcall %}
+<h3>Suggested</h3>
+<p>
+    Suggestions are "Found in the PI's own competing-interest statements and in Wikidata,
+    with funding from SEC Form D filings where a filing matched." Each shows the evidence:
+</p>
+<ul>
+    <li>the quoted statements, with links to their sources;</li>
+    <li>a Wikidata entry naming the PI as a founder;</li>
+    <li>a table of matching SEC Form D filings, with the date filed, the amount sold,
+        whether the PI is listed and a link to the filing;</li>
+    <li>a warning when a statement says the tie may be former, for example "previously" or
+        "divested". Confirm those only if the tie still holds.</li>
+</ul>
+<p>
+    To accept a suggestion, check the <strong>Role</strong>, <strong>Funding (USD)</strong>
+    and <strong>Funding as of</strong> fields, which start with what discovery found, and
+    press <strong>Confirm</strong>. A field left blank keeps the value discovery found. A
+    funding figure or date you change is recorded as yours, and the link to the filing it
+    came from is dropped. If the figure is wrong and you have no better one, tick
+    <strong>Clear funding (the figure is wrong; confirm with none)</strong>. The page says
+    "Confirmed …". A refused confirmation shows a message starting "Not confirmed:" with the
+    reason.
+</p>
+<p>
+    <strong>Reject (discovery will not suggest it again)</strong> turns a suggestion down.
+    There is no confirmation dialog. The page says "Rejected …; discovery will not suggest
+    it again."
+</p>
+{% call careful() %}
+<p>
+    Reject is permanent for discovery: the company is never suggested again. The only way
+    to list it later is to add it by hand with <strong>Add a company</strong>.
+</p>
+{% endcall %}
+<h3>Find companies</h3>
+<p>
+    <strong>Find companies</strong> queues company discovery for this PI, and the page says
+    "Company discovery queued. Its suggestions appear here when it finishes." Reload the page
+    later to see them. If discovery is already queued or running, the page says "Company
+    discovery is already queued or running for this PI." If a profile generation is queueing
+    discovery at that moment, it says "A profile generation is queueing discovery for this
+    PI right now — try again in a moment." A profile generation also runs company discovery
+    again, which can add new suggestions; it never changes confirmed companies. The line
+    under the button shows the latest run:
+</p>
+<ul>
+    <li>while discovery is queued or running the button is disabled, and the line says since
+        when. Discovery has a daily budget for reading competing-interest statements; once it
+        is used up, the line adds "waiting for the daily COI extraction budget until …", and
+        discovery continues at that time;</li>
+    <li>after a run it shows when it ran and the outcome;</li>
+    <li>after a failure it shows the error and "Press Find companies to try again.";</li>
+    <li>"Discovery has not run for this PI yet." when it never has.</li>
+</ul>
+{% call careful() %}
+<p>
+    Find companies queues a discovery run in the background. A queued run cannot be
+    cancelled from the page. Discovery reads the PI's own papers and Wikidata by their ORCID
+    iD. Without an ORCID iD it cannot run, and the page says "Company discovery needs the
+    PI's ORCID iD; none is recorded." Discovery only ever adds
+    suggestions: nothing it finds reaches BlackbirdBot until you confirm it.
+</p>
+{% endcall %}
+{{ figure(request, "pi-companies", "The Companies card with a confirmed company, the Add a company form and a suggestion waiting for review.") }}
+{% endblock %}

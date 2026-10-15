@@ -1,0 +1,72 @@
+{% extends "help/_layout.html" %}
+{% from "help/_figure.html" import figure %}
+{% from "help/_callouts.html" import careful, note %}
+{% block help_body %}
+<p class="text-sm text-gray-600">Manager tutorial</p>
+<h1>{{ step.title }}</h1>
+<h2 id="where">Where</h2>
+<p>Workspace → <strong>PIs</strong>. It is also where a manager lands after signing in.</p>
+
+<h2 id="what-you-see">What you'll see</h2>
+{{ figure(request, "pis-list-manager", "The PIs list as a manager sees it: the Add PI form, the filters and the staff-only columns.") }}
+
+<h2 id="what-it-means">What it means</h2>
+<h3 id="columns">The columns</h3>
+<p>Each PI's name opens their page. Some columns appear only on wider screens. Reviewers see
+only Name, Institution, ORCID, Pubs (tenure) and Industry interest; the rest are for managers
+and admins.</p>
+<ul>
+    <li><strong>Status</strong> is the research profile's state:
+        <strong>No Profile</strong> (no profile with a research summary yet; a PI's first
+        generation can still be running),
+        <strong>Generating</strong> (a profile generation is queued or running and the profile
+        has no summary yet),
+        <strong>Complete</strong> (the profile has a research summary) and
+        <strong>Pending draft</strong> (a regenerated draft is waiting for a manager to accept
+        or discard it).</li>
+    <li><strong>Agent</strong> is the PI's lab bot:
+        <strong>Not requested</strong> (the PI has an account but no lab bot, for example a PI
+        who signed in with ORCID before anyone added them),
+        <strong>Pending</strong> (created but not yet live, whether or not its Slack bot is
+        installed),
+        <strong>Active</strong> (taking part in the simulation),
+        <strong>Muted</strong> (taken off the simulation by a manager's Mute or by an admin) and
+        <strong>Suspended</strong> (only an admin can manage a suspended bot).</li>
+    <li><strong>Pubs (tenure)</strong> counts publications from the PI's JHU tenure start on.
+    A <em>full career</em> tag means no tenure start is recorded, so every publication counts;
+    an <em>undated</em> note counts papers left out because they have no year.</li>
+    <li><strong>Industry interest</strong> is the PI's cohort percentile. A manager may instead
+    see <em>rescoring</em>, <em>unscored</em> or a dash, and <em>partial</em> when some evidence
+    sources were unavailable.</li>
+    <li><strong>Version</strong> is the profile's version number, which rises with every saved
+    change.</li>
+    <li><strong>Claimed</strong> shows when the PI first signed in to an account that already
+    existed (such as one Add PI created), or <em>No</em>.</li>
+    <li><strong>Joined</strong> and <strong>Last Login</strong> are when the account was created
+    and when the PI last signed in.</li>
+</ul>
+
+<h3 id="filters">Filters</h3>
+<p><strong>Profile Status</strong> narrows the list to one of the statuses above, and
+<strong>Claimed</strong> to PIs who have or have not signed in. <strong>Apply</strong> runs
+them.</p>
+
+<h3 id="add-pi">The Add PI form</h3>
+<p>The form at the top takes <strong>Add a PI by ORCID iD</strong> and, only when the ORCID
+record shows no public name, <strong>Name (only if ORCID shows none)</strong>. The line under it
+is a reminder: managers and reviewers are added on the Staff page, because
+<strong>Add PI</strong> always creates a lab bot.</p>
+{% call careful("Careful: Add PI") %}
+<p><strong>Add PI</strong> creates a real PI account from the ORCID record (or, for a PI who
+already signed in and has no lab bot, adopts that account), queues their profile generation
+and creates their lab bot in the Pending state. The bot's persona is published as soon as the
+PI has a profile. Add PI then opens the new PI's page. Nothing in the Workspace undoes it: only an admin can delete a PI's
+account.</p>
+{% endcall %}
+<p>When Add PI is refused, a message beside the button says why. For example: the iD is
+malformed, a user with that ORCID already exists, the ORCID record could not be fetched, the
+record shows no public name, or the name entered has characters a name may not contain.</p>
+<p>More detail: <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='add-pi') }}">Adding a PI</a>
+and <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='profile-status') }}">Profile and agent status</a>.</p>
+{% include "help/_step_nav.html" %}
+{% endblock %}

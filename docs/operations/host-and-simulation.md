@@ -409,7 +409,7 @@ $DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.
 > alembic revision that is still untracked is silently left out of the image, so
 > `git add` it before building. Before `$DC build`, `git status --porcelain
 > --untracked-files=all -- src templates static prompts alembic scripts
-> pyproject.toml alembic.ini` must print nothing. Never add a tracked path or `.git` to
+> help_assets pyproject.toml alembic.ini` must print nothing. Never add a tracked path or `.git` to
 > `.dockerignore`: the builder needs `.git` to write `.build_info.json`, and an
 > excluded tracked path would count as dirty in every image
 > (`tests/unit/test_docker_build_context.py`).

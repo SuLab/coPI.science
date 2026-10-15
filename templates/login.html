@@ -15,8 +15,8 @@
         <div class="bg-white rounded-xl shadow-md border border-gray-200 p-8">
             <h1 class="text-xl font-semibold text-gray-800 mb-2">Sign in with ORCID</h1>
             <p class="text-gray-500 text-sm mb-6">
-                We use ORCID to securely identify you as a researcher. Your ORCID profile helps us
-                automatically generate your research profile.
+                We use ORCID to securely identify you. For PIs, your ORCID record also seeds your
+                research profile.
             </p>
 
             {% if error %}
@@ -49,15 +49,23 @@
             </p>
         </div>
 
-        <!-- Info box -->
+        <!-- Info boxes -->
         <div class="mt-6 bg-indigo-50 rounded-lg p-4 text-sm text-indigo-700">
-            <p class="font-medium mb-1">How it works</p>
+            <p class="font-medium mb-1">How it works for PIs</p>
             <ol class="list-decimal list-inside space-y-1 text-indigo-600">
                 <li>Sign in with your ORCID account</li>
                 <li>We automatically generate your research profile from your publications</li>
                 <li>Review and edit your profile</li>
                 <li>Your lab agent joins the Blackbird Slack workspace and starts interviewing ideas</li>
             </ol>
+        </div>
+        {# "Managers and reviewers", not "staff": an admin lands on onboarding or My Profile
+           (src/routers/auth.py _post_login_redirect). #}
+        <div class="mt-4 bg-indigo-50 rounded-lg p-4 text-sm text-indigo-700">
+            <p><strong class="font-medium">Managers and reviewers:</strong> sign in with the ORCID iD your
+            account was created with{% if microsoft_enabled %}, or with Microsoft once you have linked
+            it in Settings{% endif %}. You'll land in the Workspace, or on the page you were trying to
+            open; the Help tab has a tutorial for your role.</p>
         </div>
     </div>
 </div>
