@@ -27,13 +27,12 @@ import httpx
 
 from src.services.company_sources import SourceUnavailable
 from src.services.http_pacing import Pacer
+from src.services.identifiers import normalize_orcid
 
 SPARQL_URL = "https://query.wikidata.org/sparql"
 CLIENT_NAME = "copi-science-company-discovery"
 CLIENT_VERSION = "1.0"
 
-# The ORCID is validated before it is interpolated, so the query text cannot be steered.
-_ORCID = re.compile(r"^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$")
 _ENTITY = re.compile(r"^https?://www\.wikidata\.org/entity/(Q\d+)$")
 _BARE_QID = re.compile(r"^Q\d+$")
 _QUERY = (
@@ -188,9 +187,11 @@ async def founded_by_orcid(orcid: str, *, contact: str | None) -> WikidataResult
     once when its Retry-After exceeds the cap), or an oversize or unreadable body."""
     if not contact:
         raise SourceUnavailable("no contact for the User-Agent (SEC_USER_AGENT unset)")
-    if not _ORCID.match(orcid or ""):
+    # The ORCID is validated before it is interpolated, so the query text cannot be steered.
+    clean = normalize_orcid(orcid)
+    if clean is None:
         raise SourceUnavailable("no valid ORCID")
-    params = {"query": _QUERY.format(orcid=orcid), "format": "json"}
+    params = {"query": _QUERY.format(orcid=clean), "format": "json"}
     # identity: the response cap counts decoded bytes (see sec_form_d).
     headers = {"User-Agent": user_agent(contact), "Accept": "application/sparql-results+json",
                "Accept-Encoding": "identity"}

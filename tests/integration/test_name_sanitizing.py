@@ -47,7 +47,7 @@ async def test_add_pi_strips_newlines_and_markdown_from_an_id_name(db_session, m
 
 async def test_first_login_sanitises_the_oauth_name(db_session):
     user = await auth._create_new_user(
-        db_session, orcid_id="0000-0002-1825-0098", orcid_name="Jane Doe™",
+        db_session, orcid_id="0000-0002-1825-010X", orcid_name="Jane Doe™",
         profile_data={}, allowlist_entry=None, resolved_email=None,
     )
     assert user.name == "Jane Doe" and user.name_sanitized_at is not None

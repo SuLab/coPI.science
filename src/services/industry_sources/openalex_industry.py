@@ -1,6 +1,5 @@
 """OpenAlex-derived industry evidence: company co-authors and company funders."""
 import logging
-import re
 from functools import partial
 from urllib.parse import quote
 
@@ -12,8 +11,9 @@ from src.services.http_pacing import TRANSIENT_STATUSES, Pacer, with_retries
 from src.services.industry_sources import JHU_OPENALEX_IDS, EvidenceItem, Paged
 from src.services.industry_sources.companies import classify_company
 from src.services.jhu_rules import is_hopkins_affiliation
+from src.services.identifiers import normalize_orcid
 from src.services.openalex import _NO_SUCH_WORK, _lookup_doi_ok
-from src.services.person_names import PersonName, given_names_agree, parse_person_name
+from src.services.person_names import PersonName, given_names_agree, name_key, parse_person_name
 from src.services.query_escaping import openalex_filter_value
 
 logger = logging.getLogger(__name__)
@@ -51,36 +51,41 @@ def _oaid(url: str | None) -> str:
     return (url or "").rsplit("/", 1)[-1]
 
 
-_ORCID_RE = re.compile(r"\d{4}-\d{4}-\d{4}-\d{3}[\dX]$")
 #: Seniority of a `_role`, most senior first; any other role ranks last.
 _ROLE_RANK = {"corresponding": 0, "last": 1, "first": 2}
 
 
-def _printed_as(raw_name: str | None, pi: PersonName) -> bool:
+def _printed_as(raw_name: str | None, pi: PersonName) -> int:
+    """How strongly an authorship's printed name is the PI's (P15): 0 when the surname keys
+    do not intersect or the first given names disagree; 2 when they agree and both given
+    names are spelled out; 1 when they agree on an initial only."""
     raw = parse_person_name(raw_name or "")
-    return bool(raw.surname_keys & pi.surname_keys) and given_names_agree(pi.first, raw.first)
+    if not (raw.surname_keys & pi.surname_keys) or not given_names_agree(pi.first, raw.first):
+        return 0
+    return 2 if len(name_key(pi.first)) > 1 and len(name_key(raw.first)) > 1 else 1
 
 
 def _pi_authorship(work: dict, pi_orcid: str, pi_name: str | None = None) -> dict | None:
-    """The authorship carrying the PI's ORCID. OpenAlex can put one ORCID on several
+    """The authorship carrying the PI's ORCID (compared through
+    ``identifiers.normalize_orcid``, R2.2). OpenAlex can put one ORCID on several
     authorships of a work (2026-10-11: Erika Pearce's on three of W4318981448's, the first
-    printed as "Edward J. Pearce" and only the third her corresponding one). Then the most
-    senior of those printed under a name agreeing with `pi_name` is the PI's; when none
-    agrees, or `pi_name` is not given, the first."""
-    if not pi_orcid:
-        return None
-    tail = pi_orcid.rsplit("/", 1)[-1]
-    if not _ORCID_RE.search(tail):
+    printed as "Edward J. Pearce"). Then the most senior of those whose printed name is the
+    PI's most strongly (``_printed_as``: a spelled-out given name beats an initial, P15) is
+    the PI's; when none agrees, or ``pi_name`` is not given, the first."""
+    want = normalize_orcid(pi_orcid)
+    if want is None:
         return None
     mine = [a for a in work.get("authorships") or []
-            if ((a.get("author") or {}).get("orcid") or "").endswith(tail)]
+            if normalize_orcid((a.get("author") or {}).get("orcid")) == want]
     if len(mine) < 2 or not pi_name:
         return mine[0] if mine else None
     pi = parse_person_name(pi_name)
-    named = [a for a in mine if _printed_as(a.get("raw_author_name"), pi)]
-    if not named:
+    scores = [_printed_as(a.get("raw_author_name"), pi) for a in mine]
+    best = max(scores)
+    if best == 0:
         return mine[0]
-    return min(named, key=lambda a: _ROLE_RANK.get(_role(a), len(_ROLE_RANK)))
+    strongest = [a for a, score in zip(mine, scores, strict=True) if score == best]
+    return min(strongest, key=lambda a: _ROLE_RANK.get(_role(a), len(_ROLE_RANK)))
 
 
 def _pi_at_jhu(auth: dict) -> bool:
@@ -134,6 +139,40 @@ _PMID_CHUNK = 100
 #: Works per page: a PMID can map to more than one work, so a chunk's page holds
 #: twice the chunk (OpenAlex's per-page maximum).
 _PMID_PAGE = 200
+#: At most this many unreturned in-use PMIDs are looked up by DOI per run, newest first
+#: (P14); the rest make the source "truncated".
+DOI_FALLBACK_MAX = 50
+#: This many consecutive DOI lookups failing the same way is OpenAlex failing, not bad DOIs.
+_DOI_FAILURE_RUN = 3
+
+
+def _doi_failure(exc: BaseException) -> tuple[str, int | str] | None:
+    """The signature of a per-DOI failure, or None for one that must raise at once (a 429
+    after the retries)."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code
+        return None if code == 429 else ("HTTP", code)
+    if isinstance(exc, httpx.TransportError):
+        return ("transport", type(exc).__name__)
+    return ("body", type(exc).__name__)
+
+
+async def _lookup_doi(client: httpx.AsyncClient, doi: str, params: dict) -> dict | None:
+    """One singleton DOI lookup: the work, or None for "no such work" (400, 404, 410) or a
+    non-dict body. Raises on any other failure."""
+    resp = await with_retries(
+        partial(client.get, f"{OA}/works/doi:{quote(doi, safe='/')}", params=params),
+        attempts=4, backoff=lambda a: 2.0 * (2 ** a),
+        retry_statuses=TRANSIENT_STATUSES, retry_exceptions=(httpx.TransportError,),
+        pacer=_PACER,
+    )
+    if resp.status_code in _NO_SUCH_WORK:
+        if resp.status_code == 400:  # also what a request OpenAlex rejects would get
+            logger.warning("OpenAlex refused DOI %s (400): %s", doi, resp.text[:200])
+        return None
+    resp.raise_for_status()
+    body = resp.json()
+    return body if isinstance(body, dict) else None
 
 
 async def fetch_works_for_pmids(pmids: list[str]) -> Paged:
@@ -160,35 +199,50 @@ async def fetch_works_for_pmids(pmids: list[str]) -> Paged:
     return Paged(out, truncated)
 
 
-async def fetch_works_for_dois(dois: list[str]) -> list[dict]:
+async def fetch_works_for_dois(dois: list[str], *, skipped: list[str] | None = None) -> list[dict]:
     """The OpenAlex works of `dois`, one singleton lookup each (`GET /works/doi:<doi>`): the
     fallback for in-use papers the PMID filter did not return, because OpenAlex can file a
     merged preprint and article under the preprint's PMID (2026-10-10: 216 of 6,263 in-use
     PMIDs unreturned, hiding two PIs' company co-authors). A singleton lookup costs no
     credit, so the request budget is not consulted. A malformed DOI (`openalex`'s check, no
-    request made) or an unknown one (400, 404, 410) yields nothing; any other failure
+    request made) or an unknown one (400, 404, 410) yields nothing. A DOI whose lookup fails
+    (an HTTP error other than 429, a final transport error, an unreadable body) is logged,
+    appended to `skipped` and passed over (P14); the `_DOI_FAILURE_RUN`-th consecutive
+    failure with the same signature, a 429 after the retries, or any other exception
     raises, so the source is unavailable for the run."""
     out: list[dict] = []
     contact = getattr(get_settings(), "ncbi_contact_email", None)
     params = {"select": _SELECT, **({"mailto": contact} if contact else {})}
+    run_sig: tuple[str, int | str] | None = None
+    run_len = 0
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
         for doi in dict.fromkeys(d.strip() for d in dois):
             if not _lookup_doi_ok(doi):
                 continue
-            resp = await with_retries(
-                partial(client.get, f"{OA}/works/doi:{quote(doi, safe='/')}", params=params),
-                attempts=4, backoff=lambda a: 2.0 * (2 ** a),
-                retry_statuses=TRANSIENT_STATUSES, retry_exceptions=(httpx.TransportError,),
-                pacer=_PACER,
-            )
-            if resp.status_code in _NO_SUCH_WORK:
-                if resp.status_code == 400:  # also what a request OpenAlex rejects would get
-                    logger.warning("OpenAlex refused DOI %s (400): %s", doi, resp.text[:200])
+            try:
+                work = await _lookup_doi(client, doi, params)
+            except (httpx.HTTPStatusError, httpx.TransportError, ValueError) as exc:
+                sig = _doi_failure(exc)
+                if sig is None:
+                    raise
+                run_len = run_len + 1 if sig == run_sig else 1
+                run_sig = sig
+                if run_len >= _DOI_FAILURE_RUN:
+                    logger.error(
+                        "OpenAlex DOI lookup: %d consecutive DOIs failed %s; treating it as systemic",
+                        run_len, f"{sig[0]} {sig[1]}",
+                    )
+                    raise
+                logger.warning(
+                    "OpenAlex DOI lookup for %s failed (%s); skipping that DOI",
+                    doi, f"{sig[0]} {sig[1]}",
+                )
+                if skipped is not None:
+                    skipped.append(doi)
                 continue
-            resp.raise_for_status()
-            body = resp.json()
-            if isinstance(body, dict):
-                out.append(body)
+            run_sig, run_len = None, 0
+            if work is not None:
+                out.append(work)
     return out
 
 

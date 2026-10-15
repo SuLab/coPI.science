@@ -12,8 +12,8 @@ pytestmark = pytest.mark.integration
 
 
 async def test_login_replaces_an_orcid_id_name_with_the_oauth_name(db_session):
-    user = await factories.make_user(db_session, name="0000-0002-1825-0401",
-                                     orcid="0000-0002-1825-0401")
+    user = await factories.make_user(db_session, name="0000-0002-1825-0409",
+                                     orcid="0000-0002-1825-0409")
     got = await auth_router._find_or_create_user(
         db_session, orcid_id=user.orcid, orcid_name="Ada Lovelace",
         profile_data={"orcid": user.orcid, "name": None}, allowlist_entry=None,
@@ -22,7 +22,7 @@ async def test_login_replaces_an_orcid_id_name_with_the_oauth_name(db_session):
 
 
 async def test_login_keeps_a_real_name(db_session):
-    user = await factories.make_user(db_session, name="Ada King", orcid="0000-0002-1825-0402")
+    user = await factories.make_user(db_session, name="Ada King", orcid="0000-0002-1825-0417")
     got = await auth_router._find_or_create_user(
         db_session, orcid_id=user.orcid, orcid_name="Someone Else",
         profile_data={"orcid": user.orcid, "name": "Ada Lovelace"}, allowlist_entry=None,
@@ -36,11 +36,11 @@ async def test_add_pi_requires_a_name_when_orcid_has_none(db_session, monkeypatc
 
     monkeypatch.setattr(pi_onboarding, "fetch_orcid_profile", nameless)
     with pytest.raises(pi_onboarding.OrcidNameRequired):
-        await pi_onboarding.find_or_create_pi_by_orcid(db_session, "0000-0002-1825-0403")
+        await pi_onboarding.find_or_create_pi_by_orcid(db_session, "0000-0002-1825-0425")
     with pytest.raises(InvalidPersonName):
-        await pi_onboarding.find_or_create_pi_by_orcid(db_session, "0000-0002-1825-0403",
+        await pi_onboarding.find_or_create_pi_by_orcid(db_session, "0000-0002-1825-0425",
                                                        name="<script>")
-    user = await pi_onboarding.find_or_create_pi_by_orcid(db_session, "0000-0002-1825-0403",
+    user = await pi_onboarding.find_or_create_pi_by_orcid(db_session, "0000-0002-1825-0425",
                                                           name="Ada Lovelace")
     assert user.name == "Ada Lovelace"
 
@@ -50,7 +50,7 @@ async def test_add_pi_ignores_the_entered_name_when_orcid_has_one(db_session, mo
         return {"orcid": orcid, "name": "Ada Lovelace", "employments": []}
 
     monkeypatch.setattr(pi_onboarding, "fetch_orcid_profile", named)
-    user = await pi_onboarding.find_or_create_pi_by_orcid(db_session, "0000-0002-1825-0404",
+    user = await pi_onboarding.find_or_create_pi_by_orcid(db_session, "0000-0002-1825-0433",
                                                           name="Someone Else")
     assert user.name == "Ada Lovelace"
 
@@ -59,11 +59,11 @@ async def _nameless_record(orcid):
     return {"orcid": orcid, "name": None, "employments": []}
 
 
-@pytest.mark.parametrize("stored", ["0000-0002-1825-0405", "", "   "])
+@pytest.mark.parametrize("stored", ["0000-0002-1825-0441", "", "   "])
 async def test_adopt_replaces_an_id_or_empty_name(db_session, monkeypatch, stored):
     """Amendment 7b: an empty name is replaced exactly as an iD-like one is."""
     monkeypatch.setattr(pi_onboarding, "fetch_orcid_profile", _nameless_record)
-    user = await factories.make_user(db_session, name=stored, orcid="0000-0002-1825-0405",
+    user = await factories.make_user(db_session, name=stored, orcid="0000-0002-1825-0441",
                                      access_status="pending")
     got = await pi_onboarding.adopt_agentless_pi(db_session, user.orcid, name="Ada Lovelace")
     assert got.id == user.id and got.name == "Ada Lovelace"
@@ -71,7 +71,7 @@ async def test_adopt_replaces_an_id_or_empty_name(db_session, monkeypatch, store
 
 async def test_adopt_keeps_a_real_name(db_session, monkeypatch):
     monkeypatch.setattr(pi_onboarding, "fetch_orcid_profile", _nameless_record)
-    user = await factories.make_user(db_session, name="Ada King", orcid="0000-0002-1825-0406",
+    user = await factories.make_user(db_session, name="Ada King", orcid="0000-0002-1825-045X",
                                      access_status="pending")
     got = await pi_onboarding.adopt_agentless_pi(db_session, user.orcid, name="Ada Lovelace")
     assert got.name == "Ada King"
@@ -79,7 +79,7 @@ async def test_adopt_keeps_a_real_name(db_session, monkeypatch):
 
 async def test_adopt_validates_the_entered_name(db_session, monkeypatch):
     monkeypatch.setattr(pi_onboarding, "fetch_orcid_profile", _nameless_record)
-    user = await factories.make_user(db_session, name="0000-0002-1825-0407",
-                                     orcid="0000-0002-1825-0407", access_status="pending")
+    user = await factories.make_user(db_session, name="0000-0002-1825-0468",
+                                     orcid="0000-0002-1825-0468", access_status="pending")
     with pytest.raises(InvalidPersonName):
         await pi_onboarding.adopt_agentless_pi(db_session, user.orcid, name="<script>")

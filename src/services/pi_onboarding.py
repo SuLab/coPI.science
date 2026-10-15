@@ -8,7 +8,6 @@ design (D6). Neither creates a user named by its ORCID iD (spec 2026-10-05 §6.3
 Add-PI asks for the name, the CLI refuses."""
 
 import logging
-import re
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -17,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.models import USER_ROLE_PI, AgentRegistry, ResearcherProfile, User
 from src.models.job import INTERACTIVE_PRIORITY
 from src.services.agent_identity import derive_agent_identity
+from src.services.identifiers import normalize_orcid
 from src.services.jhu_rules import derive_employment_start, get_tenure_start, set_tenure_start
 from src.services.orcid import fetch_orcid_profile
 from src.services.person_names import (
@@ -29,35 +29,20 @@ from src.services.user_email import assign_user_email
 
 logger = logging.getLogger(__name__)
 
-# Format-only (no checksum): every real iD matches, and it is enough to keep
-# arbitrary text out of the ORCID URL path, PubMed [auid]/[Author] search
-# terms, and the manager page's error redirect (audit L1).
-_ORCID_RE = re.compile(r"^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$")
-
-
-#: An ``orcid.org/`` prefix as pasted from a profile page, with or without a
-#: scheme or ``www.`` (D-18).
-_ORCID_URL_PREFIX = re.compile(r"^(?:https?://)?(?:www\.)?orcid\.org/", re.IGNORECASE)
-
-
-def normalize_orcid(raw: str) -> str:
-    """The canonical spelling of a typed ORCID iD: trimmed, an ``orcid.org/`` URL
-    prefix removed, a lowercase check digit ``x`` uppercased (D-18). Does not
-    validate the result — ``validate_orcid`` does. Used wherever an ORCID is looked
-    up, so a pasted URL finds the same row as the bare iD."""
-    orcid = _ORCID_URL_PREFIX.sub("", raw.strip())
-    if orcid.endswith("x"):
-        orcid = orcid[:-1] + "X"
-    return orcid
-
-
+# Q21 (2026-10-15 publication-handling design): an iD must pass ORCID's ISO 7064
+# MOD 11-2 check digit, so a mistyped iD is refused before any ORCID fetch, and only a
+# well-formed iD reaches the ORCID URL path, PubMed [auid]/[Author] search terms and
+# the manager page's error redirect (audit L1).
 def validate_orcid(orcid: str) -> str:
-    """Format-only check shared by Add-PI and `cli seed-profile` (MD-14), applied
-    after ``normalize_orcid``; returns the normalized iD."""
-    orcid = normalize_orcid(orcid)
-    if not _ORCID_RE.match(orcid):
-        raise ValueError(f"Invalid ORCID iD format: {orcid[:40]!r}")
-    return orcid
+    """The canonical iD (``identifiers.normalize_orcid``; an orcid.org URL, a lowercase
+    ``x``, hyphenless and single-spaced forms are accepted), shared by Add-PI, the Staff
+    form and `cli seed-profile` (MD-14). Raises ``ValueError`` containing "Invalid ORCID"
+    (``_pi_common._create_pi_error_code`` maps it to ``invalid_orcid``) when the text is
+    not an iD or its check digit does not match."""
+    normalized = normalize_orcid(orcid)
+    if normalized is None:
+        raise ValueError(f"Invalid ORCID iD: {orcid.strip()[:40]!r}")
+    return normalized
 
 
 async def record_employment_tenure(db: AsyncSession, user: User, profile_data: dict) -> int | None:

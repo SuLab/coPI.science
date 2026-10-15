@@ -30,6 +30,7 @@ from src.models import (
 )
 from src.models.job import PER_USER_JOB_TYPES
 from src.services import staff_accounts
+from src.services.identifiers import normalize_orcid
 from src.services.jhu_rules import TENURE_KEY_PREFIX
 from src.services.staff_accounts import (
     AUDIT_CONVERT,
@@ -50,7 +51,9 @@ _oids = itertools.count(1)
 
 
 def _new_oid() -> str:
-    return f"0000-0003-0000-{next(_oids):04d}"
+    """A checksum-valid iD ``0000-0003-0000-NNNC``, distinct per call (R2.2)."""
+    stem = f"0000-0003-0000-{next(_oids):03d}"
+    return next(o for c in "0123456789X" if (o := normalize_orcid(stem + c)) is not None)
 
 
 def _record(oid: str, **overrides) -> dict:
@@ -169,7 +172,7 @@ def test_expectation_digests_every_shown_fact_and_as_view_is_json_native():
                         access_status="pending", has_profile=False)
     variants = [
         StaffPreview(**{**base.__dict__, "outcome": "create"}),
-        StaffPreview(**{**base.__dict__, "orcid": "0000-0003-0000-9998"}),
+        StaffPreview(**{**base.__dict__, "orcid": "0000-0003-0001-9994"}),
         StaffPreview(**{**base.__dict__, "role": USER_ROLE_MANAGER}),
         StaffPreview(**{**base.__dict__, "user_id": uuid.uuid4()}),
         StaffPreview(**{**base.__dict__, "name": "Janet Doe"}),
@@ -967,7 +970,7 @@ async def test_list_staff_accounts_rows_and_flags(db_session):
 async def test_recent_staff_changes_newest_first_with_actor_names(db_session):
     mgr = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER, name="Mona Manager")
     now = datetime.now(UTC)
-    payload = {"user_id": str(uuid.uuid4()), "orcid": "0000-0003-0000-8888",
+    payload = {"user_id": str(uuid.uuid4()), "orcid": "0000-0003-0001-8887",
                "name": "Rae Viewer", "role": USER_ROLE_REVIEWER}
     db_session.add_all([
         AdminAuditEvent(action=AUDIT_CREATE, actor_user_id=mgr.id, payload=payload,
@@ -982,7 +985,7 @@ async def test_recent_staff_changes_newest_first_with_actor_names(db_session):
     assert [c["action"] for c in changes][:2] == [AUDIT_REVOKE, AUDIT_CREATE]
     assert all(c["action"] != "simulation_start" for c in changes)
     assert changes[0] == {"action": AUDIT_REVOKE, "actor_name": None, "target_name": "Rae Viewer",
-                          "target_orcid": "0000-0003-0000-8888", "role": USER_ROLE_REVIEWER,
+                          "target_orcid": "0000-0003-0001-8887", "role": USER_ROLE_REVIEWER,
                           "created_at": changes[0]["created_at"]}
     assert changes[1]["actor_name"] == "Mona Manager"
     assert len(await staff_accounts.recent_staff_changes(db_session, limit=1)) == 1

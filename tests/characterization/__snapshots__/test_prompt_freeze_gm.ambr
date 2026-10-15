@@ -28433,7 +28433,9 @@
       </paper_abstract>
       
       Methods: <paper_methods>
-      Methods Organoids were derived from resected tissue. Base editing used ABE8e.
+      Methods
+      Organoids were derived from resected tissue.
+      Base editing used ABE8e.
       </paper_methods>
     ''',
   })

@@ -95,6 +95,35 @@ def reconcile_record_doi(
     return doi, action != "unverified"
 
 
+def bounded_publication_fields(
+    *, pmid: str | None, doi: str | None, pmcid: str | None, journal: str | None,
+) -> dict[str, str | None]:
+    """``doi``, ``pmcid`` and ``journal`` fitted to their ``publications`` columns (R2.13 of
+    the 2026-10-15 publication-handling design; main PIPE-14, SCR-9; Q13; B-D4, C-D12). The
+    widths are read from the model, so they cannot drift. An over-long DOI or PMCID is not
+    an identifier of this paper and becomes None (one WARNING); an over-long journal is cut
+    to the width (one INFO). Returns exactly the keys doi, pmcid and journal."""
+    columns = Publication.__table__.c
+    out: dict[str, str | None] = {"doi": doi, "pmcid": pmcid, "journal": journal}
+    for name in ("doi", "pmcid"):
+        value, width = out[name], columns[name].type.length
+        if value is not None and len(value) > width:
+            logger.warning(
+                "[field-bounds] pmid=%s: %s of %d characters exceeds publications.%s (%d); "
+                "storing NULL",
+                pmid, name, len(value), name, width,
+            )
+            out[name] = None
+    width = columns.journal.type.length
+    if journal is not None and len(journal) > width:
+        logger.info(
+            "[field-bounds] pmid=%s: journal of %d characters truncated to %d",
+            pmid, len(journal), width,
+        )
+        out["journal"] = journal[:width]
+    return out
+
+
 #: The fields a metadata refresh may write (D44).
 REFRESHED_FIELDS = ("title", "abstract", "journal", "year", "pmcid")
 
@@ -198,15 +227,30 @@ def _refresh_row(
     outcome: CorpusStoreOutcome,
 ) -> None:
     """DOI check (``manual`` rows too, as the pipeline always did), then, unless the row is
-    ``manual``, the metadata refresh and the provenance backfill."""
+    ``manual``, the metadata refresh and the provenance backfill. Fields are bounded to
+    their columns (``bounded_publication_fields``), and a stored DOI that is not a DOI is
+    cleared when this run yields none (R2.13)."""
     doi, verified = reconcile_record_doi(rec, orcid_dois)
+    bounded = bounded_publication_fields(
+        pmid=rec.get("pmid"), doi=doi, pmcid=rec.get("pmcid"), journal=rec.get("journal"),
+    )
+    if bounded["doi"] is None:
+        doi, verified = None, None
     if doi and row.doi != doi:
         row.doi = doi
     if doi is not None:
         row.doi_verified = verified
+    elif row.doi is not None and normalize_doi(row.doi) is None:
+        logger.warning(
+            "[doi-gate] pmid=%s: stored DOI %r is not a DOI; cleared", rec.get("pmid"), row.doi
+        )
+        row.doi = None
+        row.doi_verified = None
     if row.provenance == PROVENANCE_MANUAL:
         return
-    changes = metadata_changes(row, rec)
+    changes = metadata_changes(
+        row, {**rec, "pmcid": bounded["pmcid"], "journal": bounded["journal"]}
+    )
     if changes:
         if "year" in changes:
             outcome.year_changes.append((rec["pmid"], row.year, changes["year"]))
@@ -231,15 +275,20 @@ def _insert_row(
     orcid_dois: Mapping[str, str], outcome: CorpusStoreOutcome,
 ) -> Publication:
     doi, verified = reconcile_record_doi(rec, orcid_dois)
+    bounded = bounded_publication_fields(
+        pmid=rec.get("pmid"), doi=doi, pmcid=rec.get("pmcid"), journal=rec.get("journal"),
+    )
+    if bounded["doi"] is None:
+        verified = None
     pub = Publication(
         user_id=user_id,
         pmid=rec.get("pmid"),
-        pmcid=rec.get("pmcid"),
-        doi=doi,
+        pmcid=bounded["pmcid"],
+        doi=bounded["doi"],
         doi_verified=verified,
         title=rec.get("title") or "",
         abstract=rec.get("abstract", ""),
-        journal=rec.get("journal"),
+        journal=bounded["journal"],
         year=rec.get("year"),
         provenance=provenance_for(rec),
     )

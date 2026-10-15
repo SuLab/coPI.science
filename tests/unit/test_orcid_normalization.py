@@ -1,15 +1,16 @@
 """D-18: the ORCID forms people paste — an orcid.org URL, a lowercase check-digit
-x — normalize to the canonical iD before validation."""
+x — normalize to the canonical iD before validation. Since R2.2 the check digit is validated too."""
 
 import pytest
 
-from src.services.pi_onboarding import normalize_orcid, validate_orcid
+from src.services.pi_onboarding import validate_orcid
 
 
 @pytest.mark.parametrize(
     "raw,expected",
     [
         ("0000-0002-1825-0097", "0000-0002-1825-0097"),
+        ("0000000218250097", "0000-0002-1825-0097"),
         ("  0000-0002-1825-0097\n", "0000-0002-1825-0097"),
         ("0000-0002-1694-233x", "0000-0002-1694-233X"),
         ("https://orcid.org/0000-0002-1825-0097", "0000-0002-1825-0097"),
@@ -37,5 +38,6 @@ def test_validate_orcid_still_rejects_malformed_input(raw):
         validate_orcid(raw)
 
 
-def test_normalize_orcid_does_not_validate():
-    assert normalize_orcid(" not-an-orcid ") == "not-an-orcid"
+def test_validate_orcid_rejects_a_wrong_check_digit():
+    with pytest.raises(ValueError, match="Invalid ORCID"):
+        validate_orcid("0000-0002-1825-0098")

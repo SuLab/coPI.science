@@ -77,7 +77,7 @@ CHAT_PITCH = (
 
 def _check_digit(base15: str) -> str:
     """The ISO 7064 MOD 11-2 check character for 15 digits: the algorithm
-    ``src.services.pubmed._normalize_author_orcid`` validates with."""
+    ``src.services.identifiers.normalize_orcid`` validates with."""
     total = 0
     for ch in base15:
         total = (total + int(ch)) * 2
@@ -94,13 +94,31 @@ def _bad_checksum_orcid(n: int) -> str:
     return "-".join(digits[i:i + 4] for i in range(0, 16, 4))
 
 
+#: Leading digit groups of a block of iDs ORCID does not issue (F21 of the 2026-10-15
+#: publication-handling design). ORCID's support page "Structure of the ORCID Identifier"
+#: (https://support.orcid.org/hc/en-us/articles/360006897674) says iDs are typically
+#: assigned between 0000-0001-5000-0007 and 0000-0003-5000-0001, or between
+#: 0009-0000-0000-0000 and 0009-0010-0000-0000; 0000-0000- lies below both. That rests on
+#: "typically", not a guarantee (owner decision, 2026-10-15). An iD here is checksum-valid,
+#: so the staff preview accepts it.
+UNISSUED_ORCID_BLOCK = "0000-0000-"
+
+
+def _valid_unissued_orcid(n: int) -> str:
+    """A checksum-valid iD inside ``UNISSUED_ORCID_BLOCK``: the block's digits, then ``n``
+    zero-padded to 15 digits, then the check character."""
+    stem = UNISSUED_ORCID_BLOCK.replace("-", "")
+    base = stem + f"{n:0{15 - len(stem)}d}"
+    digits = base + _check_digit(base)
+    return "-".join(digits[i:i + 4] for i in range(0, 16, 4))
+
+
 SEED_ORCIDS: dict[str, str] = {key: _bad_checksum_orcid(n) for key, (_, n) in PEOPLE.items()}
-STAFF_PREVIEW_ORCID = _bad_checksum_orcid(901)
+STAFF_PREVIEW_ORCID = _valid_unissued_orcid(901)
 
 assert all(
-    _check_digit(orcid.replace("-", "")[:15]) != orcid[-1]
-    for orcid in (*SEED_ORCIDS.values(), STAFF_PREVIEW_ORCID)
-), "every seeded ORCID iD must fail the MOD 11-2 check"
+    _check_digit(orcid.replace("-", "")[:15]) != orcid[-1] for orcid in SEED_ORCIDS.values()
+), "every seeded person's ORCID iD must fail the MOD 11-2 check"
 
 
 def _email(key: str) -> str:

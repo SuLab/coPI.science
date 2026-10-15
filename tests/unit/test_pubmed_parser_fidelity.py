@@ -172,6 +172,10 @@ def test_authors_are_parsed_with_names_affiliations_and_collectives():
                 "HHMI",
             ],
             "orcid": None,
+            "position": 1,
+            "suffix": None,
+            "valid": True,
+            "equal_contrib": False,
         },
         {
             "last": None,
@@ -180,6 +184,10 @@ def test_authors_are_parsed_with_names_affiliations_and_collectives():
             "collective": "N3C Consortium",
             "affiliations": [],
             "orcid": None,
+            "position": 2,
+            "suffix": None,
+            "valid": True,
+            "equal_contrib": False,
         },
     ]
     assert record["author_count"] == 2
@@ -293,7 +301,7 @@ async def test_search_pmids_raises_on_a_bad_response_instead_of_returning_empty(
 
 
 # ---------------------------------------------------------------------------
-# MedlineDate years (G-12) and the surviving methods tier (D46)
+# MedlineDate years (G-12)
 # ---------------------------------------------------------------------------
 
 
@@ -321,10 +329,3 @@ def test_a_year_element_wins_over_a_medline_date_and_junk_gives_none():
     [rec] = pubmed._parse_pubmed_xml(_article("<MedlineDate>Spring</MedlineDate>"))
     assert rec.get("year") is None
 
-
-def test_methods_are_found_in_unnamespaced_pmc_xml_only():
-    plain = "<article><body><sec><title>2 METHODS</title><p>We did it.</p></sec></body></article>"
-    assert pubmed._extract_methods_section(plain) == "2 METHODS We did it."
-    namespaced = ('<article xmlns="http://jats.nlm.nih.gov"><body><sec><title>Methods</title>'
-                  "<p>x</p></sec></body></article>")
-    assert pubmed._extract_methods_section(namespaced) is None

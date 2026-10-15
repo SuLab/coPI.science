@@ -185,7 +185,7 @@ def _authorship(orcid, *, institutions=(), raw=(), raw_orcid=None):
 async def test_fetch_orcid_authorships_lists_pmid_less_works_with_the_orcids_authorship(
     monkeypatch,
 ):
-    pi = "0000-0002-4217-477X"
+    pi = "0000-0002-1694-233X"
     seen = []
 
     def handler(request):
@@ -239,3 +239,15 @@ async def test_fetch_orcid_authorships_raises_on_failure(monkeypatch):
     monkeypatch.setattr(http_pacing, "_sleep", _instant)
     with pytest.raises(httpx.HTTPStatusError):
         await openalex.fetch_orcid_authorships("0000-0002-4217-4776")
+
+
+def test_orcid_key_is_the_shared_normaliser():
+    assert openalex._orcid_key("https://orcid.org/0000-0002-1694-233x") == "0000-0002-1694-233X"
+    assert openalex._orcid_key("https://orcid.org/0000-0002-1825-0098") is None
+    assert openalex._orcid_key(None) is None
+
+
+def test_openalex_pmid_url_is_normalized():
+    assert openalex._pmid_from_url("https://pubmed.ncbi.nlm.nih.gov/0123/") == "123"
+    assert openalex._pmid_from_url("https://pubmed.ncbi.nlm.nih.gov/abc") is None
+    assert openalex._pmid_from_url(None) is None

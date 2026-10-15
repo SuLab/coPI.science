@@ -22,7 +22,7 @@ async def test_pi_is_denied_all_four_write_routes(client, db_session):
     target = await factories.make_user(db_session, user_role=USER_ROLE_PI)
     headers = auth_headers(pi.id)
 
-    r = await client.post("/workspace/pis", data={"orcid": "0000-0003-0000-0000"}, headers=headers)
+    r = await client.post("/workspace/pis", data={"orcid": "0000-0003-0000-0003"}, headers=headers)
     assert r.status_code == 403
     r = await client.post(f"/workspace/pis/{target.id}/profile", data={}, headers=headers)
     assert r.status_code == 403
@@ -67,7 +67,7 @@ async def test_manager_create_pi_rejects_a_duplicate_orcid(client, db_session):
     """A PI who already has a lab agent; an agentless one is adopted instead
     (test_manager_add_pi_pipeline.py)."""
     manager = await _manager(db_session)
-    existing = await factories.make_user(db_session, orcid="0000-0005-0000-0000")
+    existing = await factories.make_user(db_session, orcid="0000-0005-0000-0008")
     await factories.make_agent(db_session, user=existing)
     await db_session.commit()  # the refusal rolls the request back
 
@@ -236,13 +236,13 @@ async def test_manager_create_pi_also_mints_a_pending_agent_and_tenure_entry(
         new=AsyncMock(return_value=dict(_ORCID_PROFILE)),
     ):
         r = await client.post(
-            "/workspace/pis", data={"orcid": "0000-0007-0000-0000"},
+            "/workspace/pis", data={"orcid": "0000-0007-0000-0002"},
             headers=auth_headers(manager.id), follow_redirects=False,
         )
     assert r.status_code == 302
 
     created = (await db_session.execute(
-        select(User).where(User.orcid == "0000-0007-0000-0000")
+        select(User).where(User.orcid == "0000-0007-0000-0002")
     )).scalar_one()
 
     agent = (await db_session.execute(
@@ -287,7 +287,7 @@ async def test_manager_create_pi_maps_known_failures_to_canned_codes(
     client, db_session
 ):
     manager = await _manager(db_session)
-    existing = await factories.make_user(db_session, orcid="0000-0008-0000-0000")
+    existing = await factories.make_user(db_session, orcid="0000-0008-0000-000X")
     await factories.make_agent(db_session, user=existing)
     await db_session.commit()  # each refusal rolls its request back
     # Read now: a refusal's rollback expires the shared session's objects.
@@ -304,7 +304,7 @@ async def test_manager_create_pi_maps_known_failures_to_canned_codes(
         new=AsyncMock(side_effect=RuntimeError("ORCID down")),
     ):
         r = await client.post(
-            "/workspace/pis", data={"orcid": "0000-0009-0000-0000"},
+            "/workspace/pis", data={"orcid": "0000-0009-0000-0007"},
             headers=headers, follow_redirects=False,
         )
     assert r.headers["location"] == "/workspace/pis?error=fetch_failed"
@@ -330,14 +330,14 @@ async def test_a_collision_race_rolls_back_cleanly_instead_of_500ing(
         ),
     ):
         r = await client.post(
-            "/workspace/pis", data={"orcid": "0000-0010-0000-0000"},
+            "/workspace/pis", data={"orcid": "0000-0010-0000-0006"},
             headers=auth_headers(manager.id), follow_redirects=False,
         )
     assert r.status_code == 302
     assert r.headers["location"] == "/workspace/pis?error=agent_conflict"
 
     ghost = (await db_session.execute(
-        select(User).where(User.orcid == "0000-0010-0000-0000")
+        select(User).where(User.orcid == "0000-0010-0000-0006")
     )).scalar_one_or_none()
     assert ghost is None, "the User row must roll back with the agent row"
 
@@ -407,7 +407,7 @@ async def test_manager_can_correct_the_tenure_year_from_the_edit_form(
 
     manager = await _manager(db_session)
     pi = await factories.make_user(
-        db_session, user_role=USER_ROLE_PI, orcid="0000-0013-0000-0000",
+        db_session, user_role=USER_ROLE_PI, orcid="0000-0013-0000-0008",
     )
     profile = await factories.make_profile(db_session, user=pi)
     r = await client.post(
@@ -431,7 +431,7 @@ async def test_a_concurrent_add_of_the_same_orcid_reports_exists(client, db_sess
         "src.routers.workspace.pi_directory.find_or_create_pi_by_orcid", new=AsyncMock(side_effect=dup)
     ):
         r = await client.post(
-            "/workspace/pis", data={"orcid": "0000-0012-0000-0001"},
+            "/workspace/pis", data={"orcid": "0000-0012-0000-0019"},
             headers=auth_headers(manager.id), follow_redirects=False,
         )
     assert r.status_code == 302
@@ -439,8 +439,8 @@ async def test_a_concurrent_add_of_the_same_orcid_reports_exists(client, db_sess
 
 
 async def test_the_users_orcid_unique_constraint_is_named_users_orcid_key(db_session):
-    await factories.make_user(db_session, orcid="0000-0012-0000-0002")
+    await factories.make_user(db_session, orcid="0000-0012-0000-0027")
     with pytest.raises(IntegrityError) as exc:
         async with db_session.begin_nested():
-            await factories.make_user(db_session, orcid="0000-0012-0000-0002")
+            await factories.make_user(db_session, orcid="0000-0012-0000-0027")
     assert "users_orcid_key" in str(exc.value.orig)

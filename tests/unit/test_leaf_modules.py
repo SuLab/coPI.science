@@ -28,8 +28,13 @@ def test_the_web_app_does_not_import_the_engine_entry_point():
 
 
 def test_leaf_modules_are_dependency_free():
-    for rel in ("src/agent/tool_definitions.py", "src/agent/dois.py", "src/services/secret_redaction.py", "src/agent/slack_escape.py"):
+    for rel in ("src/agent/tool_definitions.py", "src/agent/dois.py",
+                "src/services/secret_redaction.py"):
         assert not {m for m in _src_imports(rel) if m.startswith("src.")}, rel
+    # I6 (2026-10-15 publication-handling design): the Slack escape reads DOI spans with
+    # the leaf finder, and imports nothing else from src.
+    slack_escape = {m for m in _src_imports("src/agent/slack_escape.py") if m.startswith("src.")}
+    assert slack_escape == {"src.agent.dois"}
 
 
 def test_roles_no_longer_imports_tools_and_tools_no_longer_imports_agent():

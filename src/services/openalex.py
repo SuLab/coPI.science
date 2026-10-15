@@ -24,6 +24,7 @@ import httpx
 from src.config import get_settings
 from src.services import openalex_budget
 from src.services.http_pacing import TRANSIENT_STATUSES, with_retries
+from src.services.identifiers import normalize_orcid, normalize_pmid
 from src.services.query_escaping import openalex_filter_value
 
 logger = logging.getLogger(__name__)
@@ -39,10 +40,9 @@ def _make_client() -> httpx.AsyncClient:
 
 
 def _pmid_from_url(url: str | None) -> str | None:
-    if not url:
-        return None
-    tail = url.rstrip("/").rsplit("/", 1)[-1]
-    return tail or None
+    """The PMID of OpenAlex's ``https://pubmed.ncbi.nlm.nih.gov/<n>`` form, canonical
+    (``identifiers.normalize_pmid``), or None (R2.5)."""
+    return normalize_pmid(url)
 
 
 def _doi_from_url(url: str | None) -> str | None:
@@ -160,10 +160,9 @@ async def fetch_works_by_orcid(orcid: str) -> list[dict]:
 
 
 def _orcid_key(value: object) -> str | None:
-    """An ORCID iD, bare or as an orcid.org URL, upper-cased; None when blank or not text."""
-    if not isinstance(value, str) or not value.strip():
-        return None
-    return value.strip().rstrip("/").rsplit("/", 1)[-1].upper()
+    """An ORCID iD, bare or as an orcid.org URL, in canonical form; None when it is not
+    text or fails the check digit (``identifiers.normalize_orcid``, R2.2)."""
+    return normalize_orcid(value) if isinstance(value, str) else None
 
 
 def _texts(values: object) -> list[str]:

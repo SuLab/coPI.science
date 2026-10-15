@@ -102,6 +102,7 @@ from src.services.corpus import (  # noqa: E402
     resolve_corpus,
 )
 from src.services.corpus_additions import (  # noqa: E402
+    bounded_publication_fields,
     lock_corpus,
     provenance_for,
     reconcile_record_doi,
@@ -620,16 +621,21 @@ async def _apply_plan(db: AsyncSession, plan: PiRepairPlan) -> bool:
                 print(f"    already stored since planning: pmid={rec.get('pmid')}")
                 continue
             doi, verified = reconcile_record_doi(rec, plan.orcid_dois)
+            bounded = bounded_publication_fields(
+                pmid=rec.get("pmid"), doi=doi, pmcid=rec.get("pmcid"), journal=rec.get("journal"),
+            )
+            if bounded["doi"] is None:
+                verified = None
             db.add(
                 Publication(
                     user_id=plan.user_id,
                     pmid=rec.get("pmid"),
-                    pmcid=rec.get("pmcid"),
-                    doi=doi,
+                    pmcid=bounded["pmcid"],
+                    doi=bounded["doi"],
                     doi_verified=verified,
                     title=rec.get("title") or "",
                     abstract=rec.get("abstract") or "",
-                    journal=rec.get("journal"),
+                    journal=bounded["journal"],
                     year=rec.get("year"),
                     provenance=provenance_for(rec),
                 )

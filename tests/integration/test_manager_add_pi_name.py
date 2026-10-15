@@ -8,7 +8,7 @@ from tests import factories
 from tests.integration.test_manager_access import auth_headers
 
 pytestmark = pytest.mark.integration
-_OID = "0000-0002-1825-0501"
+_OID = "0000-0002-1825-0505"
 
 
 @pytest.fixture

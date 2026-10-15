@@ -51,7 +51,7 @@ async def _seed_phase4(s) -> dict:
     from tests import factories
 
     a = await factories.make_user(
-        s, user_role=USER_ROLE_PI, name="Jane Wang", orcid="0000-0002-1111-0010",
+        s, user_role=USER_ROLE_PI, name="Jane Wang", orcid="0000-0002-1111-0016",
         email="jane-wang@uiaudit.test")
     await factories.make_profile(
         s, user=a, research_summary="P4 original summary.", techniques=["Microscopy"],
@@ -61,7 +61,7 @@ async def _seed_phase4(s) -> dict:
         s, user=a, agent_id="p4-wang", bot_name="WangBot", pi_name="Jane Wang")
 
     b = await factories.make_user(
-        s, user_role=USER_ROLE_PI, name="Profileless PI", orcid="0000-0002-1111-0011",
+        s, user_role=USER_ROLE_PI, name="Profileless PI", orcid="0000-0002-1111-0024",
         email="profileless@uiaudit.test")
     await factories.make_agent(
         s, user=b, agent_id="p4-profileless", bot_name="ProfilelessBot",
@@ -69,7 +69,7 @@ async def _seed_phase4(s) -> dict:
     await set_provisional_tenure_start(s, b.id, 2016)
 
     c = await factories.make_user(
-        s, user_role=USER_ROLE_PI, name="Activation Refusal", orcid="0000-0002-1111-0012",
+        s, user_role=USER_ROLE_PI, name="Activation Refusal", orcid="0000-0002-1111-0032",
         email="activation-refusal@uiaudit.test")
     await factories.make_profile(
         s, user=c, research_summary="P4 activation profile.", profile_version=1,
@@ -247,23 +247,23 @@ async def main() -> None:
     async with get_session_factory()() as s:
         mk = factories.make_user
         admin = await mk(s, user_role=USER_ROLE_ADMIN, name="Audit Admin",
-                         orcid="0000-0002-1111-0001", email="admin@uiaudit.test")
+                         orcid="0000-0002-1111-0040", email="admin@uiaudit.test")
         manager = await mk(s, user_role=USER_ROLE_MANAGER, name="Audit Manager",
-                           orcid="0000-0002-1111-0002", email="mgr@uiaudit.test")
+                           orcid="0000-0002-1111-0059", email="mgr@uiaudit.test")
         reviewer = await mk(s, user_role=USER_ROLE_REVIEWER, name="Audit Reviewer",
-                            orcid="0000-0002-1111-0003", email="rev@uiaudit.test")
-        pi = await mk(s, user_role=USER_ROLE_PI, name=EVIL_NAME, orcid="0000-0002-1111-0004",
+                            orcid="0000-0002-1111-0067", email="rev@uiaudit.test")
+        pi = await mk(s, user_role=USER_ROLE_PI, name=EVIL_NAME, orcid="0000-0002-1111-0075",
                       email="pi@uiaudit.test", institution=XSS)
         pi2 = await mk(s, user_role=USER_ROLE_PI, name="Bert Vogelstein",
-                       orcid="0000-0002-1111-0005", email="bv@uiaudit.test")
+                       orcid="0000-0002-1111-0083", email="bv@uiaudit.test")
         delegate = await mk(s, user_role=USER_ROLE_PI, name="Del Egate",
-                            orcid="0000-0002-1111-0006", email="del@uiaudit.test")
+                            orcid="0000-0002-1111-0104", email="del@uiaudit.test")
         pending = await mk(s, user_role=USER_ROLE_PI, name="Pending " + XSS,
-                           orcid="0000-0002-1111-0007", email="pend@uiaudit.test",
+                           orcid="0000-0002-1111-0112", email="pend@uiaudit.test",
                            access_status="pending", onboarding_complete=False)
         script_user = await mk(s, user_role=USER_ROLE_MANAGER, name=SCRIPT_NAME, orcid="0000-0002-1111-0091",
                                email="x1@uiaudit.test")
-        apostrophe_user = await mk(s, name=APOSTROPHE_NAME, orcid="0000-0002-1111-0092",
+        apostrophe_user = await mk(s, name=APOSTROPHE_NAME, orcid="0000-0002-1111-0120",
                                    email="x2@uiaudit.test")
         await factories.make_profile(s, user=pi, research_summary=MD_EVIL + "\n\n" + LONG,
                                      techniques=[XSS, "CRISPR"], keywords=[LONG, "k2"])

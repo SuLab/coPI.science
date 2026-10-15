@@ -146,7 +146,7 @@ async def test_a_work_openalex_files_under_another_pmid_is_found_by_its_doi(db_s
     async def no_works(pmids):
         return Paged([])
 
-    async def by_doi(dois):
+    async def by_doi(dois, *, skipped=None):
         asked.append(list(dois))
         return [_PARATEK_WORK | {"ids": {"pmid": "https://pubmed.ncbi.nlm.nih.gov/39041038"}}]
 

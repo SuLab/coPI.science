@@ -13,7 +13,7 @@ from src.dependencies import get_admin_user
 from src.models import AccessAllowlist, ResearcherProfile, User
 from src.models.job import INTERACTIVE_PRIORITY
 from src.services.admin_invariant import LastAdminError, ensure_admin_remains
-from src.services.pi_onboarding import normalize_orcid
+from src.services.identifiers import normalize_orcid
 from src.routers.admin._common import _template_context, router, templates
 from src.services.profile_jobs import enqueue_profile_job_if_absent
 from src.services.session_epoch import bump_session_epoch

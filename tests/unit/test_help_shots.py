@@ -11,7 +11,7 @@ import re
 import struct
 from pathlib import Path
 
-from src.services.pubmed import _normalize_author_orcid
+from src.services.identifiers import normalize_orcid
 from src.web.help_pages import AUDIENCE_ALL, AUDIENCE_STAFF, HELP_PAGES, TUTORIALS
 from tests.e2e.help_shots import seed
 from tests.e2e.help_shots.shots import SHOTS
@@ -109,9 +109,17 @@ def test_manifest_audience_matches_shots_py():
 
 
 def test_seed_orcids_fail_the_mod_11_2_check():
-    """An iD with a wrong check digit can never be issued to anyone (spec §8.1)."""
-    orcids = [*seed.SEED_ORCIDS.values(), seed.STAFF_PREVIEW_ORCID]
+    """A seeded person's iD has a wrong check digit, so it can never be issued (spec §8.1)."""
+    orcids = list(seed.SEED_ORCIDS.values())
     assert len(set(orcids)) == len(orcids)
     for orcid in orcids:
         assert re.fullmatch(r"\d{4}-\d{4}-\d{4}-\d{3}[\dX]", orcid), orcid
-        assert _normalize_author_orcid(orcid) is None, orcid
+        assert normalize_orcid(orcid) is None, orcid
+
+
+def test_staff_preview_orcid_is_valid_and_never_issued():
+    """F21: the staff-preview iD passes the check digit (the preview validates it) and lies in a
+    block ORCID never issues (seed.UNISSUED_ORCID_BLOCK)."""
+    assert normalize_orcid(seed.STAFF_PREVIEW_ORCID) == seed.STAFF_PREVIEW_ORCID
+    assert seed.STAFF_PREVIEW_ORCID.startswith(seed.UNISSUED_ORCID_BLOCK)
+    assert seed.STAFF_PREVIEW_ORCID not in seed.SEED_ORCIDS.values()

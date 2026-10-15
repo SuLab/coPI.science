@@ -140,3 +140,17 @@ async def test_additions_come_from_the_uncapped_list_with_provenance_and_verifie
         "SELECT mechanism FROM profile_revisions WHERE agent_registry_id = :a"),
         {"a": agent.id})).scalars().all()
     assert revisions == ["reexport"]
+
+
+async def test_repair_additions_are_bounded(db_session):
+    import scripts.repair_pi_corpus as rp
+    from src.models import Publication
+    from tests import factories
+
+    user = await factories.make_user(db_session)
+    plan = rp.PiRepairPlan(user_id=user.id, orcid=user.orcid, name=user.name, agent_id=None)
+    plan.additions = [{"pmid": "779", "title": "Long", "year": 2024, "journal": "J" * 300}]
+    await rp._apply_plan(db_session, plan)
+    journal = (await db_session.execute(
+        select(Publication.journal).where(Publication.user_id == user.id))).scalar_one()
+    assert len(journal) == 255

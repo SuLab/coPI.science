@@ -29,7 +29,7 @@ async def test_a_write_under_impersonation_is_logged_with_both_identities(client
     worn = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     caplog.set_level(logging.WARNING, logger="src.dependencies")
     r = await client.post(
-        "/admin/access-allowlist/add", data={"orcid": "0000-0004-0000-0001", "note": ""},
+        "/admin/access-allowlist/add", data={"orcid": "0000-0004-0000-0000", "note": ""},
         headers=impersonation_headers(real.id, worn.id), follow_redirects=False,
     )
     assert r.status_code == 302
@@ -65,7 +65,7 @@ async def test_a_write_without_impersonation_logs_no_impersonation_line(client, 
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     caplog.set_level(logging.WARNING, logger="src.dependencies")
     await client.post(
-        "/admin/access-allowlist/add", data={"orcid": "0000-0004-0000-0002", "note": ""},
+        "/admin/access-allowlist/add", data={"orcid": "0000-0004-0000-0019", "note": ""},
         headers=auth_headers(admin.id), follow_redirects=False,
     )
     assert not [m for m in caplog.messages if "while impersonating" in m]

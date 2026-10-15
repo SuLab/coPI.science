@@ -42,20 +42,23 @@ from src.models import (
     ProfileRevision,
     User,
 )
+from src.services.identifiers import normalize_orcid
 from tests import factories
 
 pytestmark = pytest.mark.integration
 
 # Rows created by this module are committed for real, so they are tagged and deleted
-# around every test. `cli seed-profile` validates the ORCID format (MD-14), so a tag
-# maps to a well-formed iD under a prefix no other test uses; the prefix is the tag.
+# around every test. `cli seed-profile` validates the ORCID iD, check digit included (MD-14;
+# R2.2 of the 2026-10-15 publication-handling design), so a tag maps to a checksum-valid iD
+# under a prefix no other test uses; the prefix is the tag.
 ORCID_PREFIX = "0000-0006-60"
 AGENT_PREFIX = "clitest"
 
 
 def _orcid(tag: str) -> str:
-    n = int(hashlib.sha256(tag.encode()).hexdigest(), 16) % 10**6
-    return f"{ORCID_PREFIX}{n // 10**4:02d}-{n % 10**4:04d}"
+    n = int(hashlib.sha256(tag.encode()).hexdigest(), 16) % 10**5
+    stem = f"{ORCID_PREFIX}{n // 10**3:02d}-{n % 10**3:03d}"
+    return next(o for c in "0123456789X" if (o := normalize_orcid(stem + c)) is not None)
 
 
 # ---------------------------------------------------------------------------

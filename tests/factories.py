@@ -22,6 +22,18 @@ from src.models import (
     ThreadDecision,
     User,
 )
+from src.services.identifiers import normalize_orcid
+
+
+def valid_orcid(n: int) -> str:
+    """A checksum-valid iD unique per ``n`` (0 <= n < 10**7): ``0000-0000-0NNN-NNNC``.
+    Routes now validate the check digit (R2.2), so factory users must carry valid iDs."""
+    base = f"00000000{n:07d}"
+    for check in "0123456789X":
+        if (orcid := normalize_orcid(base + check)) is not None:
+            return orcid
+    raise AssertionError(f"no check character for {base}")
+
 
 _counter = itertools.count(1)
 
@@ -30,7 +42,7 @@ async def make_user(session, **overrides) -> User:
     n = next(_counter)
     data = dict(
         name=f"Researcher {n}",
-        orcid=f"0000-0000-0000-{n:04d}",
+        orcid=valid_orcid(n),
         email=f"user{n}@example.edu",
         institution="Test University",
         user_role=USER_ROLE_PI,

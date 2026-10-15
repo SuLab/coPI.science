@@ -53,6 +53,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from src.config import get_settings
 from src.models import AgentRegistry, Publication, User
+from src.services.corpus_additions import bounded_publication_fields
 from src.services.profile_publish import (
     lock_persona_writer,
     reexport_persona,
@@ -200,8 +201,15 @@ async def _fix_per_pi(
         )).scalars().all()
         for p in fresh:
             final_doi, action = reconcile_pub_doi(p.doi, authoritative.get(str(p.pmid)))
-            if action in ("corrected", "filled", "ok") and (final_doi or None) != (p.doi or None):
-                p.doi = final_doi
+            bounded_doi = bounded_publication_fields(
+                pmid=p.pmid, doi=final_doi, pmcid=None, journal=None,
+            )["doi"]
+            if (
+                action in ("corrected", "filled", "ok")
+                and bounded_doi is not None
+                and bounded_doi != (p.doi or None)
+            ):
+                p.doi = bounded_doi
                 written += 1
             verified = _VERIFIED_BY_ACTION.get(action)
             if verified is not None and p.doi_verified is not verified:

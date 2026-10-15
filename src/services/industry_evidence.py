@@ -2,7 +2,7 @@
 
 The job asks each source in `industry_sources.registry.SOURCES` for the PI's evidence and
 records what each covered: "ok", "truncated" (USPTO or ClinicalTrials.gov paging stopped
-at its cap) or "unavailable:<reason>" (`SourceUnavailable`). Evidence rows are upserted
+at its cap, or OpenAlex's DOI fallback was capped or skipped a DOI) or "unavailable:<reason>" (`SourceUnavailable`). Evidence rows are upserted
 on (user_id, source, kind, external_id), every column refreshed except the id and the
 veto, so a row keeps its id (the veto form's URL) and its veto across runs (E-9). Then the
 non-vetoed rows that a source with coverage "ok" did not return are deleted, which also

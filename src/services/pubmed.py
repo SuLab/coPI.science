@@ -14,7 +14,9 @@ from typing import Any
 import httpx
 
 from src.config import get_settings
+from src.services import pmc_methods
 from src.services.http_pacing import Pacer
+from src.services.identifiers import normalize_doi, normalize_orcid
 from src.services.secret_redaction import install_log_redaction, redact_api_keys
 
 logger = logging.getLogger(__name__)
@@ -36,25 +38,6 @@ IDCONV_BASE = "https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles/"
 # avoid repeated 429 responses observed for large DOI requests, without treating
 # transport failures as evidence that the papers do not exist.
 IDCONV_DOI_BATCH_SIZE = 100
-
-# Strips a leading "doi:" or a doi.org URL prefix from a raw DOI string.
-_DOI_PREFIX_RE = re.compile(r"^\s*(?:doi:\s*|https?://(?:dx\.)?doi\.org/)", re.IGNORECASE)
-
-
-def normalize_doi(doi: str | None) -> str | None:
-    """Canonicalize a raw DOI string.
-
-    Strips a leading ``doi:`` or ``https://doi.org/`` prefix and trailing
-    whitespace/period junk. Case is preserved (DOIs are case-insensitive but the
-    publisher-registered form often carries case). Returns ``None`` for empty or
-    missing input.
-    """
-    if not doi:
-        return None
-    d = _DOI_PREFIX_RE.sub("", doi.strip()).strip()
-    d = d.rstrip(" .")
-    return d or None
-
 
 def _doi_fold(doi: str) -> str:
     """Comparison key for two spellings of the same DOI.
@@ -350,6 +333,33 @@ def _describe(sig: tuple[str, int | str]) -> str:
 # and its drops are reported through ``permanently_dropped`` instead.
 _SYSTEMIC_RUN = 3
 
+#: PMIDs per EFetch request, for the corpus fetch and DOI verification alike.
+EFETCH_BATCH_SIZE = 100
+
+
+def _missing_pmids(requested: list[str], records: list[dict[str, Any]]) -> list[str]:
+    """The requested PMIDs a batch that returned has no record for: deleted, book or
+    invalid ids. An answer, not a failure (R2.10)."""
+    returned = {str(r.get("pmid")) for r in records}
+    return [p for p in (str(x).strip() for x in requested) if p not in returned]
+
+
+def _log_efetch_summary(
+    requested: int, failed_pmids: int, failed_batches: int, batches: int, missing: list[str],
+) -> None:
+    """The run's two summary lines (R2.10, main PM-6)."""
+    if failed_batches:
+        logger.error(
+            "PubMed EFetch: %d of %d PMIDs not fetched (%d of %d batches failed)",
+            failed_pmids, requested, failed_batches, batches,
+        )
+    if missing:
+        logger.warning(
+            "PubMed EFetch: %d of %d requested PMIDs came back with no record "
+            "(deleted, book or invalid ids; first: %s)",
+            len(missing), requested, ", ".join(missing[:10]),
+        )
+
 
 async def fetch_pubmed_records(
     pmids: list[str],
@@ -360,10 +370,16 @@ async def fetch_pubmed_records(
     """
     Batch fetch PubMed records for a list of PMIDs.
     Returns list of dicts with: pmid, doi, pmcid, title, abstract, journal, year,
-    pub_types, authors, author_count, coi_statement, updated_in, update_of.
-    Each ``authors`` entry has last, fore, initials, collective, affiliations
-    and orcid (hyphenated ``0000-0000-0000-000X``, or None when absent or
-    invalid). ``updated_in`` / ``update_of`` are PMID lists from the record's
+    pub_types, authors, author_count, author_list_complete, coi_statement, updated_in,
+    update_of. ``title`` and ``journal`` are one line. ``abstract`` is the article's own
+    Abstract, else its first English OtherAbstract. Each ``authors`` entry, in AuthorList
+    order, has exactly: last, fore, initials, collective, affiliations (whitespace
+    collapsed, an e-mail address reduced to its domain), orcid (hyphenated
+    ``0000-0000-0000-000X``, or None when absent or not a valid iD), position (1-based,
+    every Author counted), suffix, valid (False exactly when ``ValidYN="N"``) and
+    equal_contrib. ``author_list_complete`` is False exactly when the AuthorList carries
+    ``CompleteYN="N"`` (True with no AuthorList; contract C11, read with
+    ``.get(key, True)``). ``updated_in`` / ``update_of`` are PMID lists from the record's
     UpdateIn / UpdateOf CommentsCorrections links (empty when none).
 
     ``strict`` decides what one failed batch costs:
@@ -399,6 +415,10 @@ async def fetch_pubmed_records(
     persisted from such a corpus). Non-strict mode records nothing there: it
     loses whole batches for any reason, transient included.
 
+    After the loop, one ERROR sums the PMIDs of failed non-strict batches, and one WARNING
+    names (at most ten of) the requested PMIDs a returned batch had no record for; a missing
+    PMID is an answer, never a drop.
+
     ``fetch_abstract`` deliberately does NOT come through here (see its
     docstring): a single-record lookup needs exactly the information the
     non-strict loop discards.
@@ -406,16 +426,20 @@ async def fetch_pubmed_records(
     if not pmids:
         return []
 
-    # Batch in chunks of 100
     results = []
-    for i in range(0, len(pmids), 100):
-        batch = pmids[i : i + 100]
+    failed_pmids = failed_batches = 0
+    missing: list[str] = []
+    for i in range(0, len(pmids), EFETCH_BATCH_SIZE):
+        batch = pmids[i : i + EFETCH_BATCH_SIZE]
         try:
             records = await _fetch_pubmed_batch(batch)
             results.extend(records)
+            missing.extend(_missing_pmids(batch, records))
         except Exception as exc:
             if not strict:
                 logger.error("Failed to fetch PubMed batch %s: %s", batch[:3], exc)
+                failed_batches += 1
+                failed_pmids += len(batch)
                 continue
             if not _is_per_item_failure(exc):
                 raise
@@ -432,7 +456,9 @@ async def fetch_pubmed_records(
             leading: list[tuple[str, int | str]] = []
             for n, pmid in enumerate(batch):
                 try:
-                    results.extend(await _fetch_pubmed_batch([pmid]))
+                    one = await _fetch_pubmed_batch([pmid])
+                    results.extend(one)
+                    missing.extend(_missing_pmids([pmid], one))
                 except Exception as one_exc:
                     if not _is_per_item_failure(one_exc):
                         raise
@@ -450,6 +476,9 @@ async def fetch_pubmed_records(
                             )
                             raise
                     _drop_pmid(pmid, one_exc, permanently_dropped)
+    _log_efetch_summary(
+        len(pmids), failed_pmids, failed_batches, -(-len(pmids) // EFETCH_BATCH_SIZE), missing
+    )
     return results
 
 
@@ -527,32 +556,12 @@ class PubMedParseError(ValueError):
     """
 
 
-def _normalize_author_orcid(text: str | None) -> str | None:
-    """Return ``text`` as a hyphenated ORCID iD, or None if it is not a valid one.
-
-    Accepts bare, hyphenless and ``http(s)://orcid.org/`` forms. The ISO 7064
-    MOD 11-2 check digit is validated because PubMed carries some truncated
-    and hyphenless iDs that must not be compared against a PI's iD.
-    """
-    if not text:
-        return None
-    chars = "".join(c for c in text if c.isdigit() or c in "Xx").upper()
-    if len(chars) != 16 or "X" in chars[:-1] or not chars[:15].isdigit():
-        return None
-    total = 0
-    for ch in chars[:15]:
-        total = (total + int(ch)) * 2
-    result = (12 - total % 11) % 11
-    if chars[15] != ("X" if result == 10 else str(result)):
-        return None
-    return "-".join(chars[i : i + 4] for i in range(0, 16, 4))
-
-
 def _author_orcid(author: ET.Element) -> str | None:
-    """The first of the author's ``Identifier Source="ORCID"`` children that is a
-    valid iD (``_normalize_author_orcid``), else None."""
+    """The first of the author's ``Identifier Source="ORCID"`` children that is a valid iD
+    (``identifiers.normalize_orcid``: check digit verified, hyphenless, single-spaced and
+    orcid.org URL forms accepted), else None."""
     for ident in author.findall("Identifier"):
-        if ident.get("Source") == "ORCID" and (orcid := _normalize_author_orcid(ident.text)):
+        if ident.get("Source") == "ORCID" and (orcid := normalize_orcid(ident.text)):
             return orcid
     return None
 
@@ -568,6 +577,116 @@ def _linked_pmids(article: ET.Element, ref_type: str) -> list[str]:
         if linked_pmid and linked_pmid not in linked:
             linked.append(linked_pmid)
     return linked
+
+
+#: An e-mail address in an affiliation (F15): replaced by its domain, so the personal part
+#: is dropped and the institutional evidence ("jhmi.edu", which jhu_rules matches) stays.
+_EMAIL_ADDRESS = re.compile(
+    r"\s*(?:Electronic address:\s*)?[\w.+-]+@(?P<domain>[\w-]+(?:\.[\w-]+)+)\.?"
+)
+#: The first plausible year in a MedlineDate ("Winter 1998-1999", "Dec 1998-Jan 1999").
+_YEAR_IN_TEXT = re.compile(r"(1[89]|20)\d{2}")
+
+
+def _one_line(text: str | None) -> str | None:
+    """``text`` with every run of whitespace (CR, LF, VT, FF, U+0085, U+2028, U+2029, tabs,
+    Unicode spaces) collapsed to one space; None for anything blank or not text. The same rule
+    as ``non_pubmed_works._one_line`` (Q18 ingest half)."""
+    return " ".join(text.split()) if isinstance(text, str) and text.strip() else None
+
+
+def _affiliation_text(raw: str) -> str:
+    """One affiliation: whitespace collapsed, each e-mail address replaced by its domain
+    (F15), trailing spaces and periods removed. "" when nothing is left."""
+    text = " ".join(raw.split())
+    text = " ".join(_EMAIL_ADDRESS.sub(lambda m: " " + m.group("domain"), text).split())
+    return text.rstrip(" .")
+
+
+def _author_entry(author: ET.Element, position: int) -> dict[str, Any]:
+    """One ``record["authors"]`` entry (R2.6). ``valid`` and the record's
+    ``author_list_complete`` are contract C11; read them with ``.get(key, True)``."""
+    last_el = author.find("LastName")
+    fore_el = author.find("ForeName")
+    init_el = author.find("Initials")
+    coll_el = author.find("CollectiveName")
+    suffix_el = author.find("Suffix")
+    return {
+        "last": last_el.text if last_el is not None else None,
+        "fore": fore_el.text if fore_el is not None else None,
+        "initials": init_el.text if init_el is not None else None,
+        "collective": coll_el.text if coll_el is not None else None,
+        "affiliations": [
+            text
+            for aff in author.findall("AffiliationInfo/Affiliation")
+            if (text := _affiliation_text("".join(aff.itertext())))
+        ],
+        "orcid": _author_orcid(author),
+        "position": position,
+        "suffix": suffix_el.text if suffix_el is not None else None,
+        "valid": author.get("ValidYN") != "N",
+        "equal_contrib": author.get("EqualContrib") == "Y",
+    }
+
+
+def _authors(article: ET.Element) -> tuple[list[dict[str, Any]], bool]:
+    """(authors, author_list_complete) from ``MedlineCitation/Article/AuthorList``. Every
+    ``Author`` is listed and numbered, collectives and ``ValidYN="N"`` included. The list is
+    complete unless it carries ``CompleteYN="N"``; with no AuthorList it is complete (C11:
+    Phase 3 keeps an anchored record whose list is incomplete, so a record with no list must
+    stay ``no_match`` rather than be stored with no author evidence)."""
+    author_list = article.find("./MedlineCitation/Article/AuthorList")
+    if author_list is None:
+        return [], True
+    authors = [
+        _author_entry(author, position)
+        for position, author in enumerate(author_list.findall("Author"), start=1)
+    ]
+    return authors, author_list.get("CompleteYN") != "N"
+
+
+def _abstract_text(container: ET.Element) -> str:
+    """The ``AbstractText`` children of an Abstract or OtherAbstract, each "LABEL: text" when
+    labelled, joined by spaces (itertext: inline markup must not truncate)."""
+    parts = []
+    for el in container.findall("AbstractText"):
+        text = "".join(el.itertext())
+        label = el.get("Label")
+        parts.append(f"{label}: {text}" if label else text)
+    return " ".join(parts)
+
+
+def _abstract(article: ET.Element) -> str:
+    """The article's own Abstract (R2.7, main PM-4); only when that is empty, the first
+    English (or language-less) OtherAbstract with text; else "". An OtherAbstract is never
+    concatenated onto the article's own."""
+    own = article.find("./MedlineCitation/Article/Abstract")
+    text = _abstract_text(own) if own is not None else ""
+    if text:
+        return text
+    for other in article.findall("./MedlineCitation/OtherAbstract"):
+        if (other.get("Language") or "eng").lower() == "eng" and (text := _abstract_text(other)):
+            return text
+    return ""
+
+
+def _int_year(text: str | None) -> int | None:
+    try:
+        return int(text) if text else None
+    except ValueError:
+        return None
+
+
+def _year(article: ET.Element) -> int | None:
+    """PubDate/Year, else the first plausible year in PubDate/MedlineDate, else the
+    electronic ArticleDate/Year (R2.8, main PM-5); a junk value falls through."""
+    year = _int_year(article.findtext(".//PubDate/Year"))
+    if year is None:
+        match = _YEAR_IN_TEXT.search(article.findtext(".//PubDate/MedlineDate") or "")
+        year = int(match.group(0)) if match else None
+    if year is None:
+        year = _int_year(article.findtext("./MedlineCitation/Article/ArticleDate/Year"))
+    return year
 
 
 def _parse_pubmed_xml(xml_text: str) -> list[dict[str, Any]]:
@@ -641,40 +760,25 @@ def _parse_pubmed_xml(xml_text: str) -> list[dict[str, Any]]:
         # element, so an <i>/<sup>/<b> inside the title truncated the stored
         # field (112 production titles were repaired for this on 2026-08-13;
         # Task 1 of docs/plans/2026-08-13-pi-profile-coverage-plan.md is this
-        # fix).
+        # fix). Collapsed to one line at ingest (Q18), so no stored title carries a
+        # line break.
         title_el = article.find(".//ArticleTitle")
         record["title"] = (
-            "".join(title_el.itertext()) if title_el is not None else ""
-        )
+            _one_line("".join(title_el.itertext())) if title_el is not None else None
+        ) or ""
 
-        # Abstract (same truncation hazard as the title)
-        abstract_parts = []
-        for abstract_el in article.findall(".//AbstractText"):
-            label = abstract_el.get("Label")
-            text = "".join(abstract_el.itertext())
-            if label:
-                abstract_parts.append(f"{label}: {text}")
-            else:
-                abstract_parts.append(text)
-        record["abstract"] = " ".join(abstract_parts)
+        # Abstract: the article's own; an OtherAbstract only as an English fallback (R2.7).
+        record["abstract"] = _abstract(article)
 
         # Journal
         journal_el = article.find(".//Journal/Title")
-        record["journal"] = journal_el.text if journal_el is not None else None
+        record["journal"] = _one_line(journal_el.text) if journal_el is not None else None
 
-        # Year: PubDate/Year, else the leading year of a MedlineDate ("1998 Dec-1999 Jan",
-        # G-12), which PubMed uses for seasonal and multi-month issues.
-        year_el = article.find(".//PubDate/Year")
-        medline_el = article.find(".//PubDate/MedlineDate")
-        if year_el is not None and year_el.text:
-            try:
-                record["year"] = int(year_el.text)
-            except ValueError:
-                pass
-        elif medline_el is not None and medline_el.text:
-            match = re.match(r"\s*(\d{4})\b", medline_el.text)
-            if match:
-                record["year"] = int(match.group(1))
+        # Year: PubDate/Year, MedlineDate's first year, then ArticleDate (R2.8). Absent
+        # when none gives one.
+        year = _year(article)
+        if year is not None:
+            record["year"] = year
 
         # Article type
         pub_types = [
@@ -687,29 +791,9 @@ def _parse_pubmed_xml(xml_text: str) -> list[dict[str, Any]]:
         # Authors: names, affiliations and collectives — the corpus resolver's
         # identity gates (src/services/corpus.py) need the surname/forename
         # pair, consortium detection, and the PI's OWN affiliation strings.
-        authors: list[dict[str, Any]] = []
-        for author in article.findall(".//Author"):
-            last_el = author.find("LastName")
-            fore_el = author.find("ForeName")
-            init_el = author.find("Initials")
-            coll_el = author.find("CollectiveName")
-            affiliations = [
-                text
-                for aff in author.findall(".//AffiliationInfo/Affiliation")
-                if (text := "".join(aff.itertext()).strip())
-            ]
-            authors.append(
-                {
-                    "last": last_el.text if last_el is not None else None,
-                    "fore": fore_el.text if fore_el is not None else None,
-                    "initials": init_el.text if init_el is not None else None,
-                    "collective": coll_el.text if coll_el is not None else None,
-                    "affiliations": affiliations,
-                    "orcid": _author_orcid(author),
-                }
-            )
-        record["authors"] = authors
-        record["author_count"] = len(authors)
+        record["authors"], record["author_list_complete"] = _authors(article)
+        # Invalid (ValidYN="N") authors still count, as before.
+        record["author_count"] = len(record["authors"])
 
         record["coi_statement"] = article.findtext(".//CoiStatement")
 
@@ -778,6 +862,12 @@ async def convert_dois_to_pmids(
       or the same unreadable-body error) re-raise, because that is NCBI
       refusing or failing every request, not that many bad DOIs.
 
+    Each input is normalised (``identifiers.normalize_doi``) first: a non-DOI is neither
+    queried, mapped nor dropped; inputs that differ only in case or prefix share one query,
+    and every input maps to (or is dropped with) its query. For inputs already normalised
+    and unique the requests, the mapping order and the drops are exactly those of the
+    per-DOI resolver (Freeze B24).
+
     ``permanently_dropped`` is populated in strict mode only; a DOI answered
     as unmapped (above) is an answer and is never recorded there.
 
@@ -795,16 +885,35 @@ async def convert_dois_to_pmids(
     """
     if not dois:
         return {}
-    mapping: dict[str, str] = {}
-    await _idconv_phase(dois, mapping, strict=strict)
-    remaining = [d for d in dois if d not in mapping]
-    if remaining:
-        logger.info("Resolving %d remaining DOIs via PubMed ESearch", len(remaining))
-        answers = await _esearch_phase(remaining, strict=strict)
-        await _verify_phase(
-            remaining, answers, mapping, strict=strict, permanently_dropped=permanently_dropped
-        )
-    return mapping
+    # One query per DOI, normalised and case-folded; the caller's inputs stay the keys (R2.11).
+    queries: dict[str, str] = {}
+    inputs: dict[str, list[str]] = {}
+    for doi in dois:
+        normalized = normalize_doi(doi)
+        if normalized is None:
+            logger.debug("convert_dois_to_pmids: %r is not a DOI; not queried", doi)
+            continue
+        query = queries.setdefault(normalized.casefold(), normalized)
+        inputs.setdefault(query, []).append(doi)
+    unique = list(queries.values())
+    resolved: dict[str, str] = {}
+    dropped: list[str] = []
+    try:
+        if unique:
+            await _idconv_phase(unique, resolved, strict=strict)
+            remaining = [q for q in unique if q not in resolved]
+            if remaining:
+                logger.info("Resolving %d remaining DOIs via PubMed ESearch", len(remaining))
+                answers = await _esearch_phase(remaining, strict=strict)
+                await _verify_phase(
+                    remaining, answers, resolved, strict=strict, permanently_dropped=dropped
+                )
+    finally:
+        # A systemic raise still reports what was dropped before it, in drop order.
+        if permanently_dropped is not None:
+            for query in dropped:
+                permanently_dropped.extend(inputs[query])
+    return {doi: pmid for query, pmid in resolved.items() for doi in inputs[query]}
 
 
 @dataclass
@@ -904,6 +1013,7 @@ async def _esearch_phase(remaining: list[str], *, strict: bool) -> list[str | Ba
     per-item, and at the ``_SYSTEMIC_RUN``-th identical per-item failure in a row:
     the classification raises at or before that answer, so no later one is read."""
     answers: list[str | BaseException | None] = []
+    failed: list[str] = []
     streak = _Run()
     for doi in remaining:
         try:
@@ -918,6 +1028,7 @@ async def _esearch_phase(remaining: list[str], *, strict: bool) -> list[str | Ba
         except Exception as exc:
             if not strict:
                 logger.debug("ESearch DOI lookup failed for %s: %s", doi, exc)
+                failed.append(doi)
                 answers.append(None)
                 continue
             answers.append(exc)
@@ -938,12 +1049,17 @@ async def _esearch_phase(remaining: list[str], *, strict: bool) -> list[str | Ba
                 "as a miss (D4b)", doi, len(id_list),
             )
         answers.append(None)
+    if failed:
+        logger.warning(
+            "ESearch DOI lookup failed for %d of %d DOIs (first: %s)",
+            len(failed), len(remaining), failed[0],
+        )
     return answers
 
 
 class _VerificationFetcher:
     """The EFetch half of DOI verification: the hit PMIDs, in hit order, in chunks
-    of at most 100, one batch request per chunk, made when the first hit of the
+    of at most ``EFETCH_BATCH_SIZE``, one batch request per chunk, made when the first hit of the
     chunk is verified. ``records(i)`` returns what the old per-hit fetch returned
     for hit ``i`` (the caller reads ``records[0]``): the batch's record under that
     PMID when the batch is unambiguous, otherwise that old single fetch itself."""
@@ -955,9 +1071,9 @@ class _VerificationFetcher:
         self._chunks: dict[int, dict[str, dict[str, Any]] | None] = {}
 
     async def records(self, i: int) -> list[dict[str, Any]]:
-        start = i - i % 100
+        start = i - i % EFETCH_BATCH_SIZE
         if start not in self._chunks:
-            self._chunks[start] = await self._batch(self._pmids[start:start + 100])
+            self._chunks[start] = await self._batch(self._pmids[start:start + EFETCH_BATCH_SIZE])
         by_pmid = self._chunks[start]
         pmid = self._pmids[i]
         if by_pmid is not None and pmid in by_pmid:
@@ -1061,7 +1177,8 @@ async def convert_pmids_to_pmcids(pmids: list[str]) -> dict[str, str]:
 async def fetch_pmc_methods(pmcid: str) -> str | None:
     """
     Fetch the methods section from a PMC full-text article.
-    Returns extracted methods text or None if not available.
+    Returns extracted methods text or None if not available. The section is located and
+    serialised by ``pmc_methods.extract_methods_section`` (R2.12).
     """
     # Strip PMC prefix if present
     pmcid_clean = pmcid.replace("PMC", "")
@@ -1073,53 +1190,10 @@ async def fetch_pmc_methods(pmcid: str) -> str | None:
     }
     try:
         resp = await _ncbi_get(f"{EUTILS_BASE}/efetch.fcgi", params)
-        return _extract_methods_section(resp.text)
+        return pmc_methods.extract_methods_section(resp.text)
     except Exception as exc:
         logger.debug("Failed to fetch PMC full text for %s: %s", pmcid, exc)
         return None
-
-
-def _extract_methods_section(xml_text: str) -> str | None:
-    """Extract the methods/materials section text from PMC XML.
-
-    The module's OTHER ``ET.ParseError`` handler, and it deliberately keeps
-    swallowing — checked when ``_parse_pubmed_xml`` was changed to raise. The
-    reason they differ is what the caller says afterwards: an empty parse there
-    became "No PubMed record found for X", an affirmative claim about the world,
-    whereas ``None`` here reaches ``fetch_full_text`` as ``methods: None``, which
-    ``src/agent/tools.py::_format_full_text`` renders by omitting the Methods
-    block entirely. Nothing is asserted, so there is nothing to correct — and
-    ``fetch_pmc_methods`` wraps this in ``except Exception -> None`` anyway, so
-    raising would change no observable behaviour.
-
-    PMC's efetch XML carries no JATS namespace, so only unnamespaced ``<sec>``
-    titles containing "method" are matched (the namespaced exact-title tiers never
-    fired and were removed, spec 2026-10-05 D46).
-    """
-    try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError:
-        return None
-
-    for sec in root.findall(".//sec"):
-        title_el = sec.find("title")
-        if title_el is not None and title_el.text:
-            if "method" in title_el.text.lower():
-                return _extract_text(sec)
-
-    return None
-
-
-def _extract_text(element) -> str:
-    """Recursively extract text from an XML element."""
-    parts = []
-    if element.text:
-        parts.append(element.text)
-    for child in element:
-        parts.append(_extract_text(child))
-        if child.tail:
-            parts.append(child.tail)
-    return " ".join(p.strip() for p in parts if p.strip())
 
 
 # ---------------------------------------------------------------------------

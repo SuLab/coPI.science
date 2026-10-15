@@ -131,7 +131,7 @@ async def test_a_pmid_openalex_does_not_return_is_looked_up_by_its_doi(monkeypat
     async def works(pmids):
         return Paged([w1])
 
-    async def by_doi(dois):
+    async def by_doi(dois, *, skipped=None):
         asked.append(list(dois))
         return [w1, w2, w2]
 
@@ -166,7 +166,7 @@ async def test_fetch_works_for_dois_skips_malformed_and_unknown_dois(caplog):
 
 
 @respx.mock
-async def test_fetch_works_for_dois_raises_on_a_server_error(monkeypatch):
+async def test_a_doi_whose_lookup_keeps_failing_is_skipped(monkeypatch):
     from src.services import http_pacing
     from src.services.industry_sources import openalex_industry as oai
 
@@ -174,9 +174,10 @@ async def test_fetch_works_for_dois_raises_on_a_server_error(monkeypatch):
         return None
 
     monkeypatch.setattr(http_pacing, "_sleep", no_sleep)
-    respx.get(f"{oai.OA}/works/doi:10.1038/s1").mock(return_value=httpx.Response(503))
-    with pytest.raises(httpx.HTTPStatusError):
-        await oai.fetch_works_for_dois(["10.1038/s1"])
+    route = respx.get(f"{oai.OA}/works/doi:10.1038/s1").mock(return_value=httpx.Response(503))
+    skipped: list[str] = []
+    assert await oai.fetch_works_for_dois(["10.1038/s1"], skipped=skipped) == []
+    assert skipped == ["10.1038/s1"] and route.call_count == 4
 
 
 @respx.mock
@@ -189,3 +190,117 @@ async def test_fetch_works_sends_100_pmids_a_request_with_room_for_two_works_eac
     sizes = [len(c.request.url.params["filter"].removeprefix("pmid:").split("|")) for c in route.calls]
     assert sizes == [100, 50]
     assert {c.request.url.params["per-page"] for c in route.calls} == {"200"}
+
+
+@pytest.fixture
+def _fast_openalex(monkeypatch):
+    from src.services import http_pacing
+    from src.services.http_pacing import Pacer
+    from src.services.industry_sources import openalex_industry as oai
+
+    async def no_sleep(seconds):
+        return None
+
+    monkeypatch.setattr(http_pacing, "_sleep", no_sleep)
+    monkeypatch.setattr(oai, "_PACER", Pacer(0.0))
+
+
+async def test_the_doi_fallback_looks_up_at_most_50_newest_first(monkeypatch):
+    from src.services.industry_sources import openalex_industry as oai
+
+    asked = []
+
+    async def works(pmids):
+        return Paged([])
+
+    async def by_doi(dois, *, skipped=None):
+        asked.append(list(dois))
+        return []
+
+    async def none(ids):
+        return set()
+
+    monkeypatch.setattr(oai, "fetch_works_for_pmids", works)
+    monkeypatch.setattr(oai, "fetch_works_for_dois", by_doi)
+    monkeypatch.setattr(oai, "company_funder_ids", none)
+    pmids = [str(i) for i in range(1, 61)]
+    ctx = dataclasses.replace(_ctx(), pmids=pmids,
+                              year_by_pmid={p: 1960 + int(p) for p in pmids},
+                              doi_by_pmid={p: f"10.1038/p{p}" for p in pmids})
+    result = await OpenAlexSource().fetch(ctx)
+    assert asked == [[f"10.1038/p{i}" for i in range(60, 10, -1)]]
+    assert result.coverage == "truncated" and result.note.endswith("by_doi_capped=10")
+
+
+@respx.mock
+async def test_one_failing_doi_is_skipped_not_fatal(monkeypatch, _fast_openalex):
+    from src.services.industry_sources import openalex_industry as oai
+
+    work_b = {"id": "https://openalex.org/WB"}
+    respx.get(f"{oai.OA}/works/doi:10.1038/a").mock(return_value=httpx.Response(403))
+    respx.get(f"{oai.OA}/works/doi:10.1038/b").mock(return_value=httpx.Response(200, json=work_b))
+    skipped: list[str] = []
+    assert await oai.fetch_works_for_dois(["10.1038/a", "10.1038/b"], skipped=skipped) == [work_b]
+    assert skipped == ["10.1038/a"]
+
+    w1 = {"id": "https://openalex.org/W1", "ids": {"pmid": "https://pubmed.ncbi.nlm.nih.gov/1"}}
+
+    async def works(pmids):
+        return Paged([w1])
+
+    async def none(ids):
+        return set()
+
+    monkeypatch.setattr(oai, "fetch_works_for_pmids", works)
+    monkeypatch.setattr(oai, "company_funder_ids", none)
+    ctx = dataclasses.replace(_ctx(), pmids=["1", "2", "3"],
+                              doi_by_pmid={"2": "10.1038/a", "3": "10.1038/b"})
+    result = await OpenAlexSource().fetch(ctx)
+    assert result.coverage == "truncated"
+    # works=2: the PMID-filter work W1 is kept alongside the DOI fallback's WB.
+    assert result.note == "openalex works=2 items=0 by_doi=1 by_doi_skipped=1"
+
+
+@respx.mock
+async def test_three_identical_doi_failures_in_a_row_raise(monkeypatch, _fast_openalex):
+    from src.services.industry_sources import openalex_industry as oai
+
+    dois = ["10.1038/f1", "10.1038/f2", "10.1038/f3"]
+    for doi in dois:
+        respx.get(f"{oai.OA}/works/doi:{doi}").mock(return_value=httpx.Response(403))
+    with pytest.raises(httpx.HTTPStatusError):
+        await oai.fetch_works_for_dois(dois)
+
+    async def works(pmids):
+        return Paged([])
+
+    monkeypatch.setattr(oai, "fetch_works_for_pmids", works)
+    ctx = dataclasses.replace(_ctx(), pmids=["1", "2", "3"],
+                              doi_by_pmid={"1": dois[0], "2": dois[1], "3": dois[2]})
+    with pytest.raises(SourceUnavailable) as exc:
+        await OpenAlexSource().fetch(ctx)
+    assert exc.value.reason == "http_403"
+
+
+@respx.mock
+async def test_alternating_doi_failures_do_not_trip_the_run(_fast_openalex):
+    from src.services.industry_sources import openalex_industry as oai
+
+    statuses = {"a1": 403, "b1": 200, "a2": 403, "b2": 200, "a3": 403}
+    for name, status in statuses.items():
+        body = {"json": {"id": f"https://openalex.org/{name}"}} if status == 200 else {}
+        respx.get(f"{oai.OA}/works/doi:10.1038/{name}").mock(
+            return_value=httpx.Response(status, **body))
+    skipped: list[str] = []
+    works = await oai.fetch_works_for_dois([f"10.1038/{n}" for n in statuses], skipped=skipped)
+    assert len(works) == 2
+    assert skipped == ["10.1038/a1", "10.1038/a2", "10.1038/a3"]
+
+
+@respx.mock
+async def test_a_429_after_retries_raises(_fast_openalex):
+    from src.services.industry_sources import openalex_industry as oai
+
+    respx.get(f"{oai.OA}/works/doi:10.1038/r1").mock(return_value=httpx.Response(429))
+    with pytest.raises(httpx.HTTPStatusError):
+        await oai.fetch_works_for_dois(["10.1038/r1"])

@@ -7,7 +7,7 @@ from collections.abc import Set as AbstractSet
 from pathlib import Path
 from typing import Any
 
-from src.agent.dois import paper_ids_in
+from src.agent.dois import canonical_doi, canonical_pmid, paper_ids_in
 from src.agent.prompt_safety import delimit
 from src.agent.prompt_snapshot import active as active_snapshot
 from src.agent.prompt_snapshot import role_spec
@@ -408,11 +408,12 @@ def _lab_brief(hub_role: str) -> str | None:
 
 def _requested_paper_ids(ref: str) -> set[str]:
     """The paper ids a ``pmid_or_doi`` argument names: its DOIs and labelled PMIDs
-    (``dois.paper_ids_in``), plus the argument itself when it is a bare PMID."""
+    (``dois.paper_ids_in``), plus the argument itself read as one DOI or one PMID
+    (``canonical_doi``, ``canonical_pmid``: a bare or zero-padded PMID, a URL-encoded DOI)."""
     ids = paper_ids_in(ref)
-    bare = ref.strip() if isinstance(ref, str) else ""
-    if bare.isdigit():
-        ids.add(str(int(bare)))
+    for canonical in (canonical_doi(ref), canonical_pmid(ref)):
+        if canonical is not None:
+            ids.add(canonical)
     return ids
 
 

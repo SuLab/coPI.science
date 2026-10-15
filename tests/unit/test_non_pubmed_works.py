@@ -317,3 +317,8 @@ async def test_an_unattributed_duplicate_does_not_displace_an_attributed_version
         lookup=_no_lookup, pi_orcid=PI,
         authorship_lookup=_authorships({"10.1/pre": None, "10.1/pub": HOPKINS}))
     assert [r["doi"] for r in out] == ["10.1/pub"]
+
+
+async def test_non_pubmed_works_skip_a_non_doi_orcid_value():
+    work = {"doi": "N/A", "pmid": None, "title": "X", "type": "journal-article"}
+    assert await _collect(_result(orcid=[work]), lookup=_no_lookup) == []

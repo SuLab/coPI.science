@@ -20,7 +20,7 @@ from src.dependencies import (
 )
 from src.models import User
 from src.routers.admin._common import router
-from src.services.pi_onboarding import normalize_orcid
+from src.services.identifiers import normalize_orcid
 
 
 @router.post("/impersonate")
@@ -32,6 +32,11 @@ async def impersonate_user(
 ):
     """Start impersonating a user by ORCID."""
     orcid = normalize_orcid(orcid)
+    if orcid is None:
+        # Not an iD, or a wrong check digit (R2.2): nobody can hold it, so no query runs.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="No user has that ORCID iD"
+        )
     result = await db.execute(select(User).where(User.orcid == orcid))
     target = result.scalar_one_or_none()
     if target is None:

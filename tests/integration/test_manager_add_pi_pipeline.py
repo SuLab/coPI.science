@@ -303,7 +303,7 @@ _PROFILE = {"name": "Grace Hopper", "employments": []}
 async def test_add_pi_adopts_a_pi_who_signed_in_before_being_added(client, db_session):
     manager = await _manager(db_session)
     signed_in = await factories.make_user(
-        db_session, orcid="0000-0031-0000-0001", name="Grace Hopper",
+        db_session, orcid="0000-0031-0000-0002", name="Grace Hopper",
         access_status="pending", onboarding_complete=False,
     )
     with patch(
@@ -331,8 +331,8 @@ async def test_add_pi_adopts_a_pi_who_signed_in_before_being_added(client, db_se
 @pytest.mark.parametrize("holder", ["pi_with_agent", "manager", "denied_pi"])
 async def test_add_pi_still_refuses_any_other_holder_of_the_orcid(client, db_session, holder):
     manager = await _manager(db_session)
-    orcid = {"pi_with_agent": "0000-0032-0000-0001", "manager": "0000-0032-0000-0002",
-             "denied_pi": "0000-0032-0000-0003"}[holder]
+    orcid = {"pi_with_agent": "0000-0032-0000-000X", "manager": "0000-0032-0000-0018",
+             "denied_pi": "0000-0032-0000-0026"}[holder]
     user = await factories.make_user(
         db_session, orcid=orcid,
         user_role=USER_ROLE_MANAGER if holder == "manager" else USER_ROLE_PI,
@@ -372,11 +372,11 @@ async def test_an_identity_derivation_failure_rolls_back_instead_of_500ing(clien
         ),
     ):
         r = await client.post(
-            "/workspace/pis", data={"orcid": "0000-0033-0000-0001"},
+            "/workspace/pis", data={"orcid": "0000-0033-0000-0007"},
             headers=auth_headers(manager.id), follow_redirects=False,
         )
     assert r.headers["location"] == "/workspace/pis?error=create_failed"
     ghost = (await db_session.execute(
-        select(User).where(User.orcid == "0000-0033-0000-0001")
+        select(User).where(User.orcid == "0000-0033-0000-0007")
     )).scalar_one_or_none()
     assert ghost is None, "the User and its job roll back with the failed agent"

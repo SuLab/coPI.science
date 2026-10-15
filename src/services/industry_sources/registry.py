@@ -6,7 +6,8 @@ to the pre-registry table; SCORER_VERSION is 2.0.0 since COI attribution and the
 filter (spec 2026-10-05 §6.2). A source that cannot be reached raises
 `SourceUnavailable`; the job then keeps that source's stored rows and refreshes the
 others (DP-04) instead of failing whole, and records `unavailable:<reason>` in the score
-row's coverage; a paged source that stopped at its cap returns coverage `truncated`.
+row's coverage; a paged source that stopped at its cap, or OpenAlex's DOI fallback when it
+was capped or skipped a DOI, returns coverage `truncated`.
 `sbir_sttr` has a weight and no producer yet (`EVIDENCE_KINDS` reserves it); its
 source returns nothing."""
 from __future__ import annotations
@@ -67,7 +68,10 @@ def _unavailable(name: str, exc: BaseException) -> SourceUnavailable:
 
 class OpenAlexSource:
     """The works of the PI's in-use PMIDs; a PMID no returned work carries is looked up by
-    its paper's DOI instead (`fetch_works_for_dois`), each work counted once."""
+    its paper's DOI instead (`fetch_works_for_dois`), each work counted once. At most
+    ``DOI_FALLBACK_MAX`` of those DOIs are looked up, newest first; coverage is "truncated"
+    when the PMID filter was truncated, or OpenAlex's DOI fallback was capped or skipped a
+    DOI, so ``_delete_missing`` keeps the rows they could have confirmed."""
 
     name = "openalex"
     kinds = {"coauthor_company": (3.0, 30.0), "company_funder": (4.0, 20.0)}
@@ -75,6 +79,7 @@ class OpenAlexSource:
     async def fetch(self, ctx: SourceContext) -> SourceResult:
         from src.services.industry_sources.openalex_industry import (
             _oaid,
+            DOI_FALLBACK_MAX,
             company_funder_ids,
             evidence_from_work,
             fetch_works_for_dois,
@@ -85,9 +90,15 @@ class OpenAlexSource:
             works = list(paged.items)
             returned = {_oaid((w.get("ids") or {}).get("pmid")) for w in works}
             seen = {w.get("id") for w in works}
+            missing = sorted(
+                (p for p in ctx.pmids if p not in returned and ctx.doi_by_pmid.get(p)),
+                key=lambda p: (-(ctx.year_by_pmid.get(p) or 0), -(int(p) if p.isdigit() else 0)),
+            )
+            capped = missing[DOI_FALLBACK_MAX:]
+            skipped: list[str] = []
             by_doi: list[dict] = []
             for w in await fetch_works_for_dois(
-                    [ctx.doi_by_pmid[p] for p in ctx.pmids if p not in returned and ctx.doi_by_pmid.get(p)]):
+                    [ctx.doi_by_pmid[p] for p in missing[:DOI_FALLBACK_MAX]], skipped=skipped):
                 if w.get("id") not in seen:
                     seen.add(w.get("id"))
                     by_doi.append(w)
@@ -100,9 +111,13 @@ class OpenAlexSource:
         for w in works:
             items += evidence_from_work(w, ctx.user.orcid, ctx.tenure_start, company_funder_ids=cfids,
                                         pi_name=ctx.user.name)
-        return SourceResult(
-            items, note=f"openalex works={len(works)} items={len(items)} by_doi={len(by_doi)}",
-            coverage="truncated" if paged.truncated else "ok")
+        note = f"openalex works={len(works)} items={len(items)} by_doi={len(by_doi)}"
+        if capped:
+            note += f" by_doi_capped={len(capped)}"
+        if skipped:
+            note += f" by_doi_skipped={len(skipped)}"
+        truncated = paged.truncated or bool(capped) or bool(skipped)
+        return SourceResult(items, note=note, coverage="truncated" if truncated else "ok")
 
 
 class PubMedCoiSource:

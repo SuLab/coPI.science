@@ -35,7 +35,7 @@ async def test_creates_a_pi_user_and_enqueues_a_profile_job(db_session):
 
 async def test_rejects_an_orcid_that_already_exists_regardless_of_role(db_session):
     existing = await factories.make_user(
-        db_session, orcid="0000-0009-9999-0001", user_role=USER_ROLE_ADMIN,
+        db_session, orcid="0000-0009-9999-0003", user_role=USER_ROLE_ADMIN,
     )
     with pytest.raises(ValueError, match="already exists"):
         await find_or_create_pi_by_orcid(db_session, existing.orcid)
@@ -47,10 +47,10 @@ async def test_a_fetch_failure_raises_instead_of_creating_a_stub_user(db_session
         new=AsyncMock(side_effect=RuntimeError("ORCID API down")),
     ):
         with pytest.raises(ValueError, match="Could not fetch ORCID profile"):
-            await find_or_create_pi_by_orcid(db_session, "0000-0002-0000-0000")
+            await find_or_create_pi_by_orcid(db_session, "0000-0002-0000-0006")
 
     count = (await db_session.execute(
-        select(User).where(User.orcid == "0000-0002-0000-0000")
+        select(User).where(User.orcid == "0000-0002-0000-0006")
     )).scalars().all()
     assert count == []
 
@@ -79,7 +79,7 @@ async def test_creation_persists_an_employment_derived_tenure_start(db_session):
             ],
         }),
     ):
-        user = await find_or_create_pi_by_orcid(db_session, "0000-0006-1111-2222")
+        user = await find_or_create_pi_by_orcid(db_session, "0000-0006-1111-2221")
 
     assert await get_tenure_start(db_session, user.id) == 2016
 
@@ -89,7 +89,7 @@ async def test_create_pending_agent_for_is_idempotent_and_inert(db_session):
     from src.services.pi_onboarding import create_pending_agent_for
 
     user = await factories.make_user(
-        db_session, orcid="0000-0006-3333-4444", name="Mary McCarthy",
+        db_session, orcid="0000-0006-3333-444X", name="Mary McCarthy",
     )
     agent = await create_pending_agent_for(db_session, user)
     assert (agent.agent_id, agent.bot_name) == ("mccarthy", "McCarthyBot")

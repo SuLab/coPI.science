@@ -33,6 +33,13 @@ the five entries whose request carries the `retrieve_profile` tool definition
 `test_hub_reply_final_text_truncation_retry_gm`, `test_pi_lab_reply_turn_gm`) are
 regenerated once, for the new description, and the `.ambr` diff must be exactly that
 description string, reviewed line by line. It licenses no other regeneration.
+
+A fourth owner-approved exception (F20 of the 2026-10-15 publication-handling design):
+`test_retrieve_full_text_tool_results_gm` is regenerated once, for the PMC methods
+serialiser (R2.12, main PM-9), and the `.ambr` diff must be exactly the line breaks PM-9
+puts between the `Methods` title and its two paragraphs in `with_pmc_methods`, reviewed
+line by line. It licenses no other regeneration, and `test_agent_turn_gm.ambr` is not
+touched by it.
 """
 import json
 import uuid

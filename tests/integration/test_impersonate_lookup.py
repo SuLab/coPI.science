@@ -18,13 +18,13 @@ async def test_impersonating_an_unknown_orcid_is_a_404_and_creates_nothing(clien
     fetch = AsyncMock(return_value={"name": "Ghost"})
     with patch("src.services.pi_onboarding.fetch_orcid_profile", new=fetch):
         r = await client.post(
-            "/admin/impersonate", data={"orcid": "0000-0003-9999-0001"},
+            "/admin/impersonate", data={"orcid": "0000-0003-9999-000X"},
             headers=auth_headers(admin.id), follow_redirects=False,
         )
     assert r.status_code == 404
     fetch.assert_not_awaited()
     assert (await db_session.execute(
-        select(User).where(User.orcid == "0000-0003-9999-0001")
+        select(User).where(User.orcid == "0000-0003-9999-000X")
     )).scalar_one_or_none() is None
     assert (await db_session.execute(
         select(Job).where(Job.type == "generate_profile")

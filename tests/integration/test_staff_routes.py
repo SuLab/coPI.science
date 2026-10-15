@@ -35,7 +35,7 @@ from tests.session_support import raw_session_headers, session_from_response, se
 pytestmark = pytest.mark.integration
 
 _NEW = "0000-0002-7000-0001"
-_HELD = "0000-0002-7000-0002"
+_HELD = "0000-0002-7000-001X"
 _STAFF_PAGE = "/workspace/staff"
 
 

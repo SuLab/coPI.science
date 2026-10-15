@@ -46,7 +46,7 @@ async def test_valid_write_bodies_cannot_bypass_effective_role(client, db_sessio
     headers = auth_headers(actor.id, impersonate=effective.id if impersonated else None)
     ids = {key: str(uuid.uuid4()) for key in ('candidate_id', 'publication_id', 'grant_id', 'funding_id', 'evidence_id', 'company_id')}
     ids['user_id'] = str(target.id)
-    form = {'orcid': '0000-0001-0000-0011', 'name': 'Valid Name', 'email': '',
+    form = {'orcid': '0000-0001-0000-0017', 'name': 'Valid Name', 'email': '',
             'expected_profile_version': '1', 'profile_id': '123', 'company_name': 'Real Company',
             'pi_role': 'founder', 'research_summary': 'No mutation'}
     for prefix in ('/workspace', '/manager'):

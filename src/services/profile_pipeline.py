@@ -48,6 +48,7 @@ from src.services.corpus import (
 from src.services.corpus_additions import (
     apply_corpus_result,
     apply_non_pubmed_works,
+    bounded_publication_fields,
     is_anchored,
     lock_corpus,
 )
@@ -714,6 +715,12 @@ async def _step5_methods(run: PipelineRun) -> None:
             pmcid_map = await convert_pmids_to_pmcids(pmids_needing_conversion)
         except Exception as exc:
             logger.warning("Step 5 PMCID conversion failed: %s", exc)
+    # R2.13: a PMCID wider than publications.pmcid is neither stored nor fetched.
+    pmcid_map = {
+        pmid: pmcid for pmid, pmcid in pmcid_map.items()
+        if bounded_publication_fields(pmid=pmid, doi=None, pmcid=pmcid, journal=None)["pmcid"]
+        is not None
+    }
 
     # Fill in PMCIDs from conversion, and save each on the PI's row when it has none
     # (spec 2026-10-05 G-16).

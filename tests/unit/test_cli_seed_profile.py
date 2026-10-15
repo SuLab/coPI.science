@@ -10,7 +10,7 @@ pytestmark = pytest.mark.integration
 
 
 def test_validate_orcid():
-    assert pi_onboarding.validate_orcid(" 0000-0001-2345-678X ") == "0000-0001-2345-678X"
+    assert pi_onboarding.validate_orcid(" 0000-0002-1694-233X ") == "0000-0002-1694-233X"
     with pytest.raises(ValueError):
         pi_onboarding.validate_orcid("not-an-orcid")
 
@@ -50,6 +50,6 @@ async def test_seed_records_employment_tenure(db_session, monkeypatch):
 
     monkeypatch.setattr(cli, "_get_db", _db_from(db_session))
     monkeypatch.setattr("src.services.orcid.fetch_orcid_profile", fake_profile)
-    await cli._seed_one_orcid("0000-0002-0000-0001", run_pipeline=False)
-    user = (await db_session.execute(select(User).where(User.orcid == "0000-0002-0000-0001"))).scalar_one()
+    await cli._seed_one_orcid("0000-0002-0000-0006", run_pipeline=False)
+    user = (await db_session.execute(select(User).where(User.orcid == "0000-0002-0000-0006"))).scalar_one()
     assert await get_tenure_start(db_session, user.id) == 2012

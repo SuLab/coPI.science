@@ -70,7 +70,7 @@ async def journey_login_logout_second_device(h) -> dict:
     """Two devices on one account: signing out on one signs out the other; a session
     issued at the bumped epoch (what the next login writes) is accepted."""
     ids = _seed(h, '''
-u = await factories.make_user(s, name="Two Device", orcid="0000-0002-4444-0001", email="two@uiaudit.test")
+u = await factories.make_user(s, name="Two Device", orcid="0000-0002-4444-0011", email="two@uiaudit.test")
 await factories.make_profile(s, user=u)
 return {"user": str(u.id)}
 ''')
@@ -113,7 +113,7 @@ return {"user": str(u.id)}
 async def journey_impersonate_and_stop(h) -> dict:
     """An admin impersonates by ORCID, sees the banner, stops; no cookie but the session."""
     _seed(h, '''
-t = await factories.make_user(s, name="Imp Target", orcid="0000-0002-4444-0002", email="imp@uiaudit.test")
+t = await factories.make_user(s, name="Imp Target", orcid="0000-0002-4444-002X", email="imp@uiaudit.test")
 await factories.make_profile(s, user=t)
 return {"target": str(t.id)}
 ''')
@@ -121,7 +121,7 @@ return {"target": str(t.id)}
     try:
         await page.goto(f"{h.base_url}/admin/users", wait_until="networkidle")
         await page.fill("form[action='/admin/impersonate'] input[name=orcid]",
-                        "0000-0002-4444-0002")
+                        "0000-0002-4444-002X")
         await page.click("form[action='/admin/impersonate'] button[type=submit]")
         await page.wait_for_load_state("networkidle")
         during_url = page.url
@@ -152,8 +152,8 @@ async def journey_invite_accept_verified_and_unverified(h) -> dict:
     ids = _seed(h, '''
 pi = await factories.make_user(s, name="Inviting PI", orcid="0000-0002-4444-0003", email="inviter@uiaudit.test")
 agent = await factories.make_agent(s, user=pi, agent_id="inviter1b", bot_name="Inviter1bBot", pi_name="Inviting PI")
-good = await factories.make_user(s, name="Verified Delegate", orcid="0000-0002-4444-0004", email="verified@uiaudit.test", email_verified_at=datetime.now(UTC))
-bad = await factories.make_user(s, name="Unverified Delegate", orcid="0000-0002-4444-0005", email="unverified@uiaudit.test")
+good = await factories.make_user(s, name="Verified Delegate", orcid="0000-0002-4444-0038", email="verified@uiaudit.test", email_verified_at=datetime.now(UTC))
+bad = await factories.make_user(s, name="Unverified Delegate", orcid="0000-0002-4444-0046", email="unverified@uiaudit.test")
 for email, token in (("verified@uiaudit.test", "uiaudit-1b-verified"), ("unverified@uiaudit.test", "uiaudit-1b-unverified")):
     s.add(DelegateInvitation(agent_registry_id=agent.id, invited_by_user_id=pi.id, email=email, token=token, status="pending", expires_at=datetime.now(UTC) + timedelta(days=1)))
 await s.flush()

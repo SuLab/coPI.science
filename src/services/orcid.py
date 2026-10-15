@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 
 from src.services.http_pacing import TRANSIENT_STATUSES, with_retries
+from src.services.identifiers import is_preprint_doi, normalize_doi, normalize_pmid
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +156,58 @@ def _display_index(value: Any) -> int:
 _RECORD_STATE_STATUSES = frozenset({301, 404, 409, 410})
 
 
+class OrcidResponseError(ValueError):
+    """ORCID answered 200 with a body that is not a works listing"""
+
+
+def _listing_problem(data: object) -> str | None:
+    """Why a 200 works body is not a listing (R2.4, Q22), or None when it is one: a dict
+    whose "group" is a list or null."""
+    if not isinstance(data, dict):
+        return f"top level is {type(data).__name__}"
+    if "group" not in data:
+        return 'no "group" key'
+    if not isinstance(data["group"], list | None):
+        return f'"group" is {type(data["group"]).__name__}'
+    return None
+
+
+def _work_ids(ext_ids: object, put_code: object) -> tuple[str | None, str | None]:
+    """(doi, pmid) of one work summary's ``external-id`` list (R2.5; main ORC-2, ORC-3).
+
+    Only ``self`` ids count (a missing relationship is ``self``); a ``version-of`` or
+    ``part-of`` DOI is never the work's. The DOI is the first self DOI that is not a
+    preprint's (``is_preprint_doi``), else the first self DOI; the PMID is the first self
+    value ``normalize_pmid`` accepts. Values are normalised, so a labelled PMID reaches
+    EFetch canonical and a non-DOI ("N/A") is never a DOI; each rejected value is logged
+    at DEBUG with the put-code."""
+    if not isinstance(ext_ids, list):
+        return None, None
+    dois: list[str] = []
+    seen: set[str] = set()
+    pmid: str | None = None
+    for eid in ext_ids:
+        if not isinstance(eid, dict):
+            continue
+        if (eid.get("external-id-relationship") or "self").lower() != "self":
+            continue
+        id_type = (eid.get("external-id-type") or "").lower()
+        value = eid.get("external-id-value")
+        if id_type == "doi":
+            doi = normalize_doi(value)
+            if doi is None:
+                logger.debug("ORCID work put-code %s: DOI %r is not a DOI; ignored", put_code, value)
+            elif doi.casefold() not in seen:
+                seen.add(doi.casefold())
+                dois.append(doi)
+        elif id_type == "pmid" and pmid is None:
+            pmid = normalize_pmid(value)
+            if pmid is None:
+                logger.debug("ORCID work put-code %s: PMID %r is not a PMID; ignored", put_code, value)
+    doi = next((d for d in dois if not is_preprint_doi(d)), dois[0] if dois else None)
+    return doi, pmid
+
+
 async def fetch_orcid_works(
     orcid_id: str, *, strict: bool = False
 ) -> list[dict[str, Any]]:
@@ -174,6 +227,12 @@ async def fetch_orcid_works(
       Swallowing it would thin the corpus, and a paper-derived tenure start
       could then be stored from the thinner one; the job retry is the
       recovery.
+
+    A 200 whose body is not a works listing (not a dict, no ``group`` key, or a ``group``
+    that is neither a list nor null) raises ``OrcidResponseError`` in strict mode, which
+    ``resolve_corpus``'s ``_stage`` turns into ``CorpusStageError`` (Q22), and reads as
+    ``[]`` with one WARNING otherwise. Each work's ``doi`` and ``pmid`` come from
+    ``_work_ids``.
     """
     url = f"{ORCID_API_BASE}/{orcid_id}/works"
     headers = {"Accept": "application/json"}
@@ -202,9 +261,16 @@ async def fetch_orcid_works(
                 return []
             raise
 
+    problem = _listing_problem(data)
+    if problem is not None:
+        if strict:
+            raise OrcidResponseError(
+                f"ORCID answered 200 for {orcid_id}'s works with a body that is not a "
+                f"works listing ({problem})"
+            )
+        logger.warning("ORCID works for %s: %s; reading it as no works", orcid_id, problem)
+        return []
     works = []
-    if not isinstance(data, dict):
-        return works
     for grp in data.get("group") or []:
         if not isinstance(grp, dict):
             continue
@@ -241,17 +307,10 @@ async def fetch_orcid_works(
                 except (TypeError, ValueError):
                     pass
 
-            # External IDs
-            ext_ids = (summary.get("external-ids") or {}).get("external-id") or []
-            for eid in ext_ids:
-                if not isinstance(eid, dict):
-                    continue
-                id_type = (eid.get("external-id-type") or "").lower()
-                id_value = eid.get("external-id-value") or ""
-                if id_type == "pmid":
-                    work["pmid"] = id_value
-                elif id_type == "doi":
-                    work["doi"] = id_value
+            # External IDs (R2.5): relationship-aware and normalised.
+            work["doi"], work["pmid"] = _work_ids(
+                (summary.get("external-ids") or {}).get("external-id"), summary.get("put-code")
+            )
 
             works.append(work)
     return works

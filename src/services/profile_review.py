@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import Job, Publication, PublicationCandidate, ResearcherProfile
 from src.models.publication import PROVENANCE_MANUAL, PROVENANCE_UNANCHORED
-from src.services.corpus_additions import lock_corpus, reconcile_record_doi
+from src.services.corpus_additions import bounded_publication_fields, lock_corpus, reconcile_record_doi
 from src.services.profile_drafts import DRAFT_FIELDS, Draft, draft_is_stale, read_draft
 from src.services.profile_limits import SUMMARY_MAX_CHARS
 from src.services.profile_publish import persona_out_of_date
@@ -131,7 +131,7 @@ async def accept_candidate(
     """Store the pending candidate's paper from ``record`` (its PubMed record) with
     provenance ``manual``, or mark the already-stored row ``manual``, and mark the candidate
     accepted by ``actor_id``. None when no pending candidate of this PI has that id. Takes
-    ``lock_corpus``; flushes, never commits."""
+    ``lock_corpus``; flushes, never commits. Fields are bounded to their columns (R2.13)."""
     await lock_corpus(db, user_id)
     cand = await _pending_candidate(db, user_id, candidate_id)
     if cand is None:
@@ -143,10 +143,15 @@ async def accept_candidate(
     )).scalar_one_or_none()
     if row is None:
         doi, doi_verified = reconcile_record_doi(record, {})
+        bounded = bounded_publication_fields(
+            pmid=cand.pmid, doi=doi, pmcid=record.get("pmcid"), journal=record.get("journal"),
+        )
+        if bounded["doi"] is None:
+            doi_verified = None
         db.add(Publication(
-            user_id=user_id, pmid=cand.pmid, pmcid=record.get("pmcid"), doi=doi,
+            user_id=user_id, pmid=cand.pmid, pmcid=bounded["pmcid"], doi=bounded["doi"],
             doi_verified=doi_verified, title=record.get("title") or cand.title,
-            abstract=record.get("abstract"), journal=record.get("journal"),
+            abstract=record.get("abstract"), journal=bounded["journal"],
             year=record.get("year"), provenance=PROVENANCE_MANUAL,
         ))
     else:

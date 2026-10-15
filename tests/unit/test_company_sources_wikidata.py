@@ -169,3 +169,10 @@ async def test_wikidata_requests_ask_for_an_uncompressed_body(respx_mock):
         200, content=_fixture("wikidata_p112_0000-0002-7086-765X.json"), headers=SPARQL_JSON))
     await wikidata.founded_by_orcid("0000-0002-7086-765X", contact="ops@example.org")
     assert route.calls.last.request.headers["Accept-Encoding"] == "identity"
+
+
+async def test_wikidata_refuses_a_wrong_check_digit_without_a_request(respx_mock):
+    route = respx_mock.get(wikidata.SPARQL_URL)
+    with pytest.raises(SourceUnavailable, match="no valid ORCID"):
+        await wikidata.founded_by_orcid("0000-0002-7086-7650", contact="ops@example.org")
+    assert route.call_count == 0

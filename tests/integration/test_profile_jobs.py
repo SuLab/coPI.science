@@ -62,11 +62,11 @@ async def test_manager_add_pi_then_approval_leaves_exactly_one_pending_job(
     manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     resp = await client.post(
-        "/workspace/pis", data={"orcid": "0000-0002-7777-0001"}, headers=auth_headers(manager.id),
+        "/workspace/pis", data={"orcid": "0000-0002-7777-0009"}, headers=auth_headers(manager.id),
     )
     assert resp.status_code == 302
     added = (await db_session.execute(
-        select(User).where(User.orcid == "0000-0002-7777-0001")
+        select(User).where(User.orcid == "0000-0002-7777-0009")
     )).scalar_one()
     assert await _jobs(db_session, added.id, "pending") == 1
     resp = await client.post(

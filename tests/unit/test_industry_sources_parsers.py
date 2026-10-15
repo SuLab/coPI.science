@@ -217,3 +217,18 @@ def test_shared_orcid_without_a_name_match_keeps_the_first_authorship():
     w = shared_orcid_work(("Edward J. Pearce", "middle", False), ("Erika L. Pearce", "last", True))
     assert shared_orcid_roles(w) == ["middle"]
     assert shared_orcid_roles(w, pi_name="Jane Doe") == ["middle"]
+
+
+def test_shared_orcid_prefers_a_spelled_out_name_over_initials():
+    w = shared_orcid_work(("Erika L. Pearce", "middle", False), ("E. J. Pearce", "last", True))
+    assert shared_orcid_roles(w, pi_name="Erika Pearce") == ["middle"]
+
+
+def test_shared_orcid_with_only_initials_takes_the_most_senior():
+    w = shared_orcid_work(("E. Pearce", "middle", False), ("E. J. Pearce", "last", True))
+    assert shared_orcid_roles(w, pi_name="Erika Pearce") == ["corresponding"]
+
+
+def test_an_initial_only_pi_name_keeps_the_seniority_rule():
+    w = shared_orcid_work(("Erika L. Pearce", "middle", False), ("Edward J. Pearce", "last", True))
+    assert shared_orcid_roles(w, pi_name="E. Pearce") == ["corresponding"]

@@ -26,7 +26,7 @@ import httpx
 import pytest
 import respx
 
-from src.services import pubmed
+from src.services import pmc_methods, pubmed
 
 pytestmark = [pytest.mark.live_api]
 
@@ -49,8 +49,8 @@ JINEK_PMCID = "PMC6286148"
 JINEK_YEAR = 2012
 
 # Li et al. 2009, Bioinformatics — "The Sequence Alignment/Map format and SAMtools".
-# Fully open access in PMC, and its full text has a section titled "2 METHODS", which
-# `_extract_methods_section`'s substring match finds.
+# Fully open access in PMC, and its full text has a body section titled "2 METHODS", which
+# `pmc_methods.extract_methods_section` selects by its normalised title.
 SAMTOOLS_PMCID = "PMC2723002"
 
 # Bolger et al. 2014, Bioinformatics — "Trimmomatic". Also fully open access with a
@@ -83,7 +83,8 @@ def methods_titled_sections(xml_text: str) -> list[str]:
     """Titles of every <sec> whose own <title> mentions "method", namespace or not.
 
     This is an INDEPENDENT probe of the live XML — deliberately not routed through
-    `_extract_methods_section` — so a failure can be attributed. If this finds a
+    `pmc_methods.extract_methods_section`, which reads only the body and back and ranks by
+    title and `sec-type` — so a failure can be attributed. If this finds a
     methods section and the service returns None, the service is broken; if this finds
     none, the article genuinely has none and the None is correct.
     """
@@ -490,7 +491,7 @@ async def test_id_conversion_round_trips_and_a_nonsense_doi_maps_to_nothing(api_
 
 
 async def test_pmc_methods_extraction_on_real_open_access_articles(api_budget):
-    """T2.4 — `fetch_pmc_methods` / `_extract_methods_section` against live PMC.
+    """T2.4 — `fetch_pmc_methods` / `pmc_methods.extract_methods_section` against live PMC.
 
     Three legs, because "returns a methods section" and "returns None" are only
     meaningful together:
@@ -516,10 +517,10 @@ async def test_pmc_methods_extraction_on_real_open_access_articles(api_budget):
         "pick another open-access article, because the leg below cannot pass"
     )
 
-    methods = pubmed._extract_methods_section(raw)
+    methods = pmc_methods.extract_methods_section(raw)
     assert isinstance(methods, str) and methods.strip(), (
         f"OUR EXTRACTOR returned {methods!r} even though an independent probe found "
-        f"methods-titled sections {titled} in the same XML. _extract_methods_section "
+        f"methods-titled sections {titled} in the same XML. pmc_methods.extract_methods_section "
         "is broken — most likely its <sec>/<title> traversal or its namespace handling"
     )
     assert len(methods) > 200, (
@@ -539,7 +540,7 @@ async def test_pmc_methods_extraction_on_real_open_access_articles(api_budget):
     api_budget.wait("ncbi")
     via_service = await pubmed.fetch_pmc_methods(SAMTOOLS_PMCID)
     assert via_service is not None and via_service[:200] == methods[:200], (
-        "fetch_pmc_methods disagrees with _extract_methods_section on the same article "
+        "fetch_pmc_methods disagrees with pmc_methods.extract_methods_section on the same article "
         "— the wrapper's PMC-prefix stripping or its error swallowing is at fault, not "
         f"the parser. Wrapper gave: {(via_service or '')[:120]!r}"
     )
@@ -555,10 +556,10 @@ async def test_pmc_methods_extraction_on_real_open_access_articles(api_budget):
         f"{TRIMMOMATIC_PMCID} now HAS a methods-titled section, so it is no longer a "
         "valid negative control. Change the TEST DATA, not the extractor"
     )
-    assert pubmed._extract_methods_section(raw_none) is None, (
+    assert pmc_methods.extract_methods_section(raw_none) is None, (
         "OUR EXTRACTOR invented a methods section for an article that has none. The "
         "caller distinguishes None from '' — returning either a string or '' here "
-        f"corrupts that: {pubmed._extract_methods_section(raw_none)!r}"
+        f"corrupts that: {pmc_methods.extract_methods_section(raw_none)!r}"
     )
 
     # --- leg 3: in PMC, but no full text deposited -------------------------------
