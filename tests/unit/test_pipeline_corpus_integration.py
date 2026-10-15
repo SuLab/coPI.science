@@ -35,8 +35,14 @@ from sqlalchemy import select
 from src.models import AppSetting, Job, Publication
 from src.services import profile_export, profile_pipeline
 from src.services.corpus import CorpusResult, CorpusStageError
-from src.services.jhu_rules import TENURE_KEY_PREFIX, get_tenure_start, set_tenure_start
+from src.services.jhu_rules import (
+    TENURE_KEY_PREFIX,
+    get_tenure_start,
+    set_provisional_tenure_start,
+    set_tenure_start,
+)
 from src.services.profile_pipeline import run_profile_pipeline
+from src.services.pubmed import PmcidLookup
 from tests import factories
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("progress_on_test_connection")]
@@ -88,6 +94,7 @@ def wired(monkeypatch, tmp_path):
         corpus=CorpusResult(kept=[], flagged=[]),
         contexts=[],
         fundings=[],
+        pmcid_lookups=[],
     )
 
     async def fake_profile(orcid):
@@ -105,6 +112,10 @@ def wired(monkeypatch, tmp_path):
     async def fake_pmcids(pmids):
         return {}
 
+    async def fake_lookup_pmcids(pmids):
+        ns.pmcid_lookups.append(list(pmids))
+        return PmcidLookup(found={}, absent=frozenset())
+
     async def fake_synth(context, name):
         ns.contexts.append(context)
         return dict(_SYNTH)
@@ -113,6 +124,7 @@ def wired(monkeypatch, tmp_path):
     monkeypatch.setattr(profile_pipeline, "fetch_orcid_fundings", fake_fundings)
     monkeypatch.setattr(profile_pipeline, "resolve_corpus", fake_corpus)
     monkeypatch.setattr(profile_pipeline, "convert_pmids_to_pmcids", fake_pmcids)
+    monkeypatch.setattr(profile_pipeline, "lookup_pmcids", fake_lookup_pmcids)
     monkeypatch.setattr(profile_pipeline, "synthesize_profile", fake_synth)
     monkeypatch.setattr(profile_export, "PROFILES_DIR", tmp_path)
     ns.export_dir = tmp_path
@@ -392,7 +404,7 @@ async def test_flag_progress_names_the_actual_reasons(db_session, wired):
         p["detail"] for p in job.payload.get("progress", [])
         if p["step"] == "corpus_flagged"
     ]
-    assert detail.startswith("5 records withheld for review (")
+    assert detail.startswith("5 records withheld as not confirmed to be the PI's (")
     assert "2 initial-only name match not confirmed" in detail
     assert "1 no individual author match" in detail
     assert (
@@ -402,6 +414,21 @@ async def test_flag_progress_names_the_actual_reasons(db_session, wired):
     # An unlabelled code shows raw rather than borrowing another's label.
     assert "1 some_future_code" in detail
     assert detail.endswith("): 7, 8, 9, 10, 11")
+
+    # A flag the PI's ORCID ties to is counted in the text.
+    flagged = list(wired.corpus.flagged)
+    flagged[0] = {"pmid": "7", "reason": "no_individual_author_match", "stages": ["s1"]}
+    wired.corpus = CorpusResult(kept=wired.corpus.kept, flagged=flagged)
+    await run_profile_pipeline(user.id, db_session, job.id)
+    await db_session.refresh(job)
+    detail = [
+        p["detail"] for p in job.payload.get("progress", [])
+        if p["step"] == "corpus_flagged"
+    ][-1]
+    assert detail.endswith(
+        ". Tied to the PI's ORCID iD: 1 (any not yet decided are listed under Withheld "
+        "papers on the PI page)"
+    )
 
 
 async def test_existing_pi_rows_are_never_deleted_and_s4_only_adds_are_flagged(
@@ -561,3 +588,61 @@ async def test_flagged_records_and_none_kept_read_as_identity_unmatched(db_sessi
     assert profile.evidence_flagged_count == len(flagged)
     assert (profile.evidence_pmid_count, profile.evidence_pub_count) == (0, 0)
     assert profile.evidence_state == "identity_unmatched"
+
+
+async def test_the_pipeline_records_corpus_rechecked(db_session, wired):
+    user, _agent, job = await _make_pi(db_session)
+    db_session.add(Publication(user_id=user.id, pmid="2", title="Stored", year=2020,
+                               provenance="s1"))
+    await db_session.flush()
+    wired.corpus = CorpusResult(kept=[_rec(1, 2020, "Returned")], flagged=[],
+                                ranked=[_rec(1, 2020, "Returned")],
+                                stage_map={"1": ("s1",)}, stage_counts={"s1": 1})
+    await run_profile_pipeline(user.id, db_session, job.id)
+    await db_session.refresh(job)
+    [detail] = [p["detail"] for p in job.payload["progress"] if p["step"] == "corpus_rechecked"]
+    assert detail.startswith("Stored publications re-checked: 0 excluded")
+    assert "1 unanchored (no ORCID anchor in this run)" in detail
+
+
+async def test_the_pmcid_lookup_asks_only_for_candidates(db_session, wired):
+    user, _agent, job = await _make_pi(db_session)
+    db_session.add_all([
+        Publication(user_id=user.id, pmid="1", title="P1", year=2020, pmcid="PMC1",
+                    provenance="s1"),
+        Publication(user_id=user.id, pmid="2", title="P2", year=2020, pmcid="PMC2",
+                    provenance="s1"),
+        Publication(user_id=user.id, pmid="3", title="P3", year=2020, provenance="s1"),
+    ])
+    await db_session.flush()
+    wired.corpus = _uncapped([{**_rec(2, 2020, "P2"), "pmcid": "PMC2"}, _rec(3, 2020, "P3")])
+    await run_profile_pipeline(user.id, db_session, job.id)
+    assert wired.pmcid_lookups == [], "no stored PMCID lacks one on its record"
+    wired.corpus = _uncapped([_rec(1, 2020, "P1"), {**_rec(2, 2020, "P2"), "pmcid": "PMC2"},
+                              _rec(3, 2020, "P3")])
+    await run_profile_pipeline(user.id, db_session, job.id)
+    assert wired.pmcid_lookups == [["1"]]
+
+
+async def test_a_stale_provisional_year_does_not_skip_collection(db_session, wired, monkeypatch):
+    user, _agent, job = await _make_pi(db_session)
+    wired.profile["employments"] = [
+        {"organization": "Johns Hopkins University", "start_year": 2022, "current": True}]
+    await set_provisional_tenure_start(db_session, user.id, 2015)
+    db_session.add_all([
+        Publication(user_id=user.id, pmid=str(500 + i), title=f"Paper {i}",
+                    year=2015 + i % 7, provenance="s1") for i in range(19)
+    ] + [
+        Publication(user_id=user.id, pmid=str(600 + i), title=f"Recent {i}",
+                    year=2022 + i % 2, provenance="s1") for i in range(6)
+    ])
+    await db_session.flush()
+    calls = []
+
+    async def collect(result, **kwargs):
+        calls.append(result)
+        return []
+
+    monkeypatch.setattr(profile_pipeline, "collect_non_pubmed_works", collect)
+    await run_profile_pipeline(user.id, db_session, job.id)
+    assert len(calls) == 1

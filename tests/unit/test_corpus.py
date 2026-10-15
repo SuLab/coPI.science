@@ -293,8 +293,8 @@ async def test_a_dropped_doi_whose_paper_arrived_anyway_is_not_reported(monkeypa
 
 async def test_a_duplicate_title_collapses_to_the_journal_version(monkeypatch):
     records = [
-        _rec(100, year=2020, title="Same Result!", authors=[_PI]),
-        _rec(200, year=2021, title="same result", authors=[_PI]),
+        _rec(100, year=2020, title="Same Result in Organoid Screens!", authors=[_PI]),
+        _rec(200, year=2021, title="same result in organoid screens", authors=[_PI]),
     ]
     _wire(monkeypatch, orcid_works=[{"pmid": "100"}, {"pmid": "200"}],
           records=records)
@@ -689,8 +689,8 @@ def test_a_link_to_a_record_that_is_not_a_survivor_changes_nothing():
 
 
 def test_records_without_link_keys_rank_as_before_and_the_title_winner_is_unchanged():
-    a = _linked(100, 2020, ["s1"], title="Same Result!")
-    b = _linked(200, 2021, ["s1"], title="same result")
+    a = _linked(100, 2020, ["s1"], title="Same Result in Organoid Screens!")
+    b = _linked(200, 2021, ["s1"], title="same result in organoid screens")
     c = _linked(300, 2019, ["s1"])
     pmids, dropped = _dedupe(a, b, c)
     assert pmids == ["200", "300"]
@@ -860,3 +860,73 @@ def test_gate_keeps_a_swapped_anchored_record():
     assert len(kept) == 1
     _k, flagged, _d = _gate(swapped(), {"s4"}, "Wen Zhang")
     assert [f["reason"] for f in flagged] == ["no_individual_author_match"]
+
+
+async def test_stage_map_lists_every_pmid_a_stage_returned(monkeypatch):
+    _wire(monkeypatch, orcid_works=[{"pmid": "1"}], s3=["2"], s4=["1", "3"],
+          records=[_rec(1, authors=[_PI]), _rec(2, authors=[_PI]), _rec(3, authors=[_PI])])
+    result = await resolve_corpus(
+        "0000-0001-2345-6789", "Rachel Green", "Johns Hopkins University")
+    assert result.stage_map == {"1": ("s1", "s4"), "2": ("s3",), "3": ("s4",)}
+
+
+async def test_type_dropped_records_are_reported(monkeypatch):
+    types = ["Journal Article", "Retracted Publication"]
+    _wire(monkeypatch, orcid_works=[{"pmid": "5"}],
+          records=[_rec(5, year=2021, pub_types=types, authors=[_PI])])
+    result = await resolve_corpus(
+        "0000-0001-2345-6789", "Rachel Green", "Johns Hopkins University")
+    assert result.ranked == []
+    assert result.type_excluded == [{"pmid": "5", "title": "Paper 5", "year": 2021,
+                                     "stages": ["s1"], "pub_types": types}]
+
+
+def _title_dedupe(*recs):
+    dropped = {"consortium": 0, "excluded_type": 0, "identity": 0, "duplicate_title": 0}
+    out: list = []
+    ranked = corpus._dedupe_and_rank(list(recs), dropped, None, out)
+    return [r["pmid"] for r in ranked], [(r["pmid"], keeper) for r, keeper in out], dropped
+
+
+def test_flagged_entries_carry_the_year():
+    _kept, flagged, _dropped = corpus._gate_records(
+        [_rec(9, year=2021, authors=[_author("Smith", "Ann", "A")])], {"9": {"s4"}},
+        "Rachel Green", "Johns Hopkins University")
+    assert flagged[0]["year"] == 2021
+
+
+def test_a_constructed_result_has_no_stage_map():
+    assert CorpusResult(kept=[], flagged=[]).stage_map is None
+
+
+def test_short_titles_never_collapse():
+    pmids, pairs, _ = _title_dedupe(_linked(1, 2015, ["s1"], title="Introduction"),
+                                    _linked(2, 2016, ["s1"], title="Introduction"))
+    assert (pmids, pairs) == (["2", "1"], [])
+
+
+def test_long_titles_years_apart_never_collapse():
+    pmids, pairs, _ = _title_dedupe(
+        _linked(1, 2010, ["s1"], title="Mechanism of X in Y cells"),
+        _linked(2, 2020, ["s1"], title="Mechanism of X in Y cells"))
+    assert (pmids, pairs) == (["2", "1"], [])
+
+
+def test_long_titles_close_in_year_collapse_to_the_newer():
+    pmids, pairs, _ = _title_dedupe(
+        _linked(100, 2019, ["s1"], title="Mechanism of X in Y cells"),
+        _linked(200, 2020, ["s1"], title="Mechanism of X in Y cells"))
+    assert (pmids, pairs) == (["200"], [("100", "200")])
+
+
+def test_an_anchored_record_never_loses_to_an_unanchored_one():
+    pmids, pairs, _ = _title_dedupe(
+        _linked(100, 2019, ["s1"], title="Mechanism of X in Y cells"),
+        _linked(200, 2020, ["s4"], title="Mechanism of X in Y cells"))
+    assert (pmids, pairs) == (["100"], [("200", "100")])
+
+
+def test_a_pmid_served_twice_still_collapses():
+    a = _linked(5, 2020, ["s1"], title="T")
+    pmids, pairs, dropped = _title_dedupe(a, dict(a))
+    assert (pmids, pairs, dropped["duplicate_title"]) == (["5"], [], 1)

@@ -154,3 +154,64 @@ async def test_repair_additions_are_bounded(db_session):
     journal = (await db_session.execute(
         select(Publication.journal).where(Publication.user_id == user.id))).scalar_one()
     assert len(journal) == 255
+
+
+async def _plan_with_one_removal(db_session, rp, pmid):
+    from src.models import Publication
+    from tests import factories
+
+    user = await factories.make_user(db_session)
+    await factories.make_profile(db_session, user=user)
+    agent = await factories.make_agent(db_session, user=user)
+    row = Publication(user_id=user.id, pmid=pmid, title="Not the PI's", year=2020,
+                      provenance="s1")
+    db_session.add(row)
+    await db_session.flush()
+    plan = rp.PiRepairPlan(user_id=user.id, orcid=user.orcid, name=user.name,
+                           agent_id=agent.agent_id)
+    plan.removals = [rp.RemovalCandidate(publication_id=str(row.id), pmid=pmid,
+                                         reason="no_individual_author_match",
+                                         title=row.title)]
+    return plan, row, agent
+
+
+async def test_apply_excludes_instead_of_deleting(db_session, monkeypatch, tmp_path):
+    import scripts.repair_pi_corpus as rp
+    from src.models import ProfileRevision
+    from src.services import profile_export
+
+    monkeypatch.setattr(profile_export, "PROFILES_DIR", tmp_path)
+    plan, row, agent = await _plan_with_one_removal(db_session, rp, "500")
+    assert await rp._apply_plan(db_session, plan) is True
+    await db_session.refresh(row)
+    assert row.excluded_at is not None and row.excluded_reason == "repair_script"
+    assert row.excluded_by_user_id is None
+    summaries = (await db_session.execute(select(ProfileRevision.change_summary).where(
+        ProfileRevision.agent_registry_id == agent.id))).scalars().all()
+    assert summaries == ["Corpus repaired (repair_pi_corpus)"]
+
+
+async def test_apply_skips_a_row_made_manual_since_planning(db_session, monkeypatch, tmp_path,
+                                                           capsys):
+    import scripts.repair_pi_corpus as rp
+    from src.services import profile_export
+
+    monkeypatch.setattr(profile_export, "PROFILES_DIR", tmp_path)
+    plan, row, _agent = await _plan_with_one_removal(db_session, rp, "501")
+    row.provenance = "manual"  # staff kept it after the preview
+    await db_session.flush()
+    assert await rp._apply_plan(db_session, plan) is False
+    await db_session.refresh(row)
+    assert row.excluded_at is None and row.provenance == "manual"
+    assert "skipped (now manual or excluded): pmid=501" in capsys.readouterr().out
+
+
+def test_the_script_imports_no_delete():
+    import ast
+
+    source = (Path(__file__).resolve().parents[2] / "scripts" / "repair_pi_corpus.py").read_text(
+        encoding="utf-8")
+    imported = {alias.name for node in ast.walk(ast.parse(source))
+                if isinstance(node, ast.ImportFrom) and node.module == "sqlalchemy"
+                for alias in node.names}
+    assert "delete" not in imported and "select" in imported, imported

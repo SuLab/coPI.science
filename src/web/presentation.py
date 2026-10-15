@@ -52,7 +52,7 @@ SCHEMAS = {
         "id agent_id bot_name pi_name user_id status muted_at persona_export_failed_at requested_at role".split()
     ),
     "Publication": frozenset(
-        "id pmid pmcid doi title abstract journal year methods_text provenance excluded_at".split()
+        "id pmid pmcid doi title abstract journal year methods_text provenance excluded_at excluded_reason".split()
     ),
     "PublicationCandidate": frozenset(
         "id pmid title journal year reason source stages created_at".split()
@@ -103,8 +103,10 @@ SCHEMAS = {
     ),
     "TenureScopedPublications": frozenset("publications tenure_start".split()),
     "ReviewCards": frozenset(
-        "candidates unanchored excluded draft draft_stale draft_diff regenerate_refusal persona_out_of_date".split()
+        "candidates unanchored excluded draft draft_stale draft_diff regenerate_refusal persona_out_of_date withheld withheld_summary generation_notes".split()
     ),
+    "GenerationNotes": frozenset("job_status enqueued_at completed_at notes".split()),
+    "GenerationNote": frozenset("step label detail".split()),
     "Draft": frozenset(
         "fields synthesis_validated evidence_pmid_count evidence_pub_count evidence_flagged_count base_profile_version job_id created_at".split()
     ),
@@ -130,7 +132,7 @@ SECRET_KEYS = frozenset(
 )
 STAFF_VERDICT_FIELDS = frozenset(f.column for f in VERDICT_FIELDS if f.staff_only)
 STAFF_KEYS = frozenset(
-    "jobs review revisions draft discovery company_suggestions companies_suggested activation_blockers activation_blocked activated blockers has_bot_token can_retry_profile profile_status agent_status email email_verified_at name_sanitized_at onboarding_complete claimed_at last_login_at".split()
+    "jobs review revisions outside_window draft discovery company_suggestions companies_suggested activation_blockers activation_blocked activated blockers has_bot_token can_retry_profile profile_status agent_status email email_verified_at name_sanitized_at onboarding_complete claimed_at last_login_at".split()
 )
 ADMIN_KEYS = frozenset(
     "raw_verdict raw_opinion raw_opinion_truncated unplaced_turns held_counts in_doubt "
@@ -186,7 +188,7 @@ VIEW_FIELDS = frozenset(
         "methods_text mid_scale mid_scale_count min minutes missing_domains missing_ok model "
         "most_active_agent most_active_count muted muted_at n name name_sanitized_at never new_role "
         "new_status no_result none_confirmed normalized_name note off_rubric_count onboarding_complete "
-        "opinion orcid orcid_fundings organization origin other outcome output_config overall_official page page_count "
+        "opinion orcid orcid_fundings organization origin other outcome output_config outside_window overall_official page page_count "
         "panel_by_thread panel_domains panel_failure_reason panel_owed panel_received panel_row_limit "
         "panel_state panel_summary panel_truncated parents partial pass_label password password_hash past "
         "path payload pct pending pending_profile pending_profile_created_at percentile "

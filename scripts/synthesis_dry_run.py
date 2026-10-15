@@ -6,8 +6,9 @@ stored: the PI's stored, non-excluded publications (the corpus as of the last ru
 any regeneration; nothing is re-resolved), selected as the pipeline does
 (``profile_pipeline.select_synthesis_inputs``: the tenure window, or the full career under
 the thin-record fallback of spec 2026-10-09), the newest ``SYNTHESIS_WINDOW``, those with an
-abstract; methods from the rows' stored
-``methods_text`` (the first 10 with text; PMC is not fetched); the persona's grant
+abstract; methods from the stored
+``methods_text`` of the papers the context shows (``synthesis_context_selection``), the first
+ten with text; PMC is not fetched; the persona's grant
 sections. Then calls ``llm.synthesize_profile`` once (one Opus call, about $0.15) and
 prints the parsed reply, the type check's verdict and ``_validate_profile``'s. On a parse
 failure it prints the exception; the full model text is in llm's ERROR log line.
@@ -39,18 +40,16 @@ from src.services.grant_sections import load_grant_sections  # noqa: E402
 from src.services.jhu_rules import export_tenure_start  # noqa: E402
 from src.services.llm import synthesize_profile  # noqa: E402
 from src.services.profile_pipeline import (  # noqa: E402
+    METHODS_FETCH_LIMIT,
     SynthesisOutputError,
     _build_synthesis_context,
     _researcher_info,
     _validate_profile,
     checked_synthesis,
     select_synthesis_inputs,
+    synthesis_context_selection,
 )
 from src.services.tenure_scope import publication_in_use, publication_order_by  # noqa: E402
-
-#: Stored methods sections offered, as step 5 fetches at most this many.
-METHODS_LIMIT = 10
-
 
 async def build_context(db: AsyncSession, user: User) -> str:
     """The step-7 context from the stored corpus (no resolve, no network, no write)."""
@@ -71,9 +70,9 @@ async def build_context(db: AsyncSession, user: User) -> str:
     ]
     pubs = select_synthesis_inputs(records, tenure_start).offered
     methods: dict[str, str] = {}
-    for rec in pubs:
+    for rec in synthesis_context_selection(pubs):
         row = by_pmid.get(rec["pmid"]) if rec.get("pmid") else None
-        if row is not None and row.methods_text and len(methods) < METHODS_LIMIT:
+        if row is not None and row.methods_text and len(methods) < METHODS_FETCH_LIMIT:
             methods[rec["pmid"]] = row.methods_text
     grants = await load_grant_sections(db, user.id)
     return _build_synthesis_context(

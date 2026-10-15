@@ -160,3 +160,18 @@ def test_a_row_superseded_by_a_weak_successor_stays_reportable():
     weak = {"pmid": "2", "stages": ["s4"], "title": "Journal", "year": 2025}
     result = CorpusResult(kept=[weak], flagged=[], ranked=[weak], superseded=[("1", "2")])
     assert [pmid for _id, pmid, _t in compare([row], result).unanchored] == ["1"]
+
+
+async def test_a_title_duplicate_with_an_anchored_keeper_is_not_unanchored(db_session):
+    import scripts.unanchored_publications_report as rep
+
+    pi = await factories.make_user(db_session, name="Ada Lovelace")
+    db_session.add(Publication(user_id=pi.id, pmid="100", title="Mechanism of X in Y cells",
+                               year=2019, provenance="s1"))
+    await db_session.flush()
+    rows = (await db_session.execute(
+        select(Publication).where(Publication.user_id == pi.id))).scalars().all()
+    result = CorpusResult(kept=[], flagged=[], ranked=[
+        _rec("200", ["s1"], year=2020, title="Mechanism of X in Y cells")],
+        title_duplicates=[("100", "200")])
+    assert rep.compare(rows, result).unanchored == []

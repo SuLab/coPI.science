@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.dependencies import impersonation_note
-from src.models import USER_ROLE_PI, Job, PublicationCandidate, ResearcherProfile, User
+from src.models import USER_ROLE_PI, Job, Publication, PublicationCandidate, ResearcherProfile, User
 from src.models.job import INTERACTIVE_PRIORITY
 from src.services import directory, profile_review
 from src.services.profile_edit import (
@@ -193,6 +193,16 @@ async def _no_rows() -> None:
     return None
 
 
+def _paper_label(row: Publication) -> str:
+    """How a revision summary or a log line names a paper: its PMID, else its DOI, else
+    its title (first 80 characters) in quotes. Never "PMID None" (P9)."""
+    if row.pmid:
+        return f"PMID {row.pmid}"
+    if row.doi:
+        return f"DOI {row.doi}"
+    return f'"{(row.title or "")[:80]}"'
+
+
 @router.post("/pis/{user_id}/candidates/{candidate_id}/accept")
 async def workspace_accept_candidate(
     user_id: uuid.UUID,
@@ -203,7 +213,8 @@ async def workspace_accept_candidate(
 ):
     """Store a candidate paper with provenance ``manual`` from its PubMed record (fetched
     before any lock; nothing is written when PubMed fails) and record a ``paper_review``
-    revision. 404 for another PI's or an already decided candidate."""
+    revision. A stored PMID-less copy of the paper moves to Excluded papers (P8). 404 for
+    another PI's or an already decided candidate."""
     await _require_pi(db, user_id)
     pmid = await db.scalar(
         select(PublicationCandidate.pmid).where(
@@ -224,7 +235,7 @@ async def workspace_accept_candidate(
         return _review_redirect(request, user_id, "pubmed_not_found")
     actor_id = current_user.id
     try:
-        cand = await _bounded_persona_locks(
+        result = await _bounded_persona_locks(
             db,
             user_id,
             PERSONA_LOCK_TIMEOUT,
@@ -234,8 +245,9 @@ async def workspace_accept_candidate(
         )
     except _PersonaBusy:
         return _review_busy(request, user_id)
-    if cand is None:
+    if result is None:
         raise HTTPException(status_code=404, detail="Candidate not found")
+    _cand, twins = result
     await _publish(
         request,
         db,
@@ -245,7 +257,12 @@ async def workspace_accept_candidate(
         summary=f"Paper accepted: PMID {pmid}",
         action="Candidate paper accept",
     )
-    flash(request, "Paper added to the corpus.", "success")
+    flash(
+        request,
+        "Paper added to the corpus. Its copy stored without a PMID moved to Excluded papers."
+        if twins else "Paper added to the corpus.",
+        "success",
+    )
     return _review_redirect(request, user_id)
 
 
@@ -300,7 +317,7 @@ async def workspace_keep_publication(
     if row is None:
         return _review_redirect(request, user_id)
     _warn_if_impersonated(request, current_user, "Publication keep", user_id)
-    _log_actor(current_user, f"kept publication PMID {row.pmid}", user_id)
+    _log_actor(current_user, f"kept publication {_paper_label(row)}", user_id)
     await db.commit()
     flash(request, "Kept.", "success")
     return _review_redirect(request, user_id)
@@ -337,7 +354,7 @@ async def workspace_exclude_publication(
         user_id,
         current_user,
         mechanism="paper_review",
-        summary=f"Paper excluded: PMID {row.pmid}",
+        summary=f"Paper excluded: {_paper_label(row)}",
         action="Publication exclude",
     )
     flash(request, "Paper excluded.", "success")
@@ -372,7 +389,7 @@ async def workspace_restore_publication(
         user_id,
         current_user,
         mechanism="paper_review",
-        summary=f"Paper restored: PMID {row.pmid}",
+        summary=f"Paper restored: {_paper_label(row)}",
         action="Publication restore",
     )
     flash(request, "Paper restored to the corpus.", "success")

@@ -675,10 +675,30 @@
                        class="text-xs text-blue-600 hover:underline">PubMed</a>
                     {% endif %}
                     {% if pub.pmcid %}<span class="text-xs text-gray-600">PMC: {{ pub.pmcid }}</span>{% endif %}
+                    {% if permissions.staff %}
+                    <form method="post" action="{{ page_url(request, 'workspace_exclude_publication', user_id=target_user.id, publication_id=pub.id) }}"><button type="submit" class="text-xs text-red-700 underline">Exclude</button></form>
+                    {% endif %}
                 </div>
             </div>
             {% endfor %}
         </div>
+        {% if outside_window %}
+        <details class="mt-3"><summary class="text-sm text-blue-700 cursor-pointer">Outside the tenure window, used by the full-career profile ({{ outside_window | length }})</summary>
+            <p class="text-xs text-gray-500 mt-2">This profile is written from the PI's whole career, so these papers also ground it and can appear in the lab agent's description.</p>
+            <div class="space-y-3 mt-2">
+                {% for pub in outside_window %}
+                <div class="border-b border-gray-100 pb-3 last:border-0 text-sm">
+                    <p class="font-medium text-gray-800">{{ pub.title }}</p>
+                    <p class="text-gray-500 text-xs mt-0.5">{{ pub.journal or 'journal unknown' }} · {{ pub.year or 'year unknown' }}</p>
+                    <div class="flex gap-2 mt-1">
+                        {% if pub.pmid %}<a href="https://pubmed.ncbi.nlm.nih.gov/{{ pub.pmid }}" target="_blank" rel="noopener noreferrer" class="text-xs text-blue-600 hover:underline">PubMed</a>{% endif %}
+                        <form method="post" action="{{ page_url(request, 'workspace_exclude_publication', user_id=target_user.id, publication_id=pub.id) }}"><button type="submit" class="text-xs text-red-700 underline">Exclude</button></form>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </details>
+        {% endif %}
     </div>
     {% endif %}
 

@@ -16,9 +16,9 @@ import re
 #: ``tests/unit/test_prompt_safety.py`` fails when a ``delimit`` call in ``src/``
 #: uses a literal tag missing from this set.
 FENCE_TAGS: frozenset[str] = frozenset({
-    "agent_profile", "authors", "lab_message", "paper_abstract", "paper_methods",
-    "paper_title", "patent", "pi", "proposal_summary", "staff_company_record",
-    "statement",
+    "agent_profile", "authors", "lab_message", "methods_section", "paper_abstract",
+    "paper_methods", "paper_title", "patent", "pi", "proposal_summary",
+    "publication_abstract", "staff_company_record", "statement",
 })
 
 # Ordinary nested forgeries are stripped exactly; adversarial depth must not force

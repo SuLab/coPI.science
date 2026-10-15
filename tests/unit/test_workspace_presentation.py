@@ -130,3 +130,38 @@ def test_reviewer_run_version_label_cannot_carry_nested_configuration():
     page = project_workspace("assessments", {"runs": [run]}, capabilities_for(viewer))
     assert page["runs"][0].config == {}
     assert "NESTED_SECRET" not in repr(page)
+
+
+def _viewer(role):
+    return User(id=uuid.uuid4(), name="Viewer", user_role=role)
+
+
+def test_review_cards_project_generation_notes():
+    from datetime import UTC, datetime
+
+    from src.services.profile_review import GenerationNote, GenerationNotes, ReviewCards
+
+    notes = GenerationNotes(job_status="completed", enqueued_at=datetime(2026, 10, 15, tzinfo=UTC),
+                            completed_at=None, notes=[GenerationNote(
+                                "corpus_rechecked", "Stored papers re-checked", "Re-checked.")])
+    cards = ReviewCards(candidates=[], unanchored=[], excluded=[], draft=None,
+                        draft_stale=False, draft_diff=[], regenerate_refusal=None,
+                        persona_out_of_date=None, withheld=[], withheld_summary="3 withheld",
+                        generation_notes=notes)
+    staff = project_workspace("pis", {"review": cards}, capabilities_for(_viewer("manager")))
+    assert staff["review"].generation_notes.notes[0].label == "Stored papers re-checked"
+    assert staff["review"].withheld_summary == "3 withheld"
+    reviewer = project_workspace("pis", {"review": cards}, capabilities_for(_viewer("reviewer")))
+    assert "review" not in reviewer
+
+
+def test_outside_window_is_staff_only():
+    from src.models import Publication
+
+    pub = Publication(id=uuid.uuid4(), pmid="1", title="Pre-tenure paper", year=2015)
+    staff = project_workspace("pis", {"outside_window": [pub]},
+                              capabilities_for(_viewer("manager")))
+    assert staff["outside_window"][0].title == "Pre-tenure paper"
+    reviewer = project_workspace("pis", {"outside_window": [pub]},
+                                 capabilities_for(_viewer("reviewer")))
+    assert "outside_window" not in reviewer

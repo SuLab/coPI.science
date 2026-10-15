@@ -1,9 +1,9 @@
 """The corpus storage rule (spec 2026-10-05 §6.3, D14, D17): no cap; anchored records are
 stored, unanchored ones held for review; provenance; DOI verification; metadata refresh."""
 import asyncio
-from types import SimpleNamespace
 
 from src.models import Publication, PublicationCandidate
+from src.services.corpus import CorpusResult
 from src.services.corpus_additions import (
     apply_corpus_result,
     is_anchored,
@@ -91,7 +91,7 @@ def _row(pmid, provenance, excluded_at=None):
 
 def _apply(rows, ranked, superseded=(), candidates=()):
     db = _FakeDb(rows, candidates)
-    result = SimpleNamespace(ranked=ranked, orcid_dois={}, superseded=list(superseded))
+    result = CorpusResult(kept=[], flagged=[], ranked=list(ranked), superseded=list(superseded))
     return asyncio.run(apply_corpus_result(db, "u", result)), db
 
 

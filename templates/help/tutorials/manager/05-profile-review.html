@@ -10,7 +10,7 @@ page below the header; reviewers do not see them.</p>
 
 <h2 id="what-you-see">What you'll see</h2>
 {{ figure(request, "pi-account-edit", "The Account card and the Edit Profile form on a PI's page.") }}
-{{ figure(request, "pi-paper-review", "The Corpus and profile review card: candidate, unanchored and excluded papers.") }}
+{{ figure(request, "pi-paper-review", "The Corpus and profile review card: latest generation notes, candidate, withheld, unanchored and excluded papers.") }}
 
 <h2 id="what-it-means">What it means</h2>
 <h3 id="account">The Account card</h3>
@@ -44,7 +44,7 @@ provisional when ORCID could not be read or the search was incomplete, and a not
 names it. Leaving the field blank leaves it unchanged. A PI with no year, recorded or provisional,
 is treated as full career for the profile, the persona, the PI page's list and the grants, and has
 no industry score. A PI with only a few papers from that year on is treated as full career for the
-profile and persona; with a recorded year the PI page's own list stays limited to the window.</p>
+profile and persona; with a recorded year the PI page's own list stays limited to the window. When the profile uses the whole career, the PI page lists the papers before the window under the collapsed <em>Outside the tenure window, used by the full-career profile</em>, each with Exclude.</p>
 {% call careful("Careful: Save Changes") %}
 <p>Save Changes writes a new profile version and updates the persona the lab bot works from. A
 name change also renames the lab bot in the simulation, but not the Slack app's display name. A
@@ -80,25 +80,25 @@ says <em>The profile changed since this draft was made; discard it or regenerate
 Discard draft deletes the draft. Neither can be undone from the page.</p>
 {% endcall %}
 
-<h3 id="papers">Candidate, unanchored and excluded papers</h3>
+<h3 id="papers">Candidate, withheld, unanchored and excluded papers</h3>
 <ul>
     <li><strong>Candidate papers</strong> were found only by OpenAlex or the name search, with no
     ORCID anchor. <strong>Accept</strong> fetches the paper from PubMed and stores it;
     <strong>Reject</strong> sets it aside.</li>
+    <li><strong>Withheld papers</strong> are listed on the PI's ORCID record, or carry the PI's ORCID iD in PubMed, but their PubMed author list does not name the PI. <strong>Accept</strong> stores one; <strong>Reject</strong> sets it aside.</li>
     <li><strong>Unanchored papers</strong> are stored papers no ORCID anchor confirms.
     <strong>Keep</strong> marks one as checked: the paper stays in the profile, leaves this list
-    and is no longer offered for Exclude;
-    <strong>Exclude</strong> removes it from the profile and the persona. Only papers on this list
-    can be excluded from the page: a paper confirmed by ORCID, or a work stored without a PubMed
-    record, has no Exclude button.</li>
+    and later generations do not exclude or move it;
+    <strong>Exclude</strong> removes it from the profile and the persona.
+    <strong>Exclude</strong> is also on every paper in the PI page's Publications list.</li>
     <li><strong>Excluded papers</strong>, under a disclosure, list every excluded paper with
-    <strong>Restore</strong>, which brings it back.</li>
+    <strong>Restore</strong>, which brings it back. Each row says why the paper was excluded.</li>
 </ul>
 {% call careful("Careful: paper decisions") %}
 <p>Accept adds the paper to the PI's corpus and updates the persona; no button removes it again.
 A rejected candidate is not offered again, but a later generation stores it if the PI's ORCID
-record or PubMed's ORCID field confirms it. Keep is permanent: a kept
-paper is no longer offered for Exclude. Exclude takes the paper out of the profile and the
+record or PubMed's ORCID field confirms it. Keep cannot be undone: later generations leave a kept
+paper alone. Exclude takes the paper out of the profile and the
 persona; Restore undoes it.</p>
 {% endcall %}
 
@@ -116,7 +116,7 @@ nothing in the profile itself.</p>
 <h3 id="jobs">Jobs</h3>
 <p>The <strong>Jobs</strong> table at the bottom lists the background work run for this PI: its
 type, status (Pending, Processing, Completed or Dead; a job whose attempt failed waits as Pending
-until it is retried), attempts, and when it was queued and completed. A job that failed shows the start of its error under its row.</p>
+until it is retried), attempts, and when it was queued and completed. A job that failed shows the start of its error under its row. The newest profile generation's notable steps are under <strong>Latest generation notes</strong> on the Corpus and profile review card.</p>
 <p>More detail: <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='finding-papers') }}">How papers are found and kept</a>,
 <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='writing-profile') }}">What the profile is written from</a>,
 <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='account') }}">The Account card</a>,

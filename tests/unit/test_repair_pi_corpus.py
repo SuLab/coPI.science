@@ -297,8 +297,10 @@ def test_an_orcid_bearing_author_survives_only_when_the_pi_orcid_is_given():
 
 def test_duplicate_title_keeps_the_higher_year_and_removes_the_earlier():
     survivors = [
-        (_pub("a", "100", title="CRISPR Screen"), _record(100, title="CRISPR Screen", year=2020)),
-        (_pub("b", "200", title="CRISPR Screen (preprint)"), _record(200, title="CRISPR Screen!", year=2019)),
+        (_pub("a", "100", title="CRISPR Screen of Organoid Lines"),
+         _record(100, title="CRISPR Screen of Organoid Lines", year=2020)),
+        (_pub("b", "200", title="CRISPR Screen of Organoid Lines (preprint)", year=2019),
+         _record(200, title="CRISPR Screen of Organoid Lines!", year=2019)),
     ]
     removals, kept = find_duplicate_title_removals(survivors)
     assert [r.publication_id for r in removals] == ["b"]
@@ -308,12 +310,44 @@ def test_duplicate_title_keeps_the_higher_year_and_removes_the_earlier():
 
 def test_duplicate_title_tiebreaks_on_higher_pmid_when_years_are_equal():
     survivors = [
-        (_pub("a", "100", title="Same Title", year=2020), _record(100, title="Same Title", year=2020)),
-        (_pub("b", "200", title="Same Title", year=2020), _record(200, title="Same Title", year=2020)),
+        (_pub("a", "100", title="Same Title of a Long Enough Paper", year=2020),
+         _record(100, title="Same Title of a Long Enough Paper", year=2020)),
+        (_pub("b", "200", title="Same Title of a Long Enough Paper", year=2020),
+         _record(200, title="Same Title of a Long Enough Paper", year=2020)),
     ]
     removals, kept = find_duplicate_title_removals(survivors)
     assert [r.publication_id for r in removals] == ["a"]
     assert [p.id for p, _ in kept] == ["b"]
+
+
+@pytest.mark.parametrize(("title", "years", "removed"), [
+    ("T", (2019, 2020), []),
+    ("Mechanism of X in Y cells", (2019, 2020), ["a"]),
+    ("Mechanism of X in Y cells", (2010, 2020), []),
+])
+def test_duplicate_title_needs_a_long_title_and_close_years(title, years, removed):
+    survivors = [
+        (_pub("a", "100", title=title, year=years[0]), _record(100, title=title, year=years[0])),
+        (_pub("b", "200", title=title, year=years[1]), _record(200, title=title, year=years[1])),
+    ]
+    removals, _kept = find_duplicate_title_removals(survivors)
+    assert [r.publication_id for r in removals] == removed
+
+
+def test_the_matcher_reads_the_rows_anchor():
+    # R3.8 hand-off: on an anchored row an author carrying a different ORCID iD does not by
+    # itself disqualify the PI (Q15); on an unanchored one it does, and the surname makes it
+    # a review item, never an exclusion.
+    author = {**_author("Dang", "Chi V", "CV"), "orcid": "0000-0001-5133-7373"}
+    refetched = {"1": _record(1, authors=[author])}
+    anchored = [StoredPublication(id="a", pmid="1", title="T", year=2020, provenance="s1")]
+    removals, review, survivors = classify_stored_publications(
+        anchored, refetched, "Chi Dang", "0000-0002-4031-2522")
+    assert (removals, review, [p.id for p, _ in survivors]) == ([], [], ["a"])
+    bare = [StoredPublication(id="b", pmid="1", title="T", year=2020, provenance=None)]
+    removals, review, survivors = classify_stored_publications(
+        bare, refetched, "Chi Dang", "0000-0002-4031-2522")
+    assert removals == [] and [r.reason for r in review] == ["forename_mismatch"]
 
 
 def test_a_unique_title_is_never_flagged_as_a_duplicate():
@@ -337,15 +371,17 @@ def test_the_whole_pipeline_combines_duplicate_pmid_identity_and_title_dedup():
         _pub("b", "1", title="Paper One (dup pmid)", year=2019),  # duplicate_pmid
         _pub("c", "2", title="No Match Paper"),  # no_individual_author_match
         _pub("d", "3", title="Comment Only"),  # excluded_type
-        _pub("e", "4", title="Same Title", year=2018),
-        _pub("f", "5", title="Same Title!", year=2021),  # wins over e (higher year)
+        _pub("e", "4", title="Same Title of a Long Enough Paper", year=2020),
+        _pub("f", "5", title="Same Title of a Long Enough Paper!", year=2021),  # wins over e
     ]
     refetched = {
         "1": _record(1, title="Paper One", authors=[_author("Green", "Rachel", "R")]),
         "2": _record(2, authors=[_author("Smith", "Ann", "A")]),
         "3": _record(3, pub_types=["Comment"], authors=[_author("Green", "Rachel", "R")]),
-        "4": _record(4, title="Same Title", year=2018, authors=[_author("Green", "Rachel", "R")]),
-        "5": _record(5, title="Same Title!", year=2021, authors=[_author("Green", "Rachel", "R")]),
+        "4": _record(4, title="Same Title of a Long Enough Paper", year=2020,
+                     authors=[_author("Green", "Rachel", "R")]),
+        "5": _record(5, title="Same Title of a Long Enough Paper!", year=2021,
+                     authors=[_author("Green", "Rachel", "R")]),
     }
     removals, review = build_removal_and_review_plan(stored, refetched, "Rachel Green")
     reasons_by_id = {r.publication_id: r.reason for r in removals}

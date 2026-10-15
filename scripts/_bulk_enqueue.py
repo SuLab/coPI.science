@@ -54,8 +54,8 @@ OPENALEX_CREDITS_PER_JOB: dict[str, int] = {
     "enrich_grants": 0,         # RePORTER + ORCID only (src/services/grant_enrichment.py)
     "industry_evidence": 8,     # openalex_industry: /works per 100 PMIDs, /funders, /institutions
     "company_discovery": 0,
-    # corpus fetch_works_by_orcid (<= 5 pages), fetch_orcid_authorships for a PubMed-thin PI
-    # (<= 5 pages) and its industry_evidence
+    # corpus fetch_works_by_orcid (<= 5 pages), fetch_orcid_authorships for a PI who is
+    # PubMed-thin or has in-use openalex rows (<= 5 pages) and its industry_evidence
     "generate_profile": 18,
 }
 TAG_KEY = "bulk_tag"

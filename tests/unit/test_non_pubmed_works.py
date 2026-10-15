@@ -117,12 +117,14 @@ async def test_types_dois_titles_and_retractions_filter():
     assert [(r["doi"], r["provenance"]) for r in out] == [("10.1/j", "s1,s2")]
 
 
-async def test_one_record_per_title_keeps_the_later_version():
+async def test_one_record_per_title_marks_the_older_version():
     out = await _collect(_result(openalex=[
-        _oa("10.48550/arxiv.1", title="Safety Filters!", year=2023, type_="preprint"),
-        _oa("10.1109/x.2", title="Safety filters", year=2024),
+        _oa("10.48550/arxiv.1", title="Safety filters for learned controllers", year=2023,
+            type_="preprint"),
+        _oa("10.1109/x.2", title="Safety Filters for Learned Controllers!", year=2024),
     ]), lookup=_no_lookup)
-    assert [r["doi"] for r in out] == ["10.1109/x.2"]
+    assert [(r["doi"], r.get("duplicate_of")) for r in out] == [
+        ("10.1109/x.2", None), ("10.48550/arxiv.1", "10.1109/x.2")]
 
 
 async def test_newest_first_and_undated_last():
@@ -389,3 +391,42 @@ def test_attribution_verdict_is_three_valued():
     ) == "unattributed"
     assert attribution_verdict(_authorship(in_metadata=True), []) == "attributed"
     assert attribution_verdict(_authorship(raw=["Johns Hopkins University"]), []) == "attributed"
+
+
+async def test_prefetched_authorships_are_not_fetched_again():
+    calls = []
+
+    async def lookup(orcid):
+        calls.append(orcid)
+        return {"10.1/a": HOPKINS, "10.1/b": None}
+
+    result = _result(openalex=[_oa("10.1/a", title="A"), _oa("10.1/b", title="B")])
+    fetched = await collect_non_pubmed_works(result, lookup=_no_lookup, pi_orcid=PI,
+                                             authorship_lookup=lookup)
+    prefetched = await collect_non_pubmed_works(
+        result, lookup=_no_lookup, pi_orcid=PI, authorship_lookup=lookup,
+        prefetched_authorships={"10.1/a": HOPKINS, "10.1/b": None})
+    assert calls == [PI], "the prefetched collection made no request"
+    assert prefetched == fetched and [r["doi"] for r in prefetched] == ["10.1/a"]
+
+
+async def test_retracted_works_are_reported():
+    async def lookup(doi):
+        return _oa(doi, title="Looked up", retracted=True)
+
+    retracted: set[str] = set()
+    out = await _collect(_result(orcid=[_orcid("10.1/s")],
+                                 openalex=[_oa("10.1/R", retracted=True)]),
+                         lookup=lookup, retracted=retracted)
+    assert out == [] and retracted == {"10.1/r", "10.1/s"}
+
+
+async def test_orcid_authorships_by_doi_folds_keys(monkeypatch):
+    from src.services import non_pubmed_works
+
+    async def fetch(orcid):
+        assert orcid == PI
+        return {"10.1/AbC": HOPKINS, "https://doi.org/10.1/abc": None}
+
+    monkeypatch.setattr(non_pubmed_works, "fetch_orcid_authorships", fetch)
+    assert await non_pubmed_works.orcid_authorships_by_doi(PI) == {"10.1/abc": HOPKINS}

@@ -75,6 +75,7 @@ class ResearcherProfile(Base):
     #                         Excluded rows (publications.excluded_at set, by staff or by
     #                         the system) are never in scope, so they never count
     #                         (tenure_scope.publication_in_use).
+    #                         NULL counts as 'protect': a run with no abstracts never replaces a stored profile whose count is NULL.
     evidence_pmid_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     evidence_pub_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     #: Records the identity gates withheld in the run that wrote the counts above

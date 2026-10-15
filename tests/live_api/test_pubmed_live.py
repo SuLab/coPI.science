@@ -487,6 +487,17 @@ async def test_id_conversion_round_trips_and_a_nonsense_doi_maps_to_nothing(api_
     )
 
 
+#: A PubMed record with no PubMed Central article: idconv answered "Identifier not found in
+#: PMC" for it in the live probe of 2026-10-15. Replace it if PMC ever adds it.
+PMID_NOT_IN_PMC = WATSON_CRICK_PMID
+
+
+async def test_idconv_reports_absent_for_a_pmid_not_in_pmc():
+    resp = await pubmed._ncbi_get(pubmed.IDCONV_BASE, {"ids": PMID_NOT_IN_PMC, "format": "json"})
+    assert pubmed.classify_idconv([PMID_NOT_IN_PMC], resp.json()) == {
+        PMID_NOT_IN_PMC: ("absent", None)}
+
+
 # ------------------------------------------------------------------------- T2.4
 
 

@@ -121,6 +121,9 @@ async def workspace_pi_detail(
             profile=detail["profile"],
             publications=detail["publications"],
             pub_scope=detail["pub_scope"],
+            outside_window=detail["outside_window"]
+            if staff and detail["profile"] is not None and detail["profile"].full_career_fallback
+            else [],
             grants=detail["grants"],
             grant_identity=detail["grant_identity"],
             orcid_fundings=detail["orcid_fundings"],

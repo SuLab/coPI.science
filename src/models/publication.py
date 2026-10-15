@@ -1,4 +1,4 @@
-"""Publication model and the staff review queue of unanchored finds (migration 0062)."""
+"""Publication model and the staff review queue of unanchored finds (migrations 0062, 0065 and 0068)."""
 
 import uuid
 from datetime import datetime
@@ -43,6 +43,45 @@ CANDIDATE_STATUSES = ("pending", "accepted", "rejected")
 #: publication_candidates.reason for a resolved record with no ORCID anchor.
 CANDIDATE_REASON_NO_ANCHOR = "no_orcid_anchor"
 
+#: publication_candidates.reason for a record the PI's ORCID record or PubMed's ORCID field
+#: lists (stage s1 or s3) but whose PubMed author list does not name the PI (contract C5,
+#: owner decision Q8): a "withheld paper" on the staff PI page. At most 40 characters.
+CANDIDATE_REASON_ORCID_AUTHOR_MISMATCH = "orcid_listed_author_mismatch"
+
+#: publications.excluded_reason (migration 0068, contract C3). "staff" is a person's Exclude;
+#: the other six are the system's (corpus_additions.exclude_by_system). Restore follows the
+#: reason (profile_review.restore_publication).
+EXCLUDED_REASON_STAFF = "staff"
+#: A stored UpdateOf successor supersedes the row (corpus_additions._exclude_superseded).
+EXCLUDED_REASON_SUPERSEDED = "superseded"
+#: A PMID-less row whose PubMed twin is stored (the run, or a staff Accept: P8).
+EXCLUDED_REASON_PUBMED_TWIN = "pubmed_twin"
+#: Same long title as a newer paper, published close together (Q13).
+EXCLUDED_REASON_DUPLICATE_TITLE = "duplicate_title"
+#: The record now carries an EXCLUDED_TYPES type (Q7, F12), or OpenAlex marks the work
+#: retracted (F28).
+EXCLUDED_REASON_PUBLICATION_TYPE = "publication_type"
+#: OpenAlex's authorship no longer ties an "openalex" row to the PI (Q11).
+EXCLUDED_REASON_OPENALEX_AFFILIATION = "openalex_affiliation"
+#: scripts/repair_pi_corpus.py --apply (Q4).
+EXCLUDED_REASON_REPAIR_SCRIPT = "repair_script"
+EXCLUDED_REASONS: tuple[str, ...] = (
+    EXCLUDED_REASON_STAFF,
+    EXCLUDED_REASON_SUPERSEDED,
+    EXCLUDED_REASON_PUBMED_TWIN,
+    EXCLUDED_REASON_DUPLICATE_TITLE,
+    EXCLUDED_REASON_PUBLICATION_TYPE,
+    EXCLUDED_REASON_OPENALEX_AFFILIATION,
+    EXCLUDED_REASON_REPAIR_SCRIPT,
+)
+SYSTEM_EXCLUDED_REASONS = frozenset(EXCLUDED_REASONS) - {EXCLUDED_REASON_STAFF}
+#: Identical to alembic/versions/0068_publication_excluded_reason.py's constant
+#: (tests/integration/test_migration_0068.py pins it).
+EXCLUDED_REASON_CHECK_SQL = (
+    "excluded_reason IS NULL OR excluded_reason IN ('staff', 'superseded', 'pubmed_twin', "
+    "'duplicate_title', 'publication_type', 'openalex_affiliation', 'repair_script')"
+)
+
 
 class Publication(Base):
     __tablename__ = "publications"
@@ -68,13 +107,18 @@ class Publication(Base):
     #: or an anchored record's stage list. NULL: stored before 0062 and not yet seen by a profile run
     #: or scripts/unanchored_publications_report.py.
     provenance: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    #: Staff excluded the row (migration 0062, D45). Excluded rows are kept (D15) and ignored
-    #: by synthesis, export, RePORTER linking, discovery and industry scans
-    #: (src/services/tenure_scope.py `publication_in_use`).
+    #: Staff or the system excluded the row (migration 0062, D45); why is ``excluded_reason``
+    #: (0068). Excluded rows are kept (D15) and ignored by synthesis, export, RePORTER linking,
+    #: discovery and industry scans (src/services/tenure_scope.py `publication_in_use`).
     excluded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     excluded_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
+    #: Why the row is excluded (migration 0068, contract C3): one of EXCLUDED_REASONS. Every
+    #: writer sets it together with ``excluded_at`` and Restore clears both. NULL on an in-use
+    #: row and on a row excluded before 0068 (never backfilled). Meaningful only while
+    #: ``excluded_at`` is set.
+    excluded_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
     #: True when `doi` is the DOI PubMed records for `pmid` (reconcile_pub_doi "ok", "filled"
     #: or "corrected"); False when PubMed has none to check it against ("unverified"); NULL
     #: when never checked or there is no DOI. The export links the DOI only when True and
@@ -91,6 +135,7 @@ class Publication(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "pmid", name="uq_publications_user_pmid"),
         CheckConstraint(PROVENANCE_CHECK_SQL, name="ck_publications_provenance"),
+        CheckConstraint(EXCLUDED_REASON_CHECK_SQL, name="ck_publications_excluded_reason"),
         Index("ix_publications_pmid", "pmid"),
         Index("ix_publications_user_id", "user_id"),
         Index("ix_publications_excluded_by_user_id", "excluded_by_user_id"),

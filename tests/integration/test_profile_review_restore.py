@@ -1,12 +1,16 @@
 """restore_publication: a restored system exclusion sticks (becomes manual); a staff
 exclusion keeps its provenance."""
+from datetime import UTC, datetime
+
 import pytest
 from sqlalchemy import func
 
-from src.models import Publication
+from src.models import USER_ROLE_MANAGER, Publication
+from src.models.publication import SYSTEM_EXCLUDED_REASONS
 from src.services.corpus import CorpusResult
 from src.services.corpus_additions import apply_corpus_result
-from src.services.profile_review import restore_publication
+from src.services.profile_review import exclude_publication, restore_publication
+from src.services.user_deletion import delete_user_account
 from tests import factories
 
 pytestmark = pytest.mark.integration
@@ -47,3 +51,45 @@ async def test_restored_staff_exclusion_keeps_its_provenance(db_session):
     restored = await restore_publication(db_session, pi.id, row.id)
     assert restored is not None and restored.excluded_at is None
     assert restored.excluded_by_user_id is None and restored.provenance == "s1"
+
+
+async def test_restore_of_a_staff_exclusion_keeps_provenance_after_the_excluder_is_deleted(
+    db_session,
+):
+    pi = await factories.make_user(db_session, name="Ada Lovelace")
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    row = Publication(user_id=pi.id, pmid="1", title="T", provenance="s1,s4")
+    db_session.add(row)
+    await db_session.flush()
+    await exclude_publication(db_session, pi.id, row.id, actor_id=manager.id)
+    await delete_user_account(db_session, manager)
+    await db_session.refresh(row)
+    assert (row.excluded_by_user_id, row.excluded_reason) == (None, "staff")
+    restored = await restore_publication(db_session, pi.id, row.id)
+    assert restored.provenance == "s1,s4"
+    assert (restored.excluded_at, restored.excluded_by_user_id, restored.excluded_reason) == (
+        None, None, None)
+
+
+@pytest.mark.parametrize("reason", sorted(SYSTEM_EXCLUDED_REASONS))
+async def test_restore_of_a_system_reason_turns_the_row_manual(db_session, reason):
+    pi = await factories.make_user(db_session, name="Ada Lovelace")
+    row = Publication(user_id=pi.id, pmid="1", title="T", provenance="s1",
+                      excluded_at=datetime.now(UTC), excluded_reason=reason)
+    db_session.add(row)
+    await db_session.flush()
+    restored = await restore_publication(db_session, pi.id, row.id)
+    assert (restored.provenance, restored.excluded_reason) == ("manual", None)
+
+
+async def test_restore_of_a_legacy_exclusion_follows_excluded_by(db_session):
+    pi = await factories.make_user(db_session, name="Ada Lovelace")
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    a = Publication(user_id=pi.id, pmid="1", title="A", provenance="s1",
+                    excluded_at=datetime.now(UTC))
+    b = Publication(user_id=pi.id, pmid="2", title="B", provenance="s1",
+                    excluded_at=datetime.now(UTC), excluded_by_user_id=manager.id)
+    db_session.add_all([a, b])
+    await db_session.flush()
+    assert (await restore_publication(db_session, pi.id, a.id)).provenance == "manual"
+    assert (await restore_publication(db_session, pi.id, b.id)).provenance == "s1"

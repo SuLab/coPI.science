@@ -16,9 +16,11 @@ def _rec(pmid, stages=("s1",), year=2020, **kw):
             "stages": list(stages), **kw}
 
 
-def _result(ranked, kept=None):
-    return CorpusResult(kept=list(kept if kept is not None else ranked[:50]), flagged=[],
-                        ranked=list(ranked))
+def _result(ranked, kept=None, **kw):
+    kw.setdefault("stage_map", {r["pmid"]: tuple(sorted(r["stages"])) for r in ranked})
+    kw.setdefault("stage_counts", {"s1": 1})
+    return CorpusResult(kept=list(kept if kept is not None else ranked[:50]),
+                        flagged=kw.pop("flagged", []), ranked=list(ranked), **kw)
 
 
 async def _pubs(db, user_id):
@@ -117,3 +119,203 @@ async def test_a_duplicate_pmid_in_ranked_stores_one_row(db_session):
     pi = await factories.make_user(db_session)
     await apply_corpus_result(db_session, pi.id, _result([_rec(1), _rec(1, title="Copy")]))
     assert [p.title for p in (await _pubs(db_session, pi.id)).values()] == ["Paper 1"]
+
+
+async def test_superseded_and_twin_exclusions_record_their_reason(db_session):
+    pi = await factories.make_user(db_session)
+    db_session.add_all([
+        Publication(user_id=pi.id, pmid="1", title="Preprint", provenance="unanchored"),
+        Publication(user_id=pi.id, doi="10.1/tw", title="A conference twin",
+                    provenance="openalex"),
+    ])
+    await db_session.flush()
+    await apply_corpus_result(db_session, pi.id, _result(
+        [_rec(2, update_of=["1"]), _rec(3, doi="10.1/TW")]))
+    rows = {(p.pmid, p.doi): p for p in (await db_session.execute(
+        select(Publication).where(Publication.user_id == pi.id))).scalars()}
+    pre = rows[("1", None)]
+    twin = rows[(None, "10.1/tw")]
+    assert (pre.excluded_reason, pre.excluded_by_user_id) == ("superseded", None)
+    assert (twin.excluded_reason, twin.excluded_by_user_id) == ("pubmed_twin", None)
+
+
+async def test_an_incomplete_run_does_not_unanchor_a_returned_row(db_session):
+    pi = await factories.make_user(db_session)
+    db_session.add(Publication(user_id=pi.id, pmid="7", title="Old", provenance="s1"))
+    await db_session.flush()
+    await apply_corpus_result(db_session, pi.id,
+                              _result([_rec(7, ("s2",))], truncated_stages=["s2"]))
+    row = (await _pubs(db_session, pi.id))["7"]
+    assert (row.provenance, row.title) == ("s1", "Paper 7")
+
+
+async def test_a_complete_run_unanchors_a_returned_row(db_session):
+    pi = await factories.make_user(db_session)
+    db_session.add(Publication(user_id=pi.id, pmid="7", title="Old", provenance="s1"))
+    await db_session.flush()
+    await apply_corpus_result(db_session, pi.id, _result([_rec(7, ("s2",))]))
+    assert (await _pubs(db_session, pi.id))["7"].provenance == "unanchored"
+
+
+_FLAG = {"pmid": "42", "reason": "no_individual_author_match", "title": "T", "year": 2021,
+         "stages": ["s1"]}
+
+
+async def test_a_flagged_orcid_listed_record_becomes_a_withheld_candidate(db_session):
+    pi = await factories.make_user(db_session)
+    out = await apply_corpus_result(db_session, pi.id, _result([], flagged=[_FLAG]))
+    cand = (await _cands(db_session, pi.id))["42"]
+    assert (cand.status, cand.reason, cand.stages, cand.year) == (
+        "pending", "orcid_listed_author_mismatch", "s1", 2021)
+    assert out.withheld_new == ["42"]
+
+
+async def test_a_pending_candidate_takes_the_latest_runs_reason(db_session):
+    pi = await factories.make_user(db_session)
+    db_session.add(Publication(user_id=pi.id, pmid="0", title="Stored"))
+    db_session.add(PublicationCandidate(user_id=pi.id, pmid="42", title="T",
+                                        reason="no_orcid_anchor", status="pending"))
+    await db_session.flush()
+    await apply_corpus_result(db_session, pi.id, _result([], flagged=[_FLAG]))
+    assert (await _cands(db_session, pi.id))["42"].reason == "orcid_listed_author_mismatch"
+    await apply_corpus_result(db_session, pi.id, _result([_rec(42, ("s4",))]))
+    assert (await _cands(db_session, pi.id))["42"].reason == "no_orcid_anchor"
+
+
+async def test_a_flagged_record_without_an_anchor_is_not_a_candidate(db_session):
+    pi = await factories.make_user(db_session)
+    out = await apply_corpus_result(
+        db_session, pi.id, _result([], flagged=[{**_FLAG, "stages": ["s4"]}]))
+    assert "42" not in await _cands(db_session, pi.id) and out.withheld_new == []
+
+
+async def test_a_flagged_record_already_stored_is_not_a_candidate(db_session):
+    pi = await factories.make_user(db_session)
+    db_session.add(Publication(user_id=pi.id, pmid="42", title="Stored", provenance="s1"))
+    await db_session.flush()
+    await apply_corpus_result(db_session, pi.id, _result([], flagged=[_FLAG]))
+    assert "42" not in await _cands(db_session, pi.id)
+
+
+async def test_a_decided_withheld_candidate_is_not_reoffered(db_session):
+    pi = await factories.make_user(db_session)
+    db_session.add(Publication(user_id=pi.id, pmid="0", title="Stored"))
+    db_session.add(PublicationCandidate(user_id=pi.id, pmid="42", title="Old",
+                                        reason="orcid_listed_author_mismatch",
+                                        status="rejected"))
+    await db_session.flush()
+    out = await apply_corpus_result(db_session, pi.id, _result([], flagged=[_FLAG]))
+    cand = (await _cands(db_session, pi.id))["42"]
+    assert (cand.status, cand.title, out.withheld_new) == ("rejected", "Old", [])
+
+
+async def test_a_withheld_candidate_that_later_passes_is_stored_and_settled(db_session):
+    pi = await factories.make_user(db_session)
+    db_session.add(Publication(user_id=pi.id, pmid="0", title="Stored"))
+    db_session.add(PublicationCandidate(user_id=pi.id, pmid="42", title="T",
+                                        reason="orcid_listed_author_mismatch",
+                                        status="pending"))
+    await db_session.flush()
+    await apply_corpus_result(db_session, pi.id, _result([_rec(42, ("s1",))]))
+    assert (await _pubs(db_session, pi.id))["42"].provenance == "s1"
+    cand = (await _cands(db_session, pi.id))["42"]
+    assert (cand.status, cand.decided_by_user_id) == ("accepted", None)
+
+
+async def _pmcid_row(db_session, pi, provenance="s1"):
+    db_session.add(Publication(user_id=pi.id, pmid="1001", title="Paper 1001",
+                               provenance=provenance, pmcid="PMC999", methods_text="WRONG"))
+    await db_session.flush()
+
+
+async def test_a_stored_pmcid_is_cleared_when_idconv_reports_none(db_session):
+    pi = await factories.make_user(db_session)
+    await _pmcid_row(db_session, pi)
+    out = await apply_corpus_result(db_session, pi.id, _result([_rec(1001)]),
+                                    pmcid_absent={"1001"})
+    row = (await _pubs(db_session, pi.id))["1001"]
+    assert (row.pmcid, row.methods_text) == (None, None)
+    assert out.pmcid_cleared == ["1001"]
+
+
+async def test_no_positive_answer_keeps_the_pmcid(db_session):
+    pi = await factories.make_user(db_session)
+    await _pmcid_row(db_session, pi)
+    await apply_corpus_result(db_session, pi.id, _result([_rec(1001)]), pmcid_absent=set())
+    row = (await _pubs(db_session, pi.id))["1001"]
+    assert (row.pmcid, row.methods_text) == ("PMC999", "WRONG")
+
+
+async def test_a_changed_pmcid_drops_the_methods(db_session):
+    pi = await factories.make_user(db_session)
+    await _pmcid_row(db_session, pi)
+    out = await apply_corpus_result(db_session, pi.id, _result([_rec(1001, pmcid="PMC1")]))
+    row = (await _pubs(db_session, pi.id))["1001"]
+    assert (row.pmcid, row.methods_text) == ("PMC1", None)
+    assert out.methods_cleared == ["1001"]
+
+
+async def test_manual_rows_keep_their_pmcid(db_session):
+    pi = await factories.make_user(db_session)
+    await _pmcid_row(db_session, pi, provenance="manual")
+    await apply_corpus_result(db_session, pi.id, _result([_rec(1001)]),
+                              pmcid_absent={"1001"})
+    row = (await _pubs(db_session, pi.id))["1001"]
+    assert (row.pmcid, row.methods_text) == ("PMC999", "WRONG")
+
+
+_TITLE = "Mechanism of X in Y cells"
+
+
+async def _dup_world(db_session, pi, *, stored_provenance="s1", keeper_excluded=False,
+                     with_record=False):
+    db_session.add(Publication(user_id=pi.id, pmid="100", title=_TITLE, year=2019,
+                               provenance=stored_provenance))
+    if keeper_excluded:
+        from datetime import UTC, datetime
+        db_session.add(Publication(user_id=pi.id, pmid="200", title=_TITLE, year=2020,
+                                   provenance="s1", excluded_at=datetime.now(UTC),
+                                   excluded_reason="staff"))
+    await db_session.flush()
+    kw = {"title_duplicates": [("100", "200")]}
+    if with_record:
+        kw["title_duplicate_records"] = [_rec(100, title=_TITLE, year=2019)]
+    return _result([_rec(200, title=_TITLE, year=2020)], **kw)
+
+
+async def test_a_stored_earlier_same_title_row_is_excluded(db_session):
+    pi = await factories.make_user(db_session)
+    result = await _dup_world(db_session, pi)
+    out = await apply_corpus_result(db_session, pi.id, result)
+    pubs = await _pubs(db_session, pi.id)
+    assert pubs["100"].excluded_reason == "duplicate_title"
+    assert pubs["200"].excluded_at is None
+    assert out.title_duplicates_excluded == ["100"]
+
+
+async def test_a_new_anchored_duplicate_is_stored_excluded(db_session):
+    pi = await factories.make_user(db_session)
+    db_session.add(Publication(user_id=pi.id, pmid="0", title="Stored"))
+    await db_session.flush()
+    result = _result([_rec(200, title=_TITLE, year=2020)],
+                     title_duplicates=[("100", "200")],
+                     title_duplicate_records=[_rec(100, title=_TITLE, year=2019)])
+    out = await apply_corpus_result(db_session, pi.id, result)
+    pubs = await _pubs(db_session, pi.id)
+    assert pubs["200"].excluded_at is None
+    assert pubs["100"].excluded_reason == "duplicate_title"
+    assert out.stored == ["200"]
+
+
+async def test_a_manual_duplicate_is_never_excluded(db_session):
+    pi = await factories.make_user(db_session)
+    result = await _dup_world(db_session, pi, stored_provenance="manual")
+    await apply_corpus_result(db_session, pi.id, result)
+    assert (await _pubs(db_session, pi.id))["100"].excluded_at is None
+
+
+async def test_no_exclusion_when_the_keeper_is_not_in_use(db_session):
+    pi = await factories.make_user(db_session)
+    result = await _dup_world(db_session, pi, keeper_excluded=True)
+    await apply_corpus_result(db_session, pi.id, result)
+    assert (await _pubs(db_session, pi.id))["100"].excluded_at is None

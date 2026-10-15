@@ -32,6 +32,10 @@ from S4, no affiliation at all (see ``resolve_corpus``). Consortium-only papers
 and cannot consume cap slots (R1); records with neither an individual match nor a collective
 are withheld AND flagged, never silently added or removed.
 
+Two records are one paper by title only with a long enough title and years close together
+(``corpus_additions.same_paper_by_title``); a dropped title duplicate is reported, so storage
+excludes a stored copy.
+
 A preprint and its journal version carry different titles or years at times, so
 the title dedupe alone misses them; PubMed's own links (``update_of`` on the journal
 record, ``updated_in`` on the preprint) drop the superseded version (see
@@ -50,7 +54,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.services.corpus_additions import is_anchored
+from src.services.corpus_additions import is_anchored, same_paper_by_title, title_key
 from src.services.identifiers import normalize_orcid
 from src.services.jhu_rules import is_hopkins_affiliation
 from src.services.job_queue import JobDeferred
@@ -701,6 +705,21 @@ class CorpusResult:
     orcid_works: list[dict[str, Any]] = field(default_factory=list)
     openalex_works: list[dict[str, Any]] = field(default_factory=list)
     pubmed_dois: frozenset[str] = frozenset()
+    #: Every PMID a stage returned in this resolve -> its sorted stages, e.g. ("s1", "s4").
+    #: None on a CorpusResult resolve_corpus did not build (tests, scripts), which
+    #: corpus_additions.incomplete_lookups_reason reads as incomplete, so such a result never
+    #: unanchors a row (contract C4).
+    stage_map: dict[str, tuple[str, ...]] | None = None
+    #: The records the publication-type gate dropped, as {"pmid", "title", "year",
+    #: "stages", "pub_types"}: the re-check excludes a stored row among them (C4, Q7, F12).
+    type_excluded: list[dict[str, Any]] = field(default_factory=list)
+    #: (duplicate PMID, keeper PMID) for every record the title dedupe dropped as the same
+    #: paper as a kept one (corpus_additions.same_paper_by_title, Q13). A PMID that EFetch
+    #: served twice collapses too but is not listed.
+    title_duplicates: list[tuple[str, str]] = field(default_factory=list)
+    #: The records of ``title_duplicates``, as gated, with "stages", in drop order: storage
+    #: keeps an anchored one, excluded.
+    title_duplicate_records: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         # Constructors that predate ``ranked`` pass only ``kept``; storage and tenure read
@@ -770,9 +789,12 @@ def _gate_records(
     name: str,
     institution: str | None,
     orcid: str | None = None,
+    type_excluded: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
     """Identity and type gates over EFetch records: returns (kept, flagged, dropped).
-    Every flagged entry's "reason" literal lives here (tests/unit/test_corpus.py)."""
+    Every flagged entry's "reason" literal lives here (tests/unit/test_corpus.py). Flagged
+    entries carry the record's year; ``type_excluded``, when given, receives the records the
+    type gate dropped."""
     kept: list[dict[str, Any]] = []
     flagged: list[dict[str, Any]] = []
     dropped = {
@@ -795,6 +817,12 @@ def _gate_records(
         pub_types = {t.lower() for t in rec.get("pub_types") or []}
         if pub_types & EXCLUDED_TYPES:
             dropped["excluded_type"] += 1
+            if type_excluded is not None:
+                type_excluded.append({
+                    "pmid": rec.get("pmid"), "title": rec.get("title", ""),
+                    "year": rec.get("year"), "stages": rec["stages"],
+                    "pub_types": list(rec.get("pub_types") or []),
+                })
             continue
         if match.kind == "consortium":
             dropped["consortium"] += 1
@@ -813,6 +841,7 @@ def _gate_records(
                     ),
                     "title": rec.get("title", ""),
                     "stages": rec["stages"],
+                    "year": rec.get("year"),
                 }
             )
             continue
@@ -834,6 +863,7 @@ def _gate_records(
                     ),
                     "title": rec.get("title", ""),
                     "stages": rec["stages"],
+                    "year": rec.get("year"),
                 }
             )
             continue
@@ -897,36 +927,61 @@ def _dedupe_and_rank(
     kept: list[dict[str, Any]],
     dropped: dict[str, int],
     superseded: list[tuple[dict[str, Any], str]] | None = None,
+    title_duplicates: list[tuple[dict[str, Any], str]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Title dedupe, superseded-version dedupe and newest-first ranking (pre-cap);
-    counts every record it drops into ``dropped["duplicate_title"]``. When
-    ``superseded`` is a list it receives (record, final surviving successor PMID) for
-    each superseded-version drop (not title drops), in drop order."""
-    # Dedupe by normalized title (PMID dedupe fell out of the stages map).
-    # Preprint/journal pairs share a title; keep the later year (the journal
-    # version), tiebreak higher PMID. Errata never reach here (EXCLUDED_TYPES).
-    by_title: dict[str, dict] = {}
+    """PMID dedupe, same-paper title dedupe, superseded-version dedupe and newest-first
+    ranking (pre-cap); counts every record it drops into ``dropped["duplicate_title"]``.
+
+    1. Records sharing a PMID (EFetch served it twice) collapse to one: the higher year, on a
+       tie the first seen. Not reported.
+    2. Walking the rest in keeper preference (anchored first, then year descending with
+       None last, then PMID descending), a record that is the same paper by title
+       (``corpus_additions.same_paper_by_title``: a title key of at least
+       TITLE_KEY_MIN_CHARS characters, years at most SAME_PAPER_YEARS apart) as an
+       already-kept record is dropped as a duplicate of the first such keeper; when
+       ``title_duplicates`` is a list it receives (record, keeper PMID). A short title such
+       as "Introduction", or years further apart, never collapses, and an anchored record
+       never loses to an unanchored one.
+    3. ``_drop_superseded`` (``superseded`` receives its (record, final successor PMID)
+       pairs), then year DESC / PMID DESC."""
+    by_pmid: dict[str, dict[str, Any]] = {}
+    others: list[dict[str, Any]] = []
     for rec in kept:
-        key = _normalize_title(rec.get("title", "")) or f"pmid:{rec.get('pmid')}"
-        rival = by_title.get(key)
+        pmid = rec.get("pmid")
+        if not pmid:
+            others.append(rec)
+            continue
+        rival = by_pmid.get(str(pmid))
         if rival is None:
-            by_title[key] = rec
-        else:
-            dropped["duplicate_title"] += 1
-            winner = max(
-                (rival, rec),
-                key=lambda r: (r.get("year") or 0, _pmid_sort_key(r.get("pmid"))),
-            )
-            by_title[key] = winner
-
-    survivors = _drop_superseded(list(by_title.values()), dropped, superseded)
-
-    ranked = sorted(
+            by_pmid[str(pmid)] = rec
+            continue
+        dropped["duplicate_title"] += 1
+        if (rec.get("year") or 0) > (rival.get("year") or 0):
+            by_pmid[str(pmid)] = rec
+    preference = sorted([*by_pmid.values(), *others], key=lambda r: (
+        not is_anchored(r), r.get("year") is None, -(r.get("year") or 0),
+        -_pmid_sort_key(r.get("pmid"))))
+    survivors: list[dict[str, Any]] = []
+    keepers: dict[str, list[dict[str, Any]]] = {}
+    for rec in preference:
+        key = title_key(rec.get("title"))
+        keeper = next((k for k in keepers.get(key, []) if same_paper_by_title(
+            k.get("title"), k.get("year"), rec.get("title"), rec.get("year"))),
+            None) if key else None
+        if keeper is None:
+            survivors.append(rec)
+            if key:
+                keepers.setdefault(key, []).append(rec)
+            continue
+        dropped["duplicate_title"] += 1
+        if title_duplicates is not None:
+            title_duplicates.append((rec, str(keeper.get("pmid"))))
+    survivors = _drop_superseded(survivors, dropped, superseded)
+    return sorted(
         survivors,
         key=lambda r: (r.get("year") or 0, _pmid_sort_key(r.get("pmid"))),
         reverse=True,
     )
-    return ranked
 
 
 def _attribute_resolved_dois(
@@ -1103,11 +1158,13 @@ async def resolve_corpus(
         if item not in doi_pool or _doi_fold(item) not in fetched_dois
     ]
 
+    type_excluded: list[dict[str, Any]] = []
     kept, flagged, dropped = _gate_records(
-        records, stages, name, institution, orcid
+        records, stages, name, institution, orcid, type_excluded=type_excluded
     )
     superseded_pairs: list[tuple[dict[str, Any], str]] = []
-    ranked = _dedupe_and_rank(kept, dropped, superseded_pairs)
+    title_dups: list[tuple[dict[str, Any], str]] = []
+    ranked = _dedupe_and_rank(kept, dropped, superseded_pairs, title_dups)
     kept = ranked[:cap]  # the cap is applied LAST
 
     logger.info(
@@ -1130,4 +1187,8 @@ async def resolve_corpus(
         orcid_works=list(orcid_works),
         openalex_works=list(openalex_works),
         pubmed_dois=_pubmed_dois(mapping, records, orcid_works, openalex_works),
+        stage_map={pmid: tuple(sorted(s)) for pmid, s in stages.items()},
+        type_excluded=type_excluded,
+        title_duplicates=[(str(r.get("pmid")), keeper) for r, keeper in title_dups],
+        title_duplicate_records=[r for r, _keeper in title_dups],
     )

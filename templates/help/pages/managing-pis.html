@@ -281,8 +281,12 @@
         only as an initial, or one on which several authors match the PI's name, is also
         checked against the matched authors' affiliations when no ORCID anchor confirms it,
         and may be left out when no affiliation matches the recorded institution;</li>
-    <li>a paper whose authorship cannot be confirmed is left out. It is not offered as a
-        candidate, and no page shows it;</li>
+    <li>a paper whose authorship cannot be confirmed is left out. When the PI's ORCID record
+        or PubMed's ORCID field ties it to the PI but its author list does not name them, it
+        is listed under <strong>Withheld papers</strong> for you to decide (see
+        <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='paper-review') }}">Reviewing papers</a>);
+        any other paper left out is only counted in the <strong>Latest generation
+        notes</strong>;</li>
     <li>papers published under a former surname never match;</li>
     <li>a paper the PI's ORCID record or PubMed's ORCID field lists is kept in three further
         cases: when PubMed cuts its author list short before the PI; when the only matching
@@ -296,12 +300,14 @@
 </p>
 <h3>Copies and earlier versions</h3>
 <p>
-    Copies of one paper merge into one: two records with the same title, or two that PubMed
-    links as versions of one work (a preprint and its published version, or an article and the
-    version that updates or supersedes it). The later version is kept. A stored
-    updated or superseded version moves to Excluded papers once its later version is stored with an ORCID
-    anchor or accepted or kept by staff; an earlier version a person kept or accepted, or
-    restored after Blackbird excluded it, is left alone.
+    Copies of one paper merge into one: two papers with the same long title published close
+    together, or two that PubMed links as versions of one work (a preprint and its published
+    version, or an article and the version that updates or supersedes it). The later version
+    is kept. A short title such as "Introduction" never merges two papers. Of two stored
+    papers with the same long title, the older one moves to Excluded papers. A stored
+    updated or superseded version moves to Excluded papers once its later version is stored
+    with an ORCID anchor or accepted or kept by staff; an earlier version a person kept or
+    accepted, or restored after Blackbird excluded it, is left alone.
 </p>
 <h3>Works PubMed does not index</h3>
 <p>
@@ -311,17 +317,29 @@
     that only OpenAlex attributes to the PI is stored only when the PI's authorship on it
     names Hopkins or an organization on the PI's ORCID record (its name as one run of words, in order), or the publisher's metadata
     carries the PI's ORCID iD. These works never appear in Candidate papers or Unanchored
-    papers, and the page cannot exclude them.
+    papers, but each has <strong>Exclude</strong> in the PI page's Publications list. Every
+    generation checks a work that only OpenAlex attributes again, whether or not the PI has
+    few PubMed papers: it moves to Excluded papers when OpenAlex no longer ties it to the PI,
+    and is left alone when OpenAlex says nothing about it. Any stored work that OpenAlex
+    marks retracted moves to Excluded papers.
 </p>
 <h3>Keeping papers up to date</h3>
 <p>
-    Each generation refreshes the stored papers from PubMed. It never removes a paper, even
-    when the searches stop finding it. <strong>Keep</strong> and <strong>Accept</strong>
-    stop that refresh of the title, abstract, journal and year for the paper they act on (its
-    DOI is still checked against PubMed), and so does <strong>Restore</strong> for a
-    paper Blackbird excluded itself; a paper a person excluded and then restored is
-    refreshed as before. Blackbird itself
-    excludes a paper only as an earlier version, or as a copy of a paper it already holds.
+    Each generation refreshes the stored papers from PubMed and checks them again. It never
+    deletes a paper. It moves a paper to Excluded papers when PubMed now lists it as a
+    retraction, erratum, comment or a similar type, even when it also carries a research
+    type; when OpenAlex marks the work retracted; when it is an older copy of a stored paper
+    with the same long title; or when only OpenAlex attributes the work and OpenAlex no
+    longer ties it to the PI. After a complete search, a paper no longer tied to the PI's
+    ORCID iD, or whose author list no longer names the PI, moves to Unanchored papers; after
+    a search that was cut short, it stays where it is. A PubMed Central link that PubMed
+    Central no longer has is removed, with the methods text taken from it.
+    <strong>Keep</strong> and <strong>Accept</strong> stop the refresh of the title,
+    abstract, journal and year for the paper they act on (its DOI is still checked against
+    PubMed), and so does <strong>Restore</strong> for a paper Blackbird excluded itself; a
+    paper a person excluded and then restored is refreshed and checked as before.
+    Generations never exclude or move a paper a person kept or accepted, or restored after
+    Blackbird excluded it.
 </p>
 <p>
     Nothing refreshes a profile or its papers on a schedule. New papers arrive only with a
@@ -356,6 +374,7 @@
         are looked up after the profile is written;</li>
     <li>the PI's name, institution, department and ORCID website.</li>
 </ul>
+<p>When only a few of the PI's papers fall in the tenure window, the whole career is used, and the PI page's Publications card then lists the papers before the window under the collapsed <strong>Outside the tenure window, used by the full-career profile</strong>, each with <strong>Exclude</strong>.</p>
 <p>
     The text it writes has to pass quality checks: a summary within the length limit, enough
     techniques, and at least one disease area. A text that fails is retried with the
@@ -408,37 +427,69 @@
     undo button either. Open the PMID link and check the authors before you decide.
 </p>
 {% endcall %}
-<h3>Unanchored papers</h3>
-<p>Papers already stored for the PI that a later generation found again without an ORCID
-anchor, and that no one has kept, accepted or excluded.</p>
+<h3>Withheld papers</h3>
 <p>
-    Only papers on this list can be excluded from the page. A wrong paper that the PI's
-    ORCID record confirms, or a work stored without a PubMed record, has no Exclude
-    button, and no page in the Workspace can exclude it.
+    The card's note reads: "Listed on the PI's ORCID record, or carrying the PI's ORCID iD in
+    PubMed, but the PubMed author list does not name the PI. Accept stores the paper. A
+    rejected paper is not offered again, but a later generation stores it if its PubMed
+    author list comes to name the PI." A withheld paper's stages include
+    <strong>s1</strong> or <strong>s3</strong>. Under the list, "Latest generation:" repeats
+    what the newest generation said about the papers it withheld.
 </p>
 <ul>
+    <li><strong>Accept</strong> fetches the paper from PubMed and adds it to the PI's
+        papers, as for a candidate.</li>
+    <li><strong>Reject</strong> stops the paper being offered again.</li>
+</ul>
+{% call careful() %}
+<p>
+    Accept and Reject of a withheld paper have no undo button, as for a candidate. Open the
+    PMID link and check the authors before you decide.
+</p>
+{% endcall %}
+<h3>Unanchored papers</h3>
+<p>Papers already stored for the PI that a later generation found without an ORCID
+anchor, or found no longer tied to the PI after a complete search, and that no one has kept, accepted or excluded.</p>
+<p><strong>Exclude</strong> is on every paper in the PI page's Publications list; <strong>Keep</strong> is only here.</p>
+<ul>
     <li><strong>Keep</strong> marks the paper as checked; the page says "Kept." It changes
-        nothing the profile says, but the paper leaves this list, is no longer offered for
-        Exclude, and later profile runs do not exclude it.</li>
+        nothing the profile says, but the paper leaves this list, and later profile runs do
+        not exclude or move it.</li>
     <li><strong>Exclude</strong> removes the paper from the profile and the persona;
         Blackbird ignores it everywhere from then on. The page says "Paper excluded."</li>
 </ul>
 <h3>Excluded papers</h3>
 <p>
     The collapsed <strong>Excluded papers</strong> list shows every excluded paper, with the
-    time it was excluded. It can also hold papers Blackbird excluded itself, such as an
-    earlier version of a paper or a work stored without a PubMed record that PubMed has
-    since indexed. <strong>Restore</strong> puts a paper back, and the page
-    says "Paper restored to the corpus."
+    time it was excluded and why:
+</p>
+<ul>
+    <li>"excluded by staff": someone pressed <strong>Exclude</strong>;</li>
+    <li>"an updated or superseded version is stored";</li>
+    <li>"PubMed now has this work": a work stored without a PubMed record that PubMed has
+        since indexed, or whose PubMed copy was accepted;</li>
+    <li>"same title as a newer paper";</li>
+    <li>"PubMed lists a publication type Blackbird leaves out", also used for a work
+        OpenAlex marks retracted;</li>
+    <li>"OpenAlex no longer ties it to the PI";</li>
+    <li>"excluded by a corpus repair";</li>
+    <li>"excluded before reasons were recorded": excluded before Blackbird kept the reason.</li>
+</ul>
+<p>
+    <strong>Restore</strong> puts a paper back, and the page says "Paper restored to the
+    corpus." A paper a person excluded comes back as it was. A paper Blackbird excluded comes
+    back as kept by staff, and later generations leave it alone. Accepting a candidate whose
+    copy without a PMID is stored moves that copy here, and the page says "Paper added to the
+    corpus. Its copy stored without a PMID moved to Excluded papers."
 </p>
 {% call careful() %}
 <p>
     Accept, Exclude and Restore each rewrite the persona straight away and record a persona
     revision. The research summary itself changes only at the next profile generation.
-    Exclude can be undone with Restore; Keep cannot be undone.
+    Exclude can be undone with Restore; Keep cannot be undone. Exclude works the same from the Publications list and from this card.
 </p>
 {% endcall %}
-{{ figure(request, "pi-paper-review", "The Corpus and profile review card with candidate and unanchored papers.") }}
+{{ figure(request, "pi-paper-review", "The Corpus and profile review card with the latest generation notes and candidate, withheld and unanchored papers.") }}
 
 <h2 id="drafts">Pending drafts</h2>
 <p>
@@ -563,6 +614,14 @@ anchor, and that no one has kept, accepted or excluded.</p>
         dead profile generation, use <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='regenerate') }}">Retry profile generation</a> or
         Regenerate profile.</li>
 </ul>
+<h3>Latest generation notes</h3>
+<p>
+    The <strong>Corpus and profile review</strong> card shows, under
+    <strong>Latest generation notes</strong>, the newest profile generation's notable steps,
+    each with a label such as "Stored papers re-checked", "Papers withheld" or "Duplicate
+    titles excluded", and when that generation was queued. It says "Nothing to note." when
+    the generation had none.
+</p>
 
 <h2 id="slack-bot">Installing the Slack bot</h2>
 <p>

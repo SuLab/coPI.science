@@ -110,3 +110,23 @@ async def test_the_dry_run_applies_the_thin_record_fallback(db_session, monkeypa
 
     [context] = contexts
     assert "First stored paper" in context and "Second stored paper" in context
+
+
+async def test_stored_methods_come_from_the_context_selection(db_session, monkeypatch):
+    mod = _load()
+    seen = {}
+
+    def capture(**kwargs):
+        seen.update(kwargs)
+        return "context"
+
+    monkeypatch.setattr(mod, "_build_synthesis_context", capture)
+    user = await factories.make_user(db_session)
+    db_session.add_all([
+        Publication(user_id=user.id, pmid=str(1000 + i), title=f"Paper {i}", abstract="A.",
+                    year=2040 - i, methods_text=f"Methods {i}." if i >= 30 else None)
+        for i in range(40)
+    ])
+    await db_session.flush()
+    await mod.build_context(db_session, user)
+    assert seen["methods_by_pmid"] == {}

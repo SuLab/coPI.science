@@ -25,7 +25,8 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from typing import Any, Literal
 
 from src.models.publication import PROVENANCE_OPENALEX
-from src.services.corpus import CorpusResult, _normalize_title
+from src.services.corpus import CorpusResult
+from src.services.corpus_additions import same_paper_by_title, title_key
 from src.services.jhu_rules import is_hopkins_affiliation
 from src.services.openalex import fetch_orcid_authorships, fetch_work_by_doi
 from src.services.pubmed import _doi_fold, normalize_doi
@@ -84,6 +85,8 @@ async def collect_non_pubmed_works(
     enriched_dois: frozenset[str] = frozenset(), pi_orcid: str | None = None,
     institutions: Sequence[str] = (), authorship_lookup: AuthorshipLookup | None = None,
     unattributed: list[str] | None = None,
+    prefetched_authorships: Mapping[str, dict[str, Any] | None] | None = None,
+    retracted: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """The storable non-PubMed works of one resolve, newest first. Each record is
     ``{"doi", "title", "abstract", "journal", "year", "provenance"}``: ``doi`` in its source's
@@ -106,7 +109,12 @@ async def collect_non_pubmed_works(
     publisher's metadata carries ``pi_orcid``. The authorships come from one
     ``authorship_lookup(pi_orcid)`` (default ``fetch_orcid_authorships``, one charged request per page), made only when such a work
     exists; its failure RAISES. With no ``pi_orcid`` no "openalex" work is kept. The DOIs of
-    the works dropped this way are appended to ``unattributed`` when it is given."""
+    the works dropped this way are appended to ``unattributed`` when it is given.
+    ``prefetched_authorships`` (folded DOI -> authorship, from ``orcid_authorships_by_doi``)
+    replaces the authorship request, so a run makes at most one. ``retracted`` receives the
+    folded DOI of every work whose OpenAlex record, from S2 or a singleton lookup, is
+    retracted (F28). Each record may carry ``"duplicate_of"``: the DOI of the kept record it
+    is the same paper as (``_one_per_title``)."""
     lookup = lookup or fetch_work_by_doi
     s2 = _by_doi(result.openalex_works, result.pubmed_dois)
     listed = _by_doi(result.orcid_works, result.pubmed_dois)
@@ -117,11 +125,16 @@ async def collect_non_pubmed_works(
     )
     for fold in missing[:MAX_DOI_LOOKUPS]:
         looked_up[fold] = await lookup(listed[fold]["doi"])
-    authorships: dict[str, dict[str, Any] | None] | None = None
+    authorships: dict[str, dict[str, Any] | None] | None = (
+        dict(prefetched_authorships) if prefetched_authorships is not None else None
+    )
     records = []
     for fold in sorted({*s2, *listed}):
         if fold in enriched_dois and fold not in s2:
             continue  # stored with an abstract; nothing new without a lookup
+        oa = s2.get(fold) or looked_up.get(fold) or {}
+        if retracted is not None and oa.get("is_retracted"):
+            retracted.add(fold)
         record = _record(listed.get(fold), s2.get(fold), looked_up.get(fold))
         if record is None:
             continue
@@ -136,13 +149,29 @@ async def collect_non_pubmed_works(
     return _newest_first(_one_per_title(records))
 
 
+async def orcid_authorships_by_doi(pi_orcid: str) -> dict[str, dict[str, Any] | None]:
+    """The PI's OpenAlex authorships keyed by folded DOI, from ONE
+    ``fetch_orcid_authorships(pi_orcid)`` call (one charged list request per page of 200
+    works, at most 5 pages; the first entry of a repeated DOI wins). Raises what that call
+    raises, JobDeferred included. Shared by the pipeline's re-check (contract C4, F27), the
+    thin-path collection and scripts/openalex_attribution_report.py."""
+    found = await fetch_orcid_authorships(pi_orcid)
+    out: dict[str, dict[str, Any] | None] = {}
+    for doi, authorship in found.items():
+        if doi := normalize_doi(doi):
+            out.setdefault(_doi_fold(doi), authorship)
+    return out
+
+
 async def _authorships(
     pi_orcid: str | None, authorship_lookup: AuthorshipLookup | None,
 ) -> dict[str, dict[str, Any] | None]:
     """The PI's authorships by folded DOI; empty without an ORCID."""
     if not pi_orcid:
         return {}
-    found = await (authorship_lookup or fetch_orcid_authorships)(pi_orcid)
+    if authorship_lookup is None:
+        return await orcid_authorships_by_doi(pi_orcid)
+    found = await authorship_lookup(pi_orcid)
     out: dict[str, dict[str, Any] | None] = {}
     for doi, authorship in found.items():
         if doi := normalize_doi(doi):
@@ -345,14 +374,25 @@ def _rank(rec: dict[str, Any]) -> tuple:
 
 
 def _one_per_title(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """One record per normalised title (spec §5.2): the published version over its preprint."""
-    best: dict[str, dict[str, Any]] = {}
-    for rec in records:
-        key = _normalize_title(rec["title"]) or f"doi:{_doi_fold(rec['doi'])}"
-        held = best.get(key)
-        if held is None or _rank(rec) < _rank(held):
-            best[key] = rec
-    return list(best.values())
+    """Every record, in ``_rank`` order (later year, then ORCID-listed, then lower DOI). A
+    record that is the same paper by title (``corpus_additions.same_paper_by_title``: a
+    title key of at least TITLE_KEY_MIN_CHARS characters, years at most SAME_PAPER_YEARS
+    apart) as an already-kept record is returned with ``"duplicate_of"``: that keeper's
+    DOI, rather than dropped, so storage keeps it excluded (Q13). A short title never
+    marks one."""
+    out: list[dict[str, Any]] = []
+    keepers: dict[str, list[dict[str, Any]]] = {}
+    for rec in sorted(records, key=_rank):
+        key = title_key(rec["title"])
+        keeper = next((k for k in keepers.get(key, []) if same_paper_by_title(
+            k["title"], k.get("year"), rec["title"], rec.get("year"))), None) if key else None
+        if keeper is None:
+            if key:
+                keepers.setdefault(key, []).append(rec)
+            out.append(rec)
+        else:
+            out.append({**rec, "duplicate_of": keeper["doi"]})
+    return out
 
 
 def _newest_first(records: list[dict[str, Any]]) -> list[dict[str, Any]]:

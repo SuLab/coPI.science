@@ -250,14 +250,21 @@ async def _both_resolve(monkeypatch, world):
 #: CorpusResult fields the frozen oracle predates (spec 2026-10-09 §5.2): inputs to the
 #: non-PubMed collection, not part of the PubMed path this oracle pins.
 _NON_PUBMED_FIELDS = frozenset({"orcid_works", "openalex_works", "pubmed_dois"})
+#: Fields the frozen oracle predates (publication handling Phase 4): skipped, and the flagged
+#: entries' "year" key is removed before comparing.
+_PHASE4_FIELDS = frozenset({"stage_map", "type_excluded", "title_duplicates",
+                            "title_duplicate_records"})
 
 
 def _assert_same_result(new, old):
     assert isinstance(new, corpus.CorpusResult) and isinstance(old, corpus.CorpusResult), (new, old)
     for f in dataclasses.fields(corpus.CorpusResult):
-        if f.name in _NON_PUBMED_FIELDS:
+        if f.name in _NON_PUBMED_FIELDS or f.name in _PHASE4_FIELDS:
             continue
-        assert _ordered(getattr(new, f.name)) == _ordered(getattr(old, f.name)), f.name
+        got = getattr(new, f.name)
+        if f.name == "flagged":
+            got = [{k: v for k, v in entry.items() if k != "year"} for entry in got]
+        assert _ordered(got) == _ordered(getattr(old, f.name)), f.name
 
 
 def _mixed_world(**overrides) -> _World:
@@ -288,10 +295,10 @@ def _mixed_world(**overrides) -> _World:
     add(161, kind="consortium")
     add(162, pub_type="Published Erratum")
     add(163, kind="other")
-    add(170, title="Shared title", year=2010)
-    add(171, title="Shared title", year=2010)
-    add(172, title="Another shared title", year=2011)
-    add(173, title="Another shared title", year=2012)
+    add(170, title="A shared title long enough to compare", year=2010)
+    add(171, title="A shared title long enough to compare", year=2010)
+    add(172, title="Another shared title long enough here", year=2011)
+    add(173, title="Another shared title long enough here", year=2012)
     add(301, kind="full_aff")
     add(302, kind="full_other")         # S4-only, affiliation present and wrong: flagged
     add(303, kind="full_noaff")         # S4-only, no affiliation: kept (institution searched)

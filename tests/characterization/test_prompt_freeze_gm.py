@@ -40,6 +40,19 @@ serialiser (R2.12, main PM-9), and the `.ambr` diff must be exactly the line bre
 puts between the `Methods` title and its two paragraphs in `with_pmc_methods`, reviewed
 line by line. It licenses no other regeneration, and `test_agent_turn_gm.ambr` is not
 touched by it.
+
+A fifth owner-approved exception (Q16 of the 2026-10-15 publication-handling design, Phase 4):
+`test_profile_synthesis_request_gm` is regenerated once, for the `<publication_abstract>` and
+`<methods_section>` fences and the synthesis data notice. Its `.ambr` diff must be exactly the
+30 fenced abstracts, the 2 fenced methods texts and the notice ending the user message,
+reviewed line by line. It licenses no other regeneration, and `test_agent_turn_gm.ambr` is not
+touched by it.
+
+An owner-approved fixture change (2026-10-15, Phase 4 integration): `test_export_via_pipeline_gm`
+seeds its stored profile with `evidence_pub_count=0`, a known zero. Under PIPE-15 a NULL stored
+count is protected, which would keep the stored text and so change what this entry pins; with a
+known zero the fake zero-evidence synthesis is applied as before, and the snapshot is unchanged.
+PIPE-15's NULL case is pinned by `test_a_null_stored_count_is_protected`.
 """
 import json
 import uuid
@@ -813,7 +826,9 @@ def _exported(export_dir, agent):
 
 async def test_export_via_pipeline_gm(snapshot, db_session, export_dir, monkeypatch):
     _install_fakes(monkeypatch)
-    user, _profile, agent = await _seed_export_pi(db_session, n=1)
+    user, profile, agent = await _seed_export_pi(db_session, n=1)
+    profile.evidence_pub_count = 0  # a known zero, not NULL (see the module docstring)
+    await db_session.flush()
     callbacks = []
     await profile_pipeline.run_profile_pipeline(user.id, db_session, after_commit=callbacks)
     assert not (export_dir / f"{agent.agent_id}.md").exists(), (

@@ -183,8 +183,10 @@ For how the parts fit together, read
     {% if permissions.staff %}
     <dt id="term-excluded-papers">Excluded papers</dt>
     <dd>Papers taken out of a PI's profile and persona, by a manager with
-    <strong>Exclude</strong> or by Blackbird itself as an earlier version or a copy of a
-    stored paper. <strong>Restore</strong> puts one back.</dd>
+    <strong>Exclude</strong> or by Blackbird itself: as an earlier version or a copy of a
+    stored paper, as a retraction or a similar publication type, as a work OpenAlex marks
+    retracted or no longer ties to the PI, or by a corpus repair. Each row says why.
+    <strong>Restore</strong> puts one back.</dd>
     {% endif %}
 
     <dt id="term-feedback">Feedback</dt>
@@ -447,12 +449,13 @@ For how the parts fit together, read
 
     {% if permissions.staff %}
     <dt id="term-stages">Stages</dt>
-    <dd>On a candidate paper's row, a list such as <strong>s2,s4</strong> naming the searches
+    <dd>On a candidate or withheld paper's row, a list such as <strong>s2,s4</strong> naming the searches
     that found it: <strong>s1</strong> is the PI's ORCID works, <strong>s2</strong> OpenAlex's works
     for the PI's ORCID iD, <strong>s3</strong> PubMed papers carrying the PI's ORCID iD and
     <strong>s4</strong> PubMed by name at the PI's recorded institution. A paper found by
     <strong>s1</strong> or <strong>s3</strong> is anchored, so a candidate normally shows only
-    <strong>s2</strong> and <strong>s4</strong>, alone or together. See
+    <strong>s2</strong> and <strong>s4</strong>, alone or together, and a withheld paper
+    shows <strong>s1</strong> or <strong>s3</strong>. See
     <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='finding-papers') }}">How papers are found and kept</a>.</dd>
     {% endif %}
 
@@ -477,9 +480,10 @@ For how the parts fit together, read
 
     {% if permissions.staff %}
     <dt id="term-unanchored-papers">Unanchored papers</dt>
-    <dd>Stored papers that nothing ties to the PI's ORCID iD. <strong>Keep</strong> marks
-    one as checked; <strong>Exclude</strong> takes it out of the profile and the
-    persona.</dd>
+    <dd>Stored papers that nothing ties to the PI's ORCID iD, including papers a generation
+    found no longer tied to the PI or whose author list no longer names them.
+    <strong>Keep</strong> marks one as checked; <strong>Exclude</strong> takes it out of the
+    profile and the persona.</dd>
     {% endif %}
 
     <dt id="term-unreviewed-reviewed">Unreviewed, Reviewed</dt>
@@ -509,5 +513,14 @@ For how the parts fit together, read
     BlackbirdBot's own account of why the idea scored as it did. On an assessment's page, a
     box in the brief with that account only, shown when BlackbirdBot recorded one; the score
     and band are in the Verdict card.</dd>
+
+    {% if permissions.staff %}
+    <dt id="term-withheld-papers">Withheld papers</dt>
+    <dd>Papers the PI's ORCID record or PubMed's ORCID field ties to the PI but whose PubMed
+    author list does not name them. They are not stored until staff press
+    <strong>Accept</strong> on the PI's page; <strong>Reject</strong> stops one being
+    offered again. See
+    <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='paper-review') }}">Reviewing papers</a>.</dd>
+    {% endif %}
 </dl>
 {% endblock %}

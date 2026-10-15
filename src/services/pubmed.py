@@ -6,7 +6,7 @@ import json
 import logging
 import re
 import xml.etree.ElementTree as ET
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -1172,6 +1172,72 @@ async def convert_pmids_to_pmcids(pmids: list[str]) -> dict[str, str]:
         except Exception as exc:
             logger.warning("Failed to convert PMIDs to PMCIDs: %s", exc)
     return mapping
+
+
+#: idconv's errmsg for a PMID PubMed Central does not hold: the one positive "absent"
+#: answer (tests/live_api/test_pubmed_live.py pins it against the live service).
+IDCONV_ABSENT = "Identifier not found in PMC"
+
+
+@dataclass(frozen=True)
+class PmcidLookup:
+    """``lookup_pmcids``'s answer: ``found`` maps a PMID to its PMCID, ``absent`` holds the
+    PMIDs idconv positively reported as not in PMC. A PMID in neither got no clear answer."""
+
+    found: dict[str, str]
+    absent: frozenset[str]
+
+
+def classify_idconv(
+    batch: Sequence[str], payload: Mapping[str, Any],
+) -> dict[str, tuple[str, str | None]]:
+    """Pure: each requested PMID's idconv verdict, ``("pmcid", value)``, ``("absent", None)``
+    or ``("unknown", why)``. Records are matched by ``requested-id``: an error record is
+    "absent" only for IDCONV_ABSENT and "unknown" for any other errmsg; a record whose
+    ``pmid`` is not the requested id is "unknown"; a PMID with no record is "unknown"."""
+    verdicts: dict[str, tuple[str, str | None]] = {
+        str(p): ("unknown", "no-record") for p in batch
+    }
+    for record in payload.get("records") or []:
+        if not isinstance(record, Mapping):
+            continue
+        requested = str(record.get("requested-id", ""))
+        if requested not in verdicts:
+            continue
+        if record.get("status") == "error":
+            errmsg = record.get("errmsg")
+            verdicts[requested] = (
+                ("absent", None) if errmsg == IDCONV_ABSENT else ("unknown", str(errmsg))
+            )
+        elif str(record.get("pmid")) != requested:
+            verdicts[requested] = ("unknown", f"pmid-mismatch:{record.get('pmid')}")
+        elif record.get("pmcid"):
+            verdicts[requested] = ("pmcid", str(record["pmcid"]))
+        else:
+            verdicts[requested] = ("absent", None)
+    return verdicts
+
+
+async def lookup_pmcids(pmids: Sequence[str]) -> PmcidLookup:
+    """idconv over ``pmids`` in chunks of 200 (``_ncbi_get``), classified by
+    ``classify_idconv``. A chunk whose request or body fails is logged at WARNING and its
+    PMIDs land in neither set, so no caller clears a PMCID on a failure. Never raises."""
+    found: dict[str, str] = {}
+    absent: set[str] = set()
+    for i in range(0, len(pmids), 200):
+        batch = [str(p) for p in pmids[i : i + 200]]
+        try:
+            resp = await _ncbi_get(IDCONV_BASE, {"ids": ",".join(batch), "format": "json"})
+            verdicts = classify_idconv(batch, resp.json())
+        except Exception as exc:  # a failed chunk is "no answer", never an error
+            logger.warning("idconv lookup of %d PMIDs failed: %s", len(batch), exc)
+            continue
+        for pmid, (kind, value) in verdicts.items():
+            if kind == "pmcid" and value:
+                found[pmid] = value
+            elif kind == "absent":
+                absent.add(pmid)
+    return PmcidLookup(found=found, absent=frozenset(absent))
 
 
 async def fetch_pmc_methods(pmcid: str) -> str | None:

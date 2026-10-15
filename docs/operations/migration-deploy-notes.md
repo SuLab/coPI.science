@@ -1510,3 +1510,53 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > - Rows stored by a Phase 3 run in the meantime stay: they are ordinary anchored rows.
 >
 > Rollback: re-tag each `:rollback-pre-phase3` as `:latest`, then `$DC up -d blackbird-app worker`. There is no schema to undo; rows stored by a Phase 3 run in the meantime are ordinary anchored rows and stay.
+
+> **Deploy order for `0068_publication_excluded_reason` — migrate BEFORE the new web and
+> worker images serve, with the worker idle or stopped; rebuild `blackbird-app` and `worker`
+> only; no backfill.** `0068` adds `publications.excluded_reason` (VARCHAR(32), nullable) and
+> the CHECK `ck_publications_excluded_reason`, which admits NULL or one of `staff`,
+> `superseded`, `pubmed_twin`, `duplicate_title`, `publication_type`, `openalex_affiliation`
+> and `repair_script`. Every exclusion now records why, and staff Restore follows the reason.
+> Design: the 2026-10-15 publication-handling design, Phase 4.
+>
+> *Old code on the new schema* is safe: it never reads or writes the column, and the CHECK
+> admits NULL. *New code on the old schema* is not: `Publication` maps the column, so every
+> publication read on the web app and the worker raises `UndefinedColumn` (the PI pages and
+> every profile generation). **Agent image:** the engine never queries `publications`, so the
+> agent is not rebuilt with this revision. **No backfill:** a row excluded before `0068`
+> keeps a NULL reason, and Restore judges it by `excluded_by_user_id`, as before.
+>
+> **Lock.** Adding the CHECK validates it by scanning `publications` under ACCESS EXCLUSIVE.
+> The worker holds one transaction across a profile pipeline run that writes `publications`,
+> so migrate with no `processing` job (or `$DC stop worker`), or the chain's 10 s
+> `lock_timeout` rolls the apply back. PI pages queue behind the lock while the apply waits.
+>
+>     DC="docker compose -f docker-compose.prod.yml"
+>     git status --porcelain --untracked-files=all -- src templates static prompts alembic \
+>         scripts help_assets pyproject.toml alembic.ini   # must print nothing (commit first)
+>     .venv-test/bin/python -m tests.e2e.help_shots.capture --check   # no stale or missing shots
+>     # Rollback point: tag the image each container RUNS, not :latest, which the build overwrites.
+>     for s in blackbird-app worker; do
+>       docker image tag "$(docker inspect -f '{{.Image}}' "$($DC ps -q $s)")" \
+>         copi-blackbird-$s:rollback-pre-pub4
+>     done
+>     $DC build blackbird-app worker
+>     docker image tag copi-blackbird-blackbird-app:latest copi-blackbird-blackbird-app:pub4-0068
+>     $DC exec -T postgres psql -U copi -d copi -c \
+>       "select count(*) from jobs where status='processing'"   # must be 0, else $DC stop worker
+>     ./scripts/migrate/run_migration.sh                   # rehearse
+>     ./scripts/migrate/run_migration.sh --apply
+>     $DC up -d blackbird-app worker
+>
+> Do not touch `agent`, and never start a simulation run.
+>
+> Rollback: re-tag each `:rollback-pre-pub4` as `:latest`, then `$DC up -d blackbird-app worker`.
+> `0068` stays applied: old code never reads the column. **Never downgrade first**: the new
+> images would then fail on every publication read. If the feature is reverted in git, keep
+> `alembic/versions/0068_publication_excluded_reason.py` in the tree or downgrade first:
+> without the file every later preflight BLOCKs on a stamp of `0068`. To downgrade, after the
+> old images serve, run `alembic downgrade 0067` in a one-off `docker run --rm` container off
+> `copi-blackbird-blackbird-app:pub4-0068`, on the compose network with the stack's `.env`
+> (`$DC run` and `run_migration.sh` always use `:latest`, which is then the old image). The
+> downgrade discards every recorded reason. **Never reuse revision id `0068`**, whatever
+> happens to this feature.

@@ -11,7 +11,7 @@ before any removal/addition decision is made (D8, plan Task 3). Unlike the retir
 before re-inserting, this one never bulk-deletes and never
 removes a row without printing its evidence first.
 
-Removal set (automatic, still gated on --apply):
+Exclusion set (automatic, still gated on --apply; nothing is ever deleted):
   - every stored row but the first (by ``created_at``, then ``id``) that
     shares an identical PMID (``duplicate_pmid`` — observed, not enforced, until
     migration 0056 adds ``uq_publications_user_pmid``);
@@ -21,9 +21,9 @@ Removal set (automatic, still gated on --apply):
     other type alongside (``excluded_type``); a row carrying a non-excluded
     type too (e.g. ``Comment`` + ``Journal Article``) is routed to review
     instead (``secondary_excluded_type``), never auto-removed (D4);
-  - the earlier member of each duplicate-title group among the survivors,
-    using ``resolve_corpus``'s own rule: normalize the title, keep the higher
-    year, tiebreak on the higher PMID (``duplicate_title``).
+  - the older member of each same-paper pair among the survivors, by the pipeline's own
+    rule (``corpus_additions.same_paper_by_title``: a long enough title and years close
+    together; the newer, then the higher PMID, is kept) (``duplicate_title``).
 
 Review set (``--review``, NEVER applied automatically):
   - rows whose only identity evidence is a bare single-letter forename/initial
@@ -48,6 +48,13 @@ OpenAlex or name+affiliation search alone go to review as ``unanchored_addition`
 Each PI is applied under the persona and corpus locks, and its persona is re-exported
 after the commit (spec 2026-10-05 §4.3).
 
+``--apply`` never deletes (Q4 of the 2026-10-15 publication-handling design). Each exclusion
+sets ``excluded_at`` and ``excluded_reason = 'repair_script'`` through
+``corpus_additions.exclude_by_system``; the row is kept, and staff Restore on the manager PI
+page undoes it (the row then turns ``manual``). ``manual`` and excluded rows are never read,
+and the count of them is printed. The matcher reads a row's ORCID anchor from its provenance
+(stage s1 or s3), as the pipeline's gate reads a record's stages.
+
 Usage (run via ``docker compose -f docker-compose.prod.yml run --rm --no-deps -T
 blackbird-app``, never ``exec`` — the running container may still hold the
 pre-fix matcher, plan Task 4):
@@ -58,7 +65,7 @@ pre-fix matcher, plan Task 4):
     # Preview one PI, print the review report too:
     python scripts/repair_pi_corpus.py --orcid 0000-0000-0000-0000 --review
 
-    # Apply only the automatic removals for two PIs:
+    # Apply only the automatic exclusions for two PIs (the scope keeps its name):
     python scripts/repair_pi_corpus.py --orcid 0000-... --orcid 0000-... \\
         --only removals --apply
 
@@ -88,11 +95,12 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import delete, or_, select  # noqa: E402
+from sqlalchemy import func, or_, select  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from src.database import get_session_factory  # noqa: E402
 from src.models import AgentRegistry, Publication, User  # noqa: E402
+from src.models.publication import EXCLUDED_REASON_REPAIR_SCRIPT, PROVENANCE_MANUAL  # noqa: E402
 from src.services import openalex_budget  # noqa: E402
 from src.services.corpus import (  # noqa: E402
     EXCLUDED_TYPES,
@@ -105,11 +113,15 @@ from src.services.corpus import (  # noqa: E402
     resolve_corpus,
 )
 from src.services.corpus_additions import (  # noqa: E402
+    ANCHOR_STAGES,
     bounded_publication_fields,
+    exclude_by_system,
     lock_corpus,
     provenance_for,
     reconcile_record_doi,
+    same_paper_by_title,
     select_corpus_additions,
+    title_key,
 )
 from src.services.job_queue import JobDeferred  # noqa: E402
 from src.services.profile_publish import (  # noqa: E402
@@ -142,6 +154,7 @@ class StoredPublication:
     pmid: str | None
     title: str
     year: int | None
+    provenance: str | None = None
 
 
 @dataclass(frozen=True)
@@ -175,6 +188,7 @@ class PiRepairPlan:
     # candidate reconcile_record_doi checks against the PubMed record's DOI.
     orcid_dois: dict[str, str] = field(default_factory=dict)
     additions_error: str | None = None
+    skipped: int = 0  # manual or excluded rows, never read
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +284,12 @@ def _record_has_surname(record: dict[str, Any], pi_name: str) -> bool:
     return False
 
 
+def _row_is_anchored(pub: StoredPublication) -> bool:
+    """The stored row's provenance names an ORCID anchor stage (s1 or s3): the matcher then
+    judges it as the pipeline's gate judges an anchored record (R3.8)."""
+    return bool(set((pub.provenance or "").split(",")) & ANCHOR_STAGES)
+
+
 def classify_stored_publications(
     stored: Sequence[StoredPublication],
     refetched: dict[str, dict[str, Any]],
@@ -282,7 +302,8 @@ def classify_stored_publications(
 
     ``pi_orcid`` is passed to the matcher so rows the pipeline stored through its
     ORCID-first pass (an author carrying the PI's ORCID, surname matching) classify
-    the same way here; None means name-only matching."""
+    the same way here; None means name-only matching. A row's ORCID anchor comes from
+    its provenance (``_row_is_anchored``)."""
     removals: list[RemovalCandidate] = []
     review: list[ReviewCandidate] = []
     survivors: list[tuple[StoredPublication, dict[str, Any]]] = []
@@ -312,7 +333,7 @@ def classify_stored_publications(
             )
             continue
 
-        # Deleting a stored row is one-way, so auto-removal is reserved for
+        # An exclusion takes a row out of every reader until staff restore it, so auto-exclusion is reserved for
         # the ONE case where the record positively contradicts the
         # attribution: it lists authors, and none of them carries the PI's
         # surname. Everything weaker goes to review. The 2026-09-22 dry run
@@ -332,7 +353,8 @@ def classify_stored_publications(
         # declines to ADD one (R1, not individual lab output), which is a very
         # different act from deleting one somebody already verified.
         authors = record.get("authors") or []
-        kind, _ = match_pi_author(record, pi_name, pi_orcid)
+        anchored = _row_is_anchored(pub)
+        kind, _ = match_pi_author(record, pi_name, pi_orcid, anchored=anchored)
         if kind != "individual":
             if not authors:
                 reason = "unverifiable_no_authors"
@@ -397,7 +419,7 @@ def classify_stored_publications(
             )
             continue
 
-        if _match_pi_author_detail(record, pi_name, pi_orcid)[2]:
+        if _match_pi_author_detail(record, pi_name, pi_orcid, anchored=anchored)[2]:
             review.append(
                 ReviewCandidate(
                     publication_id=pub.id,
@@ -420,46 +442,38 @@ def classify_stored_publications(
 def find_duplicate_title_removals(
     survivors: Sequence[tuple[StoredPublication, dict[str, Any]]],
 ) -> tuple[list[RemovalCandidate], list[tuple[StoredPublication, dict[str, Any]]]]:
-    """``resolve_corpus``'s title dedupe rule, applied to the survivor set:
-    group by normalized title, keep the later record (higher year, tiebreak
-    higher PMID), and remove the rest of the group. The title rule only: the
-    superseded-version rule of ``resolve_corpus`` (``update_of``/``updated_in``)
-    is not applied here."""
-    groups: dict[str, list[tuple[StoredPublication, dict[str, Any]]]] = {}
-    for pub, record in survivors:
-        title = record.get("title") or pub.title
-        key = normalize_title(title) or f"pmid:{pub.pmid}"
-        groups.setdefault(key, []).append((pub, record))
+    """The pipeline's same-paper title rule (``corpus_additions.same_paper_by_title``: a
+    title key of at least TITLE_KEY_MIN_CHARS characters, years at most SAME_PAPER_YEARS
+    apart) over the survivor set. Survivors are walked newest first (the refetched year,
+    else the stored one; then the higher PMID); one that is the same paper as an
+    already-kept survivor is a ``duplicate_title`` exclusion. A short title such as
+    "Introduction", or years further apart, never merges. The superseded-version rule of
+    ``resolve_corpus`` is not applied here."""
+    def year_of(item: tuple[StoredPublication, dict[str, Any]]) -> int | None:
+        return item[1].get("year") or item[0].year
 
+    def title_of(item: tuple[StoredPublication, dict[str, Any]]) -> str:
+        return item[1].get("title") or item[0].title
+
+    ordered = sorted(survivors, key=lambda item: (
+        year_of(item) is None, -(year_of(item) or 0), -pmid_sort_key(item[0].pmid)))
     removals: list[RemovalCandidate] = []
     kept: list[tuple[StoredPublication, dict[str, Any]]] = []
-    for group in groups.values():
-        if len(group) < 2:
-            kept.append(group[0])
+    by_key: dict[str, list[tuple[StoredPublication, dict[str, Any]]]] = {}
+    for item in ordered:
+        key = title_key(title_of(item))
+        keeper = next((k for k in by_key.get(key, []) if same_paper_by_title(
+            title_of(k), year_of(k), title_of(item), year_of(item))), None) if key else None
+        if keeper is None:
+            kept.append(item)
+            if key:
+                by_key.setdefault(key, []).append(item)
             continue
-        winner = max(
-            group,
-            key=lambda item: (
-                item[1].get("year") or item[0].year or 0,
-                pmid_sort_key(item[0].pmid),
-            ),
-        )
-        kept.append(winner)
-        for pub, _record in group:
-            if pub is winner[0]:
-                continue
-            removals.append(
-                RemovalCandidate(
-                    publication_id=pub.id,
-                    pmid=pub.pmid,
-                    reason="duplicate_title",
-                    title=pub.title,
-                    evidence={
-                        "kept_publication_id": winner[0].id,
-                        "kept_pmid": winner[0].pmid,
-                    },
-                )
-            )
+        pub = item[0]
+        removals.append(RemovalCandidate(
+            publication_id=pub.id, pmid=pub.pmid, reason="duplicate_title", title=pub.title,
+            evidence={"kept_publication_id": keeper[0].id, "kept_pmid": keeper[0].pmid},
+        ))
     return removals, kept
 
 
@@ -496,6 +510,10 @@ async def load_stored_publications(
                     # Not the non-PubMed corpus (spec 2026-10-09 §5.7): a PMID-less row with a
                     # provenance was stored by a run on purpose, not left behind by PubMed.
                     or_(Publication.pmid.isnot(None), Publication.provenance.is_(None)),
+                    # Never read a row a person kept or accepted, or an excluded row (Q4).
+                    Publication.excluded_at.is_(None),
+                    or_(Publication.provenance.is_(None),
+                        Publication.provenance != PROVENANCE_MANUAL),
                 )
                 .order_by(Publication.created_at, Publication.id)
             )
@@ -504,9 +522,22 @@ async def load_stored_publications(
         .all()
     )
     return [
-        StoredPublication(id=str(p.id), pmid=p.pmid, title=p.title or "", year=p.year)
+        StoredPublication(
+            id=str(p.id), pmid=p.pmid, title=p.title or "", year=p.year, provenance=p.provenance
+        )
         for p in rows
     ]
+
+
+async def count_untouchable_publications(db: AsyncSession, user_id: uuid.UUID) -> int:
+    """The PI's rows the repair never reads: ``manual`` rows and excluded rows (Q4)."""
+    return await db.scalar(
+        select(func.count()).select_from(Publication).where(
+            Publication.user_id == user_id,
+            or_(Publication.excluded_at.isnot(None),
+                Publication.provenance == PROVENANCE_MANUAL),
+        )
+    ) or 0
 
 
 async def refetch_pmids(pmids: Sequence[str]) -> dict[str, dict[str, Any]]:
@@ -530,6 +561,7 @@ async def build_plan_for_pi(
         user_id=user.id, orcid=user.orcid, name=user.name, agent_id=agent_id
     )
     stored = await load_stored_publications(db, user.id)
+    plan.skipped = await count_untouchable_publications(db, user.id)
     # Read-only phase done: end the transaction so no connection sits idle in
     # transaction across the PubMed/OpenAlex/ORCID round trips below.
     await db.commit()
@@ -590,10 +622,12 @@ async def _apply_plan(db: AsyncSession, plan: PiRepairPlan) -> bool:
     when it failed for all 73 PIs and wrote nothing. Committing per PI keeps
     the same atomicity and the same failure isolation.
 
-    The corpus advisory lock is taken first and held to the commit, so a
-    concurrent profile-pipeline run cannot interleave its publication writes.
-    The stored PMIDs are re-read under that lock: an addition that landed since
-    planning is skipped rather than inserted twice.
+    The persona writer and corpus locks are taken first and held to the commit, and the
+    removal rows are re-read by id under them: a row staff kept (``manual``) or excluded
+    since planning is skipped. A removal is an exclusion with reason ``repair_script``
+    (``exclude_by_system``); nothing is deleted, and staff Restore undoes it. The stored
+    PMIDs are re-read under the locks: an addition that landed since planning is skipped
+    rather than inserted twice.
 
     When the plan changed a row, the persona revision is recorded in the same
     transaction (``reexport_persona``, mechanism ``reexport``); the caller writes the
@@ -617,8 +651,16 @@ async def _apply_plan(db: AsyncSession, plan: PiRepairPlan) -> bool:
         changed = False
         if plan.removals:
             ids = [uuid.UUID(r.publication_id) for r in plan.removals]
-            await db.execute(delete(Publication).where(Publication.id.in_(ids)))
-            changed = True
+            rows = (await db.execute(
+                select(Publication).where(
+                    Publication.user_id == plan.user_id, Publication.id.in_(ids),
+                )
+            )).scalars().all()
+            for row in rows:
+                if row.provenance == PROVENANCE_MANUAL or row.excluded_at is not None:
+                    print(f"    skipped (now manual or excluded): pmid={row.pmid}")
+                    continue
+                changed = exclude_by_system(row, EXCLUDED_REASON_REPAIR_SCRIPT) or changed
         for rec in plan.additions:
             if rec.get("pmid") in stored_now:
                 print(f"    already stored since planning: pmid={rec.get('pmid')}")
@@ -665,13 +707,14 @@ async def _apply_plan(db: AsyncSession, plan: PiRepairPlan) -> bool:
 
 def _print_plan(plan: PiRepairPlan, *, show_review: bool) -> None:
     print(f"\n=== {plan.name} ({plan.orcid}) ===")
+    print(f"  Skipped (manual or excluded, never touched): {plan.skipped}")
     if plan.removals:
-        print(f"  Removals ({len(plan.removals)}):")
+        print(f"  Exclusions ({len(plan.removals)}):")
         for r in plan.removals:
             print(f"    - pmid={r.pmid} [{r.reason}] {r.title[:70]!r}")
             print(f"      evidence: {r.evidence}")
     else:
-        print("  Removals: none")
+        print("  Exclusions: none")
 
     if show_review:
         if plan.review:
@@ -706,7 +749,7 @@ def _write_report(plan: PiRepairPlan, *, applied: bool) -> Path:
         f"Generated: {datetime.now(UTC).isoformat()}",
         f"Applied: {applied}",
         "",
-        f"## Removals ({len(plan.removals)})",
+        f"## Exclusions ({len(plan.removals)})",
         "",
     ]
     if plan.removals:
@@ -801,7 +844,7 @@ async def _run(
         print("\n=== Totals ===")
         print(f"  PIs processed: {len(users)}")
         verb = "written" if apply else "planned"
-        print(f"  Removals {verb}: {total_removals}")
+        print(f"  Exclusions {verb}: {total_removals}")
         print(f"  Review items (never auto-applied): {total_review}")
         print(f"  Additions {verb}: {total_additions}")
         if apply:

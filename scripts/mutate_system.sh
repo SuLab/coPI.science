@@ -281,7 +281,7 @@ MUTANTS=(
 # --- PubMed / NCBI (T2) ----------------------------------------------------------------
 'pubmed_both~~src/services/pubmed.py~~    """Make a rate-limited, identified GET request to NCBI, with retry.~~    """Make a rate-limited, identified GET request to NCBI E-utilities, with retry. [INERT EDIT]~~M12b INERT docstring — MUST SURVIVE'
 "pubmed_doi~~src/services/pubmed.py~~    if assigned.lower() == auth.lower():~~    if True:~~M2 reconcile_pub_doi always reports a match, so a PMID keeps whatever DOI it arrived with"
-'pubmed_tool~~src/services/pubmed.py~~    params.setdefault("tool", _NCBI_TOOL)~~    pass  # tool= no longer sent~~M3 _ncbi_get stops identifying itself to NCBI (throttle, then IP block)'
+'pubmed_tool~~src/services/pubmed.py~~    query.setdefault("tool", _NCBI_TOOL)~~    pass  # tool= no longer sent~~M3 _ncbi_get stops identifying itself to NCBI (throttle, then IP block)'
 # --- worker (T5) -----------------------------------------------------------------------
 'worker~~src/worker/main.py~~    logger.info("Job %s completed", job_id)~~    logger.info("Job %s has completed", job_id)~~M12c INERT log string — MUST SURVIVE'
 "worker~~src/worker/main.py~~        .with_for_update(skip_locked=True)~~        .with_for_update()~~M4 claim_job drops SKIP LOCKED, so a worker pool serialises behind the slowest job"

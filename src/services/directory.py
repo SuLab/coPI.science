@@ -400,10 +400,19 @@ async def load_user_detail(
     pub_scope = await scoped_publications_for(
         db, user_id, agent_id, publications=publications
     )
+    # F29: the in-use rows the tenure window leaves out, in load order, from the rows already
+    # in memory. The staff PI page lists them only under the full-career fallback, when they
+    # ground the profile (pi_directory.workspace_pi_detail).
+    in_window = {p.id for p in pub_scope.publications}
+    outside_window = (
+        [p for p in publications if p.id not in in_window]
+        if pub_scope.tenure_start is not None else []
+    )
 
     detail = {
         "user": user, "profile": user.profile, "publications": pub_scope.publications,
         "pub_scope": pub_scope,
+        "outside_window": outside_window,
         "jobs": sorted(user.jobs, key=lambda j: j.enqueued_at, reverse=True) if staff else [],
     }
     if not pi_evidence:
@@ -438,9 +447,10 @@ async def load_user_detail(
         **detail,
         "user": user,
         "profile": user.profile,
-        # Now the IN-TENURE rows, not the full career. The rows the
-        # window cuts are deliberately NOT returned: operator decision
-        # 2026-09-22 — pre-tenure papers are listed nowhere in the UI. Use
+        # Now the IN-TENURE rows, not the full career. The rows the window cuts are returned
+        # apart, as ``outside_window``: the staff PI page lists them only under the
+        # full-career fallback (F29 of the 2026-10-15 publication-handling design); otherwise
+        # pre-tenure papers are listed nowhere in the UI (operator decision 2026-09-22). Use
         # `scripts/audit_tenure_scope.py` to see what a tenure year excludes.
         "publications": pub_scope.publications,
         "pub_scope": pub_scope,

@@ -1,5 +1,12 @@
 {# Corpus and profile review (spec 2026-10-05 §6.3 Review UIs, D21, D45, D47, D71); staff
    only: the router passes `review` (profile_review.ReviewCards) as None for reviewers. #}
+{% set excluded_reason_labels = {'staff': 'excluded by staff',
+    'superseded': 'an updated or superseded version is stored',
+    'pubmed_twin': 'PubMed now has this work',
+    'duplicate_title': 'same title as a newer paper',
+    'publication_type': 'PubMed lists a publication type Blackbird leaves out',
+    'openalex_affiliation': 'OpenAlex no longer ties it to the PI',
+    'repair_script': 'excluded by a corpus repair'} %}
 {% set field_labels = {'research_summary': 'Research Summary', 'techniques': 'Techniques',
     'experimental_models': 'Model Systems', 'disease_areas': 'Disease Areas',
     'key_targets': 'Key Targets', 'keywords': 'Keywords'} %}
@@ -26,6 +33,18 @@
     </form>
     {% if review.regenerate_refusal %}<p class="text-xs text-gray-500 mt-1">{{ review.regenerate_refusal }}</p>{% endif %}
   </div>
+
+  {% if review.generation_notes %}
+  <h3 class="font-medium text-gray-800 mb-1">Latest generation notes</h3>
+  <p class="text-xs text-gray-500 mb-2">Profile generation {{ review.generation_notes.job_status | capitalize }}, queued {{ review.generation_notes.enqueued_at | ts }}.</p>
+  {% if review.generation_notes.notes %}
+  <ul class="list-disc pl-5 space-y-1 text-sm mb-4">
+    {% for n in review.generation_notes.notes %}
+    <li><span class="font-medium">{{ n.label }}:</span> {{ n.detail }}</li>
+    {% endfor %}
+  </ul>
+  {% else %}<p class="text-sm text-gray-500 mb-4">Nothing to note.</p>{% endif %}
+  {% endif %}
 
   {% if review.draft %}
   <h3 class="font-medium text-gray-800 mb-1">Pending draft</h3>
@@ -69,6 +88,26 @@
     {% endfor %}
   </ul>
 
+  <h3 class="font-medium text-gray-800 mb-1">Withheld papers ({{ review.withheld | length }})</h3>
+  <p class="text-xs text-gray-500 mb-2">Listed on the PI's ORCID record, or carrying the PI's ORCID iD in PubMed, but the PubMed author list does not name the PI. Accept stores the paper. A rejected paper is not offered again, but a later generation stores it if its PubMed author list comes to name the PI.</p>
+  {% if not review.withheld %}<p class="text-sm text-gray-500 mb-2">No withheld papers waiting.</p>{% endif %}
+  <ul class="divide-y mb-2">
+    {% for c in review.withheld %}
+    <li class="py-2 flex justify-between gap-4 text-sm">
+      <div>
+        <div class="font-medium">{{ c.title or '(no title)' }}</div>
+        <div class="text-xs text-gray-500">{{ c.year or 'year unknown' }}{% if c.stages %} · stages {{ c.stages }}{% endif %} ·
+          <a href="https://pubmed.ncbi.nlm.nih.gov/{{ c.pmid }}/" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">PMID {{ c.pmid }}</a></div>
+      </div>
+      <div class="flex gap-2">
+        <form method="post" action="{{ page_url(request, 'workspace_accept_candidate', user_id=target_user.id, candidate_id=c.id) }}"><button type="submit" class="text-xs text-green-700 underline">Accept</button></form>
+        <form method="post" action="{{ page_url(request, 'workspace_reject_candidate', user_id=target_user.id, candidate_id=c.id) }}"><button type="submit" class="text-xs text-red-700 underline">Reject</button></form>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% if review.withheld_summary %}<p class="text-xs text-gray-500 mb-4">Latest generation: {{ review.withheld_summary }}</p>{% endif %}
+
   <h3 class="font-medium text-gray-800 mb-1">Unanchored papers ({{ review.unanchored | length }})</h3>
   <p class="text-xs text-gray-500 mb-2">Stored papers no ORCID anchor confirms. Keep marks one as checked; Exclude removes it from the profile and the persona (Restore undoes it).</p>
   {% if not review.unanchored %}<p class="text-sm text-gray-500 mb-2">No unanchored papers.</p>{% endif %}
@@ -94,7 +133,7 @@
       <li class="py-2 flex justify-between gap-4 text-sm">
         <div class="opacity-50">
           <div class="font-medium">{{ p.title or '(no title)' }}</div>
-          <div class="text-xs text-gray-500">{{ p.journal or 'journal unknown' }} · {{ p.year or 'year unknown' }}{% if p.pmid %} · PMID {{ p.pmid }}{% endif %} · excluded {{ p.excluded_at | ts }}</div>
+          <div class="text-xs text-gray-500">{{ p.journal or 'journal unknown' }} · {{ p.year or 'year unknown' }}{% if p.pmid %} · PMID {{ p.pmid }}{% endif %} · excluded {{ p.excluded_at | ts }} · {{ excluded_reason_labels.get(p.excluded_reason, 'excluded before reasons were recorded') }}</div>
         </div>
         <form method="post" action="{{ page_url(request, 'workspace_restore_publication', user_id=target_user.id, publication_id=p.id) }}"><button type="submit" class="text-xs text-green-700 underline">Restore</button></form>
       </li>

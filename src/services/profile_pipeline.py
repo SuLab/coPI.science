@@ -28,36 +28,43 @@ import functools
 import logging
 import uuid
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.agent.prompt_safety import delimit
 from src.models import AgentRegistry, Publication, ResearcherProfile, User
 from src.models.job import BULK_PRIORITY
+from src.models.publication import PROVENANCE_MANUAL, PROVENANCE_OPENALEX
 from src.services import job_progress
 from src.services.corpus import (
     DEFAULT_CAP,
     EXCLUDED_TYPES,  # noqa: F401 — re-exported; tests and callers import it from here
+    CorpusResult,
     CorpusStageError,
     resolve_corpus,
 )
 from src.services.corpus_additions import (
+    ANCHOR_STAGES,
+    SAME_PAPER_YEARS,
     apply_corpus_result,
     apply_non_pubmed_works,
     bounded_publication_fields,
     is_anchored,
     lock_corpus,
+    superseded_pairs,
 )
+from src.services.corpus_recheck import recheck_progress_detail, recheck_stored_publications
 from src.services.grant_sections import GrantSections, grant_blocks, load_grant_sections
 from src.services.jhu_rules import (
     clear_provisional_tenure_start,
     derive_employment_start,
     derive_start_from_papers,
-    export_tenure_start,
     get_tenure_start,
     set_provisional_tenure_start,
     set_tenure_start,
@@ -65,7 +72,7 @@ from src.services.jhu_rules import (
 )
 from src.services.job_queue import AfterCommit, JobDeferred, NonRetryableJobError
 from src.services.llm import SynthesisRefused, synthesize_profile
-from src.services.non_pubmed_works import collect_non_pubmed_works
+from src.services.non_pubmed_works import collect_non_pubmed_works, orcid_authorships_by_doi
 from src.services.orcid import fetch_orcid_profile
 from src.services.orcid_fundings import fetch_orcid_fundings, store_orcid_fundings
 from src.services.person_names import is_orcid_like, name_from_machine_source
@@ -82,6 +89,7 @@ from src.services.pubmed import (
     _doi_fold,
     convert_pmids_to_pmcids,
     fetch_pmc_methods,
+    lookup_pmcids,
 )
 from src.services.tenure_scope import (
     THIN_RECORD_MAX_PAPERS,
@@ -101,6 +109,10 @@ CORPUS_CAP = DEFAULT_CAP
 
 #: Newest in-tenure stored rows a synthesis reads (spec D14 "rolling newest-50").
 SYNTHESIS_WINDOW = 50
+#: Papers the synthesis context shows, newest first (main SPEC PIPE-12).
+SYNTHESIS_CONTEXT_PAPERS = 30
+#: Methods sections fetched per run, from the context selection only.
+METHODS_FETCH_LIMIT = 10
 ORCID_ID_NAME_REFUSAL = "name is an ORCID iD; enter the PI's name"
 EMPTY_NAME_REFUSAL = "the PI has no name; enter the PI's name"
 #: Appended to the context for the one retry after a failed validation.
@@ -169,6 +181,19 @@ def select_synthesis_inputs(
     )
 
 
+def synthesis_context_selection(offered: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The papers the synthesis context shows: the newest SYNTHESIS_CONTEXT_PAPERS of
+    ``offered`` in the shared publication order. Methods come only from these (PIPE-12),
+    so no methods section belongs to a paper the model does not see. Pure."""
+    return sorted(offered, key=publication_sort_key)[:SYNTHESIS_CONTEXT_PAPERS]
+
+
+def _one_line(value: object) -> str:
+    """``value`` on one line: every whitespace run, line breaks of any kind included
+    (``\\r``, ``\\n``, ``\\v``, ``\\f``, U+0085, U+2028, U+2029), becomes one space."""
+    return " ".join(str(value).split())
+
+
 @dataclass
 class PipelineRun:
     """Everything one pipeline run carries from step to step (spec §7.4). Field names are the locals of the pre-split function, so each step body is the old code with those locals read as run.<name>."""
@@ -184,6 +209,15 @@ class PipelineRun:
     corpus_result: Any = None
     #: Phase B (spec 2026-10-09 §5.2): the resolve's storable non-PubMed works.
     non_pubmed_works: list[dict] = field(default_factory=list)
+    #: C4 / F27: the PI's OpenAlex authorships by folded DOI, fetched once when the PI has an
+    #: in-use "openalex" row and step 1 succeeded; None when not fetched.
+    openalex_authorships: dict[str, dict[str, Any] | None] | None = None
+    #: Why the OpenAlex attribution re-check is skipped this run (I12, F27), else None.
+    openalex_skip_reason: str | None = None
+    #: Folded DOIs the thin-path singleton lookups found retracted (F28).
+    openalex_retracted: set[str] = field(default_factory=set)
+    #: PMIDs idconv positively reported as not in PMC (R4.14), cleared by storage.
+    pmcid_absent: frozenset[str] = frozenset()
     tenure_start: int | None = None
     #: The records in scope: the tenure window, or the full career under the fallback.
     in_tenure: list[dict] = field(default_factory=list)
@@ -350,24 +384,19 @@ async def _steps3_4_resolve_corpus(run: PipelineRun) -> None:
         run.orcid_id, user.name, user.institution, cap=CORPUS_CAP
     )
     corpus_result = run.corpus_result
+    await _prefetch_openalex_authorships(run)
     if await _may_be_pubmed_thin(run):
         run.non_pubmed_works = await _collect_non_pubmed(
             run, await _enriched_non_pubmed_dois(run)
         )
+    run.pmcid_absent = await _pmcid_absent(run)
     await run.progress(
         "step4",
         f"Corpus resolved: kept {len(corpus_result.kept)} "
         f"(stages {corpus_result.stage_counts}, dropped {corpus_result.dropped})",
     )
     if corpus_result.flagged:
-        sample = ", ".join(
-            str(f.get("pmid")) for f in corpus_result.flagged[:10]
-        )
-        await run.progress(
-            "corpus_flagged",
-            f"{len(corpus_result.flagged)} records withheld for review "
-            f"({_flag_reason_summary(corpus_result.flagged)}): {sample}",
-        )
+        await run.progress("corpus_flagged", _flagged_detail(corpus_result.flagged))
     if corpus_result.truncated_stages:
         await run.progress(
             "corpus_truncated",
@@ -381,6 +410,74 @@ async def _steps3_4_resolve_corpus(run: PipelineRun) -> None:
             f"Only {len(corpus_result.kept)} publications resolved across "
             "ORCID, OpenAlex and PubMed.",
         )
+
+
+def _flagged_detail(flagged: list[dict[str, Any]]) -> str:
+    """The ``corpus_flagged`` text (R4.8): what was withheld and why, and how many of those
+    the PI's ORCID ties to them (they become Withheld papers on the staff PI page)."""
+    sample = ", ".join(str(f.get("pmid")) for f in flagged[:10])
+    detail = (
+        f"{len(flagged)} records withheld as not confirmed to be the PI's "
+        f"({_flag_reason_summary(flagged)}): {sample}"
+    )
+    tied = sum(1 for f in flagged if set(f.get("stages") or []) & ANCHOR_STAGES)
+    if tied:
+        detail += (
+            f". Tied to the PI's ORCID iD: {tied} (any not yet decided are listed under "
+            "Withheld papers on the PI page)"
+        )
+    return detail
+
+
+async def _prefetch_openalex_authorships(run: PipelineRun) -> None:
+    """C4 as amended (F27, I12): when the PI has an in-use ``openalex`` row, fetch the PI's
+    OpenAlex authorships once, for the re-check and the thin-path collection alike. Before
+    any lock: one read, then the network. A budget deferral propagates, so the job goes back
+    to pending without spending an attempt; any other failure, or an unreadable ORCID profile
+    (no organisations known), skips the check for this run."""
+    has_rows = await run.db.scalar(
+        select(Publication.id).where(
+            Publication.user_id == run.user_id,
+            Publication.provenance == PROVENANCE_OPENALEX,
+            Publication.pmid.is_(None),
+            Publication.excluded_at.is_(None),
+        ).limit(1)
+    )
+    if has_rows is None:
+        return
+    if run.step1_failed:
+        run.openalex_skip_reason = "the ORCID profile was unavailable"
+        return
+    try:
+        run.openalex_authorships = await orcid_authorships_by_doi(run.orcid_id)
+    except JobDeferred:
+        raise
+    except Exception as exc:
+        logger.warning("OpenAlex authorships for %s unavailable: %s", run.orcid_id, exc)
+        run.openalex_skip_reason = "the OpenAlex authorship list could not be fetched"
+
+
+async def _pmcid_absent(run: PipelineRun) -> frozenset[str]:
+    """R4.14: the PMIDs whose stored PMCID idconv positively reports PMC no longer holds.
+    Asks only for in-use, non-``manual`` rows with a stored PMCID whose returned record has
+    none; no candidate, no request. Before any lock; ``lookup_pmcids`` never raises."""
+    without = [
+        str(r["pmid"]) for r in run.corpus_result.ranked if r.get("pmid") and not r.get("pmcid")
+    ]
+    if not without:
+        return frozenset()
+    pmids = sorted((await run.db.execute(
+        select(Publication.pmid).where(
+            Publication.user_id == run.user_id,
+            Publication.pmcid.isnot(None),
+            Publication.excluded_at.is_(None),
+            or_(Publication.provenance.is_(None), Publication.provenance != PROVENANCE_MANUAL),
+            Publication.pmid.in_(without),
+        )
+    )).scalars())
+    if not pmids:
+        return frozenset()
+    return (await lookup_pmcids(pmids)).absent
 
 
 async def _lock_persona(run: PipelineRun) -> None:
@@ -409,33 +506,56 @@ async def _lock_persona(run: PipelineRun) -> None:
 
 async def _may_be_pubmed_thin(run: PipelineRun) -> bool:
     """Phase B's trigger as far as it is known before the locks (spec 2026-10-09 §5.1): the
-    PI's in-use stored PubMed papers plus the anchored ones this resolve returned, counted in
-    the window of the best tenure year known so far (recorded or provisional, else the
-    current Hopkins ORCID employment). Storage re-checks the exact rule under the lock; this
-    only spares a PubMed-rich PI the OpenAlex lookups and their failure modes (security and
-    semantic review 2026-10-09). Reads only."""
+    PubMed papers that will be in use after storage (``predicted_pubmed_years``), counted in
+    the window of the tenure year ``_derive_tenure_start`` will use (a recorded year, else the
+    current Hopkins ORCID employment, else the earliest Hopkins paper). Storage re-checks the
+    exact rule under the lock; the prediction never exceeds that count (P10), so a PI who is
+    thin there is never denied the collection here. Reads only."""
     agent_id = run.agent_reg.agent_id if run.agent_reg else None
     result = run.corpus_result
-    tenure = await export_tenure_start(run.db, run.user_id, agent_id)
+    tenure = await get_tenure_start(run.db, run.user_id, agent_id=agent_id)
     if tenure is None:
         tenure = derive_employment_start(run.orcid_profile.get("employments") or [])
     if tenure is None:
-        # As _derive_tenure_start falls back: the earliest Hopkins paper the PI wrote.
         tenure = derive_start_from_papers([*result.ranked, *result.superseded_records])
     stored = (await run.db.execute(
-        select(Publication.pmid, Publication.year, Publication.excluded_at).where(
-            Publication.user_id == run.user_id, Publication.pmid.isnot(None),
-        )
+        select(Publication.pmid, Publication.year, Publication.excluded_at.isnot(None),
+               Publication.provenance)
+        .where(Publication.user_id == run.user_id, Publication.pmid.isnot(None))
     )).all()
-    excluded = {pmid for pmid, _year, excluded_at in stored if excluded_at is not None}
-    years = {pmid: year for pmid, year, excluded_at in stored if excluded_at is None}
+    return pubmed_thin(predicted_pubmed_years([tuple(r) for r in stored], result), tenure)
+
+
+def predicted_pubmed_years(
+    stored: Sequence[tuple[str, int | None, bool, str | None]], result: CorpusResult,
+) -> list[int | None]:
+    """Pure (P10): the years of the PubMed rows in use after storage, never more of them than
+    ``_store_non_pubmed_works`` counts under the lock. ``stored`` is (pmid, year, excluded,
+    provenance) of the PI's stored PubMed rows. Leaving storage: the earlier version of every
+    ``superseded_pairs`` link, every title duplicate and every type-excluded PMID; a
+    ``manual`` row stays (no run excludes it), an excluded row never counts. A non-``manual``
+    row the resolve returned takes the returned year. An anchored returned record with no
+    stored row is added unless it is itself leaving. ``_exclude_superseded``'s strength rule
+    is not modelled, so the count can fall below storage's, which only costs lookups."""
+    leaving = {old for old, _new in superseded_pairs(result)}
+    leaving |= {dup for dup, _keeper in result.title_duplicates}
+    leaving |= {str(e["pmid"]) for e in result.type_excluded if e.get("pmid")}
+    returned: dict[str, dict[str, Any]] = {}
     for rec in result.ranked:
-        pmid = str(rec.get("pmid") or "")
-        if pmid and pmid not in excluded and is_anchored(rec):
-            years.setdefault(pmid, rec.get("year"))
-    for old, _successor in result.superseded:  # storage excludes these earlier versions
-        years.pop(old, None)
-    return pubmed_thin(years.values(), tenure)
+        if pmid := str(rec.get("pmid") or ""):
+            returned.setdefault(pmid, rec)
+    years: dict[str, int | None] = {}
+    for pmid, year, excluded, provenance in stored:
+        manual = provenance == PROVENANCE_MANUAL
+        if excluded or (not manual and pmid in leaving):
+            continue
+        rec = returned.get(pmid)
+        years[pmid] = rec["year"] if not manual and rec and rec.get("year") is not None else year
+    stored_pmids = {row[0] for row in stored}
+    for pmid, rec in returned.items():
+        if pmid not in stored_pmids and pmid not in leaving and is_anchored(rec):
+            years[pmid] = rec.get("year")
+    return list(years.values())
 
 
 async def _enriched_non_pubmed_dois(run: PipelineRun) -> frozenset[str]:
@@ -457,15 +577,17 @@ async def _collect_non_pubmed(
 ) -> list[dict[str, Any]]:
     """Phase B collection (spec 2026-10-09 §5.2), before any lock: network only (free OpenAlex
     singleton lookups, and one charged authorship list when OpenAlex alone attributes a work
-    to the PI). A failure is a corpus stage failure, so the job retries rather than storing
+    to the PI, none when the run already fetched it for the re-check, F27). A failure is a corpus stage failure, so the job retries rather than storing
     less. A work only OpenAlex attributes is kept when the PI's authorship names Johns Hopkins
-    or an organization on the PI's ORCID record, or the publisher lists the PI's ORCID."""
+    or an organization on the PI's ORCID record, or the publisher lists the PI's ORCID.
+    OpenAlex records found retracted are added to ``run.openalex_retracted`` (F28)."""
     unattributed: list[str] = []
     try:
         works = await collect_non_pubmed_works(
             run.corpus_result, enriched_dois=enriched, pi_orcid=run.orcid_id,
             institutions=run.orcid_profile.get("organizations") or [],
             unattributed=unattributed,
+            prefetched_authorships=run.openalex_authorships, retracted=run.openalex_retracted,
         )
     except JobDeferred:
         raise  # the authorship list is charged: a budget deferral spends no retry attempt
@@ -579,14 +701,33 @@ async def _derive_tenure_start(run: PipelineRun) -> None:
     run.tenure_start = tenure_start
 
 
+def _duplicates_detail(ids: Sequence[str]) -> str:
+    """The ``corpus_duplicates_excluded`` text (R4.11), for both corpus paths."""
+    return (
+        f"Excluded {len(ids)} papers whose title repeats a newer stored paper's within "
+        f"{SAME_PAPER_YEARS} years; Restore on the manager PI page undoes it: "
+        + ", ".join(ids[:10])
+    )
+
+
 async def _store_corpus_publications(run: PipelineRun) -> None:
     """Store the resolve through the shared rule (corpus_additions.apply_corpus_result:
     anchored records of the uncapped ranked list, candidates for the rest, metadata and
     provenance refresh; never deletes). Storage is full-career (R2): the tenure filter
-    applies at synthesis and export."""
+    applies at synthesis and export. Then re-checks every other in-use stored row
+    (``corpus_recheck``, contract C4)."""
     await lock_corpus(run.db, run.user_id)
     run.flagged_count = len(run.corpus_result.flagged)
-    outcome = await apply_corpus_result(run.db, run.user_id, run.corpus_result)
+    outcome = await apply_corpus_result(
+        run.db, run.user_id, run.corpus_result, pmcid_absent=run.pmcid_absent
+    )
+    recheck = await recheck_stored_publications(
+        run.db, run.user_id, run.corpus_result,
+        authorships=run.openalex_authorships,
+        organizations=run.orcid_profile.get("organizations") or [],
+        retracted_dois=run.openalex_retracted,
+        openalex_skip_reason=run.openalex_skip_reason,
+    )
     if outcome.stored and not outcome.first_ingest:
         await run.progress(
             "corpus_additions",
@@ -600,11 +741,22 @@ async def _store_corpus_publications(run: PipelineRun) -> None:
             "OpenAlex or name+affiliation search only) were NOT stored; review them on the "
             "manager PI page: " + ", ".join(outcome.candidates_new[:10]),
         )
+    if outcome.withheld_new:
+        await run.progress(
+            "corpus_withheld_review",
+            f"{len(outcome.withheld_new)} papers tied to the PI's ORCID iD were not stored "
+            "because their PubMed author list does not name the PI; staff can accept them "
+            "under Withheld papers on the PI page: " + ", ".join(outcome.withheld_new[:10]),
+        )
     if outcome.candidates_accepted:
         await run.progress(
             "corpus_candidates_accepted",
             f"Stored {len(outcome.candidates_accepted)} pending candidates now found with an "
             "ORCID anchor: " + ", ".join(outcome.candidates_accepted[:10]),
+        )
+    if outcome.title_duplicates_excluded:
+        await run.progress(
+            "corpus_duplicates_excluded", _duplicates_detail(outcome.title_duplicates_excluded)
         )
     if outcome.superseded_excluded:
         await run.progress(
@@ -627,6 +779,16 @@ async def _store_corpus_publications(run: PipelineRun) -> None:
             "PubMed now has; Restore on the manager PI page undoes it: "
             + ", ".join(outcome.non_pubmed_superseded[:10]),
         )
+    if outcome.pmcid_cleared:
+        await run.progress(
+            "corpus_pmcid_cleared",
+            f"Cleared {len(outcome.pmcid_cleared)} stored PMCIDs, and their methods text, "
+            "that the PubMed Central ID converter no longer maps to their PMID: "
+            + ", ".join(outcome.pmcid_cleared[:10]),
+        )
+    detail = recheck_progress_detail(outcome, recheck)
+    if detail is not None:
+        await run.progress("corpus_rechecked", detail)
     if outcome.refreshed:
         await run.progress(
             "corpus_metadata_refreshed",
@@ -657,6 +819,10 @@ async def _store_non_pubmed_works(run: PipelineRun) -> None:
             f"({outcome.stored_openalex_only} found only by OpenAlex); "
             f"refreshed {len(outcome.refreshed)} "
             f"({outcome.refreshed_openalex_only} found only by OpenAlex).",
+        )
+    if outcome.duplicates_excluded:
+        await run.progress(
+            "corpus_duplicates_excluded", _duplicates_detail(outcome.duplicates_excluded)
         )
 
 
@@ -737,8 +903,11 @@ async def _step5_methods(run: PipelineRun) -> None:
             .values(pmcid=pmcid)
         )
 
-    # Fetch methods for papers with PMCIDs (limit to 10 to avoid too many API calls)
-    papers_with_pmcid = [r for r in pubs_for_synthesis if r.get("pmcid")][:10]
+    # Methods only for papers the context shows (PIPE-12): the newest
+    # SYNTHESIS_CONTEXT_PAPERS, first METHODS_FETCH_LIMIT with a PMCID.
+    papers_with_pmcid = [
+        r for r in synthesis_context_selection(pubs_for_synthesis) if r.get("pmcid")
+    ][:METHODS_FETCH_LIMIT]
     methods_by_pmid: dict[str, str] = {}
     run.methods_by_pmid = methods_by_pmid
 
@@ -961,7 +1130,14 @@ def _keep_stored_reason(run: PipelineRun, evidence_pub_count: int) -> str | None
         return None
     if not run.validated:
         return "failed validation twice"
-    if evidence_pub_count == 0 and (profile.evidence_pub_count or 0) > 0:
+    if evidence_pub_count == 0 and profile.evidence_pub_count != 0:
+        # NULL counts as "protect" (PIPE-15): a stored profile from before evidence tracking
+        # is never replaced by a synthesis grounded in nothing.
+        if profile.evidence_pub_count is None:
+            return (
+                "grounded in 0 publications, down from an unknown number "
+                "(the stored profile predates evidence tracking)"
+            )
         return f"grounded in 0 publications, down from {profile.evidence_pub_count}"
     return None
 
@@ -1167,18 +1343,21 @@ def _build_synthesis_context(
     Information block: name, institution and department from the user record, lab website
     from ORCID (`_researcher_info`). Grants are the persona's own sections (Active, Past
     since tenure; spec 2026-10-05 D41), stored ones only: a PI's first run sees only ORCID
-    items because enrich_grants runs after it (D63)."""
+    items because enrich_grants runs after it (D63). Abstracts and methods are third-party
+    text and are fenced with ``delimit`` (``<publication_abstract>``, ``<methods_section>``;
+    Q16); headings stay outside the fences, and titles, journals and researcher values are
+    one line."""
     parts = []
 
     # Researcher info
     parts.append("## Researcher Information")
-    parts.append(f"- Name: {orcid_profile.get('name', 'Unknown')}")
+    parts.append(f"- Name: {_one_line(orcid_profile.get('name', 'Unknown'))}")
     if orcid_profile.get("institution"):
-        parts.append(f"- Institution: {orcid_profile['institution']}")
+        parts.append(f"- Institution: {_one_line(orcid_profile['institution'])}")
     if orcid_profile.get("department"):
-        parts.append(f"- Department: {orcid_profile['department']}")
+        parts.append(f"- Department: {_one_line(orcid_profile['department'])}")
     if orcid_profile.get("lab_website"):
-        parts.append(f"- Lab Website: {orcid_profile['lab_website']}")
+        parts.append(f"- Lab Website: {_one_line(orcid_profile['lab_website'])}")
 
     # Grants
     for heading, lines in grant_blocks(grants):
@@ -1186,7 +1365,7 @@ def _build_synthesis_context(
         parts.extend(f"- {line.render()}" for line in lines)
 
     # Publications (most recent 30, in the shared publication order)
-    selected_pubs = sorted(publications, key=publication_sort_key)[:30]
+    selected_pubs = synthesis_context_selection(publications)
 
     if selected_pubs:
         parts.append("\n## Publications")
@@ -1195,16 +1374,16 @@ def _build_synthesis_context(
             year = pub.get("year") or ""
             journal = pub.get("journal") or ""
             title = pub.get("title", "")
-            parts.append(f"\n### {title} ({journal}, {year})")
+            parts.append(f"\n### {_one_line(title or '')} ({_one_line(journal)}, {year})")
             if pub.get("abstract"):
-                parts.append(f"Abstract: {pub['abstract'][:1500]}")
+                parts.append(f"Abstract: {delimit(pub['abstract'][:1500], 'publication_abstract')}")
 
     # Methods sections
     if methods_by_pmid:
         parts.append("\n## Methods Sections (from open-access papers)")
         for pmid, methods in methods_by_pmid.items():
             parts.append(f"\n### Methods from PMID {pmid}")
-            parts.append(methods[:2000])
+            parts.append(delimit(methods[:2000], "methods_section"))
 
     return "\n".join(parts)
 

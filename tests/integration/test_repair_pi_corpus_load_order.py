@@ -53,3 +53,18 @@ async def test_the_later_added_duplicate_is_the_one_removed(db_session):
     assert [r.publication_id for r in removals] == [str(newer_id)]
     assert removals[0].evidence == {"duplicate_of_publication_id": str(older_id)}
     assert [p.id for p in canonical] == [str(older_id)]
+
+
+async def test_manual_and_excluded_rows_are_not_loaded(db_session):
+    user = await factories.make_user(db_session)
+    staff = await factories.make_user(db_session)
+    db_session.add_all([
+        Publication(user_id=user.id, pmid="1", title="Anchored", provenance="s1"),
+        Publication(user_id=user.id, pmid="2", title="Kept by staff", provenance="manual"),
+        Publication(user_id=user.id, pmid="3", title="Excluded by staff", provenance="s1",
+                    excluded_at=datetime.now(UTC), excluded_by_user_id=staff.id,
+                    excluded_reason="staff"),
+    ])
+    await db_session.flush()
+    stored = await load_stored_publications(db_session, user.id)
+    assert [(p.pmid, p.provenance) for p in stored] == [("1", "s1")]

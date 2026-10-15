@@ -283,9 +283,13 @@ async def _seed_pis(s, users: dict, *, now: datetime) -> dict:
         Publication(user_id=featured.id, pmid="90000014", title="A paper by a different "
                     "D. Whitcombe", abstract="Demo abstract.", journal="Example Journal",
                     year=2019, provenance="s1", excluded_at=now - timedelta(days=3),
-                    excluded_by_user_id=users["manager"].id),
+                    excluded_by_user_id=users["manager"].id, excluded_reason="staff"),
         PublicationCandidate(user_id=featured.id, pmid="90000015", title="A candidate paper "
                              "found by name", year=2025, stages="s4", reason="no_orcid_anchor",
+                             status="pending"),
+        PublicationCandidate(user_id=featured.id, pmid="90000017", title="A paper on the PI's "
+                             "ORCID record whose author list names someone else", year=2024,
+                             stages="s1", reason="orcid_listed_author_mismatch",
                              status="pending"),
     ])
     s.add(PiGrantIdentity(
@@ -341,7 +345,23 @@ async def _seed_pis(s, users: dict, *, now: datetime) -> dict:
                       "former": False,
                   }),
     ])
-    for job_type in ("generate_profile", "enrich_grants", "industry_evidence"):
+    s.add(Job(type="generate_profile", status="completed", user_id=featured.id, payload={
+        "progress": [
+            {"step": "start", "detail": "Starting pipeline for the demo PI"},
+            {"step": "corpus_flagged", "detail": "1 records withheld as not confirmed to be "
+             "the PI's (1 no individual author match): 90000017. Tied to the PI's ORCID iD: 1 "
+             "(any not yet decided are listed under Withheld papers on the PI page)"},
+            {"step": "corpus_withheld_review", "detail": "1 papers tied to the PI's ORCID iD "
+             "were not stored because their PubMed author list does not name the PI; staff "
+             "can accept them under Withheld papers on the PI page: 90000017"},
+            {"step": "corpus_rechecked", "detail": "Stored publications re-checked: 0 "
+             "excluded (PubMed lists a publication type Blackbird leaves out), 0 excluded "
+             "(OpenAlex marks the work retracted), 0 unanchored (the PubMed author list does "
+             "not name the PI), 1 unanchored (no ORCID anchor in this run), 0 anchored again, "
+             "0 excluded (OpenAlex's authorship no longer ties the work to the PI). 90000013"},
+            {"step": "complete", "detail": "Profile generation complete."},
+        ]}))
+    for job_type in ("enrich_grants", "industry_evidence"):
         s.add(Job(type=job_type, status="completed", user_id=featured.id,
                   payload={"note": "demo"}))
     # Five scored PIs, so the industry percentile renders instead of "unscored".

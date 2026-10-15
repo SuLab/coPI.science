@@ -59,7 +59,7 @@ async def test_a_stored_pmid_less_row_is_refreshed_unless_manual(db_session):
 async def test_a_title_already_stored_is_skipped_even_when_staff_excluded_it(db_session):
     pi = await factories.make_user(db_session)
     db_session.add(Publication(user_id=pi.id, pmid="2", title="Safety Filters: A Review",
-                               excluded_at=datetime.now(UTC)))
+                               year=2024, excluded_at=datetime.now(UTC)))
     await db_session.flush()
     out = await apply_non_pubmed_works(
         db_session, pi.id, [_work("10.1/t", title="Safety filters - a review")])
@@ -75,39 +75,47 @@ async def test_nothing_is_deleted(db_session):
     assert [r.doi for r in await _rows(db_session, pi.id)] == ["10.1/gone"]
 
 
-async def test_a_later_version_takes_over_a_stored_pmid_less_preprint(db_session):
+async def test_a_published_version_excludes_the_stored_preprint(db_session):
     pi = await factories.make_user(db_session)
-    db_session.add(Publication(user_id=pi.id, doi="10.48550/arxiv.1", title="Safety filters",
+    db_session.add(Publication(user_id=pi.id, doi="10.48550/arxiv.1",
+                               title="Safety filters for learned controllers",
                                year=2023, provenance="openalex"))
     await db_session.flush()
     out = await apply_non_pubmed_works(db_session, pi.id, [
-        _work("10.1109/x.2", title="Safety Filters!", year=2024, provenance="s1")])
-    [row] = await _rows(db_session, pi.id)
-    assert (row.doi, row.year, row.provenance) == ("10.1109/x.2", 2024, "s1")
-    assert out.refreshed == ["10.1109/x.2"] and out.stored == []
+        _work("10.1109/x.2", title="Safety Filters for Learned Controllers!", year=2024,
+              provenance="s1")])
+    rows = {r.doi: r for r in await _rows(db_session, pi.id)}
+    pre = rows["10.48550/arxiv.1"]
+    assert pre.excluded_at is not None and pre.excluded_reason == "duplicate_title"
+    assert rows["10.1109/x.2"].excluded_at is None
+    assert out.stored == ["10.1109/x.2"]
+    assert out.duplicates_excluded == ["10.48550/arxiv.1"]
 
 
-async def test_an_older_version_does_not_replace_the_stored_one(db_session):
+async def test_an_older_version_is_stored_excluded(db_session):
     pi = await factories.make_user(db_session)
-    db_session.add(Publication(user_id=pi.id, doi="10.1109/x.2", title="Safety filters",
+    db_session.add(Publication(user_id=pi.id, doi="10.1109/x.2",
+                               title="Safety filters for learned controllers",
                                year=2024, provenance="s1"))
     await db_session.flush()
     out = await apply_non_pubmed_works(db_session, pi.id, [
-        _work("10.48550/arxiv.1", title="Safety filters", year=2023)])
-    [row] = await _rows(db_session, pi.id)
-    assert row.doi == "10.1109/x.2" and out.skipped == 1
+        _work("10.48550/arxiv.1", title="Safety filters for learned controllers", year=2023)])
+    rows = {r.doi: r for r in await _rows(db_session, pi.id)}
+    assert rows["10.48550/arxiv.1"].excluded_reason == "duplicate_title"
+    assert rows["10.1109/x.2"].excluded_at is None
+    assert out.duplicates_excluded == ["10.48550/arxiv.1"]
 
 
 async def test_a_refresh_never_takes_a_title_another_row_holds(db_session):
     pi = await factories.make_user(db_session)
     db_session.add_all([
-        Publication(user_id=pi.id, doi="10.1/x", title="Title A", provenance="openalex"),
-        Publication(user_id=pi.id, pmid="7", doi="10.1/p", title="Title B"),
+        Publication(user_id=pi.id, doi="10.1/x", title="Title A of a conference paper", provenance="openalex"),
+        Publication(user_id=pi.id, pmid="7", doi="10.1/p", title="Title B of a journal paper"),
     ])
     await db_session.flush()
-    await apply_non_pubmed_works(db_session, pi.id, [_work("10.1/x", title="Title B")])
+    await apply_non_pubmed_works(db_session, pi.id, [_work("10.1/x", title="Title B of a journal paper")])
     rows = {r.doi: r for r in await _rows(db_session, pi.id)}
-    assert rows["10.1/x"].title == "Title A"
+    assert rows["10.1/x"].title == "Title A of a conference paper"
     assert rows["10.1/x"].abstract == "An abstract."
 
 
@@ -119,7 +127,7 @@ async def test_a_pubmed_row_for_the_same_paper_excludes_the_pmid_less_one(db_ses
     db_session.add_all([
         Publication(user_id=pi.id, doi="10.1/Same", title="Conference version",
                     provenance="openalex"),
-        Publication(user_id=pi.id, doi="10.1/other", title="Journal version of it",
+        Publication(user_id=pi.id, doi="10.1/other", title="Journal version of the paper",
                     year=2024, provenance="s1"),
         Publication(user_id=pi.id, doi="10.1/kept", title="Kept by staff",
                     provenance="manual"),
@@ -128,7 +136,7 @@ async def test_a_pubmed_row_for_the_same_paper_excludes_the_pmid_less_one(db_ses
     recs = [
         {"pmid": "501", "title": "Indexed by PubMed now", "abstract": "A.", "journal": "J",
          "year": 2025, "doi": "10.1/same", "pmcid": None, "stages": ["s3"]},
-        {"pmid": "502", "title": "Journal version of it", "abstract": "A.", "journal": "J",
+        {"pmid": "502", "title": "Journal version of the paper", "abstract": "A.", "journal": "J",
          "year": 2025, "doi": "10.9/journal", "pmcid": None, "stages": ["s3"]},
         {"pmid": "503", "title": "Kept by staff", "abstract": "A.", "journal": "J",
          "year": 2025, "doi": "10.1/kept", "pmcid": None, "stages": ["s3"]},
@@ -138,6 +146,7 @@ async def test_a_pubmed_row_for_the_same_paper_excludes_the_pmid_less_one(db_ses
     rows = {(r.pmid, r.doi): r for r in await _rows(db_session, pi.id)}
     assert rows[(None, "10.1/Same")].excluded_at is not None
     assert rows[(None, "10.1/Same")].excluded_by_user_id is None, "the system decided"
+    assert rows[(None, "10.1/Same")].excluded_reason == "pubmed_twin"
     assert rows[(None, "10.1/other")].excluded_at is not None, "same title"
     assert rows[(None, "10.1/kept")].excluded_at is None, "a manual row is never touched"
     assert sorted(out.non_pubmed_superseded) == ["10.1/Same", "10.1/other"]
@@ -157,3 +166,29 @@ async def test_a_generic_title_years_apart_is_not_the_same_paper(db_session):
         db_session, pi.id, CorpusResult(kept=[rec], flagged=[], ranked=[rec]))
     rows = {r.doi: r for r in await _rows(db_session, pi.id)}
     assert rows["10.1/intro"].excluded_at is None and out.non_pubmed_superseded == []
+
+
+async def test_a_generic_title_years_apart_is_two_works(db_session):
+    pi = await factories.make_user(db_session)
+    db_session.add(Publication(user_id=pi.id, doi="10.1007/978-3-111-0_1", title="Introduction",
+                               year=2015, provenance="s1"))
+    await db_session.flush()
+    out = await apply_non_pubmed_works(db_session, pi.id, [
+        _work("10.1007/978-3-222-0_1", title="Introduction", year=2023, provenance="s1")])
+    rows = {r.doi: r for r in await _rows(db_session, pi.id)}
+    old = rows["10.1007/978-3-111-0_1"]
+    assert (old.year, old.excluded_at) == (2015, None)
+    assert rows["10.1007/978-3-222-0_1"].excluded_at is None
+    assert out.duplicates_excluded == []
+
+
+async def test_a_duplicate_within_one_collection_is_stored_excluded(db_session):
+    pi = await factories.make_user(db_session)
+    out = await apply_non_pubmed_works(db_session, pi.id, [
+        _work("10.1/new", title="Safety filters for learned controllers", year=2024),
+        _work("10.1/old", title="Safety filters for learned controllers", year=2023,
+              duplicate_of="10.1/new")])
+    rows = {r.doi: r for r in await _rows(db_session, pi.id)}
+    assert rows["10.1/new"].excluded_at is None
+    assert rows["10.1/old"].excluded_reason == "duplicate_title"
+    assert out.stored == ["10.1/new"]

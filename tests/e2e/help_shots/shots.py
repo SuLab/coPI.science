@@ -229,8 +229,9 @@ SHOTS: tuple[Shot, ...] = (
          "A PI's Account card and the Edit Profile form.",
          (_PI_DETAIL,), _show_account_and_edit),
     Shot("pi-paper-review", AUDIENCE_STAFF, "manager", _featured_pi, "#review",
-         "Corpus and profile review: the pending draft, a candidate paper, an unanchored "
-         "paper and an excluded one.",
+         "Corpus and profile review: the latest generation notes, the pending draft, a "
+         "candidate paper, a withheld paper, an unanchored paper and an excluded one with "
+         "its reason.",
          (_PI_DETAIL, "templates/pis/_profile_review.html")),
     Shot("pi-grants", AUDIENCE_STAFF, "manager", _featured_pi, "#grants",
          "The Grants card: the RePORTER identity, NIH awards and ORCID fundings.",

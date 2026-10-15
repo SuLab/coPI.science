@@ -97,7 +97,9 @@ def compare(rows: Sequence[Publication], result: CorpusResult) -> Comparison:
     resolver dropped as superseded (``result.superseded``) by a strong successor (anchored
     in ``ranked``, or a stored ``manual`` row) is not unanchored: the pipeline excludes it
     on purpose, so ``--apply`` must not relabel it. A row superseded by a weak successor
-    (a review candidate at most) stays reportable, since the pipeline keeps it."""
+    (a review candidate at most) stays reportable, since the pipeline keeps it. A row whose
+    PMID the resolver dropped as a title duplicate of an anchored or kept paper is not
+    unanchored either."""
     manual_pmids = {row.pmid for row in rows if row.pmid and row.provenance == PROVENANCE_MANUAL}
     returned: dict[str, dict] = {}
     for rec in result.ranked:
@@ -107,6 +109,11 @@ def compare(rows: Sequence[Publication], result: CorpusResult) -> Comparison:
     anchored = {pmid: rec for pmid, rec in returned.items() if is_anchored(rec)}
     superseded = {
         old for old, new in result.superseded if new in anchored or new in manual_pmids
+    }
+    # A title duplicate of an anchored or kept paper is excluded by the pipeline, not unanchored.
+    superseded |= {
+        dup for dup, keeper in result.title_duplicates
+        if keeper in anchored or keeper in manual_pmids
     }
     stored_pmids = {row.pmid for row in rows if row.pmid}
     out = Comparison()
@@ -121,15 +128,14 @@ def compare(rows: Sequence[Publication], result: CorpusResult) -> Comparison:
             # The non-PubMed corpus (spec 2026-10-09 §5.7): the PubMed resolve never returns
             # it, so its absence here says nothing about its anchor.
             continue
-        rec = returned.get(row.pmid) if row.pmid else None
+        rec = returned.get(row.pmid)
         if rec is not None:
             changes = metadata_changes(row, rec)
             if changes:
                 out.metadata_refresh.append((row.pmid, list(changes)))
             if "year" in changes:
                 out.year_changes.append((row.pmid, row.year, changes["year"]))
-        if row.excluded_at is None and (row.pmid is None or row.pmid not in anchored) \
-                and row.pmid not in superseded:
+        if row.excluded_at is None and row.pmid not in anchored and row.pmid not in superseded:
             out.unanchored.append((row.id, row.pmid, row.title or ""))
     return out
 
