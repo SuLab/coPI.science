@@ -4,8 +4,10 @@
 {% block help_body %}
 <h1>Managing PIs and lab bots</h1>
 <p>
-    Each PI in Blackbird gets a research profile, built from their publications, and a lab
-    agent: a Slack bot that speaks for the lab in the simulation. As a manager you add PIs,
+    Each PI in Blackbird has a research profile, built from their publications. A PI you add
+    with Add PI also gets a lab agent: a Slack bot that speaks for the lab in the simulation.
+    A PI who signed in on their own has no lab agent until you add them or they request one
+    themselves. As a manager you add PIs,
     check what their profile and publication list say, and take each lab bot from
     <strong>Pending</strong> to <strong>Active</strong>. All of this happens on the
     <a href="{{ page_url(request, 'workspace_pis') }}">PIs</a> page, on each PI's own page,
@@ -171,29 +173,52 @@
 <ul>
     <li><strong>Display Name</strong>: a change also renames the lab agent in the
         simulation. The Slack app's display name is not renamed; the note under the field
-        says so, and it has to be renamed in Slack.</li>
+        says so, and it has to be renamed in Slack. The name is also the search key for the
+        PI's grants, industry evidence and company discovery, and the name the next
+        profile generation searches PubMed with and matches against each paper's authors.
+        Saving a new name queues no refresh on its own; it takes effect at the next
+        generation, or sooner for companies when you press <strong>Find companies</strong>,
+        or for grants when you press <strong>Unpin</strong>.</li>
     <li><strong>Email</strong>, <strong>Institution</strong> and
-        <strong>Department</strong>.</li>
+        <strong>Department</strong>. The stored institution is what the next generation
+        searches PubMed with, together with the name; with no institution, that name
+        search is skipped. A generation fills Institution and Department from ORCID only
+        where they are blank.</li>
     <li><strong>Research Summary</strong>.</li>
     <li><strong>Techniques &amp; Methods</strong>, <strong>Model Systems</strong>,
         <strong>Disease Areas</strong>, <strong>Key Molecular Targets</strong> and
-        <strong>Keywords</strong>: lists of separate items.</li>
+        <strong>Keywords</strong>: lists of separate items. The words in these lists decide
+        which Slack topic channels the lab agent joins, so editing them can change where it
+        posts. The next industry scan matches patents against Keywords, Key Molecular
+        Targets and Disease Areas, and trials against Disease Areas.</li>
     <li><strong>JHU tenure start (year)</strong>, described below.</li>
 </ul>
 <p>Press <strong>Save Changes</strong>. The page says "Profile saved."</p>
 <h3>JHU tenure start</h3>
 <p>
     The tenure start is the year the PI's Hopkins work begins. Publications from that year
-    on ground the profile and the lab agent's publication list, and it also scopes the
-    PI's grants and industry score. Blackbird derives it from the PI's ORCID employment or
-    their earliest Hopkins-affiliated paper; correct it here if it is wrong.
+    on normally ground the profile and the lab agent's publication list, with the exceptions
+    below, and it also scopes the PI's grants and industry score. Blackbird derives it when none is recorded; correct it
+    here if it is wrong.
 </p>
 <ul>
     <li>Leaving the field blank leaves the year unchanged.</li>
-    <li>When no year has ever been set, Blackbird uses the PI's full career.</li>
+    <li>A recorded year always wins and is never derived again. A year from the older
+        curated list counts as recorded. With none, a profile generation tries these in
+        order: a current Hopkins position on the PI's ORCID record that has a start year,
+        then the earliest paper the PI's ORCID record or PubMed's ORCID field confirms and
+        on which the PI's own affiliation is Hopkins.</li>
+    <li>The profile and the persona's publication list use the PI's whole career, not
+        just the window, when there is no year at all, and also when a year is set but
+        only a few papers fall in the window. In that second case the PI page's publication
+        list, headed "Publications (JHU tenure, since …)", still shows only the window.</li>
     <li>When no year is recorded but the last profile run worked one out from an incomplete
-        set of papers, an amber note under the field shows that provisional year. Enter it
-        in the field to confirm it.</li>
+        set of papers, or without being able to read the ORCID record, an amber note under
+        the field shows that provisional year. Enter it in the field to confirm it. While a
+        year is only provisional, the profile, the persona and the grants use it, but the
+        PI page's publication list is headed "Publications (full career — no JHU tenure
+        start recorded)" and shows the whole career, and the industry score does not use
+        it.</li>
 </ul>
 {% call careful() %}
 <p>Saving changes the PI's live profile:</p>
@@ -217,33 +242,169 @@
     or a blank field to leave it unchanged.
 </p>
 
+<h2 id="finding-papers">How papers are found and kept</h2>
+<p>
+    Each profile generation looks for the PI's papers in these places:
+</p>
+<ul>
+    <li>the works listed on the PI's ORCID record;</li>
+    <li>the works OpenAlex holds for the PI's ORCID iD;</li>
+    <li>the PubMed papers that carry the PI's ORCID iD;</li>
+    <li>PubMed, by the PI's name at the institution recorded for them. This search is
+        skipped when the PI has no institution.</li>
+</ul>
+<p>
+    PubMed supplies the stored title, abstract, journal and year of every paper it holds.
+    A paper is anchored when the PI's ORCID record, or the PI's ORCID iD on the paper's
+    PubMed record, ties it to the PI (see
+    <a href="{{ page_url(request, 'help_page', slug='glossary', fragment='term-anchored') }}">Anchored paper</a>).
+    An anchored paper is stored without review. A paper found only by OpenAlex or the name
+    search has no anchor and becomes a candidate paper (see
+    <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='paper-review') }}">Reviewing papers</a>).
+    Storage covers the PI's whole career; the tenure start decides which papers the profile
+    and persona are written from. The overview of every data source is in
+    <a href="{{ page_url(request, 'help_page', slug='how-it-works', fragment='data-sources') }}">Where the data comes from</a>.
+</p>
+<h3>The identity check</h3>
+<p>Before a paper is stored or offered, it has to pass a check that it is the PI's:</p>
+<ul>
+    <li>the PI has to appear on the paper by name as an individual author;</li>
+    <li>editorials, comments, letters, news items, corrections, expressions of concern,
+        biographies, retraction notices, retracted papers and papers credited only to a group
+        are left out;</li>
+    <li>a paper found only by the name search, or one on which the PI's first name appears
+        only as an initial and no ORCID anchor confirms it, is also checked against the
+        matched author's affiliation, and may be left out when that affiliation does not
+        match the recorded institution;</li>
+    <li>a paper whose authorship cannot be confirmed is left out. It is not offered as a
+        candidate, and no page shows it;</li>
+    <li>papers published under a former surname never match.</li>
+</ul>
+<p>
+    A paper that is missing from every list usually failed this check. Check the PI's
+    name, institution and ORCID record.
+</p>
+<h3>Copies and earlier versions</h3>
+<p>
+    Copies of one paper, with the same title or as a preprint and its published version,
+    merge into one, and the published version is kept. A stored earlier version moves to
+    Excluded papers once its published version is stored with an ORCID anchor or accepted or
+    kept by staff; an earlier version a person kept or accepted, or restored after Blackbird
+    excluded it, is left alone.
+</p>
+<h3>Works PubMed does not index</h3>
+<p>
+    For a PI with only a few PubMed papers in the tenure window, Blackbird also stores
+    articles, conference papers, books, chapters and preprints that PubMed does not index,
+    taken from the ORCID record and from OpenAlex. They are stored without review. A work
+    that only OpenAlex attributes to the PI is stored only when the PI's authorship on it
+    names Hopkins or an organization on the PI's ORCID record, or the publisher's metadata
+    carries the PI's ORCID iD. These works never appear in Candidate papers or Unanchored
+    papers, and the page cannot exclude them.
+</p>
+<h3>Keeping papers up to date</h3>
+<p>
+    Each generation refreshes the stored papers from PubMed. It never removes a paper, even
+    when the searches stop finding it. <strong>Keep</strong> and <strong>Accept</strong>
+    stop that refresh of the title, abstract, journal and year for the paper they act on (its
+    DOI is still checked against PubMed), and so does <strong>Restore</strong> for a
+    paper Blackbird excluded itself; a paper a person excluded and then restored is
+    refreshed as before. Blackbird itself
+    excludes a paper only as an earlier version, or as a copy of a paper it already holds.
+</p>
+<p>
+    Nothing refreshes a profile or its papers on a schedule. New papers arrive only with a
+    profile generation, and these start one:
+</p>
+<ul>
+    <li>Add PI, unless the PI already has a profile from signing in on their own;</li>
+    <li>a PI's first sign-in, or an admin approving their access, when they have no profile
+        yet, or the PI refreshing their own profile;</li>
+    <li><strong>Regenerate profile</strong> and <strong>Retry profile generation</strong>;</li>
+    <li>a change to the JHU tenure start.</li>
+</ul>
+
+<h2 id="writing-profile">What the profile is written from</h2>
+<p>
+    Each profile generation sends an AI model:
+</p>
+<ul>
+    <li>the PI's newest papers in scope that have an abstract, up to a limit, and part of
+        each abstract. In scope means dated in the tenure window, or the whole career when
+        there is no year or only a few papers fall in the window (see JHU tenure start
+        above);</li>
+    <li>the methods sections from PubMed Central of some of the newest open-access papers.
+        The PI page's publication list marks a paper "Methods ✓" when methods text was
+        stored for it. "No methods fetched" usually means nobody looked, because the paper
+        was not among those checked or is not open access; it does not mean the paper has
+        no methods
+        (see <a href="{{ page_url(request, 'help_page', slug='glossary', fragment='term-methods') }}">Methods ✓, No methods fetched</a>);</li>
+    <li>the PI's grant lines, active and past (see
+        <a href="{{ page_url(request, 'help_page', slug='pi-evidence', fragment='grant-lines') }}">Grant lines</a>).
+        On a PI's first generation these are the ORCID fundings only, because NIH awards
+        are looked up after the profile is written;</li>
+    <li>the PI's name, institution, department and ORCID website.</li>
+</ul>
+<p>
+    The text it writes has to pass quality checks: a summary within the length limit, enough
+    techniques, and at least one disease area. A text that fails is retried with the
+    limits restated. If it fails again, it never replaces a stored profile that has not
+    failed the checks: the generation keeps that profile, and only the papers are updated.
+    The same happens when the new text was written from no abstracts but the stored profile
+    was written from some. Otherwise the new text is saved, and nothing on the PI's page
+    marks it as having failed the checks. If a person has edited the profile since its last
+    generation, the result waits as a
+    <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='drafts') }}">Pending draft</a>
+    instead, marked "failed the quality checks" when it failed. What each AI agent later
+    sees of the profile is in
+    <a href="{{ page_url(request, 'help_page', slug='how-it-works', fragment='what-agents-see') }}">What each AI agent sees</a>.
+</p>
+
 <h2 id="paper-review">Reviewing papers</h2>
 <p>
     The <strong>Corpus and profile review</strong> card lists the papers that need a
-    person's decision. A paper is anchored when the PI's ORCID record, or the PI's ORCID iD
-    on the paper's PubMed record, ties it to them. Unanchored papers may belong to someone
-    with a similar name.
+    person's decision. Unanchored papers may belong to someone with a similar name.
 </p>
 <h3>Candidate papers</h3>
 <p>
-    Papers found by the PI's name with no ORCID anchor. They are not part of the profile
-    until you accept them.
+    The card's note reads: "Found only by OpenAlex or the name search, with no ORCID anchor.
+    Accept stores the paper. A rejected paper is not offered again, but a later generation
+    stores it if the PI's ORCID record or PubMed's ORCID field confirms it." Candidates are
+    not part of the profile until you accept them. A pending candidate that gains an ORCID
+    anchor is stored at the next generation without a decision from you.
+</p>
+<p>
+    Each candidate row shows <strong>stages</strong> followed by codes such as
+    <strong>s2,s4</strong>. They name the searches that found the paper: <strong>s1</strong>, the
+    PI's ORCID record; <strong>s2</strong>, OpenAlex; <strong>s3</strong>, PubMed's ORCID field;
+    <strong>s4</strong>, the PubMed name search at the institution. A candidate can show only
+    <strong>s2</strong> and <strong>s4</strong>, because <strong>s1</strong> or <strong>s3</strong> would
+    have anchored it (see
+    <a href="{{ page_url(request, 'help_page', slug='glossary', fragment='term-stages') }}">Stages</a>).
 </p>
 <ul>
     <li><strong>Accept</strong> fetches the paper from PubMed and adds it to the PI's
         papers, and the page says "Paper added to the corpus."</li>
-    <li><strong>Reject</strong> keeps it out, and the page says "Paper rejected; it will not
-        be offered again."</li>
+    <li><strong>Reject</strong> stops the paper being offered again, and the page says
+        "Paper rejected; it will not be offered again." If the PI's ORCID record or PubMed
+        later ties the paper to the PI, the next generation stores it anyway.</li>
 </ul>
 {% call careful() %}
 <p>
-    <strong>Reject</strong> is permanent: a rejected paper is never offered again, and the
-    page has no way to bring it back. <strong>Accept</strong> has no undo button either.
-    Open the PMID link and check the authors before you decide.
+    <strong>Reject</strong> has no undo button: the page has no way to bring a rejected
+    paper back, and it is not offered again, although a later generation stores it if the
+    PI's ORCID record or PubMed's ORCID field confirms it. <strong>Accept</strong> has no
+    undo button either. Open the PMID link and check the authors before you decide.
 </p>
 {% endcall %}
 <h3>Unanchored papers</h3>
-<p>Papers already stored for the PI that no ORCID anchor confirms.</p>
+<p>Papers already stored for the PI that a later generation found again without an ORCID
+anchor, and that no one has kept, accepted or excluded.</p>
+<p>
+    Only papers on this list can be excluded from the page. A wrong paper that the PI's
+    ORCID record confirms, or a work stored without a PubMed record, has no Exclude
+    button, and no page in the Workspace can exclude it.
+</p>
 <ul>
     <li><strong>Keep</strong> marks the paper as checked; the page says "Kept." It changes
         nothing the profile says, but the paper leaves this list, is no longer offered for
@@ -255,7 +416,8 @@
 <p>
     The collapsed <strong>Excluded papers</strong> list shows every excluded paper, with the
     time it was excluded. It can also hold papers Blackbird excluded itself, such as an
-    earlier version of a paper. <strong>Restore</strong> puts a paper back, and the page
+    earlier version of a paper or a work stored without a PubMed record that PubMed has
+    since indexed. <strong>Restore</strong> puts a paper back, and the page
     says "Paper restored to the corpus."
 </p>
 {% call careful() %}
@@ -331,14 +493,25 @@
 <p>
     Both buttons start a full profile generation, which cannot be cancelled from the page.
     If the profile was edited since its last generation, the result waits as a Pending
-    draft; otherwise it replaces the profile.
+    draft. Otherwise the new text replaces the profile, unless the stored profile passed the
+    quality checks and the new text failed them twice or was written from no abstracts while
+    the stored one had some; then the stored profile stays and only the papers are updated
+    (see
+    <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='writing-profile') }}">What the profile is written from</a>).
+</p>
+<p>
+    Every successful generation also re-reads the PI's ORCID fundings, refreshes the
+    PI's grants and industry evidence, and runs company discovery again.
 </p>
 {% endcall %}
 
 <h2 id="persona">The persona file</h2>
 <p>
     The persona is the text the lab agent works from: the PI's profile, publications and
-    grants. Blackbird rewrites the persona file whenever something in it changes.
+    grants. Blackbird rewrites the persona file whenever something in it changes. Its
+    publication list holds the newest papers in scope, each as a title, journal and year
+    with a DOI or PubMed link; the lab agent gets no abstracts. What each AI agent sees is in
+    <a href="{{ page_url(request, 'help_page', slug='how-it-works', fragment='what-agents-see') }}">What each AI agent sees</a>.
 </p>
 <p>
     If a rewrite failed, or the saved file no longer matches the profile, the Corpus and

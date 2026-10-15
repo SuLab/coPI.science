@@ -55,10 +55,11 @@ SCHEMAS = {
         "id pmid pmcid doi title abstract journal year methods_text provenance excluded_at".split()
     ),
     "PublicationCandidate": frozenset(
-        "id pmid title journal year reason source created_at".split()
+        "id pmid title journal year reason source stages created_at".split()
     ),
     "PiGrant": frozenset(
-        "id title core_project_num activity_code first_fy last_fy is_subproject vetoed_at identity_evidence".split()
+        "id title core_project_num activity_code first_fy last_fy is_subproject vetoed_at identity_evidence"
+        " tenure_filter_mode".split()
     ),
     "PiOrcidFunding": frozenset("id title funder_name start_year end_year vetoed_at".split()),
     "PiIndustryEvidence": frozenset(

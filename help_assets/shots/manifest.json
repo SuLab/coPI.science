@@ -11,9 +11,9 @@
       "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/activity.html": "1ed12241f6977d813032f4617979bf8b735cba87b83e74019e79f20220357368",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "assessment-card": {
     "audience": "all",
@@ -30,9 +30,9 @@
       "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessments.html": "700a1506992d84b894b5c077b52234817cb6150a38fb1c3b6a3b990ab9deded6",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "assessments-list": {
     "audience": "all",
@@ -49,9 +49,9 @@
       "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessments.html": "700a1506992d84b894b5c077b52234817cb6150a38fb1c3b6a3b990ab9deded6",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "assign-to": {
     "audience": "staff",
@@ -69,9 +69,9 @@
       "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "card-rubric-gating": {
     "audience": "all",
@@ -88,9 +88,9 @@
       "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessments.html": "700a1506992d84b894b5c077b52234817cb6150a38fb1c3b6a3b990ab9deded6",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "chat-drawer": {
     "audience": "all",
@@ -108,9 +108,9 @@
       "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "detail-brief": {
     "audience": "all",
@@ -128,9 +128,9 @@
       "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "detail-evidence": {
     "audience": "all",
@@ -148,9 +148,9 @@
       "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "detail-panel-gating": {
     "audience": "all",
@@ -168,9 +168,9 @@
       "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "detail-timeline": {
     "audience": "all",
@@ -188,9 +188,9 @@
       "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "discussions": {
     "audience": "staff",
@@ -206,9 +206,9 @@
       "templates/discussions/_threads.html": "aeffa8783a49374b6fde8144f41057bc6227c685f9b71232f7a832faf794ed89",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/discussions.html": "dd2683323c03fd179783988bcdc3c5ed2764ea57cc0441284f63ea61284330ed",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "intro-prompt": {
     "audience": "all",
@@ -220,9 +220,9 @@
       "shots.py#intro-prompt": "b26a9397f5a04c13beb2381cafe452b5ef19aca09b8d5f353618741db28cb4c3",
       "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
       "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "pi-account-edit": {
     "audience": "staff",
@@ -240,12 +240,12 @@
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/pis/_bot_action.html": "f4ea7d8f70eea58713af57458875eed07f6f41972f1bcab49b77020023c0817b",
       "templates/pis/_detail_errors.html": "bd08f23c28a00b0d9a843f069d23bfecf8e15088e58c3b800308ba0d70803af7",
-      "templates/pis/_profile_review.html": "1f91607bb285715e758cf09e654bc016aae9b01f64f6774d2d8f5135b78cd7d4",
+      "templates/pis/_profile_review.html": "922d0b145947346bf2c9a9da15a56a3a4e4e31d13c864a583e48b32252292b37",
       "templates/pis/_revision_history.html": "7f21279bcd9d19086382f840758abc0915a60678aa5e85c6d19fa34d64941cb7",
-      "templates/workspace/pi_detail.html": "c6a5b30ef3e967c316afa8d13ead944eb03e8bd716b11c80b72afaf0e9056632",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "templates/workspace/pi_detail.html": "81aa90ba0a115c159af5dbb4c5acc37e66ae2fa937d99cf94fdc313346ec0629",
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "pi-companies": {
     "audience": "staff",
@@ -263,12 +263,12 @@
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/pis/_bot_action.html": "f4ea7d8f70eea58713af57458875eed07f6f41972f1bcab49b77020023c0817b",
       "templates/pis/_detail_errors.html": "bd08f23c28a00b0d9a843f069d23bfecf8e15088e58c3b800308ba0d70803af7",
-      "templates/pis/_profile_review.html": "1f91607bb285715e758cf09e654bc016aae9b01f64f6774d2d8f5135b78cd7d4",
+      "templates/pis/_profile_review.html": "922d0b145947346bf2c9a9da15a56a3a4e4e31d13c864a583e48b32252292b37",
       "templates/pis/_revision_history.html": "7f21279bcd9d19086382f840758abc0915a60678aa5e85c6d19fa34d64941cb7",
-      "templates/workspace/pi_detail.html": "c6a5b30ef3e967c316afa8d13ead944eb03e8bd716b11c80b72afaf0e9056632",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "templates/workspace/pi_detail.html": "81aa90ba0a115c159af5dbb4c5acc37e66ae2fa937d99cf94fdc313346ec0629",
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "pi-detail-reviewer": {
     "audience": "all",
@@ -286,12 +286,12 @@
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/pis/_bot_action.html": "f4ea7d8f70eea58713af57458875eed07f6f41972f1bcab49b77020023c0817b",
       "templates/pis/_detail_errors.html": "bd08f23c28a00b0d9a843f069d23bfecf8e15088e58c3b800308ba0d70803af7",
-      "templates/pis/_profile_review.html": "1f91607bb285715e758cf09e654bc016aae9b01f64f6774d2d8f5135b78cd7d4",
+      "templates/pis/_profile_review.html": "922d0b145947346bf2c9a9da15a56a3a4e4e31d13c864a583e48b32252292b37",
       "templates/pis/_revision_history.html": "7f21279bcd9d19086382f840758abc0915a60678aa5e85c6d19fa34d64941cb7",
-      "templates/workspace/pi_detail.html": "c6a5b30ef3e967c316afa8d13ead944eb03e8bd716b11c80b72afaf0e9056632",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "templates/workspace/pi_detail.html": "81aa90ba0a115c159af5dbb4c5acc37e66ae2fa937d99cf94fdc313346ec0629",
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "pi-grants": {
     "audience": "staff",
@@ -309,12 +309,12 @@
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/pis/_bot_action.html": "f4ea7d8f70eea58713af57458875eed07f6f41972f1bcab49b77020023c0817b",
       "templates/pis/_detail_errors.html": "bd08f23c28a00b0d9a843f069d23bfecf8e15088e58c3b800308ba0d70803af7",
-      "templates/pis/_profile_review.html": "1f91607bb285715e758cf09e654bc016aae9b01f64f6774d2d8f5135b78cd7d4",
+      "templates/pis/_profile_review.html": "922d0b145947346bf2c9a9da15a56a3a4e4e31d13c864a583e48b32252292b37",
       "templates/pis/_revision_history.html": "7f21279bcd9d19086382f840758abc0915a60678aa5e85c6d19fa34d64941cb7",
-      "templates/workspace/pi_detail.html": "c6a5b30ef3e967c316afa8d13ead944eb03e8bd716b11c80b72afaf0e9056632",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "templates/workspace/pi_detail.html": "81aa90ba0a115c159af5dbb4c5acc37e66ae2fa937d99cf94fdc313346ec0629",
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "pi-header-pending": {
     "audience": "staff",
@@ -332,12 +332,12 @@
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/pis/_bot_action.html": "f4ea7d8f70eea58713af57458875eed07f6f41972f1bcab49b77020023c0817b",
       "templates/pis/_detail_errors.html": "bd08f23c28a00b0d9a843f069d23bfecf8e15088e58c3b800308ba0d70803af7",
-      "templates/pis/_profile_review.html": "1f91607bb285715e758cf09e654bc016aae9b01f64f6774d2d8f5135b78cd7d4",
+      "templates/pis/_profile_review.html": "922d0b145947346bf2c9a9da15a56a3a4e4e31d13c864a583e48b32252292b37",
       "templates/pis/_revision_history.html": "7f21279bcd9d19086382f840758abc0915a60678aa5e85c6d19fa34d64941cb7",
-      "templates/workspace/pi_detail.html": "c6a5b30ef3e967c316afa8d13ead944eb03e8bd716b11c80b72afaf0e9056632",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "templates/workspace/pi_detail.html": "81aa90ba0a115c159af5dbb4c5acc37e66ae2fa937d99cf94fdc313346ec0629",
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "pi-industry": {
     "audience": "staff",
@@ -355,18 +355,18 @@
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/pis/_bot_action.html": "f4ea7d8f70eea58713af57458875eed07f6f41972f1bcab49b77020023c0817b",
       "templates/pis/_detail_errors.html": "bd08f23c28a00b0d9a843f069d23bfecf8e15088e58c3b800308ba0d70803af7",
-      "templates/pis/_profile_review.html": "1f91607bb285715e758cf09e654bc016aae9b01f64f6774d2d8f5135b78cd7d4",
+      "templates/pis/_profile_review.html": "922d0b145947346bf2c9a9da15a56a3a4e4e31d13c864a583e48b32252292b37",
       "templates/pis/_revision_history.html": "7f21279bcd9d19086382f840758abc0915a60678aa5e85c6d19fa34d64941cb7",
-      "templates/workspace/pi_detail.html": "c6a5b30ef3e967c316afa8d13ead944eb03e8bd716b11c80b72afaf0e9056632",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "templates/workspace/pi_detail.html": "81aa90ba0a115c159af5dbb4c5acc37e66ae2fa937d99cf94fdc313346ec0629",
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "pi-paper-review": {
     "audience": "staff",
     "alt": "Corpus and profile review: the pending draft, a candidate paper, an unanchored paper and an excluded one.",
     "width": 896,
-    "height": 903,
+    "height": 919,
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#pi-paper-review": "f13f0231d521c4a93b3ff8711b62f6ebc34077160a8ecbcc1c3479d603ebdab2",
@@ -378,12 +378,12 @@
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/pis/_bot_action.html": "f4ea7d8f70eea58713af57458875eed07f6f41972f1bcab49b77020023c0817b",
       "templates/pis/_detail_errors.html": "bd08f23c28a00b0d9a843f069d23bfecf8e15088e58c3b800308ba0d70803af7",
-      "templates/pis/_profile_review.html": "1f91607bb285715e758cf09e654bc016aae9b01f64f6774d2d8f5135b78cd7d4",
+      "templates/pis/_profile_review.html": "922d0b145947346bf2c9a9da15a56a3a4e4e31d13c864a583e48b32252292b37",
       "templates/pis/_revision_history.html": "7f21279bcd9d19086382f840758abc0915a60678aa5e85c6d19fa34d64941cb7",
-      "templates/workspace/pi_detail.html": "c6a5b30ef3e967c316afa8d13ead944eb03e8bd716b11c80b72afaf0e9056632",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "templates/workspace/pi_detail.html": "81aa90ba0a115c159af5dbb4c5acc37e66ae2fa937d99cf94fdc313346ec0629",
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "pis-list-manager": {
     "audience": "staff",
@@ -397,9 +397,9 @@
       "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/pis.html": "84853662a3a4edae4122e57f01915d1c33893356c013c2d60ab4410f1b527c85",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "pis-list-reviewer": {
     "audience": "all",
@@ -413,9 +413,9 @@
       "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/pis.html": "84853662a3a4edae4122e57f01915d1c33893356c013c2d60ab4410f1b527c85",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "prompt-suggestion-detail": {
     "audience": "staff",
@@ -430,9 +430,9 @@
       "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/prompt_suggestion_detail.html": "7eed854a2cab648f2321a89b9cb1b9011bcb8158fe56cd8803298e95575ed890",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "prompt-suggestions": {
     "audience": "staff",
@@ -446,9 +446,9 @@
       "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/prompt_suggestions.html": "c750299bebdc6b59ab2357a5507abdfd0e7b48486af74989f4eff57102669a67",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "review-form": {
     "audience": "all",
@@ -466,9 +466,9 @@
       "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "slack-bots": {
     "audience": "staff",
@@ -483,9 +483,9 @@
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/pis/_bot_action.html": "f4ea7d8f70eea58713af57458875eed07f6f41972f1bcab49b77020023c0817b",
       "templates/workspace/slack_bots.html": "3c87828545c3d2e71fc50db4fd2c574da01575bed223483f155ad9f7631d538f",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "staff-form": {
     "audience": "staff",
@@ -499,9 +499,9 @@
       "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/staff.html": "38325b7f941f78292b0e95124e2be6309adc7e5348ee55a710ae9e328e46e482",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "staff-preview": {
     "audience": "staff",
@@ -515,9 +515,9 @@
       "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/staff.html": "38325b7f941f78292b0e95124e2be6309adc7e5348ee55a710ae9e328e46e482",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "staff-table": {
     "audience": "staff",
@@ -531,9 +531,9 @@
       "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/staff.html": "38325b7f941f78292b0e95124e2be6309adc7e5348ee55a710ae9e328e46e482",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   },
   "topbar-help": {
     "audience": "all",
@@ -545,8 +545,8 @@
       "shots.py#topbar-help": "9c2721a7838e7c1ef0e55f0ef837d06cfc6018b1ee52bf9a8d3fb267246a5ef3",
       "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
       "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
-      "tests/e2e/help_shots/seed.py": "316a6963c79e50cd5a0f5452e19768660ff277cf2971543404d99c4ed820c0a2"
+      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
     },
-    "commit": "3bafb2923c7ab9f0a521f107c922365207a04a78"
+    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
   }
 }

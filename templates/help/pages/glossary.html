@@ -24,6 +24,17 @@ For how the parts fit together, read
     joins a running simulation at its next roster sync.</dd>
     {% endif %}
 
+    <dt id="term-active-past-grants">Active and past grants</dt>
+    <dd>The two lists of grant lines in the lab agent's description of its PI. A grant is
+    active until its end date. An NIH award with no end date stays active while its latest
+    funded year is the current one, and an ORCID funding with no end date stays active for
+    some years after it starts. A grant that has ended is past, and past grants are listed
+    only when the PI has a JHU tenure start and the grant falls within the tenure. Each list
+    keeps only the most recent grants, up to a limit. Which grants are active changes with the
+    date, so the lines change when the description is next rewritten.{% if permissions.staff %}
+    For the details, see
+    <a href="{{ page_url(request, 'help_page', slug='pi-evidence', fragment='grant-lines') }}">Which grants the persona lists</a>.{% endif %}</dd>
+
     {% if permissions.staff %}
     <dt id="term-agent-status">Agent status</dt>
     <dd>Where a PI's lab agent stands, shown on the PIs page and the Slack Bots page:
@@ -33,6 +44,17 @@ For how the parts fit together, read
     <strong>Muted</strong> (kept out of the simulation; see Muted) and
     <strong>Suspended</strong> (taken out of service, for example when its PI's account is
     deleted; only an admin can change it).</dd>
+    {% endif %}
+
+    {% if permissions.staff %}
+    <dt id="term-anchored">Anchored paper</dt>
+    <dd>A paper that the PI's ORCID record or PubMed's ORCID field confirms as the PI's. An
+    anchored paper is stored without review; a PubMed paper not yet stored that has no such
+    anchor becomes a candidate, and a stored PubMed paper that a later generation finds again
+    without an anchor is listed under Unanchored papers, unless a person has kept, accepted or
+    excluded it.
+    See
+    <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='finding-papers') }}">How papers are found and kept</a>.</dd>
     {% endif %}
 
     <dt id="term-approval-status">Approval status</dt>
@@ -82,9 +104,11 @@ For how the parts fit together, read
 
     {% if permissions.staff %}
     <dt id="term-candidate-papers">Candidate papers</dt>
-    <dd>Papers found by the PI's name with nothing tying them to the PI's ORCID iD. They are
-    not part of the PI's corpus until someone presses <strong>Accept</strong>.
-    <strong>Reject</strong> is permanent: a rejected paper is never offered again.</dd>
+    <dd>Papers found only by OpenAlex or the name search, with no ORCID anchor. They are
+    not part of the PI's corpus until someone presses <strong>Accept</strong>, which stores
+    the paper. A rejected paper is not offered again, but a later generation stores it if
+    the PI's ORCID record or PubMed's ORCID field confirms it. See also Anchored paper and
+    Stages.</dd>
     {% endif %}
 
     <dt id="term-cohort-percentile">Cohort percentile</dt>
@@ -122,8 +146,12 @@ For how the parts fit together, read
     {% if permissions.staff %}
     <dt id="term-discovery">Discovery</dt>
     <dd>The search <strong>Find companies</strong> starts for a PI's companies. What it
-    finds appears under <strong>Suggested</strong> for a manager to confirm or reject. It
-    may wait for the daily budget it draws on; the page says until when.</dd>
+    finds appears under <strong>Suggested</strong> for a manager to confirm or reject. An AI
+    model reads the conflict-of-interest statements in the PI's PubMed papers that mention
+    founding a company and name the PI, from any year and not only within the tenure window,
+    and picks out each company the PI says they founded or co-founded and the PI's role;
+    Wikidata's record of companies the PI founded is checked too. Discovery finds only founder and co-founder ties;
+    advisory and board roles are added by hand. It may wait for the daily budget it draws on; the page says until when.</dd>
     {% endif %}
 
     {% if permissions.staff %}
@@ -154,8 +182,9 @@ For how the parts fit together, read
 
     {% if permissions.staff %}
     <dt id="term-excluded-papers">Excluded papers</dt>
-    <dd>Papers a manager took out of a PI's profile and persona with
-    <strong>Exclude</strong>. <strong>Restore</strong> puts one back.</dd>
+    <dd>Papers taken out of a PI's profile and persona, by a manager with
+    <strong>Exclude</strong> or by Blackbird itself as an earlier version or a copy of a
+    stored paper. <strong>Restore</strong> puts one back.</dd>
     {% endif %}
 
     <dt id="term-feedback">Feedback</dt>
@@ -166,7 +195,11 @@ For how the parts fit together, read
 
     <dt id="term-full-career">Full career</dt>
     <dd>Shown when a PI has no JHU tenure start recorded: their publication count and list
-    then cover their whole career instead of their time at JHU.</dd>
+    then cover their whole career instead of their time at JHU. This includes a PI whose year
+    is only provisional, although the profile and the lab agent's description use that
+    provisional year unless only a few papers fall after it. The profile and the lab agent's
+    description also use the whole career when a recorded tenure start has only a few papers
+    inside the window; the PI page's list and count then stay on the window.</dd>
 
     <dt id="term-gate">Gate, gating</dt>
     <dd>The rubric's gating criteria: questions an idea is checked against apart from its
@@ -215,7 +248,11 @@ For how the parts fit together, read
     <dd>The year a PI started at JHU. Publications from that year on are the ones that
     count: they ground the profile, fill the PI page's publication list and the
     <strong>Pubs (tenure)</strong> count. With no year recorded, the pages fall back to the
-    full career.</dd>
+    full career. The profile and the lab agent's description use the whole career when there
+    is no year, recorded or provisional, and also when a year is set but only a few papers
+    fall inside the window. A "provisional" year, inferred from
+    an incomplete record, scopes the profile, the lab agent's description and the grants,
+    but not the PI page's publication list or the industry score.</dd>
 
     <dt id="term-key-points">Key points</dt>
     <dd>BlackbirdBot's short list of the points that matter most about an idea, sometimes in
@@ -237,6 +274,12 @@ For how the parts fit together, read
     <strong>Not met</strong> (&#10060;): it was asked and failed. <strong>Unconfirmed</strong>
     (&#10067;): it was never asked. Only "not met" counts against an idea; "unconfirmed" means
     the question is still open.</dd>
+
+    <dt id="term-methods">Methods ✓, No methods fetched</dt>
+    <dd>Markers on each paper in the PI page's publication list. <strong>Methods ✓</strong>
+    means a methods section was fetched for the paper. <strong>No methods fetched</strong>
+    means none was, usually because methods are looked up only for some of the newest
+    open-access papers.</dd>
 
     {% if permissions.staff %}
     <dt id="term-muted">Muted</dt>
@@ -281,8 +324,9 @@ For how the parts fit together, read
 
     {% if permissions.staff %}
     <dt id="term-persona">Persona</dt>
-    <dd>The text a PI's lab agent is given about its PI, built from the PI's profile and
-    other records Blackbird holds. Changes to a profile, a veto and the agent's lifecycle
+    <dd>The text a PI's lab agent is given about its PI. It holds the profile text, the
+    PI's newest papers in scope listed by title with a DOI or PubMed link (no abstracts),
+    and the grant lines. Changes to a profile, a veto and the agent's lifecycle
     steps update it. <strong>Persona revisions</strong> on the PI page lists earlier
     versions.</dd>
     {% endif %}
@@ -295,7 +339,7 @@ For how the parts fit together, read
 
     <dt id="term-pi">PI</dt>
     <dd>A principal investigator whose lab takes part in Blackbird. Each PI has a page in the
-    Workspace and, once a manager sets it up, a lab agent.</dd>
+    Workspace and, once a manager adds them or they request one, a lab agent.</dd>
 
     {% if permissions.staff %}
     <dt id="term-profile-status">Profile status</dt>
@@ -399,6 +443,17 @@ For how the parts fit together, read
     <dt id="term-staff-account">Staff account</dt>
     <dd>A manager or reviewer account: one with no lab of its own. The Staff page lists
     them; managers create reviewer accounts there.</dd>
+    {% endif %}
+
+    {% if permissions.staff %}
+    <dt id="term-stages">Stages</dt>
+    <dd>On a candidate paper's row, a list such as <strong>s2,s4</strong> naming the searches
+    that found it: <strong>s1</strong> is the PI's ORCID works, <strong>s2</strong> OpenAlex's works
+    for the PI's ORCID iD, <strong>s3</strong> PubMed papers carrying the PI's ORCID iD and
+    <strong>s4</strong> PubMed by name at the PI's recorded institution. A paper found by
+    <strong>s1</strong> or <strong>s3</strong> is anchored, so a candidate normally shows only
+    <strong>s2</strong> and <strong>s4</strong>, alone or together. See
+    <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='finding-papers') }}">How papers are found and kept</a>.</dd>
     {% endif %}
 
     {% if permissions.staff %}

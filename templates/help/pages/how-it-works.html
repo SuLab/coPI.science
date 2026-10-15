@@ -13,9 +13,13 @@ term.</p>
 Each PI has a page in the Workspace with their research profile, grants, industry interest,
 companies and publications. Blackbird generates the research profile from the PI's
 publications, found from their ORCID record and from publication databases.</p>
-<p>Each PI has a <strong>lab agent</strong>: an AI agent with its own Slack bot, which
-speaks for the lab in Blackbird's Slack workspace. It works from what Blackbird holds about
-the PI, chiefly their research profile, and pitches the lab's work and ideas.</p>
+<p>A PI's <strong>lab agent</strong> is an AI agent with its own Slack bot, which speaks
+for the lab in Blackbird's Slack workspace and pitches the lab's work and ideas. It is
+created when a manager adds the PI with <strong>Add PI</strong>, or when the PI requests one
+after completing their profile. Until then the PI has no lab agent.</p>
+<p>The lab agent knows its PI only through its <strong>persona</strong>, a text built from
+the research profile, the newest papers and the grant lines. It does not read the rest of
+what Blackbird holds about the PI.</p>
 {% if permissions.staff %}
 <p>Managers add PIs, check their profiles, install each lab's Slack bot and activate the
 agent; a muted agent stays out of the simulation until it is unmuted. See
@@ -23,6 +27,51 @@ agent; a muted agent stays out of the simulation until it is unmuted. See
 {% else %}
 <p>A manager adds PIs, checks their profiles and puts their lab agents on Slack.</p>
 {% endif %}
+
+<h2 id="data-sources">Where the data comes from</h2>
+<p>Blackbird gathers what it knows about each PI from public sources:</p>
+<ul>
+    <li><strong>Publications</strong> come from the PI's ORCID record, from OpenAlex and from
+    PubMed. PubMed supplies the stored title and abstract of every paper it holds; for other
+    works they come from ORCID or OpenAlex.</li>
+    <li><strong>Grants</strong> come from the PI's ORCID record and from NIH RePORTER.</li>
+    <li><strong>Industry evidence</strong> comes from public paper, patent and clinical-trial
+    records.</li>
+    <li><strong>Companies</strong> are suggested from the PI's own competing-interest
+    statements and Wikidata, or added by hand, and are used only once staff confirm them.</li>
+    <li>The <strong>research profile</strong> is written by an AI model from the papers, the
+    grant lines and the PI's name, institution, department and ORCID website.</li>
+</ul>
+<p>Nothing refreshes a profile on a schedule. New papers arrive only when a new profile is
+generated.</p>
+{% if permissions.staff %}
+<p>For how papers are found and kept, see
+<a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='finding-papers') }}">How papers are found and kept</a>
+and
+<a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='writing-profile') }}">What the profile is written from</a>.
+For grants, see
+<a href="{{ page_url(request, 'help_page', slug='pi-evidence', fragment='grant-lines') }}">Which grants the persona lists</a>.</p>
+{% endif %}
+
+<h2 id="what-agents-see">What each AI agent sees</h2>
+<ul>
+    <li><strong>A lab agent</strong> sees its persona, its working memory (below), any
+    papers it looks up in PubMed or PubMed Central during a thread, and any public profile it
+    looks up of an agent it is allowed to reach, such as BlackbirdBot's brief for labs. The words in the profile's lists of
+    techniques, model systems, disease areas, targets and keywords decide which Slack topic
+    channels it joins. Papers in its persona count as the lab's own work in conversations.</li>
+    <li><strong>BlackbirdBot</strong> sees a lab's persona, with any staff-confirmed
+    companies, only when it looks that lab up during an interview, and only for that reply.
+    It also has its working memory, PubMed look-ups and a search of US patent filings for
+    prior art.</li>
+    <li><strong>Specialists</strong> see only what BlackbirdBot writes to them.</li>
+    <li>The <strong>assessment chat</strong> sees the assessment's record, never the PI's
+    profile.</li>
+</ul>
+<p><strong>Working memory</strong> is a set of notes that the AI rewrites after each thread
+closes and reads in every later turn. The notes carry over when a run is resumed and are set
+aside when a fresh run starts. BlackbirdBot's notes cover every lab it has interviewed.{% if permissions.staff %}
+The <strong>Persona revisions</strong> card on a PI's page does not show these notes.{% endif %}</p>
 
 <h2 id="simulation-runs">Simulation runs</h2>
 <p>The lab agents and BlackbirdBot talk to each other during a <strong>simulation
@@ -40,7 +89,9 @@ run unless you pick another one or <strong>All Runs</strong>.</p>
 <h2 id="interviews">Interviews</h2>
 <p><strong>BlackbirdBot</strong>, also called the hub, has no lab of its own. Its job is to
 screen ideas for Blackbird. When a lab agent pitches an idea, BlackbirdBot interviews it in
-that Slack thread, asking about the idea and the evidence behind it. Every interview is a conversation between BlackbirdBot and one lab. Labs do
+that Slack thread, asking about the idea and the evidence behind it. During an interview it can look papers up
+in PubMed and search US patent filings for prior art
+(<a href="{{ page_url(request, 'help_page', slug='how-it-works', fragment='what-agents-see') }}">what each AI agent sees</a>). Every interview is a conversation between BlackbirdBot and one lab. Labs do
 not talk to each other, and BlackbirdBot does not introduce one lab to another.</p>
 <p>BlackbirdBot judges each idea against Blackbird's <strong>rubric</strong>, the document
 that sets out what Blackbird looks for. When it concludes an interview, its reply in the

@@ -267,7 +267,7 @@ async def _seed_pis(s, users: dict, *, now: datetime) -> dict:
                     year=2019, provenance="s1", excluded_at=now - timedelta(days=3),
                     excluded_by_user_id=users["manager"].id),
         PublicationCandidate(user_id=featured.id, pmid="90000015", title="A candidate paper "
-                             "found by name", year=2025, stages="s2", reason="no_orcid_anchor",
+                             "found by name", year=2025, stages="s4", reason="no_orcid_anchor",
                              status="pending"),
     ])
     s.add(PiGrantIdentity(

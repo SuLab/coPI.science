@@ -37,10 +37,14 @@ no button to unverify; changing the address clears the stamp.</p>
 appears once the profile exists.</em> It holds the display name, email, institution, department,
 Research Summary, the profile's keyword lists and <strong>JHU tenure start (year)</strong>.</p>
 <p>The tenure year decides which publications ground the profile and the lab bot's publication
-list: those from that year on. It is filled in automatically from ORCID employment or the
-earliest Hopkins-affiliated paper. Leaving the field blank leaves it unchanged, and a PI whose
-year was never set is treated as full career. When no year is recorded but the last profile run
-assumed one, a note under the field names that year as provisional.</p>
+list: those from that year on. A recorded year always wins and is never worked out again. Without
+one, Blackbird takes it from a current Hopkins position on ORCID, else from the earliest
+ORCID-confirmed paper on which the PI's own affiliation is Hopkins; a year taken from papers is
+provisional when ORCID could not be read or the search was incomplete, and a note under the field
+names it. Leaving the field blank leaves it unchanged. A PI with no year, recorded or provisional,
+is treated as full career for the profile, the persona, the PI page's list and the grants, and has
+no industry score. A PI with only a few papers from that year on is treated as full career for the
+profile and persona; with a recorded year the PI page's own list stays limited to the window.</p>
 {% call careful("Careful: Save Changes") %}
 <p>Save Changes writes a new profile version and updates the persona the lab bot works from. A
 name change also renames the lab bot in the simulation, but not the Slack app's display name. A
@@ -57,7 +61,12 @@ generation</strong> appears only in the header of a PI whose lab bot is still pe
 when generation failed or produced no usable profile.</p>
 {% call careful("Careful: Regenerate and Retry") %}
 <p>Both queue a profile generation, which runs in the background and cannot be cancelled from
-the page.</p>
+the page. Every generation re-reads the ORCID fundings, and every generation that completes also
+refreshes the grants and industry evidence and runs company discovery again. If the stored
+profile passed the quality checks, a new text that fails them twice, or is written from no
+abstracts while the stored one had some, is thrown away and the stored profile stays unchanged;
+if the stored profile had failed them, the new text replaces it anyway. A profile a person edited
+gets a Pending draft instead.</p>
 {% endcall %}
 
 <h3 id="drafts">Pending draft</h3>
@@ -73,19 +82,22 @@ Discard draft deletes the draft. Neither can be undone from the page.</p>
 
 <h3 id="papers">Candidate, unanchored and excluded papers</h3>
 <ul>
-    <li><strong>Candidate papers</strong> were found by name with no ORCID anchor.
-    <strong>Accept</strong> fetches the paper from PubMed and stores it;
+    <li><strong>Candidate papers</strong> were found only by OpenAlex or the name search, with no
+    ORCID anchor. <strong>Accept</strong> fetches the paper from PubMed and stores it;
     <strong>Reject</strong> sets it aside.</li>
     <li><strong>Unanchored papers</strong> are stored papers no ORCID anchor confirms.
     <strong>Keep</strong> marks one as checked: the paper stays in the profile, leaves this list
     and is no longer offered for Exclude;
-    <strong>Exclude</strong> removes it from the profile and the persona.</li>
+    <strong>Exclude</strong> removes it from the profile and the persona. Only papers on this list
+    can be excluded from the page: a paper confirmed by ORCID, or a work stored without a PubMed
+    record, has no Exclude button.</li>
     <li><strong>Excluded papers</strong>, under a disclosure, list every excluded paper with
     <strong>Restore</strong>, which brings it back.</li>
 </ul>
 {% call careful("Careful: paper decisions") %}
 <p>Accept adds the paper to the PI's corpus and updates the persona; no button removes it again.
-Reject is permanent: a rejected candidate is never offered again. Keep is permanent too: a kept
+A rejected candidate is not offered again, but a later generation stores it if the PI's ORCID
+record or PubMed's ORCID field confirms it. Keep is permanent: a kept
 paper is no longer offered for Exclude. Exclude takes the paper out of the profile and the
 persona; Restore undoes it.</p>
 {% endcall %}
@@ -105,7 +117,9 @@ nothing in the profile itself.</p>
 <p>The <strong>Jobs</strong> table at the bottom lists the background work run for this PI: its
 type, status (Pending, Processing, Completed or Dead; a job whose attempt failed waits as Pending
 until it is retried), attempts, and when it was queued and completed. A job that failed shows the start of its error under its row.</p>
-<p>More detail: <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='account') }}">The Account card</a>,
+<p>More detail: <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='finding-papers') }}">How papers are found and kept</a>,
+<a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='writing-profile') }}">What the profile is written from</a>,
+<a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='account') }}">The Account card</a>,
 <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='edit-profile') }}">Editing a profile</a>,
 <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='paper-review') }}">Reviewing papers</a>,
 <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='drafts') }}">Drafts</a>,

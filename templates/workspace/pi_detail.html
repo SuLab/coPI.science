@@ -385,8 +385,14 @@
 
       <h3 class="font-medium text-gray-800 mb-1">NIH RePORTER awards ({{ grants | selectattr('vetoed_at', 'none') | list | length }})</h3>
       <p class="text-xs text-gray-500 mb-2">Tenure filter:
-        {% if grants and grants[0].tenure_filter_mode == 'org_only' %}<span class="text-amber-700">organisation only — no JHU tenure start recorded</span>{% else %}organisation and fiscal year ≥ tenure start{% endif %}.
+        {% if grant_sections.tenure_start is none %}<span class="text-amber-700">organisation only — no JHU tenure start recorded</span>{% else %}organisation and fiscal year ≥ tenure start{% endif %}.
         A veto keeps the award out of the persona and out of re-runs.</p>
+      {# The line above is the filter the next grant lookup applies; awards stored by an
+         earlier lookup under the other tenure setting keep it until that lookup runs. #}
+      {% set current_mode = 'org_only' if grant_sections.tenure_start is none else 'org_and_year' %}
+      {% if grants | selectattr('vetoed_at', 'none') | rejectattr('tenure_filter_mode', 'equalto', current_mode) | list %}
+      <p class="text-xs text-amber-700 mb-2">Some awards below were found under an earlier tenure setting; the next grant lookup refreshes them.</p>
+      {% endif %}
       {% if not grants %}<p class="text-sm text-gray-500">No RePORTER awards stored.</p>{% endif %}
       <ul class="divide-y mb-4">
       {% for g in grants %}
@@ -661,7 +667,7 @@
                 <p class="font-medium text-gray-800">{{ pub.title }}</p>
                 <p class="text-gray-500 text-xs mt-0.5">
                     {{ pub.journal }}{% if pub.year %} · {{ pub.year }}{% endif %}
-                    · {% if pub.methods_text %}Methods ✓{% else %}No methods{% endif %}
+                    · {% if pub.methods_text %}Methods ✓{% else %}No methods fetched{% endif %}
                 </p>
                 <div class="flex gap-2 mt-1">
                     {% if pub.pmid %}

@@ -7,7 +7,12 @@
     Below a PI's research profile, their page has cards that Blackbird fills in from
     outside sources: <strong>Grants</strong>, <strong>Industry interest</strong> and
     <strong>Companies</strong>. Matching people across these sources by name is error-prone,
-    so a manager checks the results and corrects them. This page explains what each card
+    so a manager checks the results and corrects them. The sources are searched with the
+    PI's stored Display Name, so a wrong name gives wrong matches. Changing the name does
+    not start a new lookup on its own: it applies at the next profile generation, and also
+    at the next <strong>Find companies</strong> for companies or after the next
+    <strong>Unpin</strong> for grants. While the identity is pinned or marked <strong>PI has no
+    RePORTER profile</strong>, grants are not searched by name. This page explains what each card
     shows and what each correction does. Reviewers see the same cards without the controls,
     and see only confirmed companies. For the rest of a PI's page, see
     <a href="{{ page_url(request, 'help_page', slug='managing-pis') }}">Managing PIs and lab bots</a>.
@@ -45,6 +50,11 @@
     <strong>unconfirmed</strong>, <strong>no match</strong> and <strong>firehose</strong> are
     followed by "— no RePORTER grants are shown". The line also says when the identity was
     last evaluated.
+</p>
+<p>
+    The NIH lookup runs after each profile generation, and the awards it finds are then
+    added to the persona. A new PI's persona and first research summary are written
+    before that lookup, so they carry ORCID fundings only.
 </p>
 <h3>Correcting the identity</h3>
 <p>Unless the status is <strong>resolved</strong>, the card offers these controls:</p>
@@ -98,10 +108,20 @@
         Hopkins in any year.</li>
 </ul>
 <p>
-    With no tenure start the card also says "No JHU tenure start recorded: set a tenure year
-    to show past grants." Set it in the PI's
+    When no tenure start has been recorded, Blackbird uses the provisional year worked out
+    from the PI's papers, if there is one, for this filter and for past grants. The card
+    says "No JHU tenure start recorded: set a tenure year to show past grants." only when
+    there is neither. When awards that are not vetoed were stored by an earlier lookup under
+    the other setting,
+    the card adds "Some awards below were found under an earlier tenure setting; the next
+    grant lookup refreshes them." Set a year in the PI's
     <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='edit-profile') }}">Edit Profile</a>
-    form. The line "In the persona: … active, … past." counts the grants the persona lists.
+    form. The line "In the persona: … active, … past." counts the grants the persona lists;
+    <a href="{{ page_url(request, 'help_page', slug='pi-evidence', fragment='grant-lines') }}">Which grants the persona lists</a> explains which ones those are.
+</p>
+<p>
+    The card lists every award stored for the PI, but only some award types reach the
+    persona.
 </p>
 <p>
     <strong>Not this PI</strong> next to an award vetoes it: the award stays on the list,
@@ -120,9 +140,13 @@
 <h2 id="orcid-fundings">ORCID fundings</h2>
 <p>
     <strong>ORCID fundings</strong> lists the funding the PI's ORCID record shows, with each
-    item's title, funder ("funder not given" when ORCID has none) and years. ORCID records
-    can list funding that was not the PI's own, so the same <strong>Not this PI</strong>
-    veto is offered here. A vetoed item is greyed out and marked <strong>vetoed</strong>,
+    item's title, funder ("funder not given" when ORCID has none) and years. Every funding
+    with a title can reach the persona, whatever its funder, type or institution, as long as
+    it is active or a past grant within the tenure. That includes
+    fellowships, training and company funding, and funding from before Hopkins that is
+    still active. ORCID records can also list funding that was not the PI's own, so the
+    same <strong>Not this PI</strong> veto is offered here: veto any item that should not
+    describe the lab. A vetoed item is greyed out and marked <strong>vetoed</strong>,
     and stays out of the persona when the fundings are refreshed from ORCID again.
 </p>
 <p>
@@ -136,11 +160,51 @@
 </p>
 {% endcall %}
 
+<h2 id="grant-lines">Which grants the persona lists</h2>
+<p>
+    The persona has an <strong>Active Grants</strong> list and a <strong>Past Grants</strong>
+    list, built from the NIH RePORTER awards and ORCID fundings on the card that are not
+    vetoed. The card shows more than the persona does, so the counts in "In the persona: …
+    active, … past." can be lower than the lists below it.
+</p>
+<ul>
+    <li>
+        <strong>Award types.</strong> Only award types on a fixed list of common
+        research-project and career awards reach the persona. Training, instrument,
+        conference, resource and centre awards, and research or career types not on that
+        list, are listed on the card but are not counted. ORCID fundings are not filtered by type.
+    </li>
+    <li>
+        <strong>Active and past.</strong> A grant is active until its end date. An NIH award
+        with no end date stays active while its latest funded year is the current one, and an
+        ORCID funding with no end date stays active for some years after it starts. An ORCID
+        funding with no dates is never active. Grants that have ended and fall within the
+        tenure period are past. Past grants need a tenure year, recorded or provisional. Each
+        list keeps the most recent grants, up to a limit, so an older grant can drop off a
+        long list.
+    </li>
+    <li>
+        <strong>Duplicates.</strong> An ORCID funding that matches a listed NIH award by title
+        or project number is shown once, and so are repeated items within each source.
+    </li>
+    <li>
+        <strong>Dates.</strong> Which grants are active changes with the date alone, so the
+        persona's grant lines change the next time the persona is rewritten, even when
+        nothing else about the PI has changed.
+    </li>
+</ul>
+<p>
+    The persona is what the lab agent works from; see
+    <a href="{{ page_url(request, 'help_page', slug='how-it-works', fragment='what-agents-see') }}">what the agents see</a>
+    and the glossary entry
+    <a href="{{ page_url(request, 'help_page', slug='glossary', fragment='term-active-past-grants') }}">Active and past grants</a>.
+</p>
+
 <h2 id="industry">Industry interest</h2>
 <p>
     The <strong>Industry interest</strong> card scores how much evidence of industry ties a
     PI's record shows, such as company co-authors, company funding, competing-interest
-    statements and patents. It is an indicator for staff and reviewers only: the score and
+    statements, patents and clinical trials. It is an indicator for staff and reviewers only: the score and
     its evidence are never part of the PI's profile or persona, and BlackbirdBot and the
     assessment chat never see them.
 </p>
@@ -176,6 +240,17 @@
     a source that could not be refreshed are kept, and scored only from the tenure start
     on.
 </p>
+<p>
+    Patents and trials are counted narrowly. A patent counts only when it is a Hopkins
+    application, filed within the tenure window, that names the PI as first inventor and
+    whose title shares a word with the keywords, targets or disease areas in the PI's
+    profile. A trial counts only when the PI is named as its overall official, Hopkins leads
+    it, it has an industry collaborator, it started within the tenure window, and its
+    conditions match the profile's disease areas. Editing
+    those lists in the profile changes the next scan. The score never uses a provisional
+    tenure start: without a recorded year it is unscored, even where the Grants card is
+    using a provisional year.
+</p>
 <h3>The evidence list and its veto</h3>
 <p>
     <strong>Evidence</strong> opens the list of evidence rows. Each names the company, the
@@ -201,8 +276,9 @@
 <p>
     The <strong>Companies</strong> card lists companies the PI founded or co-founded,
     advises, or serves as a board member of. Only <strong>Confirmed</strong> companies reach
-    BlackbirdBot's profile lookup and the assessment pages. A suggestion reaches neither
-    until a manager confirms it.
+    BlackbirdBot, when it looks the PI up, and the assessment pages. Lab agents and the
+    assessment chat never see them. A suggestion reaches none of these until a manager
+    confirms it.
 </p>
 <h3>Confirmed</h3>
 <p>
@@ -244,6 +320,13 @@
 </p>
 {% endcall %}
 <h3>Suggested</h3>
+<p>
+    Discovery finds only companies the PI founded or co-founded. Add advisory and board
+    roles by hand with <strong>Add a company</strong>. An AI model reads the
+    competing-interest statements that mention founding a company and picks out the company
+    and the PI's role, so check the quoted statement before you confirm. It reads all of the
+    PI's papers, not only those within tenure.
+</p>
 <p>
     Suggestions are "Found in the PI's own competing-interest statements and in Wikidata,
     with funding from SEC Form D filings where a filing matched." Each shows the evidence:

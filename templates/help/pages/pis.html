@@ -27,8 +27,9 @@ page.</p>
     <dt>Pubs (tenure)</dt>
     <dd>How many of the PI's publications fall inside their JHU tenure window. When no JHU
     tenure start is recorded, the column counts the whole career and says <strong>full
-    career</strong>. Publications with no recorded year cannot be placed in the window, so
-    they are left out of the count, and the column notes how many are undated.</dd>
+    career</strong>. When a year is recorded, publications with no recorded year cannot be
+    placed in the window, so they are left out of the count, and the column notes how many
+    are undated.</dd>
     <dt>Industry interest</dt>
     <dd>The PI's industry-interest cohort percentile: how their industry evidence ranks
     against the other scored PIs. A dash means there is no score to show.</dd>
@@ -57,8 +58,8 @@ unavailable.</p>
 <p>The filter bar above the table has <strong>Profile Status</strong> and
 <strong>Claimed</strong> (Claimed or Unclaimed) menus; press <strong>Apply</strong>.</p>
 {% call careful() %}
-<p><strong>Add PI</strong> at once creates the PI's account, starts profile generation and
-creates a pending lab bot. Nothing in the Workspace undoes it.</p>
+<p><strong>Add PI</strong> at once creates the PI's account, starts profile generation unless
+the PI already has a profile, and creates a pending lab bot. Nothing in the Workspace undoes it.</p>
 {% endcall %}
 <p>The <strong>Add a PI by ORCID iD</strong> form at the top adds a PI and creates their lab
 bot. Read <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='add-pi') }}">Adding a PI</a>
@@ -84,7 +85,8 @@ sections.</p>
         has been identified: "resolved", "pinned by staff", "staff confirmed: no RePORTER
         profile", "not evaluated yet", or another state with "no RePORTER grants are shown".
         The line under it says how many active and past grants the lab agent's description of
-        the PI includes. Past grants are not shown when no JHU tenure start is recorded.</p>
+        the PI includes. Past grants are counted only when the PI has a JHU tenure start, either
+        recorded or provisional.</p>
         <p><strong>NIH RePORTER awards</strong> lists each award's title, project number,
         activity code and fiscal years, and how it was linked to this PI.
         <strong>ORCID fundings</strong> lists the funding the PI's ORCID record shows. A greyed
@@ -106,10 +108,17 @@ sections.</p>
     <dt>Publications</dt>
     <dd>The PI's publications inside their JHU tenure window. The heading says the year the
     window starts, or "full career — no JHU tenure start recorded". Each publication shows its
-    journal, year, whether its methods text was found ("Methods ✓" or "No methods"), and a
-    <strong>PubMed</strong> link where there is one. Undated publications are excluded and
-    counted under the heading. Publications from before the tenure window are not listed
-    anywhere.</dd>
+    journal, year, whether a methods section was fetched for it ("Methods ✓" or "No methods
+    fetched"), and a <strong>PubMed</strong> link where there is one. "No methods fetched"
+    means none was fetched, usually because methods are looked up only for some of the newest
+    open-access papers. When a year is recorded, undated publications are left out and counted
+    under the heading.
+    When a year is recorded, this list shows only the tenure window, but the profile and the
+    lab agent's description use the PI's whole career when only a few papers fall inside it,
+    so they can draw on papers this list does not show. While the tenure start is only
+    provisional, this list shows the whole career, but the profile and the lab agent's
+    description use the provisional year, or the whole career when only a few papers fall
+    after it.</dd>
 </dl>
 {% if permissions.staff %}
 <h3>The manager-only parts of a PI's page</h3>

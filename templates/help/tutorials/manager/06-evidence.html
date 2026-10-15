@@ -32,9 +32,14 @@ Unpin removes the pin or the mark and lets the automatic match run again.</p>
 <h3 id="grants">NIH RePORTER awards and ORCID fundings</h3>
 <p>The awards list shows each award's title, project number, activity code, fiscal years and the
 evidence that linked it to this PI. The tenure filter line says whether awards are limited to
-the organisation only (no JHU tenure start recorded) or to the organisation and fiscal years
-from the tenure start on. A line above the lists counts the active and past grants in the
-persona. The <strong>ORCID fundings</strong> list below shows the fundings on the PI's ORCID
+the organisation only (no JHU tenure start, recorded or provisional) or to the organisation
+and fiscal years from the tenure start on. Grants use a provisional year when no year is
+recorded; the industry score does not. A line above the lists counts the active and past grants in the
+persona. Only award types on a fixed list of common research-project and career awards reach the
+persona; training, instrument, conference, resource and centre awards, and other types not on that
+list, are listed here but never counted. How a grant counts as
+active or past is under <a href="{{ page_url(request, 'help_page', slug='pi-evidence', fragment='grant-lines') }}">Which grants the persona lists</a>.
+The <strong>ORCID fundings</strong> list below shows the fundings on the PI's ORCID
 record. Each award or funding offers <strong>Not this PI</strong>; a vetoed one is greyed out
 and marked <em>vetoed</em>.</p>
 {% call careful("Careful: Not this PI") %}

@@ -25,7 +25,14 @@ undoes it: only an admin can delete a PI's account.</p>
 {% endcall %}
 
 <h3 id="profile-generation">Profile generation</h3>
-<p>The profile is generated in the background from the PI's publications. While it runs, the
+<p>The profile is generated in the background from the PI's publications, the grant lines Blackbird
+holds for the PI and the PI's name, institution and department. A brand-new PI's first
+generation sees only the ORCID fundings, because NIH awards are looked up afterwards. Nothing
+refreshes a profile or its papers on a schedule: new publications appear only after another
+generation, which happens when you use <strong>Regenerate profile</strong> or <strong>Retry
+profile generation</strong>, when a PI's tenure year is changed, at a PI's first sign-in or an
+admin's approval of their access when they have no profile yet, or when the PI refreshes their
+own profile. While it runs, the
 header says <em>Agent pending — Profile generating…</em>, and the page shows the change when
 it is reloaded.
 When generation failed, when no profile exists yet, or when the profile is not grounded in any
@@ -33,7 +40,8 @@ publication abstract, the header says so in red and offers <strong>Retry profile
 generation</strong>, which queues the generation again. The step <em>Reviewing a PI's profile</em> covers the profile itself.</p>
 {% call careful("Careful: Retry profile generation") %}
 <p>Retry queues a full profile generation, which runs in the background and cannot be cancelled
-from the page.</p>
+from the page. Every generation re-reads the ORCID fundings, and every generation that
+completes also refreshes the grants and industry evidence and runs company discovery again.</p>
 {% endcall %}
 
 <h3 id="install">Install Slack bot</h3>
@@ -88,7 +96,9 @@ Each undoes the other.</p>
 
 <p>Mute is offered only for an active or muted bot. A suspended bot shows its status instead, and
 only an admin can manage it. The same controls appear on the Slack Bots page (the step <em>The Slack Bots page</em>).</p>
-<p>More detail: <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='slack-bot') }}">Installing the Slack bot</a>,
+<p>More detail: <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='finding-papers') }}">How papers are found and kept</a>,
+<a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='writing-profile') }}">What the profile is written from</a>,
+<a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='slack-bot') }}">Installing the Slack bot</a>,
 <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='activation') }}">Activation</a>
 and <a href="{{ page_url(request, 'help_page', slug='managing-pis', fragment='mute') }}">Muting</a>.</p>
 {% include "help/_step_nav.html" %}

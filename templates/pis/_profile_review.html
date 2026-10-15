@@ -51,7 +51,7 @@
   {% endif %}
 
   <h3 class="font-medium text-gray-800 mb-1">Candidate papers ({{ review.candidates | length }})</h3>
-  <p class="text-xs text-gray-500 mb-2">Found by name with no ORCID anchor. Accept stores the paper; a rejected paper is never offered again.</p>
+  <p class="text-xs text-gray-500 mb-2">Found only by OpenAlex or the name search, with no ORCID anchor. Accept stores the paper. A rejected paper is not offered again, but a later generation stores it if the PI's ORCID record or PubMed's ORCID field confirms it.</p>
   {% if not review.candidates %}<p class="text-sm text-gray-500 mb-4">No candidates waiting.</p>{% endif %}
   <ul class="divide-y mb-4">
     {% for c in review.candidates %}
