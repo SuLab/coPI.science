@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 import anthropic
 
 from src.agent.agent import Agent
+from src.agent.claim_check import feedback_text
 from src.agent.engine import deps
 from src.agent.engine.constants import ABANDONED_OUTCOME, TRUNCATION_NOTICE
 from src.agent.engine.context import EngineContext, RunState, via
@@ -543,6 +544,9 @@ class ReplyLane:
         reply_thread_phase, _, _ = phase4_guidance(agent.role, reply_message_ordinal)
 
         # Build prompt
+        # An enforce-mode block left a reason for this thread: the next draft sees it
+        # (main AGT-14). None in log mode, so the prompt is unchanged.
+        claim_reason = self.ctx.claim_feedback.get(agent.agent_id, thread.thread_id)
         system_prompt, messages = agent.build_phase4_prompt(
             thread=thread,
             thread_history=thread_history,
@@ -550,6 +554,7 @@ class ReplyLane:
             other_agent_lab=other_lab,
             visibility=thread_visibility,
             channel_id=thread_channel_id,
+            authorship_feedback=feedback_text(claim_reason) if claim_reason else None,
         )
 
         tool_executor = self._reply_tool_executor(agent, thread)

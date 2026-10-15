@@ -17,10 +17,11 @@ from src.routers.admin import impersonation  # noqa: E402,F401
 from src.routers.admin import access  # noqa: E402,F401
 from src.routers.admin import cohorts  # noqa: E402,F401
 from src.routers.admin import simulation  # noqa: E402,F401
+from src.routers.admin import authorship_checks  # noqa: E402,F401
 # isort: on
 from src.routers.admin._common import router
 
 __all__ = [
-    "access", "agents", "assessments", "cohorts", "discussions", "impersonation",
-    "jobs", "router", "runs", "simulation", "users",
+    "access", "agents", "assessments", "authorship_checks", "cohorts", "discussions",
+    "impersonation", "jobs", "router", "runs", "simulation", "users",
 ]

@@ -5,12 +5,20 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from src.agent import claim_check
 from src.agent.agent import Agent
+from src.agent.authorship_rules import (
+    ClaimReason,
+    lab_self_names,
+    strip_ungrounded_authorship_lines,
+)
 from src.agent.engine import deps
 from src.agent.engine.context import EngineContext, via
 from src.agent.engine.helpers import _was_truncated
 from src.agent.message_log import is_panel_note
+from src.agent.role_capabilities import hub_role_names
 from src.models.agent_activity import VISIBILITY_PUBLIC
+from src.models.authorship_claim_check import MODE_ENFORCE, OUTCOME_REJECTED
 
 logger = logging.getLogger("src.agent.simulation")
 
@@ -110,6 +118,77 @@ class Memory:
             logger.warning("[memory] roster re-check failed (%s); writing anyway", exc)
             return True
         return any(r.agent_id == agent_id for r in rows)
+
+    async def _sweep_authorship_lines(
+        self, agent: Agent, text: str, visibility: str, channel_id: str | None,
+    ) -> str | None:
+        """The memory text to write after the authorship sweep (GATE-13), or None to
+        keep the existing memory.
+
+        Lines whose authorship claim the lab's records cannot back are recorded as one
+        ``rejected`` row (phase ``memory``) when there are any. In log mode, always the
+        hub's, the text is returned unchanged; in enforce mode they are stripped, and a
+        result with nothing left keeps the existing memory."""
+        try:
+            mode = claim_check.effective_mode(
+                agent.role, deps.get_settings().authorship_claim_check_mode,
+            )
+            cleaned, stripped = strip_ungrounded_authorship_lines(
+                text,
+                claim_check.record_for_agent(agent),
+                lab_self_names(
+                    agent.agent_id, agent.bot_name,
+                    None if agent.role in hub_role_names() else agent.pi_name,
+                ),
+                speaker_id=agent.agent_id,
+                roster=claim_check.roster_entries(self.agents),
+            )
+        except Exception:
+            # Fail open: a fault in the rules or in reading the mode keeps the memory text
+            # as written, so a log-mode run behaves exactly as before the sweep existed.
+            logger.warning(
+                "[%s] Memory authorship sweep failed; memory kept unswept",
+                agent.agent_id, exc_info=True,
+            )
+            return text
+        if not stripped:
+            return text
+        await claim_check.record_check(
+            self.session_factory,
+            simulation_run_id=self.ctx.simulation_run_id,
+            agent_id=agent.agent_id,
+            thread_key=claim_check.memory_thread_key(visibility, channel_id),
+            phase="memory",
+            mode=mode,
+            outcome=OUTCOME_REJECTED,
+            reasons=[
+                ClaimReason(
+                    claim_check.MEMORY_REASON_CODE,
+                    "memory line not grounded in this lab's publication records: " + line[:300],
+                )
+                for line in stripped
+            ],
+            excerpt="\n".join(stripped),
+        )
+        if mode != MODE_ENFORCE:
+            logger.info(
+                "[%s] Memory update (log only): %d authorship line(s) would be stripped",
+                agent.agent_id, len(stripped),
+            )
+            return text
+        for line in stripped:
+            logger.warning(
+                "[%s] Memory update: stripped ungrounded authorship line: %s",
+                agent.agent_id, line[:160],
+            )
+        if not cleaned.strip():
+            logger.warning(
+                "[%s] Memory update: every line was an ungrounded authorship claim — "
+                "keeping the existing working memory",
+                agent.agent_id,
+            )
+            return None
+        return cleaned
 
     async def _update_agent_memory(
         self,
@@ -227,6 +306,12 @@ Keep it concise — under 300 words.""",
                     "during the update (deactivated or deleted)", agent.agent_id,
                 )
                 return
+            # The single write point feeds both the file and the revision, and every
+            # later prompt reads that file, so sweeping here is complete (GATE-13).
+            swept = await self._sweep_authorship_lines(agent, response, visibility, channel_id)
+            if swept is None:
+                return
+            response = swept
             agent.update_working_memory_file(
                 response, visibility=visibility, channel_id=channel_id,
             )

@@ -100,7 +100,8 @@ async def test_container_is_migrated(engine):
         # 0067 help_intro_dismissals (the Help tab's first-sign-in prompt)
         # 0068 publications.excluded_reason (publication handling Phase 4)
         # 0069 profile_revisions.owner_user_id (publication handling Phase 5)
-        assert v == "0069"
+        # 0070 authorship_claim_checks (the authorship claim check)
+        assert v == "0070"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

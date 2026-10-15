@@ -1047,10 +1047,13 @@ def test_static_link_resolution_coverage_is_reported():
     # The Help tab (spec 2026-10-14) adds four: its sub-nav's `{{ item.url }}`, a tutorial
     # step's "Open this page" (`page_url(request, step.open_route)`, a route name from the
     # registry), and two same-page `#reviewing` links on the Assessments help page.
+    # The 2026-10-15 publication-handling design adds two PubMed links (the withheld-papers
+    # card and the manager PI page's outside-the-tenure-window list), and builds every
+    # PubMed and DOI link through the `pubmed_url`/`doi_url` globals (count unchanged).
     unresolvable = len(values) - len(resolvable)
-    assert unresolvable <= 62, (
+    assert unresolvable <= 64, (
         f"{unresolvable} of {len(values)} href/action values do not resolve to a "
-        "checkable local path (was 62) — the matcher probably regressed, or a new "
+        "checkable local path (was 64) — the matcher probably regressed, or a new "
         "link is built from a variable"
     )
 

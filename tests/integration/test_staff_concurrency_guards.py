@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.models import USER_ROLE_MANAGER, USER_ROLE_PI, USER_ROLE_REVIEWER, Job, User
 from src.services import pi_onboarding
+from src.services.identifiers import normalize_orcid
 from src.services.profile_jobs import enqueue_profile_job_if_absent
 from tests import factories
 
@@ -18,8 +19,13 @@ pytestmark = pytest.mark.integration
 
 
 def _orcid() -> str:
-    d = f"{random.randrange(10**15):015d}"
-    return f"{d[0:4]}-{d[4:8]}-{d[8:12]}-{d[12:15]}X"
+    """A random checksum-valid iD (Add-PI validates the check digit, R2.2), outside the
+    factory's 0000-0000- block so committed rows never collide with factory users."""
+    base = f"0009{random.randrange(10**11):011d}"
+    for check in "0123456789X":
+        if (orcid := normalize_orcid(base + check)) is not None:
+            return orcid
+    raise AssertionError(f"no check character for {base}")
 
 
 async def _committed_pi(factory, **overrides) -> User:

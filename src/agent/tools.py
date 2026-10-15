@@ -169,8 +169,9 @@ async def execute_tool(
     ``own_paper_ids``: the calling agent's own paper ids (``Agent.own_paper_ids``:
     DOIs and listed PMIDs, spec 2026-10-05 D49). A ``retrieve_abstract`` whose
     ``pmid_or_doi`` names one of them — a DOI, a labelled PMID or a bare PMID — is
-    exempt from BOTH the per-thread cap check and its increment; the decision uses
-    the argument alone, before any fetch.
+    exempt from BOTH the per-thread cap check and its increment; the input decides
+    before any fetch. A result that is one of them is not charged either (AGT-3), but
+    never lifts the cap.
 
     ``hub_agent_ids`` maps each hub agent on the roster to its role;
     ``retrieve_profile`` on one of them returns that role's brief for labs.
@@ -194,24 +195,9 @@ async def execute_tool(
             )
 
         elif tool_name == "retrieve_abstract":
-            ref = _require_arg(tool_input, "pmid_or_doi", tool_name)
-            is_own = bool(own_paper_ids) and bool(_requested_paper_ids(ref) & own_paper_ids)
-            if thread_state and not is_own:
-                from src.config import get_settings
-                settings = get_settings()
-                if thread_state.abstracts_other >= settings.max_abstracts_other_per_thread:
-                    return "Rate limit: you have used all your abstract retrievals for other labs in this thread."
-            result = await fetch_abstract(ref)
-            if "error" in result:
-                return result["error"]
-            # Charge only a retrieval that returned a paper — the debit used
-            # to land before the fetch, so an outage consumed the budget with
-            # no refund (issue #23 COR-30). Safe against double-spend: tool
-            # rounds are sequential within a turn, and the thread lock
-            # serializes turns per thread.
-            if thread_state and not is_own:
-                thread_state.abstracts_other += 1
-            return _format_abstract(result)
+            return await _execute_retrieve_abstract(
+                _require_arg(tool_input, "pmid_or_doi", tool_name), thread_state, own_paper_ids,
+            )
 
         elif tool_name == "retrieve_full_text":
             ref = _require_arg(tool_input, "pmid_or_doi", tool_name)
@@ -415,6 +401,43 @@ def _requested_paper_ids(ref: str) -> set[str]:
         if canonical is not None:
             ids.add(canonical)
     return ids
+
+
+async def _execute_retrieve_abstract(
+    ref: str, thread_state: Any | None, own_paper_ids: AbstractSet[str] | None,
+) -> str:
+    """``retrieve_abstract`` with the per-thread cap on other labs' papers (D49, AGT-3).
+
+    An argument that names one of ``own_paper_ids`` skips both the cap check and the
+    charge. Any other argument at the cap is refused BEFORE the fetch, so an over-cap
+    call never reaches the network (tests/unit/test_tool_gating.py). After a successful
+    fetch, the charge is also skipped when the result is one of the lab's own papers
+    (its PMID, or the DOI of an OpenAlex result): a result can lift the charge, never
+    the cap. Only a retrieval that returned a paper is charged (COR-30)."""
+    is_own = bool(own_paper_ids) and bool(_requested_paper_ids(ref) & own_paper_ids)
+    if thread_state and not is_own:
+        from src.config import get_settings
+
+        if thread_state.abstracts_other >= get_settings().max_abstracts_other_per_thread:
+            return "Rate limit: you have used all your abstract retrievals for other labs in this thread."
+    result = await fetch_abstract(ref)
+    if "error" in result:
+        return result["error"]
+    own_result = bool(own_paper_ids) and bool(_result_paper_ids(result) & own_paper_ids)
+    if thread_state and not is_own and not own_result:
+        thread_state.abstracts_other += 1
+    return _format_abstract(result)
+
+
+def _result_paper_ids(result: Mapping[str, Any]) -> set[str]:
+    """The canonical ids of a ``fetch_abstract`` result: its PMID, and the DOI that an
+    OpenAlex result carries (``pubmed._openalex_abstract``)."""
+    ids = set()
+    if result.get("pmid"):
+        ids.add(canonical_pmid(str(result["pmid"])))
+    if result.get("doi"):
+        ids.add(canonical_doi(result["doi"]))
+    return {i for i in ids if i}
 
 
 async def _execute_retrieve_profile(

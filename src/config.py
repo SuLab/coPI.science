@@ -456,6 +456,16 @@ class Settings(BaseSettings):
     max_abstracts_other_per_thread: int = 10
     max_full_text_per_thread: int = 2
 
+    # The authorship-claim check (the 2026-10-15 publication-handling design §11, C7).
+    # "log" records every check in authorship_claim_checks and changes nothing a model
+    # or Slack sees; "enforce" also blocks a rejected pi_lab post, feeds the reason into
+    # that lab's next draft, and strips ungrounded working-memory lines. Scout-hub
+    # agents are always "log" (src/agent/claim_check.py::effective_mode). A Literal:
+    # an unknown value is replaced, with a WARNING, by `_known_claim_check_mode`.
+    # `.env` is read when a container is CREATED: a change needs
+    # `$DC up -d --force-recreate agent`, with no live run.
+    authorship_claim_check_mode: Literal["log", "enforce"] = "log"
+
     # Panel notes — a THIN one-line note the hub posts into the interview thread
     # each time it successfully consults a specialist, so a human watching Slack
     # can see the panel being engaged instead of only its silent effect on a
@@ -624,6 +634,20 @@ class Settings(BaseSettings):
             ", ".join(ASSESSMENT_CHAT_EFFORTS), value,
         )
         return "medium"
+
+    @field_validator("authorship_claim_check_mode", mode="before")
+    @classmethod
+    def _known_claim_check_mode(cls, value: object) -> object:
+        """Strip and lower-case the mode; anything but "log" or "enforce" costs a
+        WARNING and falls back to "log", never to enforcement."""
+        if isinstance(value, str) and value.strip().lower() in ("log", "enforce"):
+            return value.strip().lower()
+        logger.warning(
+            "AUTHORSHIP_CLAIM_CHECK_MODE must be 'log' or 'enforce', got %r — "
+            "falling back to 'log'.",
+            value,
+        )
+        return "log"
 
     @model_validator(mode="after")
     def _guard_assessment_chat_settings(self) -> "Settings":

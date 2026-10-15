@@ -1609,3 +1609,31 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > run `alembic downgrade 0068` in a one-off `docker run --rm` container off
 > `copi-blackbird-blackbird-app:pub5-0069`, on the compose network with the stack's `.env`.
 > The downgrade drops the column and every recorded owner. **Never reuse revision id `0069`.**
+
+> **Deploy order for `0070_authorship_claim_checks` — migrate BEFORE the new agent runs;
+> rebuild all three images; no backfill.** `0070` creates `authorship_claim_checks`: one row
+> per authorship-claim check the engine makes (mode `log`, `enforce` or `replay`; outcome
+> `no_claim`, `grounded` or `rejected`; reasons as JSON; an excerpt of at most 2,000
+> characters), `simulation_run_id` `ON DELETE CASCADE` from `simulation_runs`, with the
+> CHECKs `ck_authorship_claim_checks_mode`, `ck_authorship_claim_checks_outcome` and
+> `ck_authorship_claim_checks_excerpt_length`. Design: the 2026-10-15 publication-handling
+> design, §11.
+>
+> *Old code on the new schema* is safe: nothing old reads the table. *New code on the old
+> schema* writes no row: every post logs `Authorship claim check row not recorded for …:
+> UndefinedTable` at WARNING, and the post goes out as before. So migrate before
+> `$DC up -d agent`. **Lock:** the foreign key takes a lock on `simulation_runs`; a running
+> engine updates its run row every 30 s (`RUN_STATS_UPDATE_INTERVAL`) in short
+> transactions, so the apply may wait briefly, and a 10 s `lock_timeout` rollback is
+> harmless: re-run it. **No backfill:** no row means "never checked". **Images:** the agent
+> writes the rows, the app serves `/admin/authorship-checks` and runs
+> `scripts/replay_authorship_claims.py`, and the worker is built with the app.
+>
+> Before: `SELECT version_num FROM alembic_version;` reads `0069`, and
+> `SELECT to_regclass('public.authorship_claim_checks');` is NULL. Tag the rollback images
+> `rollback-pre-0070` first. After: `$DC run --rm blackbird-app alembic current` reads
+> `0070`. **Rollback:** first run the `rollback-pre-0070` images (the table is harmless to old
+> code); only then, if wanted, `alembic downgrade 0069` from a one-off container off the NEW
+> image drops the table and its rows (never downgrade first). Never reuse revision id
+> `0070`. Nothing here starts a run; no prompt-set or rubric version changed, so a resume
+> stays legitimate.

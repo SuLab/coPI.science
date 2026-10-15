@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block title %}Admin — Authorship Claim Checks — Blackbird{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-6">
+    <h1 class="text-2xl font-bold text-gray-900">Authorship Claim Checks</h1>
+</div>
+
+<div class="grid grid-cols-3 gap-3 mb-6">
+    {% for key, label in [('no_claim', 'No claim'), ('grounded', 'Grounded'), ('rejected', 'Rejected')] %}
+    <div class="bg-white border rounded-lg p-3 text-center">
+        <div id="count-{{ key }}" class="text-2xl font-bold text-gray-800">{{ counts.get(key, 0) }}</div>
+        <div class="text-xs text-gray-500 mt-1">{{ label }}</div>
+    </div>
+    {% endfor %}
+</div>
+
+<form method="get" action="/admin/authorship-checks" class="bg-white border border-gray-200 rounded-lg p-4 mb-4 flex flex-wrap items-end gap-4">
+    <div>
+        <label for="run-filter" class="text-xs font-medium text-gray-600 block mb-1">Run</label>
+        <select id="run-filter" name="run" class="border border-gray-300 rounded px-2 py-1 text-sm">
+            <option value="">All</option>
+            {% for run_id, started_at in run_options %}
+            <option value="{{ run_id }}" {% if run_filter == run_id | string %}selected{% endif %}>{{ (run_id | string)[:8] }} — {{ started_at | ts }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div>
+        <label for="agent-filter" class="text-xs font-medium text-gray-600 block mb-1">Agent</label>
+        <select id="agent-filter" name="agent" class="border border-gray-300 rounded px-2 py-1 text-sm">
+            <option value="">All</option>
+            {% for a in agent_options %}
+            <option value="{{ a }}" {% if agent_filter == a %}selected{% endif %}>{{ a }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div>
+        <label for="outcome-filter" class="text-xs font-medium text-gray-600 block mb-1">Outcome</label>
+        <select id="outcome-filter" name="outcome" class="border border-gray-300 rounded px-2 py-1 text-sm">
+            <option value="">All</option>
+            {% for o in outcomes %}
+            <option value="{{ o }}" {% if outcome_filter == o %}selected{% endif %}>{{ o | replace('_', ' ') | capitalize }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div>
+        <label for="mode-filter" class="text-xs font-medium text-gray-600 block mb-1">Mode</label>
+        <select id="mode-filter" name="mode" class="border border-gray-300 rounded px-2 py-1 text-sm">
+            <option value="">All</option>
+            {% for m in modes %}
+            <option value="{{ m }}" {% if mode_filter == m %}selected{% endif %}>{{ m | capitalize }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <button type="submit" class="px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">Apply</button>
+</form>
+
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto">
+    <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+            <tr>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Run</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Agent</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Phase</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Mode</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Outcome</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Reasons</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Excerpt</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+            {% for row in rows %}
+            <tr data-row="claim-check" class="align-top">
+                <td class="px-4 py-3 text-xs text-gray-500">{{ row.created_at | ts }}</td>
+                <td class="px-4 py-3 text-xs font-mono">{{ (row.run_id | string)[:8] if row.run_id else '—' }}</td>
+                <td class="px-4 py-3 text-sm">{{ row.agent_id }}</td>
+                <td class="px-4 py-3 text-sm">{{ row.phase }}</td>
+                <td class="px-4 py-3 text-sm">{{ row.mode }}</td>
+                <td class="px-4 py-3 text-sm">{{ row.outcome }}</td>
+                <td class="px-4 py-3 text-xs">
+                    {% if row.reasons %}
+                    <ul class="space-y-1">
+                        {% for code, text in row.reasons %}<li><code>{{ code }}</code> {{ text }}</li>{% endfor %}
+                    </ul>
+                    {% else %}—{% endif %}
+                </td>
+                <td class="px-4 py-3 text-xs max-w-md"><pre class="whitespace-pre-wrap">{{ row.excerpt }}</pre></td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="8" class="px-4 py-8 text-center text-gray-600 text-sm">No claim checks match these filters.</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{% if page_count > 1 %}
+{% set qs = filter_params | urlencode %}
+<div id="claim-checks-pager" class="flex items-center justify-between mt-4 text-sm text-gray-600">
+    <span>Page {{ page }} of {{ page_count }} ({{ total }} checks)</span>
+    <span class="flex gap-3">
+        {% if page > 1 %}<a href="/admin/authorship-checks?page={{ page - 1 }}{% if qs %}&amp;{{ qs }}{% endif %}" class="text-indigo-600 hover:underline">&larr; Prev</a>{% endif %}
+        {% if page < page_count %}<a href="/admin/authorship-checks?page={{ page + 1 }}{% if qs %}&amp;{{ qs }}{% endif %}" class="text-indigo-600 hover:underline">Next &rarr;</a>{% endif %}
+    </span>
+</div>
+{% endif %}
+{% endblock %}

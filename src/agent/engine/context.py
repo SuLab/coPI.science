@@ -20,6 +20,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
+from src.agent.claim_check import RejectionFeedback
 from src.agent.end_reasons import stronger_reason
 from src.agent.locks import LockRegistry
 from src.agent.message_log import MessageLog
@@ -160,6 +161,10 @@ class EngineContext:
         self.channel_id_resolver: Callable[[str], str | None] = lambda _name: None
         # Engine-wide LLM circuit breaker (S1-04): failures only.
         self.circuit = LlmCircuitBreaker()
+        # The authorship claim check's rejection reasons, per (agent_id, thread key),
+        # read into that agent's next phase-4/phase-5 prompt (src/agent/claim_check.py).
+        # Written only by an enforce-mode block; in memory and LRU-capped.
+        self.claim_feedback = RejectionFeedback()
 
 
 class RunState:

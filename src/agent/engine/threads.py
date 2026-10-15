@@ -135,7 +135,10 @@ class Threads:
         so two closes racing in opposite directions (this agent/other vs.
         other/this agent — spec §3.2's motivating scenario) converge on the
         same acquisition order and cannot deadlock on each other.
+
+        Clears every agent's authorship-claim feedback for the thread (back-off or conclusion, main AGT-14).
         """
+        self.ctx.claim_feedback.clear_thread(thread.thread_id)
         async with self._agent_locks.acquire_all(agent.agent_id, thread.other_agent_id):
             thread.status = "closed"
             self._closed_thread_ids.add(thread.thread_id)
@@ -305,7 +308,10 @@ class Threads:
         thread. Nested inside the already-held thread lock: thread-lock-
         outer, agent-lock-inner, per the ordering note on `_thread_locks` in
         __init__.
+
+        Clears every agent's authorship-claim feedback for the thread (back-off or conclusion, main AGT-14).
         """
+        self.ctx.claim_feedback.clear_thread(thread_id)
         async with self._agent_locks.acquire_all(*self.agents.keys()):
             evicted_from = 0
             for ag in self.agents.values():

@@ -4,19 +4,24 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from src.agent import claim_check
+from src.agent.authorship_rules import check_draft_authorship
 from src.agent.engine import constants, deps
 from src.agent.engine.constants import POLL_ERROR_LOG_INTERVAL
 from src.agent.engine.context import EngineContext, TagFilter, ThreadGoneCallback, via
 from src.agent.engine.sidecar import _strip_assessment_sidecar
 from src.agent.ids import WRITER_ENGINE, TsMinter
-from src.agent.message_log import LogEntry
+from src.agent.message_log import PHASE_PANEL_NOTE, LogEntry
 from src.agent.run_marker import is_run_start_marker
 from src.agent.slack_client import AgentSlackClient, ThreadNotFound
 from src.models.agent_activity import VISIBILITY_PUBLIC
+from src.models.authorship_claim_check import MODE_ENFORCE, OUTCOME_GROUNDED, OUTCOME_REJECTED
 
 if TYPE_CHECKING:
+    from src.agent.agent import Agent
     from src.agent.engine.channel_directory import ChannelDirectory
     from src.agent.engine.persistence import Persistence
 
@@ -311,6 +316,7 @@ class SlackIO:
         thread_ts: str | None = None,
         phase: str | None = None,
         landed_check: bool = False,
+        on_claim_block: Callable[[str], None] | None = None,
     ) -> str | None:
         """Post a message to Slack and record it in the message log + DB.
 
@@ -327,6 +333,11 @@ class SlackIO:
         src/agent/message_log.py). Carried on the LogEntry, not applied at
         flush time, so it survives the round trip through the log and back out
         of the DB on the next rebuild.
+
+        ``on_claim_block`` is called with the rejection reason when the authorship
+        claim check blocks this post (enforce mode, never the hub; see
+        ``_authorship_gate``). The post is then not made and ``None`` is returned,
+        like any other suppression, so the caller's suppression branch counts it.
 
         Returns the canonical post id (the root chunk's ``ts`` — a real Slack
         ts when a connected client posted, else a locally-minted one; see
@@ -371,6 +382,14 @@ class SlackIO:
 
         client = self.slack_clients.get(agent_id)
         agent = self.agents.get(agent_id)
+
+        # The authorship claim check (the 2026-10-15 publication-handling design §11):
+        # on the source text, after the sidecar/tag strip and BEFORE the cohort-tag
+        # strip below, so a co-author tag about to be stripped is still checked.
+        if agent is not None and await self._authorship_gate(
+            agent, channel, text, thread_ts, phase, on_claim_block,
+        ):
+            return None
 
         # Cohort gate, outbound side. Placed here rather than in a phase so it
         # covers every caller — Phase 4 replies, Phase 5 posts, private-channel
@@ -431,6 +450,27 @@ class SlackIO:
         # Slack if the row count matches the message count.
         mirrored = self._mirrored_messages(result, text, slack_parent)
 
+        root_ts = self._log_post_chunks(
+            agent_id, agent, channel, text, thread_ts, phase, mirrored,
+        )
+        # A post that went out clears the reason an earlier block left for this agent
+        # in this thread (main AGT-14: "cleared on post").
+        self.ctx.claim_feedback.clear(agent_id, thread_ts or claim_check.PHASE5_THREAD_KEY)
+        # Write-through: the post is not done until its rows are in the database,
+        # because a restart restores from the database only. Serialized with every
+        # other flush by `_persist_flush_lock`. A failed flush re-queues the
+        # entries exactly as the per-tick flush does, and the post still counts as
+        # posted: it is on Slack.
+        if self.session_factory and self.simulation_run_id:
+            await self._flush_persisted()
+        return root_ts
+
+    def _log_post_chunks(
+        self, agent_id: str, agent: Agent | None, channel: str, text: str,
+        thread_ts: str | None, phase: str | None, mirrored: list[dict] | None,
+    ) -> str | None:
+        """Append one ``LogEntry`` per transport message of a post and return the root
+        chunk's ts (moved out of ``_post_message`` unchanged; see the comments)."""
         # Canonical id: the Slack ts when a connected client posted, else a
         # locally-minted ts. Slack ts (when present) is also recorded as the
         # mirror mapping on the entry.
@@ -491,14 +531,89 @@ class SlackIO:
             # Persisted to agent_messages via the MessageLog append callback
             # (_enqueue_persist → _flush_persisted). The DB is the primary store.
             self.message_log.append(entry)
-        # Write-through: the post is not done until its rows are in the database,
-        # because a restart restores from the database only. Serialized with every
-        # other flush by `_persist_flush_lock`. A failed flush re-queues the
-        # entries exactly as the per-tick flush does, and the post still counts as
-        # posted: it is on Slack.
-        if self.session_factory and self.simulation_run_id:
-            await self._flush_persisted()
         return root_ts
+
+    async def _authorship_gate(
+        self, agent: Agent, channel: str, text: str, thread_ts: str | None,
+        phase: str | None, on_claim_block: Callable[[str], None] | None,
+    ) -> bool:
+        """Check ``text`` for first-person authorship claims and record the check.
+        True means the post must not be made: only a rejected claim in enforce mode,
+        which a hub role never reaches (``claim_check.effective_mode``). A panel note
+        is the hub's bookkeeping, not conversation, and is neither checked nor recorded."""
+        if phase == PHASE_PANEL_NOTE:
+            return False
+        try:
+            mode = claim_check.effective_mode(
+                agent.role, deps.get_settings().authorship_claim_check_mode,
+            )
+            verdict = check_draft_authorship(
+                text,
+                own=claim_check.record_for_agent(agent),
+                speaker_id=agent.agent_id,
+                roster=claim_check.roster_entries(self.agents),
+                record_for=lambda aid: claim_check.record_for_agent(self.agents.get(aid)),
+                bot_uid_to_agent=self._bot_identity_maps()[1],
+                label_for=lambda aid: a.bot_name if (a := self.agents.get(aid)) else aid,
+                context_text=self._thread_root_text(thread_ts),
+            )
+            outcome = claim_check.outcome_of(verdict)
+        except Exception:
+            # Fail open in every mode (audit defect 2): a fault in the rules or in reading
+            # the mode must never stop a post, and in log mode nothing a model or Slack
+            # sees may change.
+            logger.warning(
+                "[%s] Authorship claim check failed; posting unchecked",
+                agent.agent_id, exc_info=True,
+            )
+            return False
+        thread_key = thread_ts or claim_check.PHASE5_THREAD_KEY
+        # Every check is recorded, no_claim included: the rows are the owner's
+        # denominators. Called through the module so tests patch one name.
+        await claim_check.record_check(
+            self.session_factory, simulation_run_id=self.simulation_run_id,
+            agent_id=agent.agent_id, thread_key=thread_key,
+            phase=phase or ("thread_reply" if thread_ts else "new_post"),
+            mode=mode, outcome=outcome, reasons=verdict.reasons, excerpt=text,
+        )
+        if outcome == OUTCOME_GROUNDED:
+            logger.debug(
+                "[%s] Authorship claim check: grounded claim in a post to #%s",
+                agent.agent_id, channel,
+            )
+            return False
+        if outcome != OUTCOME_REJECTED:
+            return False
+        reason = verdict.reason or ""
+        if mode != MODE_ENFORCE:
+            logger.info(
+                "[%s] Authorship claim check (log only): a post to #%s would be rejected — %s",
+                agent.agent_id, channel, reason[:300],
+            )
+            return False
+        self.ctx.claim_feedback.note(agent.agent_id, thread_key, reason)
+        logger.warning(
+            "[%s] Suppressed a post to #%s: the authorship claim check rejected it — %s",
+            agent.agent_id, channel, reason,
+        )
+        if on_claim_block is not None:
+            on_claim_block(reason)
+        return True
+
+    def _thread_root_text(self, thread_ts: str | None) -> str | None:
+        """The thread root's text from the message log, its continuation chunks
+        rejoined (main AGT-13); None without a thread or when the root is not in the
+        log. ``get_thread_history`` pins the root first and drops panel notes."""
+        if not thread_ts:
+            return None
+        root = self.message_log.get_entry(thread_ts)
+        if root is None:
+            return None
+        history = self.message_log.get_thread_history(thread_ts)
+        return claim_check.root_context(
+            root.sender_agent_id, root.content,
+            ((e.sender_agent_id, e.content) for e in history[1:]),
+        )
 
     @staticmethod
     def _mirrored_messages(

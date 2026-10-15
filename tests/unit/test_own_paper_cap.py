@@ -182,3 +182,61 @@ async def test_a_foreign_pmid_over_the_cap_is_refused_without_fetching(monkeypat
     )
     assert "Rate limit" in out
     assert fetched == []
+
+
+# --- AGT-3: the result side (the 2026-10-15 publication-handling design §11 R6.14) -------
+
+
+async def test_result_side_own_paper_is_not_charged():
+    thread = ThreadState(thread_id="t7", channel="c", other_agent_id="x", abstracts_other=0)
+    out = await tools_mod.execute_tool(
+        "retrieve_abstract", {"pmid_or_doi": "10.9/other"}, "schultz", thread,
+        role="pi_lab", own_paper_ids={"12345678"},
+    )
+    assert "Title" in out
+    assert thread.abstracts_other == 0
+
+
+async def test_result_side_exemption_does_not_lift_the_cap(monkeypatch):
+    fetched = []
+
+    async def spy(ref):
+        fetched.append(ref)
+        return {"pmid": "12345678", "title": "T", "abstract": "A"}
+
+    monkeypatch.setattr(tools_mod, "fetch_abstract", spy)
+    thread = ThreadState(thread_id="t8", channel="c", other_agent_id="x", abstracts_other=10)
+    out = await tools_mod.execute_tool(
+        "retrieve_abstract", {"pmid_or_doi": "10.9/other"}, "schultz", thread,
+        role="pi_lab", own_paper_ids={"12345678"},
+    )
+    assert "Rate limit" in out
+    assert fetched == []
+
+
+async def test_a_db_only_pmid_is_exempt_by_input():
+    """31234567 is a stored PMID the persona does not list: C12 puts it in own_paper_ids."""
+    thread = ThreadState(thread_id="t9", channel="c", other_agent_id="x", abstracts_other=10)
+    out = await tools_mod.execute_tool(
+        "retrieve_abstract", {"pmid_or_doi": "31234567"}, "schultz", thread,
+        role="pi_lab", own_paper_ids={"31234567"},
+    )
+    assert "Rate limit" not in out
+    assert thread.abstracts_other == 10
+
+
+async def test_openalex_doi_result_is_exempt(monkeypatch):
+    async def openalex_shaped(ref):
+        return {"pmid": None, "doi": "10.5555/OWN", "title": "T", "abstract": "A",
+                "journal": "J", "year": 2024}
+
+    monkeypatch.setattr(tools_mod, "fetch_abstract", openalex_shaped)
+    # The fragment makes the input side read "10.5555/own#sec1", which is not an own id.
+    ref = "https://doi.org/10.5555/OWN#sec1"
+    assert not (tools_mod._requested_paper_ids(ref) & {"10.5555/own"})
+    thread = ThreadState(thread_id="t10", channel="c", other_agent_id="x", abstracts_other=0)
+    await tools_mod.execute_tool(
+        "retrieve_abstract", {"pmid_or_doi": ref}, "schultz", thread,
+        role="pi_lab", own_paper_ids={"10.5555/own"},
+    )
+    assert thread.abstracts_other == 0

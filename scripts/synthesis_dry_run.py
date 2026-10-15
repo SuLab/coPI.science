@@ -51,6 +51,7 @@ from src.services.profile_pipeline import (  # noqa: E402
 )
 from src.services.tenure_scope import publication_in_use, publication_order_by  # noqa: E402
 
+
 async def build_context(db: AsyncSession, user: User) -> str:
     """The step-7 context from the stored corpus (no resolve, no network, no write)."""
     agent_id = await db.scalar(

@@ -527,3 +527,48 @@ narrower state reserved for a `simulation_process_status` table with no row
 at all — it is upserted once (id=1) and never deleted by any code path, so
 once the supervisor has checked in even once in an environment, a later
 `stop` degrades the page to `stale`, never back to `not_deployed`.
+
+## Authorship claim check
+
+The engine checks every post for first-person authorship claims ("we published …", "our 2023
+Nature paper", "the Su lab published it with us") against the lab's publication records,
+and records each check in `authorship_claim_checks`. Design: the 2026-10-15
+publication-handling design, §11. Code: `src/agent/authorship_rules.py` (the rules),
+`src/agent/claim_check.py` (modes, records, the feedback store, the row writer) and
+`SlackIO._authorship_gate` in `src/agent/engine/slack_io.py`.
+
+- **What is checked:** replies and pitches, through the posting chokepoint, after the
+  sidecar strip and before the cohort-tag strip; and every working-memory synthesis
+  (`Memory._sweep_authorship_lines` in `src/agent/engine/memory.py`). **Not checked:**
+  headlines and the run-start marker (engine-written, they never pass the chokepoint) and
+  panel notes (bookkeeping).
+- **Records:** a lab's own papers are its in-use stored publications plus the identifiers
+  in its persona, minus a persona identifier held only by rows excluded as `staff`,
+  `openalex_affiliation` or `repair_script`. The hub has none: any authorship claim it
+  makes is a rejection, and it is never blocked.
+- **Modes:** `AUTHORSHIP_CLAIM_CHECK_MODE=log` (the default) records only; nothing a model
+  or Slack sees changes. `enforce` blocks a rejected lab post (it counts as a suppression:
+  the second one in a thread abandons it), feeds the reason into that lab's next draft,
+  restores the skip streak for a blocked pitch, and strips ungrounded lines from working
+  memory (keeping the old memory when every line would go). The hub is always `log`. The
+  startup banner says which: `Authorship claim check: mode log (scout_hub always log)`.
+- **Review:** `/admin/authorship-checks` (admins only, read-only) lists the rows with
+  filters by run, agent, outcome and mode. SQL for one run (`:run` is its id):
+
+      SELECT c.agent_id, a.role, c.phase, c.outcome, count(*) AS n
+        FROM authorship_claim_checks c LEFT JOIN agents a USING (agent_id)
+       WHERE c.simulation_run_id = :run GROUP BY 1, 2, 3, 4 ORDER BY 1, 3, 4;
+
+- **Replay** (read-only, writes a report only, never a row):
+
+      mkdir -p data/reports
+      $DC run --rm --no-deps -T blackbird-app python scripts/replay_authorship_claims.py \
+        > data/reports/authorship-claims-replay-$(date -u +%Y%m%dT%H%MZ).md
+
+  The report holds message text: keep it under `data/` (gitignored), never commit it.
+- **Switching to enforce** is the owner's decision, after the replay report. With no live
+  run on `/admin/simulation`: add `AUTHORSHIP_CLAIM_CHECK_MODE=enforce` to `.env`, run
+  `$DC up -d --force-recreate agent`, and start the next run **Fresh**: working memory
+  written under log mode is then archived instead of carried (a resume carries it until
+  each agent's next memory update sweeps it). **Rollback:** remove the line and recreate
+  the agent, again with no live run. The setting is read only by the agent.

@@ -22,6 +22,7 @@ from src.models.assessment_chat import (
     AssessmentChatTurn,
     AssessmentChatUsage,
 )
+from src.models.authorship_claim_check import AuthorshipClaimCheck
 from src.models.cohort import (
     COHORT_ACTION_AGENT_ADDED,
     COHORT_ACTION_AGENT_REMOVED,
@@ -147,4 +148,5 @@ __all__ = [
     "AssessmentChatOpen",
     "RubricDocument",
     "HelpIntroDismissal",
+    "AuthorshipClaimCheck",
 ]

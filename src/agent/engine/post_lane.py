@@ -10,6 +10,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 from src.agent.agent import Agent
+from src.agent.claim_check import PHASE5_THREAD_KEY, feedback_text
 from src.agent.engine import constants, deps
 from src.agent.engine.constants import PROPOSAL_DRAIN_SETTLE_TICKS
 from src.agent.engine.context import EngineContext, via
@@ -491,10 +492,12 @@ class PostLane:
                 bot_names={aid: a.bot_name for aid, a in self.agents.items()},
             )
 
+            claim_reason = self.ctx.claim_feedback.get(agent.agent_id, PHASE5_THREAD_KEY)
             system_prompt, messages = agent.build_phase5_prompt(
                 recent_posts=recent_posts,
                 prior_threads=prior_threads,
                 post_type_menu=post_type_menu,
+                authorship_feedback=feedback_text(claim_reason) if claim_reason else None,
             )
 
             # Correlation id for this specific call's log row, generated BEFORE the
@@ -720,9 +723,31 @@ class PostLane:
             )
             agent.state.consecutive_phase5_skips = previous_skips + 1
             return
-        # New top-level post
-        posted = await self._post_message(agent.agent_id, channel, message_text, landed_check=True)
+        await self._publish_pitch(agent, channel, message_text, action_data, previous_skips)
+
+    async def _publish_pitch(
+        self, agent: Agent, channel: str, message_text: str, action_data: dict,
+        previous_skips: int,
+    ) -> None:
+        """Post a validated pitch and account for it. A pitch the authorship claim check
+        blocked (enforce mode) restores the skip streak, as every other rejection here
+        does, because the streak feeds selection damping and the spontaneous-interval
+        stretch; its reason is already stored under (agent, "phase5"). Any other
+        suppression keeps the handling it always had."""
+        blocked: list[str] = []
+        posted = await self._post_message(
+            agent.agent_id, channel, message_text, landed_check=True,
+            on_claim_block=blocked.append,
+        )
         if not posted:
+            if blocked:
+                agent.state.consecutive_phase5_skips = previous_skips + 1
+                logger.info(
+                    "[%s] Phase 5: New post in #%s blocked by the authorship claim check "
+                    "— not counted, nothing persisted",
+                    agent.agent_id, channel,
+                )
+                return
             # _post_message already logged why (e.g. the text stripped to
             # empty). Nothing reached Slack, so neither the turn counter
             # nor an assessment row may be written for it — either would
@@ -732,30 +757,30 @@ class PostLane:
                 "nothing persisted",
                 agent.agent_id, channel,
             )
+            return
+        agent.message_count += 1
+        self._book_pitch(channel)
+
+        # No post type reaching here ever carries an assessment
+        # sidecar anymore — the hub is hard-gated out of this
+        # function entirely (see the docstring), and CANONICAL has
+        # no entry for one (post_types.py). The extraction/persist
+        # step that used to live here for `opportunity_assessment`
+        # moved to `_reply_to_thread`'s Phase-4 CONCLUDE handling
+        # (Option A relocation).
+
+        # Check if it tags another agent
+        tagged_agent = action_data.get("tagged_agent")
+        if tagged_agent:
+            logger.info(
+                "[%s] Phase 5: New post in #%s tagging @%s",
+                agent.agent_id, channel, tagged_agent,
+            )
         else:
-            agent.message_count += 1
-            self._book_pitch(channel)
-
-            # No post type reaching here ever carries an assessment
-            # sidecar anymore — the hub is hard-gated out of this
-            # function entirely (see the docstring), and CANONICAL has
-            # no entry for one (post_types.py). The extraction/persist
-            # step that used to live here for `opportunity_assessment`
-            # moved to `_reply_to_thread`'s Phase-4 CONCLUDE handling
-            # (Option A relocation).
-
-            # Check if it tags another agent
-            tagged_agent = action_data.get("tagged_agent")
-            if tagged_agent:
-                logger.info(
-                    "[%s] Phase 5: New post in #%s tagging @%s",
-                    agent.agent_id, channel, tagged_agent,
-                )
-            else:
-                logger.info(
-                    "[%s] Phase 5: New post in #%s",
-                    agent.agent_id, channel,
-                )
+            logger.info(
+                "[%s] Phase 5: New post in #%s",
+                agent.agent_id, channel,
+            )
 
     async def _rehydrate_proposal_count(self) -> None:
         """Recover this run's pitch count from the durable store on resume.

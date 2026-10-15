@@ -517,7 +517,8 @@ async def _open_or_resume_run(
 
 
 def _log_start_banner(agents: list[Agent], runtime_label: str, budget: int, fresh: bool) -> None:
-    """The deprecated-budget warning, the start line and the screening-rubric line."""
+    """The deprecated-budget warning, the start line, the screening-rubric line and the
+    authorship-claim mode."""
     if budget > 0:
         logger.warning(
             "--budget %d is the DEPRECATED cumulative cap. It counts LLM calls "
@@ -542,6 +543,12 @@ def _log_start_banner(agents: list[Agent], runtime_label: str, budget: int, fres
     logger.info(
         "Screening rubric: version %s (content hash %s)",
         RUBRIC_VERSION, RUBRIC_CONTENT_HASH,
+    )
+    # Which authorship-claim mode this engine runs (src/agent/claim_check.py). The hub is
+    # always log, whatever the setting.
+    logger.info(
+        "Authorship claim check: mode %s (scout_hub always log)",
+        get_settings().authorship_claim_check_mode,
     )
 
 

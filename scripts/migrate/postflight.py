@@ -16,7 +16,7 @@ What follows --target and what does not:
     or the comparison FAILs; a snapshot ``target`` other than --target only WARNs.
   * The pinned table/column/index/constraint expectations (EXPECTED_TABLES,
     EXPECTED_COLUMNS, EXPECTED_INDEXES, EXPECTED_CONSTRAINTS) describe the 0019-0023
-    chain and the 0056, 0062, 0065, 0068 and 0069 objects only (VERIFIED_REVISIONS), whatever the target.
+    chain and the 0056, 0062, 0065, 0068, 0069 and 0070 objects only (VERIFIED_REVISIONS), whatever the target.
 
 Exit codes (contract):
 
@@ -150,20 +150,31 @@ EXPECTED_COLUMNS: tuple[tuple[str, str, str, bool, str | None], ...] = (
     ("agents", "persona_export_failed_at", "timestamp with time zone", True, ""),
     # 0069: NULL means "written before 0069" (or an agent with no user); never backfilled.
     ("profile_revisions", "owner_user_id", "uuid", True, ""),
+    # 0070 — authorship_claim_checks (C7). No backfill: no row means "never checked".
+    ("authorship_claim_checks", "id", "uuid", False, None),
+    ("authorship_claim_checks", "simulation_run_id", "uuid", True, ""),
+    ("authorship_claim_checks", "agent_id", "character varying", False, ""),
+    ("authorship_claim_checks", "thread_key", "character varying", False, ""),
+    ("authorship_claim_checks", "phase", "character varying", False, ""),
+    ("authorship_claim_checks", "mode", "character varying", False, ""),
+    ("authorship_claim_checks", "outcome", "character varying", False, ""),
+    ("authorship_claim_checks", "reasons", "jsonb", False, "'[]'::jsonb"),
+    ("authorship_claim_checks", "excerpt", "text", False, ""),
+    ("authorship_claim_checks", "created_at", "timestamp with time zone", False, "now()"),
 )
 
 EXPECTED_TABLES = (
     "pi_dm_messages", "cohorts", "cohort_memberships", "cohort_audit_events", "rubric_documents",
-    "publication_candidates",
+    "publication_candidates", "authorship_claim_checks",
 )
 
 #: Revisions this script's EXPECTED_TABLES/EXPECTED_COLUMNS/EXPECTED_INDEXES below
-#: actually verify. Pinned: 0019-0023, 0056, 0062, 0065, 0068 and 0069. Not pinned (documented omission):
+#: actually verify. Pinned: 0019-0023, 0056, 0062, 0065, 0068, 0069 and 0070. Not pinned (documented omission):
 #: the 0024-0055, 0057-0061, 0063-0064 and 0066-0067 objects, which preflight's PLANNED_OBJECTS collision check and
 #: tests/integration/test_model_migration_parity.py cover. Bump this tuple (and add the
 #: corresponding EXPECTED_* entries) to extend the pins. The row-count and enum checks
 #: do not read it: they are scoped by revision span instead.
-VERIFIED_REVISIONS: tuple[str, ...] = ("0019", "0020", "0021", "0022", "0023", "0056", "0062", "0065", "0068", "0069")
+VERIFIED_REVISIONS: tuple[str, ...] = ("0019", "0020", "0021", "0022", "0023", "0056", "0062", "0065", "0068", "0069", "0070")
 
 #: index name -> the exact pg_indexes.indexdef tail, so a same-named index on the WRONG
 #: columns (or a partial index that lost its predicate) fails too.
@@ -203,6 +214,9 @@ EXPECTED_INDEXES: dict[str, str] = {
     ),
     # 0069.
     "ix_profile_revisions_owner_user_id": "USING btree (owner_user_id)",
+    # 0070.
+    "ix_authorship_claim_checks_run_agent": "USING btree (simulation_run_id, agent_id)",
+    "ix_authorship_claim_checks_created_at": "USING btree (created_at)",
 }
 
 #: constraint name -> (table, pg_get_constraintdef)
@@ -232,6 +246,17 @@ EXPECTED_CONSTRAINTS: dict[str, tuple[str, str]] = {
     ),
     "uq_publication_candidates_user_pmid": ("publication_candidates", "UNIQUE (user_id, pmid)"),
     "ck_publication_candidates_status": ("publication_candidates", "'rejected'"),
+    # 0070.
+    "ck_authorship_claim_checks_mode": ("authorship_claim_checks", "'enforce'::character varying"),
+    "ck_authorship_claim_checks_outcome": (
+        "authorship_claim_checks", "'rejected'::character varying",
+    ),
+    "ck_authorship_claim_checks_excerpt_length": (
+        "authorship_claim_checks", "char_length(excerpt) <= 2000",
+    ),
+    "authorship_claim_checks_simulation_run_id_fkey": (
+        "authorship_claim_checks", "REFERENCES simulation_runs(id) ON DELETE CASCADE",
+    ),
 }
 
 EXPECTED_ENUMS: dict[str, tuple[str, ...]] = {

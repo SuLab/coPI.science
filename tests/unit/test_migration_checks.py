@@ -279,8 +279,9 @@ def test_supported_start_revisions_are_exactly_the_documented_set():
         "0039", "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048",
         "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058",
         "0059", "0060", "0061", "0062", "0063", "0064", "0065", "0066", "0067", "0068",
+        "0069",
     )
-    assert pf.DEFAULT_TARGET == "0069"
+    assert pf.DEFAULT_TARGET == "0070"
 
 
 def test_every_post_branch_revision_is_a_supported_start():

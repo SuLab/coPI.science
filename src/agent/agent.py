@@ -417,6 +417,7 @@ class Agent:
         other_agent_lab: str,
         visibility: str = VISIBILITY_PUBLIC,
         channel_id: str | None = None,
+        authorship_feedback: str | None = None,
     ) -> tuple[str, list[dict]]:
         """
         Build system + messages for Phase 4 thread reply.
@@ -426,6 +427,9 @@ class Agent:
         visibility/channel_id: visibility class of the thread's channel and the
             channel's Slack ID. Threaded through to the system prompt builder
             for visibility-scoped memory injection.
+        authorship_feedback: the authorship claim check's rejection notice for this thread
+            (``claim_check.feedback_text``), appended to the user message; None leaves
+            the prompt byte-identical.
         Returns (system_prompt, messages).
         """
         system_prompt = self.build_thread_reply_system_prompt(
@@ -485,6 +489,8 @@ class Agent:
         prompt_text = prompt_text.replace("{phase_guidance}", phase_guidance)
         prompt_text = prompt_text.replace("{instructions}", instructions)
 
+        if authorship_feedback:
+            prompt_text += "\n\n" + authorship_feedback
         messages = [{"role": "user", "content": prompt_text}]
         return system_prompt, messages
 
@@ -515,6 +521,7 @@ class Agent:
         visibility: str = VISIBILITY_PUBLIC,
         channel_id: str | None = None,
         post_type_menu: str | None = None,
+        authorship_feedback: str | None = None,
     ) -> tuple[str, list[dict]]:
         """
         Build system + messages for Phase 5 new post.
@@ -533,6 +540,10 @@ class Agent:
             enforces the SAME set when the response comes back. None renders
             THIS AGENT'S ROLE's declared set with no topology filtering — used by
             direct callers and tests that have no topology to apply.
+
+        authorship_feedback: the authorship claim check's rejection notice for this pitch
+            (``claim_check.feedback_text``), appended to the user message; None leaves
+            the prompt byte-identical.
         """
         system_prompt = self.build_system_prompt(visibility=visibility, channel_id=channel_id)
         phase5_template = self._load_prompt(
@@ -600,6 +611,9 @@ class Agent:
                 self_id=self.agent_id, bot_names={},
             )
         prompt_text = prompt_text.replace("{post_type_menu}", post_type_menu)
+
+        if authorship_feedback:
+            prompt_text += "\n\n" + authorship_feedback
 
         messages = [{"role": "user", "content": prompt_text}]
         return system_prompt, messages

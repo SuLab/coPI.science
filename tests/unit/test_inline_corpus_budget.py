@@ -35,6 +35,11 @@ def harness(monkeypatch):
 
     monkeypatch.setattr(audit, "load_stored_publications", stored)
     monkeypatch.setattr(repair, "load_stored_publications", stored)
+
+    async def untouchable(*args):  # Q4: manual and excluded rows the repair never reads
+        return 0
+
+    monkeypatch.setattr(repair, "count_untouchable_publications", untouchable)
     monkeypatch.setattr(audit, "refetch_pmids", refetched)
     monkeypatch.setattr(tenure, "fetch_orcid_profile", profile)
     monkeypatch.setattr(audit, "get_session_factory", lambda: factory)

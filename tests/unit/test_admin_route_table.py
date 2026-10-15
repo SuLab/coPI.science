@@ -31,6 +31,8 @@ EXPECTED_ROUTES = {
     ("GET", "/simulation"), ("POST", "/simulation/start"), ("POST", "/simulation/stop"),
     ("POST", "/simulation/finalize-run"),
     ("POST", "/simulation/announce-settings"), ("POST", "/simulation/announce-template"),
+    # The read-only claim-check page (the 2026-10-15 publication-handling design, R6.17, F31).
+    ("GET", "/authorship-checks"),
 }
 
 
@@ -41,7 +43,7 @@ def _routes():
 
 def test_the_admin_route_set_is_unchanged():
     assert {(m, p) for _i, m, p in _routes()} == EXPECTED_ROUTES
-    assert len(_routes()) == 46
+    assert len(_routes()) == 47
 
 
 def test_literal_routes_are_registered_before_parameterised_siblings():
