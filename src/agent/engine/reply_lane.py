@@ -1140,14 +1140,10 @@ class ReplyLane:
                     ),
                 )
 
-        # Check for thread outcome. `posted` is the reply's canonical id: a hub
-        # decline records the Slack ts behind it. A reply that carried a sidecar
-        # (well-formed or not) is never a decline, even when its capture failed:
-        # the drop or the stored row is that interview's record.
+        # A reply that carried any sidecar, usable or not, is never a hub decline.
+        carried = bool(_ASSESSMENT_UNCLOSED_RE.search(raw_response or ""))
         await self._check_thread_outcome(
-            agent, thread, response_text, posted_ts=posted,
-            carried_sidecar=bool(_ASSESSMENT_UNCLOSED_RE.search(raw_response or "")),
-        )
+            agent, thread, response_text, posted_ts=posted, carried_sidecar=carried)
 
     async def _check_thread_outcome(
         self,
@@ -1220,11 +1216,11 @@ class ReplyLane:
             )
 
     def _other_party_is_a_lab(self, thread: ThreadState) -> bool:
-        """Whether the hub's counterparty is a lab: a known agent of another role (a
-        second hub, a grant bot) is not, so its thread records no decline. An agent no
-        longer on the roster counts as a lab: only labs pitch the hub."""
+        """Whether the hub's counterparty is a lab: another hub-role agent is not, so its
+        thread records no decline. An agent no longer on the roster counts as a lab:
+        only labs pitch the hub."""
         other = self.agents.get(thread.other_agent_id) if thread.other_agent_id else None
-        return other is None or other.role == "pi_lab"
+        return other is None or other.role not in hub_role_names()
 
     async def _record_hub_decline(
         self, agent: Agent, thread: ThreadState, latest_reply: str, posted_ts: str | None,

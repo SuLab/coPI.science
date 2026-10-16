@@ -19,4 +19,6 @@ async def test_equal(db_session, seeded_assessments, kw):  # noqa: F811
     run_id = kw.pop("run_id")
     new = await directory.list_assessments(db_session, run_id, **kw)
     old = await frozen_list(db_session, run_id, **kw)
+    # `declines` (migration 0071) postdates the frozen copy; the seed has none.
+    assert new.pop("declines") == []
     assert new == old

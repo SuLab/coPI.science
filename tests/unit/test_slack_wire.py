@@ -131,11 +131,12 @@ def test_only_the_run_announcer_disables_escaping():
         for name, value in inside
     )
     assert keyed == [], keyed
-    # Control: the six posting calls (slack_io.py:406, headlines.py:194 and :535,
-    # run_announcer.py:262, backfill_assessment_headlines.py:237 and :347).
+    # Control: the seven posting calls (slack_io.py, headlines.py's assessment
+    # announce, its decline announce and the engine's summary post (0071),
+    # run_announcer.py, backfill_assessment_headlines.py twice).
     assert posting == Counter({
         "src/agent/engine/slack_io.py": 1,
-        "src/agent/engine/headlines.py": 2,
+        "src/agent/engine/headlines.py": 3,
         "src/agent/engine/run_announcer.py": 1,
         "scripts/backfill_assessment_headlines.py": 2,
     })
