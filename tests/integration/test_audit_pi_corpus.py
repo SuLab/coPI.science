@@ -46,9 +46,12 @@ async def test_baseline_session_is_read_only(db_session, monkeypatch):
     monkeypatch.setattr(reader, "execute", spy)
     try:
         pis = await audit.read_baseline_rows(reader, [_ORCID])
+        # The read transaction is over before any network call.
+        reader_in_transaction = reader.in_transaction()
     finally:
         await reader.close()
     assert statements[0] == "SET TRANSACTION READ ONLY"
+    assert reader_in_transaction is False
 
     fetched: list[list[str]] = []
 

@@ -1473,7 +1473,7 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 >       2> ~/backups-blackbird/phase3-audit-baseline.err | gzip > ~/backups-blackbird/phase3-audit-baseline.jsonl.gz
 >     echo "baseline exit ${PIPESTATUS[0]}"
 >     tail -n 2 ~/backups-blackbird/phase3-audit-baseline.err
-> - **The two stderr lines:** `# audit_pi_corpus baseline: <N> PI(s), <T> anchored in-use rows evaluated, <U> unrefetchable`, then `# resolve_error: <k> PI(s): <orcid> <orcid> …`. `<T>` + `<U>` equals check (b)'s `rows`.
+> - **The two stderr lines:** `# audit_pi_corpus baseline: <N> PI(s), <T> anchored in-use rows evaluated, <U> unrefetchable`, then `# resolve_error: <k> PI(s): <orcid> <orcid> …`. `<T>` + `<U>` equals check (b)'s `rows`, less the rows of any PI whose `resolve_error` starts `PubMed refetch failed` (a transient PubMed failure leaves that PI with no rows).
 > - **On exit 1** (some PI has `resolve_error`), wait for the OpenAlex meter to reset (UTC midnight). Then append a line for each listed iD; gzip members concatenate, and the compare keeps the last line per PI:
 >       for o in <the iDs on the "# resolve_error:" line>; do
 >         $DC run --rm --no-deps -T -v "$PWD/scripts/audit_pi_corpus.py:/app/scripts/audit_pi_corpus.py:ro" \
@@ -1494,7 +1494,7 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > - **Exit 2 (STOP FOR OWNER REVIEW):** stop. The owner reviews the stderr summary, each PI's `dropped` and `newly_admitted` lists with their `newly_admitted_authors` labels, and the `openalex` lines (the compare file) before step 6.
 >   - The labels are where a containment admission of a PI's middle name ("David, Jeffrey" for "Jeffrey David Rothstein", §16 O6) or a swap admission shows.
 >   - If the owner declines, re-tag `copi-blackbird-blackbird-app:rollback-pre-phase3` and `copi-blackbird-worker:rollback-pre-phase3` as `:latest`. Nothing was recreated, so nothing else is needed.
-> - **Exit 1 (INCOMPLETE):** complete the baseline first. Re-tag the rollback image as `:latest` and go back to step 3 (re-run the `--orcid` loop for the PIs the `# incomplete PI(s):` line names), then repeat steps 4 and 5.
+> - **Exit 1 (INCOMPLETE):** a PI is incomplete, the baseline judged no PI, or an `--orcid` given to the compare is not in it. Complete the baseline first. Re-tag the rollback image as `:latest` and go back to step 3 (re-run the `--orcid` loop for the PIs the `# incomplete PI(s):` line names), then repeat steps 4 and 5.
 >
 > **6. Deploy:** `$DC up -d blackbird-app worker`. Do not recreate the agent.
 >

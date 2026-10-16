@@ -226,9 +226,33 @@ async def test_a_non_pi_with_research_data_cannot_delete_their_own_account(
     r = await client.post("/profile/delete-account", headers=_auth(uid), data={"confirm": "delete"})
     assert r.status_code == 302
     assert r.headers["location"] == "/profile/delete-account?error=research_data"
+    # Review Focus 5: the refusal writes nothing, the session included (a cleared Starlette
+    # session is sent back as an expired cookie).
+    set_cookie = r.headers.get("set-cookie", "")
+    assert "1970" not in set_cookie and "=null" not in set_cookie
     assert await db_session.scalar(
         select(func.count()).select_from(User).where(User.id == uid)) == 1
     assert (await research_data_for(db_session, [uid]))[uid].has_any
+
+
+async def test_a_conversion_after_the_request_loaded_the_user_is_still_refused(
+    client, asgi_app, db_session,
+):
+    """The request loaded a PI; a staff conversion committed before the guard ran. The role
+    is re-read under the row lock, so the now-manager account is still refused (F18)."""
+    from src.dependencies import get_current_user
+
+    user = await factories.make_user(db_session, user_role="manager", access_status="allowed")
+    uid = user.id
+    await _give(db_session, uid, "publication")
+    await db_session.commit()
+    stale = SimpleNamespace(id=uid, user_role="pi", may_use_pi_surfaces=True,
+                            _is_impersonated=False)
+    asgi_app.dependency_overrides[get_current_user] = lambda: stale
+    r = await client.post("/profile/delete-account", headers=_auth(uid), data={"confirm": "delete"})
+    assert r.headers["location"] == "/profile/delete-account?error=research_data"
+    assert await db_session.scalar(
+        select(func.count()).select_from(User).where(User.id == uid)) == 1
 
 
 async def test_a_non_pi_without_research_data_still_deletes_their_own_account(client, db_session):

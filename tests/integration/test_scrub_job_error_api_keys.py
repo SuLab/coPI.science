@@ -167,3 +167,19 @@ def test_main_apply_exits_1_when_a_row_changed_since_read(committed, monkeypatch
         sj.main(["--apply"])
     assert stop.value.code == 1
     assert "changed since read, left for a re-run: 1" in capsys.readouterr().out
+
+
+def test_main_prints_only_the_error_type_when_the_run_fails(monkeypatch, capsys):
+    """A database error's text carries the bound parameters, the unredacted text included;
+    a failed run names the exception type and nothing else."""
+
+    async def fail(apply):
+        raise RuntimeError(f"UPDATE jobs ... parameters: ('{KEYED}',)")
+
+    monkeypatch.setattr(sj, "_main", fail)
+    with pytest.raises(SystemExit) as stop:
+        sj.main(["--apply"])
+    assert stop.value.code == 2
+    captured = capsys.readouterr()
+    assert SECRET not in captured.out + captured.err
+    assert "scrub failed: RuntimeError; nothing was committed" in captured.err

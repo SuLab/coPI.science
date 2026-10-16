@@ -44,6 +44,10 @@ def test_url_encoded_doi():
     assert extract_dois("https://doi.org/10.1016%2FS0092-8674%2802%2900722-5") == {
         "10.1016/s0092-8674(02)00722-5"}
     assert extract_dois("10.1234%2Fabc%29") == {"10.1234/abc"}
+    # Review Focus 1: the decoded-then-trimmed %29 stays inside the raw span.
+    text = "x 10.1234%2Fabc%29 y"
+    [c] = find_dois(text)
+    assert text[c.start:c.end] == "10.1234%2Fabc%29"
 
 
 @pytest.mark.parametrize("text", ["110.1234/abc", "v10.1234/abc", "10.1234/", "10.123/abc"])

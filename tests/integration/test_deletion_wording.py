@@ -123,8 +123,21 @@ async def _three_deletion_pages(client, db):
 
 
 async def test_deletion_pages_name_archived_copies(client, db_session):
+    """Only owner-tagged archived copies are purged (R5.21): no page promises "any" copy, and
+    each says an untagged one is kept."""
     for body in await _three_deletion_pages(client, db_session):
         assert "archived copy" in body
+        assert "any archived copy" not in body
+        assert "records no owner is kept" in " ".join(body.split())
+
+
+async def test_deletion_pages_qualify_unowned_revisions(client, db_session):
+    """Unstamped revisions are purged only for the agent held at deletion (R5.19)."""
+    pages = await _three_deletion_pages(client, db_session)
+    assert "deleted only with the lab agent you hold now" in pages[0]
+    for body in pages[1:]:
+        assert "older revisions with no recorded owner of the agent they hold now" in " ".join(
+            body.split())
 
 
 async def test_deletion_pages_name_relinked_revisions(client, db_session):
@@ -140,7 +153,7 @@ async def test_staff_dialog_names_the_purge_facts_for_research_data(client, db_s
     await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER, name="Paul Plain")
     body = (await client.get("/workspace/staff", headers=auth_headers(admin.id))).text
     rich, plain = _dialog(body, "Rhea Profile"), _dialog(body, "Paul Plain")
-    for phrase in ("every profile revision written while it owned a lab agent",
-                   "any archived copy of its persona file"):
+    for phrase in ("every profile revision recorded as written while it owned a lab agent",
+                   "every archived copy of its persona file recorded as its own"):
         assert phrase in rich
         assert phrase not in plain

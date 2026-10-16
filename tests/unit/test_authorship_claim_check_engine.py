@@ -202,7 +202,8 @@ async def test_record_write_failure_neither_blocks_nor_raises(world, caplog):
     w.eng.ctx.simulation_run_id = uuid.uuid4()
     with caplog.at_level(logging.WARNING, logger="src.agent.claim_check"):
         assert await w.eng._post_message("wang", INTERVIEW_CHANNEL, CLAIM, thread_ts=T)
-    assert "Authorship claim check row not recorded for wang: RuntimeError: database down" in caplog.text
+    expected = "Authorship claim check row not recorded for wang: RuntimeError: database down"
+    assert [r.getMessage() for r in caplog.records].count(expected) == 1
 
 
 async def test_db_less_engine_writes_no_rows(world):

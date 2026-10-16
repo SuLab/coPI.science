@@ -9,8 +9,17 @@ import pytest
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from src.models import USER_ROLE_MANAGER, USER_ROLE_PI, USER_ROLE_REVIEWER, Job, User
-from src.services import pi_onboarding
+from src.models import (
+    USER_ROLE_ADMIN,
+    USER_ROLE_MANAGER,
+    USER_ROLE_PI,
+    USER_ROLE_REVIEWER,
+    AgentRegistry,
+    Job,
+    Publication,
+    User,
+)
+from src.services import pi_onboarding, staff_accounts, user_deletion
 from src.services.identifiers import normalize_orcid
 from src.services.profile_jobs import enqueue_profile_job_if_absent
 from tests import factories
@@ -213,3 +222,47 @@ async def test_adopt_still_adopts_an_agentless_pi(engine, monkeypatch):
         assert await _job_count(factory, seed.id) == 1
     finally:
         await _delete(factory, seed.id)
+
+
+async def test_deleting_a_reviewer_waits_for_a_persona_writer_without_deadlock(
+    engine, tmp_path, monkeypatch,
+):
+    """A converted-PI reviewer's persona writer holds the agents row FOR KEY SHARE and then
+    inserts a row whose FK check needs FOR KEY SHARE on the users row. An admin's delete in
+    between must wait on the agents row, not hold the users row and deadlock."""
+    for name in ("_PUBLIC_DIR", "_MEMORY_DIR", "_COMPANIES_DIR", "_ORPHANED_DIR"):
+        (tmp_path / name).mkdir()
+        monkeypatch.setattr(user_deletion, name, tmp_path / name)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    admin = await _committed_pi(factory, user_role=USER_ROLE_ADMIN, access_status="allowed")
+    reviewer = await _committed_pi(factory, user_role=USER_ROLE_REVIEWER, access_status="allowed")
+    async with factory() as s:
+        await factories.make_agent(s, user_id=reviewer.id, status="suspended")
+        await s.commit()
+    try:
+        async with factory() as writer:
+            await writer.execute(text("SET LOCAL lock_timeout = '5s'"))
+            await writer.execute(
+                select(AgentRegistry.id).where(AgentRegistry.user_id == reviewer.id)
+                .with_for_update(read=True, key_share=True)
+            )
+
+            async def delete():
+                async with factory() as s:
+                    await s.execute(text("SET LOCAL lock_timeout = '10s'"))
+                    actor = await s.get(User, admin.id)
+                    return await staff_accounts.delete_reviewer(
+                        s, actor=actor, user_id=reviewer.id)
+
+            task = asyncio.create_task(delete())
+            await asyncio.sleep(0.5)
+            assert not task.done()  # waiting on the writer's agents lock
+            writer.add(Publication(user_id=reviewer.id, pmid="31000003", title="Mid-delete"))
+            await writer.flush()  # the FK check: FOR KEY SHARE on the users row
+            await writer.commit()
+            await asyncio.wait_for(task, 20)
+        async with factory() as s:
+            assert await s.get(User, reviewer.id) is None
+    finally:
+        await _delete(factory, reviewer.id)
+        await _delete(factory, admin.id)

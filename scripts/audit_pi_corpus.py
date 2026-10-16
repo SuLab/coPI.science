@@ -410,10 +410,43 @@ async def _resolve_into(line: dict[str, Any], pi: BaselinePi) -> None:
     )
 
 
+SKIPPED_RESOLVE = "skipped (--skip-resolve)"
+
+
+def _empty_line(pi: BaselinePi, error: str | None) -> dict[str, Any]:
+    """A baseline line with no rows and no resolve results: the start of every line, and
+    the whole line for a PI whose anchored rows could not be refetched (``error``)."""
+    return {
+        "format": BASELINE_FORMAT,
+        "captured_at": datetime.now(UTC).isoformat(),
+        "user_id": pi.user_id,
+        "orcid": pi.orcid,
+        "name": pi.name,
+        "institution": pi.institution,
+        "in_use": pi.in_use,
+        "stored_pmids": pi.stored_pmids,
+        "rows": [],
+        "row_records": [],
+        "unrefetchable": [],
+        "gate_inputs": None,
+        "admitted": [],
+        "paper_tenure_start": None,
+        "openalex": None,
+        "resolve_error": error,
+    }
+
+
 async def baseline_line(pi: BaselinePi, *, skip_resolve: bool) -> dict[str, Any]:
-    """One ``audit_pi_corpus.baseline/1`` line. Network only: refetch, gate, resolve."""
+    """One ``audit_pi_corpus.baseline/1`` line. Network only: refetch, gate, resolve.
+
+    The refetch is strict: a PMID PubMed has no record for goes to ``unrefetchable``, but a
+    transient failure leaves the PI with no rows and a ``resolve_error``, so the compare
+    reports the PI incomplete instead of judging F6 (1) on the rows that happened to load."""
     pmids = [pmid for pmid, _provenance in pi.anchored_rows]
-    fetched = await fetch_pubmed_records(pmids) if pmids else []
+    try:
+        fetched = await fetch_pubmed_records(pmids, strict=True) if pmids else []
+    except _RESOLVE_ERRORS as exc:
+        return _empty_line(pi, f"PubMed refetch failed: {str(exc) or type(exc).__name__}")
     by_pmid = {str(r.get("pmid")): r for r in fetched}
     rows: list[dict[str, Any]] = []
     row_records: list[dict[str, Any]] = []
@@ -426,26 +459,14 @@ async def baseline_line(pi: BaselinePi, *, skip_resolve: bool) -> dict[str, Any]
         verdict = gate_verdict(record, provenance.split(","), pi.name, pi.institution, pi.orcid)
         rows.append({"pmid": pmid, "provenance": provenance, "verdict": verdict})
         row_records.append(_trim(record))
-    line: dict[str, Any] = {
-        "format": BASELINE_FORMAT,
-        "captured_at": datetime.now(UTC).isoformat(),
-        "user_id": pi.user_id,
-        "orcid": pi.orcid,
-        "name": pi.name,
-        "institution": pi.institution,
-        "in_use": pi.in_use,
-        "stored_pmids": pi.stored_pmids,
+    line = {
+        **_empty_line(pi, None),
         "rows": rows,
         "row_records": row_records,
         "unrefetchable": unrefetchable,
-        "gate_inputs": None,
-        "admitted": [],
-        "paper_tenure_start": None,
-        "openalex": None,
-        "resolve_error": None,
     }
     if skip_resolve:
-        line["resolve_error"] = "skipped (--skip-resolve)"
+        line["resolve_error"] = SKIPPED_RESOLVE
         return line
     try:
         await _resolve_into(line, pi)
@@ -470,7 +491,7 @@ async def _baseline(orcids: Sequence[str], skip_resolve: bool) -> int:
         print(json.dumps(line, sort_keys=True), flush=True)
         evaluated += len(line["rows"])
         unrefetchable += len(line["unrefetchable"])
-        if line["resolve_error"] and not skip_resolve:
+        if line["resolve_error"] and line["resolve_error"] != SKIPPED_RESOLVE:
             failed.append(pi.orcid)
     print(
         f"# audit_pi_corpus baseline: {len(pis)} PI(s), {evaluated} anchored in-use rows "
@@ -587,9 +608,12 @@ def compare_pi(base: dict[str, Any]) -> dict[str, Any]:
     return line
 
 
-def summarize(lines: list[dict[str, Any]], captured: str) -> tuple[list[str], int]:
+def summarize(
+    lines: list[dict[str, Any]], captured: str, missing: Sequence[str] = ()
+) -> tuple[list[str], int]:
     """The stderr summary and the exit code: 2 when F6 (1) or (2) trips (STOP wins), else 1
-    when any PI is incomplete, else 0."""
+    when any PI is incomplete, the baseline judged no PI, or an ``--orcid`` asked for
+    (``missing``) is not in it, else 0."""
     evaluated = sum(x["evaluated"] for x in lines)
     dropped = sum(len(x["dropped"]) for x in lines)
     stop_drop = evaluated > 0 and dropped > DROP_LIMIT * evaluated
@@ -624,9 +648,13 @@ def summarize(lines: list[dict[str, Any]], captured: str) -> tuple[list[str], in
         f"# incomplete PI(s): {len(incomplete)}:"
         + _listed(f"{x['name']} ({x['incomplete']})" for x in incomplete),
     ]
+    if not lines:
+        out.append("# no PI judged: the baseline is empty or no --orcid matched it")
+    if missing:
+        out.append("# --orcid not in the baseline:" + _listed(missing, sep=" "))
     if stop_drop or risers:
         verdict, code = "STOP FOR OWNER REVIEW", 2
-    elif incomplete:
+    elif incomplete or not lines or missing:
         verdict, code = "INCOMPLETE", 1
     else:
         verdict, code = "PASS", 0
@@ -644,10 +672,13 @@ def _compare(source: str, orcids: Sequence[str]) -> int:
             return 1
     if orcids:
         baselines = [b for b in baselines if b["orcid"] in set(orcids)]
+    missing = sorted(set(orcids) - {b["orcid"] for b in baselines})
     lines = [compare_pi(b) for b in baselines]
     for line in lines:
         print(json.dumps(line, sort_keys=True))
-    summary, code = summarize(lines, min((b["captured_at"] for b in baselines), default="none"))
+    summary, code = summarize(
+        lines, min((b["captured_at"] for b in baselines), default="none"), missing
+    )
     for summary_line in summary:
         print(summary_line, file=sys.stderr)
     return code

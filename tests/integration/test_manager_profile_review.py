@@ -317,6 +317,13 @@ def _exclude_path(pi, row):
     return f"/pis/{pi.id}/publications/{row.id}/exclude"
 
 
+def _publications_card(page: str) -> str:
+    """The Publications card of ``templates/workspace/pi_detail.html``: from its opening
+    comment to the Jobs card's, which always follows it."""
+    start = page.index("<!-- Publications (scoped to the JHU tenure window) -->")
+    return page[start:page.index("<!-- Jobs -->", start)]
+
+
 async def test_the_publication_list_offers_exclude_on_every_row_for_staff(
     client, db_session, public,
 ):
@@ -332,8 +339,10 @@ async def test_the_publication_list_offers_exclude_on_every_row_for_staff(
     db_session.add_all(rows)
     await db_session.commit()
     page = (await client.get(f"/workspace/pis/{pi.id}", headers=auth_headers(mgr.id))).text
+    card = _publications_card(page)
+    assert card.count(">Exclude</button></form>") == len(rows)
     for row in rows:
-        assert _exclude_path(pi, row) in page
+        assert card.count(_exclude_path(pi, row)) == 1
 
 
 async def test_a_reviewer_sees_no_exclude_on_the_publication_list(client, db_session, public):

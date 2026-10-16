@@ -651,10 +651,12 @@ async def _apply_plan(db: AsyncSession, plan: PiRepairPlan) -> bool:
         changed = False
         if plan.removals:
             ids = [uuid.UUID(r.publication_id) for r in plan.removals]
+            # populate_existing: the planning SELECTs ran in this session, so a row still in
+            # its identity map would otherwise keep the attributes read before staff acted.
             rows = (await db.execute(
                 select(Publication).where(
                     Publication.user_id == plan.user_id, Publication.id.in_(ids),
-                )
+                ).execution_options(populate_existing=True)
             )).scalars().all()
             for row in rows:
                 if row.provenance == PROVENANCE_MANUAL or row.excluded_at is not None:

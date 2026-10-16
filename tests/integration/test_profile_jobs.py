@@ -149,6 +149,41 @@ async def test_in_flight_is_not_refused_and_lifts_priority(db_session):
     assert pending.priority == INTERACTIVE_PRIORITY
 
 
+async def test_a_live_job_finishing_after_the_lookup_never_makes_room_past_the_cap(
+    db_session, monkeypatch,
+):
+    """At the cap with a live job, the worker may finish that job between the route's lookup
+    and an insert; the route must still insert nothing (C8)."""
+    from src.services import profile_jobs
+
+    pi = await factories.make_user(db_session)
+    await _past_jobs(db_session, pi, "completed", 1, 2, 3, 4)
+    live = Job(type="generate_profile", user_id=pi.id, status="pending", payload={})
+    db_session.add(live)
+    await db_session.flush()
+    looked_up = profile_jobs._live_profile_job
+
+    async def lookup_then_finish(db, user_id):
+        job = await looked_up(db, user_id)
+        live.status = "completed"  # the worker finishes it right after the lookup
+        await db.flush()
+        return job
+
+    monkeypatch.setattr(profile_jobs, "_live_profile_job", lookup_then_finish)
+    out = await enqueue_profile_regeneration(db_session, pi.id, actor_id=None)
+    assert out.status == "in_flight" and out.recent_jobs == 5
+    assert await _jobs(db_session, pi.id) == 5
+
+
+async def test_at_the_cap_a_live_job_of_a_denied_account_is_not_eligible(db_session):
+    pi = await factories.make_user(db_session, access_status="denied")
+    await _past_jobs(db_session, pi, "completed", 1, 2, 3, 4, 5)
+    db_session.add(Job(type="generate_profile", user_id=pi.id, status="pending", payload={}))
+    await db_session.flush()
+    out = await enqueue_profile_regeneration(db_session, pi.id, actor_id=None)
+    assert out.status == "not_eligible" and out.job is None
+
+
 async def test_manager_or_denied_is_not_eligible(db_session):
     for kw in ({"user_role": USER_ROLE_MANAGER}, {"access_status": "denied"}):
         user = await factories.make_user(db_session, **kw)

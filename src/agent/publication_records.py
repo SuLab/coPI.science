@@ -5,8 +5,9 @@ A lab's own papers are its stored in-use publications plus the identifiers in it
 persona, minus any persona identifier held only by rows excluded as not the PI's (F9:
 excluded with reason ``staff``, ``openalex_affiliation`` or ``repair_script``). Rows excluded
 for another reason (``superseded``, ``pubmed_twin``, ``duplicate_title``,
-``publication_type``) and rows excluded before migration 0068 (reason NULL, F34) neither
-count nor subtract. Tenure scope does not apply, and ``unanchored`` rows are in use (D17,
+``publication_type``) neither count nor subtract, and an identifier one of them holds stays
+the lab's own even when a not-theirs row holds it too. Rows excluded before migration 0068
+(reason NULL, F34) are ignored. Tenure scope does not apply, and ``unanchored`` rows are in use (D17,
 D45). The persona half is spec 2026-10-05 D49 unchanged: every DOI anywhere in the persona,
 plus the PMIDs of its Recent Publications section.
 
@@ -93,10 +94,13 @@ def records_from_rows(
     """``PublicationIds`` per agent id from ``(agent_id, doi, pmid, excluded_at,
     excluded_reason)`` rows. An in-use row adds its canonical identifiers to the in-use sets
     and counts; an excluded row with a ``NOT_THEIRS_REASONS`` reason adds them to the
-    not-theirs sets; any other excluded row (another reason, or NULL) is ignored. Every id in
-    ``agent_ids`` gets an entry; a row for any other agent is ignored. Pure."""
+    not-theirs sets unless an in-use row or a row excluded for another reason holds them too;
+    a row excluded with reason NULL is ignored. Every id in ``agent_ids`` gets an entry; a
+    row for any other agent is ignored. Pure."""
     found: dict[str, dict[str, set[str]]] = {
-        aid: {"in_dois": set(), "in_pmids": set(), "nt_dois": set(), "nt_pmids": set()}
+        aid: {kind: set() for kind in (
+            "in_dois", "in_pmids", "nt_dois", "nt_pmids", "kept_dois", "kept_pmids",
+        )}
         for aid in agent_ids
     }
     counts = dict.fromkeys(found, 0)
@@ -109,6 +113,8 @@ def records_from_rows(
             counts[agent_id] += 1
         elif reason in NOT_THEIRS_REASONS:
             kind = "nt"
+        elif reason is not None:
+            kind = "kept"
         else:
             continue
         doi_value = canonical_doi(doi) if doi else None
@@ -121,8 +127,8 @@ def records_from_rows(
         aid: PublicationIds(
             in_use_dois=frozenset(sets["in_dois"]),
             in_use_pmids=frozenset(sets["in_pmids"]),
-            not_theirs_dois=frozenset(sets["nt_dois"] - sets["in_dois"]),
-            not_theirs_pmids=frozenset(sets["nt_pmids"] - sets["in_pmids"]),
+            not_theirs_dois=frozenset(sets["nt_dois"] - sets["in_dois"] - sets["kept_dois"]),
+            not_theirs_pmids=frozenset(sets["nt_pmids"] - sets["in_pmids"] - sets["kept_pmids"]),
             row_count=counts[aid],
         )
         for aid, sets in found.items()
@@ -133,7 +139,7 @@ async def load_publication_ids(
     db: AsyncSession, agent_ids: Collection[str],
 ) -> dict[str, PublicationIds]:
     """``records_from_rows`` over one statement: every in-use row, and every row excluded
-    with a ``NOT_THEIRS_REASONS`` reason, of the users who own ``agent_ids``. ``{}`` without a
+    with a reason (C3), of the users who own ``agent_ids``. ``{}`` without a
     query when ``agent_ids`` is empty. Reads only, does not commit, and lets errors
     propagate."""
     if not agent_ids:
@@ -146,7 +152,7 @@ async def load_publication_ids(
         .join(Publication, Publication.user_id == AgentRegistry.user_id)
         .where(
             AgentRegistry.agent_id.in_(list(agent_ids)),
-            or_(publication_in_use(), Publication.excluded_reason.in_(sorted(NOT_THEIRS_REASONS))),
+            or_(publication_in_use(), Publication.excluded_reason.is_not(None)),
         )
     )).tuples().all()
     return records_from_rows(agent_ids, rows)

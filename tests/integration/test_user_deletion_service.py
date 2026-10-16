@@ -418,3 +418,57 @@ async def test_dangling_link_is_removed(db_session, teardown_dirs):
     report = await delete_user_account(db_session, await _owner_of_smith(db_session))
     assert not os.path.lexists(link)
     assert str(link) in report.files_deleted
+
+
+async def test_symlinked_orphaned_dir_is_reported_not_followed(
+    db_session, teardown_dirs, monkeypatch,
+):
+    a = await factories.make_user(db_session)
+    target = teardown_dirs["outside"] / "orphaned"
+    target.mkdir()
+    copy = target / f"smith.{STAMP}.owner-{a.id.hex}.md"
+    copy.write_text("not ours to follow", encoding="utf-8")
+    link = teardown_dirs["outside"].parent / "orphaned-link"
+    link.symlink_to(target, target_is_directory=True)
+    monkeypatch.setattr(user_deletion, "_ORPHANED_DIR", link)
+    report = await delete_user_account(db_session, a)
+    assert any(f"{link} is a symbolic link; not followed" in e for e in report.errors)
+    assert os.path.islink(link) and target.is_dir() and copy.exists()
+
+
+async def test_symlinked_memory_archive_root_is_reported_not_followed(db_session, teardown_dirs):
+    target = teardown_dirs["outside"] / "archive"
+    (target / "S" / "smith").mkdir(parents=True)
+    (target / "S" / "smith" / "x.md").write_text("not ours", encoding="utf-8")
+    (target / "S" / "smith.md").write_text("not ours", encoding="utf-8")
+    root = teardown_dirs["mem"] / "archive"
+    root.symlink_to(target, target_is_directory=True)
+    report = await delete_user_account(db_session, await _owner_of_smith(db_session))
+    assert any(f"{root} is a symbolic link; not followed" in e for e in report.errors)
+    assert os.path.islink(root)
+    assert (target / "S" / "smith" / "x.md").exists() and (target / "S" / "smith.md").exists()
+
+
+async def test_symlinked_tagged_archived_persona_is_unlinked_not_followed(
+    db_session, teardown_dirs,
+):
+    a = await factories.make_user(db_session)
+    target = teardown_dirs["outside"] / "t.md"
+    target.write_text("not ours", encoding="utf-8")
+    link = teardown_dirs["orphaned"] / f"smith.{STAMP}.owner-{a.id.hex}.md"
+    link.symlink_to(target)
+    report = await delete_user_account(db_session, a)
+    assert not os.path.lexists(link)
+    assert target.read_text(encoding="utf-8") == "not ours"
+    assert str(link) in report.files_deleted
+
+
+async def test_tagged_archived_persona_directory_is_reported_and_kept(db_session, teardown_dirs):
+    a = await factories.make_user(db_session)
+    entry = teardown_dirs["orphaned"] / f"smith.{STAMP}.owner-{a.id.hex}.md"
+    entry.mkdir()
+    (entry / "inner.md").write_text("kept", encoding="utf-8")
+    report = await delete_user_account(db_session, a)
+    assert any(f"{entry} is a directory; not removed" in e for e in report.errors)
+    assert entry.is_dir() and (entry / "inner.md").exists()
+    assert str(entry) not in report.files_deleted

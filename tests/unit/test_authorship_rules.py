@@ -160,6 +160,20 @@ def test_corpus(cid, spk, text, exp):
         assert _check(spk, text, roster=roster).ok is expect_ok
 
 
+@pytest.mark.parametrize(("cid", "code", "named"), [
+    ("b02", "uncited", None),
+    ("b03", "partner_no_records", "@BlackbirdBot"),
+    ("b05", "no_records", None),
+], ids=["b02", "b03", "b05"])
+def test_blackbird_rejections_carry_the_spec_reason(cid, code, named):
+    _cid, spk, text, _exp = next(row for row in BLACKBIRD_ROWS if row[0] == cid)
+    v = _check(spk, text)
+    assert v.ok is False
+    assert v.reasons[0].code == code
+    if named is not None:
+        assert named in v.reasons[0].text
+
+
 @pytest.mark.parametrize("text", [
     "We have a question about your paper.",
     "I have a comment on the Su lab's preprint.",
@@ -381,6 +395,19 @@ def test_adversarial_inputs_finish_within_a_second(text):
     ):
         start = time.perf_counter()
         run()
+        assert time.perf_counter() - start < 1.0
+
+
+@pytest.mark.parametrize("text", [
+    "Wu " * 4000, "our " * 5000 + "paper", "10.1234/" + "(" * 5000, "(a). " * 3000, '"a". ' * 3000,
+], ids=["wu", "our", "parens", "paren-sentences", "quote-sentences"])
+def test_adversarial_inputs_with_a_thread_root_finish_within_a_second(text):
+    """The thread-root grounding path (R6.4): the adversarial string as the draft under a
+    real root, and as the root under a short claim."""
+    for draft, root in ((text, R_WU), ("Yes — Dr. Wu is an author on that paper.", text)):
+        start = time.perf_counter()
+        check_draft_authorship(draft, own=BIG_REC["wu"], speaker_id="wu", roster=BIG,
+                               record_for=BIG_REC.__getitem__, context_text=root)
         assert time.perf_counter() - start < 1.0
 
 

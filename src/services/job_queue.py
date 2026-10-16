@@ -95,17 +95,26 @@ async def insert_job_if_absent(
     )
     new_id = (await db.execute(stmt)).scalar_one_or_none()
     if new_id is None and priority is not None:
-        values: dict = {"priority": priority}
-        if priority > BULK_PRIORITY:
-            values["not_before"] = case(
-                (Job.last_error.like(OPENALEX_GATE_DEFERRAL), null()), else_=Job.not_before)
-        await db.execute(
-            update(Job)
-            .where(Job.user_id == user_id, Job.type == type, Job.status == "pending",
-                   func.coalesce(Job.priority, 0) < priority)
-            .values(values)
-        )
+        await lift_pending_priority(db, type=type, user_id=user_id, priority=priority)
     return new_id
+
+
+async def lift_pending_priority(
+    db: AsyncSession, *, type: str, user_id: uuid.UUID, priority: int,
+) -> None:
+    """Carry ``priority`` onto the user's PENDING ``type`` row when it is higher (the
+    conflict half of ``insert_job_if_absent``); lifted above BULK, the row also loses a
+    ``not_before`` the OpenAlex gate set. Inserts nothing. Adds to the caller's transaction."""
+    values: dict = {"priority": priority}
+    if priority > BULK_PRIORITY:
+        values["not_before"] = case(
+            (Job.last_error.like(OPENALEX_GATE_DEFERRAL), null()), else_=Job.not_before)
+    await db.execute(
+        update(Job)
+        .where(Job.user_id == user_id, Job.type == type, Job.status == "pending",
+               func.coalesce(Job.priority, 0) < priority)
+        .values(values)
+    )
 
 
 async def _update_active_job(

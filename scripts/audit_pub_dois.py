@@ -204,6 +204,10 @@ async def _fix_per_pi(
             bounded_doi = bounded_publication_fields(
                 pmid=p.pmid, doi=final_doi, pmcid=None, journal=None,
             )["doi"]
+            if final_doi is not None and bounded_doi is None:
+                # The authoritative DOI is too long to store (R2.13), so the stored DOI is
+                # not the one PubMed records: it is neither rewritten nor marked verified.
+                continue
             if (
                 action in ("corrected", "filled", "ok")
                 and bounded_doi is not None

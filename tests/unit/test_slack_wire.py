@@ -139,3 +139,34 @@ def test_only_the_run_announcer_disables_escaping():
         "src/agent/engine/run_announcer.py": 1,
         "scripts/backfill_assessment_headlines.py": 2,
     })
+
+
+def test_post_message_resplits_a_chunk_that_grows_past_the_limit():
+    # Review Focus 7 through post_message itself: two wire chunks, each within the limit,
+    # and one posted_messages entry per Slack message holding the source text.
+    class _DistinctTs(RecordingSlackClient):
+        """Slack gives every message its own ts; the second chunk threads under the first."""
+
+        def __getattr__(self, name):
+            base = super().__getattr__(name)
+            if name != "chat_postMessage":
+                return base
+
+            def _call(**kwargs):
+                n = sum(1 for method, _ in self.calls if method == name) + 1
+                message = {"ts": f"1.{n}"}
+                if kwargs.get("thread_ts"):
+                    message["thread_ts"] = kwargs["thread_ts"]
+                self._responses[name] = {
+                    "ok": True, "ts": f"1.{n}", "channel": "C_GENERAL", "message": message}
+                return base(**kwargs)
+
+            return _call
+
+    fake = _DistinctTs()
+    text = "word " * 797 + "&&&&&"
+    result = _client(fake).post_message("general", text)
+    calls = fake.calls_to("chat_postMessage")
+    assert len(calls) == 2
+    assert all(len(c["text"]) <= 4000 for c in calls)
+    assert [m["text"] for m in result["posted_messages"]] == split_for_wire(text)

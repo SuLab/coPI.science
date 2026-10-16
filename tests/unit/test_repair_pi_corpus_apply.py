@@ -206,6 +206,26 @@ async def test_apply_skips_a_row_made_manual_since_planning(db_session, monkeypa
     assert "skipped (now manual or excluded): pmid=501" in capsys.readouterr().out
 
 
+async def test_apply_rereads_a_row_its_session_still_holds(db_session, monkeypatch, tmp_path,
+                                                         capsys):
+    """The planning session still holds the row in its identity map; a change made behind it
+    (here a raw UPDATE the ORM does not see) must still be read before the row is excluded."""
+    from sqlalchemy import text
+
+    import scripts.repair_pi_corpus as rp
+    from src.services import profile_export
+
+    monkeypatch.setattr(profile_export, "PROFILES_DIR", tmp_path)
+    plan, row, _agent = await _plan_with_one_removal(db_session, rp, "502")
+    await db_session.execute(
+        text("UPDATE publications SET provenance = 'manual' WHERE id = :id"), {"id": row.id})
+    assert row.provenance != "manual"  # the identity-map copy is stale
+    assert await rp._apply_plan(db_session, plan) is False
+    await db_session.refresh(row)
+    assert row.excluded_at is None and row.provenance == "manual"
+    assert "skipped (now manual or excluded): pmid=502" in capsys.readouterr().out
+
+
 def test_the_script_imports_no_delete():
     import ast
 

@@ -2,7 +2,12 @@
 import pytest
 
 from src.services.corpus import CorpusResult
-from src.services.non_pubmed_works import attribution_verdict, collect_non_pubmed_works
+from src.services.non_pubmed_works import (
+    _attributed,
+    _names_organization,
+    attribution_verdict,
+    collect_non_pubmed_works,
+)
 
 
 def _oa(doi, *, title="OA title", year=2024, type_="conference-paper", pmid=None,
@@ -382,6 +387,20 @@ async def test_the_rotated_run_needs_two_distinctive_words_and_whole_words():
                         "University of Washington") is False
     assert await _keeps(_authorship(raw=["York University, Toronto; New York"]),
                         "New York University") is False
+
+
+def test_the_rotation_is_withheld_from_a_one_distinctive_word_organization():
+    # Rotating "University of Washington" would give "Washington University of", which this
+    # raw affiliation holds; one distinctive word means no rotation, so it is not attributed.
+    wustl = _authorship(raw=["Washington University of St Louis"])
+    assert _attributed(wustl, ["University of Washington"]) is False
+    assert _names_organization("University of Washington", [], wustl["raw_affiliations"]) is False
+    # The case the rotation exists for: two distinctive words, last one moved to the front.
+    bch = _authorship(institutions=["Boston Children's Hospital"])
+    assert _attributed(bch, ["Children's Hospital Boston"]) is True
+    assert _names_organization(
+        "Children's Hospital Boston", ["Boston Children's Hospital"], []
+    ) is True
 
 
 def test_attribution_verdict_is_three_valued():

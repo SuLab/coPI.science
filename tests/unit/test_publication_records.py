@@ -76,6 +76,26 @@ def test_build_record_keeps_profile_ids_of_other_exclusions(reason):
     assert record.has_records is True
 
 
+@pytest.mark.parametrize("reason", OTHER_REASONS)
+def test_an_identifier_another_exclusion_holds_is_not_subtracted(reason):
+    """Spec C12: an identifier is dropped only when every row holding it is excluded as not
+    the PI's; one a superseded (or other-reason) row also holds stays the lab's own."""
+    ids = records_from_rows(["a"], [
+        ("a", "10.1000/x", "9", TS, "staff"),
+        ("a", "10.1000/X", "9", TS, reason),
+    ])["a"]
+    assert ids.not_theirs_dois == frozenset() and ids.not_theirs_pmids == frozenset()
+    assert build_record(PERSONA, ids).ids == {"10.1000/x", "9"}
+
+
+def test_a_legacy_exclusion_does_not_protect_an_identifier():
+    ids = records_from_rows(["a"], [
+        ("a", "10.1000/x", "9", TS, "staff"),
+        ("a", "10.1000/x", "9", TS, None),
+    ])["a"]
+    assert ids.not_theirs_dois == {"10.1000/x"} and ids.not_theirs_pmids == {"9"}
+
+
 def test_build_record_without_ids_uses_the_persona():
     record = build_record(PERSONA, None)
     assert record.ids == {"10.1000/x", "9"} and record.has_records is True

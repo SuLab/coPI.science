@@ -32,3 +32,20 @@ async def test_fix_sets_doi_verified_from_the_reconcile_action(db_session, monke
 
     again = await audit_pub_dois.audit(db_session, {pi.id}, False)
     assert (again["ok"], again["unverified"], again["verify"]) == (2, 1, 0)
+
+
+async def test_fix_never_verifies_a_doi_it_could_not_store(db_session, monkeypatch):
+    # Phase 2 audit: an authoritative DOI over the column width is dropped by
+    # bounded_publication_fields, so the stale stored DOI must not be marked verified.
+    pi = await factories.make_user(db_session)
+    row = Publication(user_id=pi.id, pmid="21", title="Long", doi="10.5555/stale")
+    db_session.add(row)
+    await db_session.flush()
+
+    async def authoritative(pmids):
+        return {"21": "10.5555/" + "x" * 300}
+
+    monkeypatch.setattr(audit_pub_dois, "fetch_authoritative_dois", authoritative)
+    await audit_pub_dois.audit(db_session, {pi.id}, True)
+    await db_session.refresh(row)
+    assert (row.doi, row.doi_verified) == ("10.5555/stale", None)

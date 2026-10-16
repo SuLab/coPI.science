@@ -472,6 +472,13 @@ async def delete_reviewer(
     the audit row is added first so both commit in its in-transaction phase. Commits.
     A non-admin actor is refused with ``has_research_data`` when the account holds research
     data (``research_data_for``); nothing is written."""
+    # Lock order (profile_publish module docstring): the agents row before the users row. A
+    # persona writer holds the agents row FOR KEY SHARE and then inserts rows whose FK check
+    # takes FOR KEY SHARE on the users row; taking the users row FOR UPDATE first would
+    # deadlock with it at delete_user_account's agents lock.
+    await db.execute(
+        select(AgentRegistry.id).where(AgentRegistry.user_id == user_id).with_for_update()
+    )
     target = await _locked_reviewer(db, actor, user_id)
     # Q5: a manager may not destroy research data. The target's users row is locked
     # FOR UPDATE above, which conflicts with the FOR KEY SHARE an FK check takes, so no

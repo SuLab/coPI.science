@@ -9,7 +9,10 @@ start; a row changed since then is skipped and counted as ``changed_since_read``
 
 It prints counts only, never a value or a job id. It writes no before-image, because a
 before-image would hold the key. Preview by default; ``--apply`` writes. Exit 0; with
-``--apply``, exit 1 when any row changed since it was read (re-run it).
+``--apply``, exit 1 when any row changed since it was read (re-run it). Any error ends the
+run with exit 2 and only the exception's type printed: a database error's text carries
+the statement's parameters, which include the unredacted ``last_error``. Nothing is
+committed then (the one commit is the last statement).
 
     DC="docker compose -f docker-compose.prod.yml"
     $DC run --rm --no-deps -T blackbird-app python scripts/scrub_job_error_api_keys.py [--apply]
@@ -109,7 +112,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     parser.add_argument("--apply", action="store_true", help="write the redacted text")
     args = parser.parse_args(argv)
-    sys.exit(asyncio.run(_main(args.apply)))
+    try:
+        code = asyncio.run(_main(args.apply))
+    except Exception as exc:  # its message may hold a key value: print the type only
+        print(f"scrub failed: {type(exc).__name__}; nothing was committed", file=sys.stderr)
+        code = 2
+    sys.exit(code)
 
 
 if __name__ == "__main__":

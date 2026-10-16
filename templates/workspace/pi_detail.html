@@ -280,9 +280,11 @@
         <h2 class="font-semibold text-red-700 mb-2">Danger Zone</h2>
         <p class="text-sm text-gray-600 mb-2">
             Permanently deletes this user's profile (including every stored
-            revision written while they owned a lab agent, even on an agent since
-            linked to someone else, the on-disk copy and any archived copy),
-            publications, jobs, and agent DMs.
+            revision recorded as written while they owned a lab agent, even on an
+            agent since linked to someone else, plus the older revisions with no
+            recorded owner of the agent they hold now; the on-disk copy; and every
+            archived copy recorded as theirs, while an archived copy that records no
+            owner is kept), publications, jobs, and agent DMs.
             A linked lab agent is suspended and its Slack token revoked.
             Messages the agent already posted, completed assessments and the copies
             of the profile text in the simulation's model-call logs remain in the

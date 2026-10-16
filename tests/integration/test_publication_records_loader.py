@@ -23,6 +23,10 @@ async def test_load_publication_ids_reads_in_use_and_not_theirs_rows(db_session)
         Publication(user_id=pi.id, pmid="3", title="Superseded", excluded_at=NOW,
                     excluded_reason="superseded"),
         Publication(user_id=pi.id, pmid="4", title="Legacy", excluded_at=NOW),
+        Publication(user_id=pi.id, pmid="5", doi="10.5555/twin", title="Staff twin",
+                    excluded_at=NOW, excluded_reason="staff"),
+        Publication(user_id=pi.id, pmid="6", doi="10.5555/TWIN", title="Superseded twin",
+                    excluded_at=NOW, excluded_reason="superseded"),
         Publication(user_id=pi.id, pmid=None, doi="10.5555/OA.1", title="OpenAlex only",
                     provenance="unanchored"),
     ])
@@ -31,7 +35,9 @@ async def test_load_publication_ids_reads_in_use_and_not_theirs_rows(db_session)
     smith = out["smith"]
     assert smith.in_use_pmids == {"1"}
     assert smith.in_use_dois == {"10.5555/oa.1"}
-    assert smith.not_theirs_pmids == {"2"}
+    assert smith.not_theirs_pmids == {"2", "5"}
+    # The superseded row holds the twin's DOI too, so it stays the lab's own (C12).
+    assert smith.not_theirs_dois == frozenset()
     assert smith.row_count == 2
     assert out["blackbird"] == PublicationIds()
     assert out["nobody"] == PublicationIds()

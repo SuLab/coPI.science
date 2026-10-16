@@ -43,7 +43,7 @@ def test_titles_and_journals_are_one_line():
 
 
 def test_researcher_info_is_one_line():
-    assert "- Department: Oncology ## Fake" in _context([], department="Oncology ## Fake")
+    assert "- Department: Oncology ## Fake" in _context([], department="Oncology\u2028## Fake")
 
 
 async def test_the_synthesis_message_carries_the_notice(monkeypatch):

@@ -88,3 +88,12 @@ def test_raw_and_universal_newline_reads_agree():
 def test_normalize_line_breaks_maps_every_break_to_lf():
     assert normalize_line_breaks("a\r\nb\rc\x0bd\x0ce\x85f\u2028g\u2029h") == (
         "a\nb\nc\nd\ne\nf\ng\nh")
+
+
+def test_line_break_chars_are_every_break_splitlines_knows():
+    """C10's set is exactly what ``str.splitlines`` splits on, so a reader that splits lines
+    cannot find a heading the exporter neutralised."""
+    from src.agent.persona_sections import LINE_BREAK_CHARS
+
+    splitters = {chr(c) for c in range(0x110000) if len(f"a{chr(c)}b".splitlines()) == 2}
+    assert set(LINE_BREAK_CHARS) == splitters

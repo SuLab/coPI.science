@@ -330,9 +330,11 @@
     retraction, erratum, comment or a similar type, even when it also carries a research
     type; when OpenAlex marks the work retracted; when it is an older copy of a stored paper
     with the same long title; or when only OpenAlex attributes the work and OpenAlex no
-    longer ties it to the PI. After a complete search, a paper no longer tied to the PI's
-    ORCID iD, or whose author list no longer names the PI, moves to Unanchored papers; after
-    a search that was cut short, it stays where it is. A PubMed Central link that PubMed
+    longer ties it to the PI (this check is skipped when the PI's ORCID profile lists no
+    organisations). A paper whose author list no longer names the PI moves to Unanchored
+    papers when it is still tied to the PI's ORCID iD or the search was complete. A paper no
+    longer tied to the PI's ORCID iD moves only after a complete search; after a search that
+    was cut short, it stays where it is. A PubMed Central link that PubMed
     Central no longer has is removed, with the methods text taken from it.
     <strong>Keep</strong> and <strong>Accept</strong> stop the refresh of the title,
     abstract, journal and year for the paper they act on (its DOI is still checked against

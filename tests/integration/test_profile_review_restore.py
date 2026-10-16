@@ -82,6 +82,19 @@ async def test_restore_of_a_system_reason_turns_the_row_manual(db_session, reaso
     assert (restored.provenance, restored.excluded_reason) == ("manual", None)
 
 
+async def test_restoring_a_repair_exclusion_turns_the_row_manual(db_session):
+    """R4.20: a row the repair script excluded comes back ``manual``, so the next run leaves
+    it alone (the case the parametrised test above covers, under the plan's name)."""
+    pi = await factories.make_user(db_session, name="Ada Lovelace")
+    row = Publication(user_id=pi.id, pmid="2", title="T", provenance="s1",
+                      excluded_at=datetime.now(UTC), excluded_reason="repair_script")
+    db_session.add(row)
+    await db_session.flush()
+    restored = await restore_publication(db_session, pi.id, row.id)
+    assert (restored.provenance, restored.excluded_at, restored.excluded_reason) == (
+        "manual", None, None)
+
+
 async def test_restore_of_a_legacy_exclusion_follows_excluded_by(db_session):
     pi = await factories.make_user(db_session, name="Ada Lovelace")
     manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)

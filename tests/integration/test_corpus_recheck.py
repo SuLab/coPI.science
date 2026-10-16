@@ -244,6 +244,30 @@ async def test_a_row_whose_anchor_stage_returned_it_without_a_record_is_kept(db_
     assert row.provenance == "s1"
 
 
+async def test_an_earlier_version_left_in_use_is_still_gated(db_session):
+    """A ranked record's ``update_of`` names a stored row, but the successor is not stored, so
+    ``apply_corpus_result`` leaves the earlier version in use: C4 still judges it."""
+    row = Publication(pmid="111", title="T", provenance="s1")
+    pi = await _pi_with(db_session, row)
+    out = await _run(db_session, pi, _result(
+        kept=[{"pmid": "222", "title": "T2", "year": 2021, "stages": ["s2"],
+               "update_of": ["111"]}],
+        flagged=[{"pmid": "111", "reason": "no_individual_author_match", "stages": ["s1"],
+                  "title": "T", "year": 2020}],
+        stage_map={"111": ("s1",), "222": ("s2",)}))
+    assert row.provenance == "unanchored"
+    assert out.unanchored_gate == ["111"]
+
+
+async def test_a_title_duplicate_left_in_use_is_still_checked(db_session):
+    """A title duplicate whose keeper is not stored stays in use, so C4 judges it."""
+    row = Publication(pmid="5", title="T", provenance="s1")
+    pi = await _pi_with(db_session, row)
+    out = await _run(db_session, pi, _result(title_duplicates=[("5", "6")]))
+    assert row.provenance == "unanchored"
+    assert out.unanchored_absent == ["5"]
+
+
 async def test_a_row_only_a_non_anchor_stage_returned_is_absent(db_session):
     row = Publication(pmid="9", title="T", provenance="s1")
     pi = await _pi_with(db_session, row)

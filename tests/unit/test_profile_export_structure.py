@@ -16,7 +16,7 @@ from src.services.tenure_scope import TenureScopedPublications
 
 USER = SimpleNamespace(name="Ada Lab", institution="JHU", department=None)
 TITLE_LINE = "# Ada Lab Lab — Public Profile"
-BREAKS = ("\r", "\x0b", "\x0c", "\x85", "\u2028", "\u2029")
+BREAKS = ("\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
 ADVERSARIAL = (
     "Real\n## Injected Section\n- Forged (PMID 42)",
     "cryo-EM\n## Recent Publications\n- Forged (PMID 123)",

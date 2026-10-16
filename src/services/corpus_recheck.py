@@ -47,7 +47,6 @@ from src.services.corpus_additions import (
     ANCHOR_STAGES,
     exclude_by_system,
     incomplete_lookups_reason,
-    superseded_pairs,
 )
 from src.services.non_pubmed_works import attribution_verdict
 from src.services.pubmed import _doi_fold
@@ -93,14 +92,14 @@ async def recheck_stored_publications(
     once in this run, or None when it was not fetched (``openalex_skip_reason`` then says why,
     or is None when the PI has no ``openalex`` row). ``organizations`` are the ORCID profile's.
     ``retracted_dois`` are folded DOIs the thin-path singleton lookups found retracted. Rows the
-    resolve returned, title duplicates and earlier versions of ``superseded_pairs`` were
-    already handled by ``apply_corpus_result`` and are skipped. Runs in the caller's
+    resolve returned in ``ranked`` were already handled by ``apply_corpus_result`` and are
+    skipped. A title duplicate or an earlier version ``apply_corpus_result`` excluded is no
+    longer in use; one it left in use (its keeper or successor not stored, or not strong) is
+    checked like any other row. Runs in the caller's
     transaction under the ``lock_corpus`` the caller holds; flushes, never commits."""
     outcome = RecheckOutcome()
     outcome.absence_skipped = incomplete_lookups_reason(result)
     handled = {str(r["pmid"]) for r in result.ranked if r.get("pmid")}
-    handled |= {dup for dup, _keeper in result.title_duplicates}
-    handled |= {old for old, _new in superseded_pairs(result)}
     type_excluded = {str(e["pmid"]) for e in result.type_excluded if e.get("pmid")}
     gate_failed = {str(e["pmid"]) for e in result.flagged if e.get("pmid")}
     anchored = {

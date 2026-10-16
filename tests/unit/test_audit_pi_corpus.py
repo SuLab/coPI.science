@@ -1,11 +1,15 @@
 """scripts/audit_pi_corpus.py --baseline / --compare: the F6 before/after gate of the
-2026-10-15 publication-handling design (R3.10). No database, no network."""
+2026-10-15 publication-handling design (R3.10), and the legacy per-PI classification. No
+database, no network."""
 
 import ast
+import contextlib
 import json
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from scripts import audit_pi_corpus as audit
@@ -229,3 +233,321 @@ def test_baseline_imports_only_names_the_pre_phase3_image_has():
     outside = [node for node in ast.walk(tree) if id(node) not in inside]
     assert _project_imports(outside) <= _PINNED
     assert _project_imports(ast.walk(compare)) == _COMPARE_ONLY
+
+
+# ---------------------------------------------------------------------------
+# --baseline: the live resolve, the strict refetch and the exit code (no network: every
+# call the script imports is monkeypatched).
+# ---------------------------------------------------------------------------
+
+_PI_ORCID = "0000-0002-1825-0097"
+_ABSENT_ORCID = "0000-0001-5109-3700"
+
+
+def _pi(*, anchored=(("101", "s1"),), openalex_dois=()):
+    return audit.BaselinePi(
+        user_id=str(uuid.uuid4()), orcid=_PI_ORCID, name="Rachel Green", institution=_JHU,
+        in_use=len(anchored) + len(openalex_dois),
+        stored_pmids=sorted(pmid for pmid, _ in anchored),
+        anchored_rows=list(anchored), openalex_dois=list(openalex_dois),
+    )
+
+
+def _guards(monkeypatch):
+    """Replace both OpenAlex budget guards; returns the list of awaited budget checks."""
+    checked: list[bool] = []
+
+    async def check():
+        checked.append(True)
+
+    monkeypatch.setattr(audit.openalex_budget, "check_inline_corpus_budget", check)
+    monkeypatch.setattr(audit.openalex_budget, "bulk_requests", contextlib.nullcontext)
+    return checked
+
+
+def _gating_resolve(monkeypatch, calls=None):
+    """A resolve_corpus that hands one anchored Hopkins record of the PI to the gate."""
+    async def fake_resolve(orcid, name, institution):
+        if calls is not None:
+            calls.append(orcid)
+        corpus._gate_records([_rec(1, year=2020, authors=[_PI])], {"1": {"s1"}},
+                             name, institution, orcid)
+
+    monkeypatch.setattr(audit, "resolve_corpus", fake_resolve)
+
+
+def _raising(exc):
+    async def fake(*args, **kwargs):
+        raise exc
+
+    return fake
+
+
+def _fetching(records, seen=None):
+    async def fake_fetch(pmids, *, strict=False):
+        if seen is not None:
+            seen.append((list(pmids), strict))
+        by_pmid = {r["pmid"]: r for r in records}
+        return [by_pmid[p] for p in pmids if p in by_pmid]
+
+    return fake_fetch
+
+
+def _no_openalex_inputs(monkeypatch):
+    async def unexpected(*args, **kwargs):
+        raise AssertionError("no OpenAlex attribution lookup for a PI without openalex rows")
+
+    monkeypatch.setattr(audit, "fetch_orcid_profile", unexpected)
+    monkeypatch.setattr(audit, "_authorships", unexpected)
+
+
+async def test_resolve_into_sets_the_gate_inputs_admissions_and_tenure(monkeypatch):
+    checked = _guards(monkeypatch)
+    _gating_resolve(monkeypatch)
+    _no_openalex_inputs(monkeypatch)
+    line = {"gate_inputs": None, "admitted": [], "paper_tenure_start": "unset"}
+    await audit._resolve_into(line, _pi())
+    assert checked == [True]
+    assert [r["pmid"] for r in line["gate_inputs"]["records"]] == ["1"]
+    assert line["gate_inputs"]["stages"] == {"1": ["s1"]}
+    assert line["admitted"] == ["1"]
+    assert line["paper_tenure_start"] == 2020
+    assert "openalex" not in line
+
+
+async def test_resolve_into_records_openalex_attribution_only_for_openalex_rows(monkeypatch):
+    _guards(monkeypatch)
+    _gating_resolve(monkeypatch)
+    orcids: list[str] = []
+
+    async def fake_profile(orcid):
+        orcids.append(orcid)
+        return {"organizations": ["Princeton University"]}
+
+    async def fake_authorships(orcid, lookup):
+        assert (orcid, lookup) == (_PI_ORCID, None)
+        return {audit._doi_fold("10.1/a"): {"institutions": ["Princeton University"],
+                                            "raw_affiliations": [], "orcid_in_metadata": False}}
+
+    monkeypatch.setattr(audit, "fetch_orcid_profile", fake_profile)
+    monkeypatch.setattr(audit, "_authorships", fake_authorships)
+    line: dict = {}
+    await audit._resolve_into(line, _pi(openalex_dois=["10.1/A", "10.1/b", "not a doi"]))
+    assert orcids == [_PI_ORCID]
+    assert line["openalex"]["organizations"] == ["Princeton University"]
+    assert line["openalex"]["rows"] == [
+        {"doi": "10.1/A", "attributed": True},
+        {"doi": "10.1/b", "attributed": False},
+        {"doi": "not a doi", "attributed": False},
+    ]
+
+
+async def test_resolve_into_stops_when_the_budget_guard_defers(monkeypatch):
+    _guards(monkeypatch)
+
+    async def deferring():
+        raise RuntimeError("budget")
+
+    monkeypatch.setattr(audit.openalex_budget, "check_inline_corpus_budget", deferring)
+    monkeypatch.setattr(audit, "resolve_corpus", _raising(AssertionError("resolved anyway")))
+    line: dict = {}
+    with pytest.raises(RuntimeError, match="budget"):
+        await audit._resolve_into(line, _pi())
+    assert "gate_inputs" not in line
+
+
+async def test_baseline_line_refetches_strictly_and_lists_missing_records(monkeypatch):
+    _guards(monkeypatch)
+    _gating_resolve(monkeypatch)
+    seen: list = []
+    monkeypatch.setattr(audit, "fetch_pubmed_records",
+                        _fetching([_rec(101, authors=[_PI])], seen))
+    line = await audit.baseline_line(_pi(anchored=(("101", "s1"), ("102", "s3"))),
+                                     skip_resolve=False)
+    assert seen == [(["101", "102"], True)]
+    assert line["unrefetchable"] == ["102"]
+    assert [r["pmid"] for r in line["rows"]] == ["101"]
+    assert [r["pmid"] for r in line["row_records"]] == ["101"]
+    assert line["resolve_error"] is None
+    assert line["admitted"] == ["1"]
+
+
+async def test_baseline_line_records_a_resolve_failure_without_gate_inputs(monkeypatch):
+    _guards(monkeypatch)
+    monkeypatch.setattr(audit, "fetch_pubmed_records", _fetching([_rec(101, authors=[_PI])]))
+    monkeypatch.setattr(audit, "resolve_corpus", _raising(httpx.ConnectError("x")))
+    line = await audit.baseline_line(_pi(openalex_dois=["10.1/a"]), skip_resolve=False)
+    assert line["gate_inputs"] is None and line["openalex"] is None
+    assert line["resolve_error"] == "x"
+    assert [r["pmid"] for r in line["rows"]] == ["101"]
+
+
+async def test_baseline_line_with_a_failed_refetch_has_no_rows(monkeypatch):
+    _guards(monkeypatch)
+    monkeypatch.setattr(audit, "fetch_pubmed_records", _raising(httpx.HTTPError("down")))
+    monkeypatch.setattr(audit, "resolve_corpus", _raising(AssertionError("resolved anyway")))
+    line = await audit.baseline_line(_pi(anchored=(("101", "s1"), ("102", "s3"))),
+                                     skip_resolve=False)
+    assert line["resolve_error"] == "PubMed refetch failed: down"
+    assert line["rows"] == [] and line["row_records"] == [] and line["unrefetchable"] == []
+    assert line["gate_inputs"] is None
+
+
+async def _baseline_exit(monkeypatch, pi, *, skip_resolve):
+    async def fake_rows(db, orcids):
+        return [pi]
+
+    monkeypatch.setattr(audit, "get_session_factory", lambda: lambda: contextlib.nullcontext())
+    monkeypatch.setattr(audit, "read_baseline_rows", fake_rows)
+    return await audit._baseline([], skip_resolve)
+
+
+async def test_baseline_exits_1_on_a_resolve_failure(monkeypatch, capsys):
+    _guards(monkeypatch)
+    monkeypatch.setattr(audit, "fetch_pubmed_records", _fetching([_rec(101, authors=[_PI])]))
+    monkeypatch.setattr(audit, "resolve_corpus", _raising(httpx.ConnectError("x")))
+    assert await _baseline_exit(monkeypatch, _pi(), skip_resolve=False) == 1
+    assert f"# resolve_error: 1 PI(s): {_PI_ORCID}" in capsys.readouterr().err
+
+
+async def test_baseline_exits_0_under_skip_resolve(monkeypatch, capsys):
+    _guards(monkeypatch)
+    monkeypatch.setattr(audit, "fetch_pubmed_records", _fetching([_rec(101, authors=[_PI])]))
+    monkeypatch.setattr(audit, "resolve_corpus", _raising(AssertionError("resolved anyway")))
+    assert await _baseline_exit(monkeypatch, _pi(), skip_resolve=True) == 0
+    out = capsys.readouterr().out
+    assert json.loads(out)["resolve_error"] == audit.SKIPPED_RESOLVE
+
+
+async def test_baseline_exits_1_under_skip_resolve_when_the_refetch_fails(monkeypatch):
+    _guards(monkeypatch)
+    monkeypatch.setattr(audit, "fetch_pubmed_records", _raising(httpx.HTTPError("down")))
+    monkeypatch.setattr(audit, "resolve_corpus", _raising(AssertionError("resolved anyway")))
+    assert await _baseline_exit(monkeypatch, _pi(), skip_resolve=True) == 1
+
+
+# ---------------------------------------------------------------------------
+# --compare: OpenAlex attribution changes, the E10 DOI guard and the coverage guards.
+# ---------------------------------------------------------------------------
+
+
+def _oa_authorship(*, institutions=(), raw=()):
+    return {"institutions": list(institutions), "raw_affiliations": list(raw),
+            "orcid_in_metadata": False}
+
+
+def test_openalex_changes_split_new_failures_from_new_passes():
+    fold = audit._doi_fold
+    oa = {
+        "organizations": ["Princeton University"],
+        "authorships": {
+            fold("10.1/lost"): _oa_authorship(raw=["Somewhere Else"]),
+            fold("10.1/gained"): _oa_authorship(institutions=["Princeton University"]),
+            fold("10.1/kept"): _oa_authorship(institutions=["Princeton University"]),
+        },
+        "rows": [
+            {"doi": "10.1/lost", "attributed": True},
+            {"doi": "10.1/gained", "attributed": False},
+            {"doi": "10.1/kept", "attributed": True},
+        ],
+    }
+    assert audit._openalex_changes(oa) == {
+        "rows": 3, "fail_after": ["10.1/lost"], "pass_after_only": ["10.1/gained"],
+    }
+    assert audit._openalex_changes(None) is None
+
+
+def test_authorship_for_a_doi_normalize_doi_rejects_is_none():
+    authorships = {audit._doi_fold("10.1/a"): _oa_authorship()}
+    assert audit._authorship_for(authorships, "not a doi") is None
+    assert audit._authorship_for(authorships, "https://doi.org/10.1/A") == _oa_authorship()
+
+
+def test_an_empty_compare_is_incomplete():
+    lines, code = audit.summarize([], _CAPTURED)
+    assert code == 1 and lines[-1] == "# VERDICT: INCOMPLETE"
+    assert any(x.startswith("# no PI judged") for x in lines)
+
+
+def test_an_orcid_missing_from_the_baseline_is_incomplete():
+    lines, code = audit.summarize([_line()], _CAPTURED, missing=[_PI_ORCID])
+    assert code == 1 and lines[-1] == "# VERDICT: INCOMPLETE"
+    assert f"# --orcid not in the baseline: {_PI_ORCID}" in lines
+    _lines, code = audit.summarize([_line()], _CAPTURED)
+    assert code == 0
+
+
+def test_stop_wins_over_a_missing_orcid():
+    riser = _line("Grace Hopper", in_use=40, rise=11, rise_trips=True)
+    lines, code = audit.summarize([riser], _CAPTURED, missing=[_ABSENT_ORCID])
+    assert code == 2 and lines[-1] == "# VERDICT: STOP FOR OWNER REVIEW"
+    assert f"# --orcid not in the baseline: {_ABSENT_ORCID}" in lines
+
+
+def test_compare_with_an_orcid_absent_from_the_baseline_exits_1(tmp_path, capsys):
+    path = tmp_path / "baseline.jsonl"
+    path.write_text(json.dumps(_base("Ada Lovelace", gate={"records": [], "stages": {}}))
+                    + "\n", encoding="utf-8")
+    assert audit._compare(str(path), []) == 0
+    capsys.readouterr()
+    assert audit._compare(str(path), [_ABSENT_ORCID]) == 1
+    err = capsys.readouterr().err
+    assert f"# --orcid not in the baseline: {_ABSENT_ORCID}" in err
+    assert "# no PI judged" in err
+
+
+def test_compare_of_an_empty_file_exits_1(tmp_path, capsys):
+    path = tmp_path / "baseline.jsonl"
+    path.write_text("", encoding="utf-8")
+    assert audit._compare(str(path), []) == 1
+    assert "# no PI judged" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Legacy mode: ambiguous and incomplete-list records are counted.
+# ---------------------------------------------------------------------------
+
+
+async def test_legacy_mode_counts_ambiguous_and_incomplete_list(monkeypatch, capsys):
+    user = SimpleNamespace(id=uuid.uuid4(), orcid=_PI_ORCID, name="Rachel Green",
+                           institution=_JHU)
+    stored = [SimpleNamespace(pmid=str(p), title=f"Paper {p}") for p in (1, 2, 3)]
+    records = {
+        "1": _rec(1, authors=[_PI]),
+        "2": _rec(2, authors=[_author("Green", "Rachel", "R", affs=["X"]),
+                              _author("Green", "Rachel", "R", affs=["Y"])]),
+        "3": {**_rec(3, authors=[_author("Smith", "Ann", "A")]), "author_list_complete": False},
+    }
+
+    async def fake_stored(db, user_id):
+        assert user_id == user.id
+        return stored
+
+    async def fake_refetch(pmids):
+        return {p: records[p] for p in pmids}
+
+    class _Result:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return [user]
+
+    class _Db:
+        async def execute(self, statement):
+            return _Result()
+
+    monkeypatch.setattr(audit, "load_stored_publications", fake_stored)
+    monkeypatch.setattr(audit, "refetch_pmids", fake_refetch)
+    monkeypatch.setattr(audit, "get_session_factory",
+                        lambda: lambda: contextlib.nullcontext(_Db()))
+
+    assert await audit._run([], skip_resolve=True) == 0
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert report["classification"]["strong"] == 1
+    assert report["classification"]["ambiguous"] == 1
+    assert report["classification"]["incomplete_list"] == 1
+    assert report["classification"]["no_surname_author"] == 0
+    assert ("# classification: strong=1 bare_initial_only=0 no_surname_author=0 "
+            "ambiguous=1 incomplete_list=1") in captured.err

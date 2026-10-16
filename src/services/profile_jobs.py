@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.models import USER_ROLE_MANAGER, USER_ROLE_REVIEWER, Job, ResearcherProfile, User
 from src.models.job import INTERACTIVE_PRIORITY
 from src.services.advisory_locks import lock_profile_regeneration
-from src.services.job_queue import insert_job_if_absent
+from src.services.job_queue import insert_job_if_absent, lift_pending_priority
 
 _NO_PROFILE_ROLES = frozenset({USER_ROLE_MANAGER, USER_ROLE_REVIEWER})
 _LIVE_STATUSES = ("pending", "processing")
@@ -67,6 +67,18 @@ async def _live_profile_job(db: AsyncSession, user_id: uuid.UUID) -> Job | None:
     )).scalar_one_or_none()
 
 
+async def _may_have_profile_job(db: AsyncSession, user: User) -> bool:
+    """False for a manager, a reviewer or a denied account, from the role and access status
+    re-read ``FOR SHARE`` (see ``enqueue_profile_job_if_absent``)."""
+    stored = (await db.execute(
+        select(User.user_role, User.access_status)
+        .where(User.id == user.id)
+        .with_for_update(read=True)
+    )).one_or_none()
+    role, access = stored if stored is not None else (user.user_role, user.access_status)
+    return role not in _NO_PROFILE_ROLES and access != "denied"
+
+
 async def enqueue_profile_job_if_absent(
     db: AsyncSession, user: User, *, priority: int | None = None
 ) -> Job | None:
@@ -97,13 +109,7 @@ async def enqueue_profile_job_if_absent(
     A caller that already updated the row holds a stronger lock itself, so the
     re-read does not wait on it.
     """
-    stored = (await db.execute(
-        select(User.user_role, User.access_status)
-        .where(User.id == user.id)
-        .with_for_update(read=True)
-    )).one_or_none()
-    role, access = stored if stored is not None else (user.user_role, user.access_status)
-    if role in _NO_PROFILE_ROLES or access == "denied":
+    if not await _may_have_profile_job(db, user):
         return None
     new_id = await insert_job_if_absent(
         db, type="generate_profile", user_id=user.id,
@@ -136,8 +142,9 @@ async def enqueue_profile_regeneration(
     ``limited`` when no job is live and PROFILE_REGENERATION_DAILY_CAP or more were
     enqueued in the window; otherwise the shared enqueue at INTERACTIVE_PRIORITY. With a
     live job that inserts nothing and only lifts its priority (``in_flight``); without one
-    it inserts (``queued``). The lock is held until the caller's transaction ends.
-    Flushes; never commits."""
+    it inserts (``queued``). At the cap with a live job only the priority lift runs, so a
+    job the worker finishes after the lookup cannot make room for one past the cap. The
+    lock is held until the caller's transaction ends. Flushes; never commits."""
     await lock_profile_regeneration(db, user_id)
     user = await db.get(User, user_id)
     if user is None:
@@ -150,6 +157,16 @@ async def enqueue_profile_regeneration(
             user_id, recent, actor_id,
         )
         return RegenerationOutcome("limited", None, recent)
+    if live is not None and recent >= PROFILE_REGENERATION_DAILY_CAP:
+        # The worker takes no regeneration lock: the live job may finish before an insert
+        # would run, and the shared enqueue would then add a job past the cap.
+        if not await _may_have_profile_job(db, user):
+            return RegenerationOutcome("not_eligible", None, recent)
+        await lift_pending_priority(
+            db, type="generate_profile", user_id=user_id, priority=INTERACTIVE_PRIORITY,
+        )
+        logger.info("generate_profile for user %s in_flight (actor %s)", user_id, actor_id)
+        return RegenerationOutcome("in_flight", live, recent)
     job = await enqueue_profile_job_if_absent(db, user, priority=INTERACTIVE_PRIORITY)
     if job is None:
         return RegenerationOutcome("not_eligible", None, recent)

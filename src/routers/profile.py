@@ -16,6 +16,7 @@ from src.dependencies import (
     staff_landing_redirect,
 )
 from src.models import AgentRegistry, Publication, ResearcherProfile, User
+from src.models.user import PI_SURFACE_ROLES
 from src.services.admin_invariant import LastAdminError, ensure_admin_remains
 from src.services.grant_sections import load_grant_sections
 from src.services.profile_edit import (
@@ -240,10 +241,17 @@ async def delete_account(
 
     # F18: a manager or reviewer whose account holds research data (a converted PI's
     # profile, publications or agent) may not destroy it; an admin deletes the account.
-    # The users row is locked first, so no profile, publication or agent row can be
-    # added before the decision (the FK check takes FOR KEY SHARE on it).
-    if not current_user.may_use_pi_surfaces:
-        user_id = current_user.id
+    # The role is re-read under a row lock, so a staff conversion committed after this
+    # request loaded the user decides. FOR NO KEY UPDATE waits for a role change but not
+    # for the FOR KEY SHARE a persona writer's FK check takes, so a PI's own agent writing
+    # a revision does not deadlock with delete_user_account's agents lock. A non-PI's row
+    # is then locked FOR UPDATE, so no profile, publication or agent row can be added
+    # before the decision (the FK check takes FOR KEY SHARE on it).
+    user_id = current_user.id
+    role = await db.scalar(
+        select(User.user_role).where(User.id == user_id).with_for_update(key_share=True)
+    )
+    if role not in PI_SURFACE_ROLES:
         await db.execute(select(User.id).where(User.id == user_id).with_for_update())
         if (await research_data_for(db, [user_id]))[user_id].has_any:
             logger.info("Self-delete of %s refused: the account holds research data", user_id)

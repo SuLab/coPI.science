@@ -93,6 +93,21 @@ def test_feedback_store_is_lru_capped():
     assert store.get("wang", "t1000") == "r"
 
 
+def test_feedback_store_renoting_refreshes_recency():
+    """A re-noted key moves to the most-recent end, so the next eviction takes the oldest
+    untouched key instead."""
+    store = RejectionFeedback()
+    store.note("wang", "t0", "first")
+    for i in range(1, 1000):
+        store.note("wang", f"t{i}", "r")
+    store.note("wang", "t0", "again")
+    store.note("wang", "t1000", "r")
+    assert len(store) == 1000
+    assert store.get("wang", "t1") is None
+    assert store.get("wang", "t0") == "again"
+    assert store.get("wang", "t1000") == "r"
+
+
 def test_feedback_text_is_exact():
     assert feedback_text("X") == FEEDBACK_TEMPLATE.format(reason="X") == (
         "Your previous draft was not posted: X. Cite the DOI or PubMed link from your Recent "

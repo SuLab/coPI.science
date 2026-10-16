@@ -18,9 +18,11 @@ from collections.abc import Mapping, Sequence
 from src.agent.dois import extract_pmids
 
 #: Every line break the persona exporter neutralises and this reader splits on (C10):
-#: CR, LF, VT, FF, NEL, LINE SEPARATOR, PARAGRAPH SEPARATOR. The one definition;
+#: CR, LF, VT, FF, the information separators FS, GS and RS, NEL, LINE SEPARATOR and
+#: PARAGRAPH SEPARATOR, which is exactly the set ``str.splitlines`` splits on, so no reader
+#: that splits lines can find a heading the exporter did not write. The one definition;
 #: ``profile_export`` and ``profile_edit`` import it.
-LINE_BREAK_CHARS: str = "\r\n\x0b\x0c\x85\u2028\u2029"
+LINE_BREAK_CHARS: str = "\r\n\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
 _TO_LF = str.maketrans(dict.fromkeys(LINE_BREAK_CHARS, "\n"))
 
 #: The persona's summary section, as ``profile_export.render_profile_markdown`` titles it.

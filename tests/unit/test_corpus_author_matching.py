@@ -475,10 +475,46 @@ def test_the_pis_orcid_elsewhere_disqualifies_a_foreign_namesake():
 
 
 def test_an_invalid_pi_orcid_neither_matches_nor_vetoes():
+    bad, good, name = "0000-0002-1825-0098", "0000-0002-1825-0097", "D. Scott Wilson"
     record = _rec(1, [_orcid_author("Wilson", "David S", _FOREIGN_ORCID)])
-    assert corpus._match_pi_author_detail(record, "D. Scott Wilson", "0000-0002-1825-0098") == (
-        "individual", [], True,
+    # A usable PI iD vetoes this foreign author; the bad check digit must not.
+    assert match_pi_author(record, name, good)[0] == "no_match"
+    match = corpus._match_pi_author_full(record, name, bad)
+    # bare_initial is only ever True on the name path (the ORCID pass sets it False).
+    assert (match.kind, match.affiliations, match.bare_initial, match.index) == (
+        "individual", [], True, 0,
     )
+    assert match.candidates[0].orcid == _FOREIGN_ORCID
+    # An author carrying the invalid iD string itself is not matched by iD: a forename the
+    # name pass rejects stays rejected, and an agreeing one matches through the name pass.
+    rejected = _rec(2, [_orcid_author("Wilson", "Daniel R", bad, "DR")])
+    assert match_pi_author(rejected, name, bad)[0] == "no_match"
+    assert corpus._match_pi_author_detail(
+        _rec(3, [_orcid_author("Wilson", "David S", bad, "DS")]), name, bad
+    ) == ("individual", [], True)
+
+
+def test_an_invalid_collective_entry_is_not_a_consortium():
+    def collective(valid):
+        return {**_author(), "collective": "The X Consortium", "valid": valid}
+
+    assert match_pi_author(_rec(1, [collective(True)]), "Rachel Green")[0] == "consortium"
+    assert match_pi_author(_rec(1, [collective(False)]), "Rachel Green")[0] == "no_match"
+
+
+def test_no_swap_retry_after_a_foreign_candidate_is_dropped():
+    pi_orcid = "0000-0002-1825-0097"
+    swapped = _author("Scott", "Wilson", affs=["Swapped"])
+    own_id_elsewhere = _orcid_author("Doe", "Jane", pi_orcid)
+    # Alone, the swapped entry is the PI on an anchored record.
+    alone = _rec(1, [own_id_elsewhere, swapped])
+    assert match_pi_author(alone, "Scott Wilson", pi_orcid, anchored=True) == (
+        "individual", ["Swapped"],
+    )
+    # A foreign namesake makes the name pass non-empty, so no swap retry runs; the PI's iD on
+    # another entry then drops the namesake, leaving nobody.
+    record = _rec(2, [_orcid_author("Wilson", "Scott", _FOREIGN_ORCID), own_id_elsewhere, swapped])
+    assert match_pi_author(record, "Scott Wilson", pi_orcid, anchored=True)[0] == "no_match"
 
 
 _R33_CASES = [

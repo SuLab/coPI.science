@@ -118,8 +118,9 @@ def test_seed_orcids_fail_the_mod_11_2_check():
 
 
 def test_staff_preview_orcid_is_valid_and_never_issued():
-    """F21: the staff-preview iD passes the check digit (the preview validates it) and lies in a
-    block ORCID never issues (seed.UNISSUED_ORCID_BLOCK)."""
+    """F21/F37: the staff-preview iD passes the check digit (the preview validates it) and lies
+    below both of ORCID's documented issuing ranges (seed.UNISSUED_ORCID_BLOCK; ORCID says only
+    "typically", so this is not a guarantee)."""
     assert normalize_orcid(seed.STAFF_PREVIEW_ORCID) == seed.STAFF_PREVIEW_ORCID
     assert seed.STAFF_PREVIEW_ORCID.startswith(seed.UNISSUED_ORCID_BLOCK)
     assert seed.STAFF_PREVIEW_ORCID not in seed.SEED_ORCIDS.values()

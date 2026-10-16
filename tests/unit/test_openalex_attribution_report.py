@@ -3,7 +3,8 @@ import sys
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import DBAPIError
 
 from src.models import Publication
 from src.services.pubmed import _doi_fold
@@ -82,6 +83,33 @@ async def test_the_report_writes_nothing(db_session, monkeypatch):
     assert statements[0] == "SET TRANSACTION READ ONLY"
     assert not any(s.lstrip().upper().startswith(("UPDATE", "INSERT", "DELETE"))
                    for s in statements)
+
+
+async def test_a_write_inside_the_population_read_is_refused(db_session, monkeypatch):
+    """The read-only transaction is real, not only a statement that was sent: a write
+    attempted mid-read (from the population query, after ``SET TRANSACTION READ ONLY``)
+    fails, inside a savepoint so the rest of the read still runs."""
+    import scripts.openalex_attribution_report as rep
+
+    _wire(monkeypatch, rep)
+    pi = await _pi(db_session, "Ada Alpha")
+    real_population = rep.pi_population
+    refused: list[str] = []
+
+    async def population_then_write(db):
+        with pytest.raises(DBAPIError, match="read-only transaction") as exc_info:
+            async with db.begin_nested():
+                await db.execute(update(Publication).where(Publication.user_id == pi.id)
+                                 .values(title="changed"))
+        refused.append(str(exc_info.value))
+        return await real_population(db)
+
+    monkeypatch.setattr(rep, "pi_population", population_then_write)
+    assert await rep.run(db_session, orcids=[pi.orcid]) == 0
+    assert len(refused) == 1
+    titles = (await db_session.execute(select(Publication.title).where(
+        Publication.user_id == pi.id).order_by(Publication.doi))).scalars().all()
+    assert titles == ["A", "B"]
 
 
 async def test_a_budget_stop_lists_the_rest_and_exits_1(db_session, monkeypatch, capsys):

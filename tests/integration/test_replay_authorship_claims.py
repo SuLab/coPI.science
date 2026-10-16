@@ -1,10 +1,14 @@
 """scripts/replay_authorship_claims.py (the 2026-10-15 publication-handling design §11
 R6.15): counts, the thread root as context, the hub apart, C12/F9 records, and that the
 replay writes nothing."""
+import argparse
+import json
+import types
 from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 import scripts.replay_authorship_claims as replay
 from src.database import Base
@@ -110,7 +114,7 @@ async def test_markdown_and_json_agree(db_session, tmp_path):
         t = report["totals"][key]
         assert (f"| {label} | {t['messages']} | {t['claims']} | {t['grounded']} | {t['rejected']} |"
                 in md)
-    assert replay.render_json(report)
+    assert json.loads(replay.render_json(report))["totals"] == report["totals"]
 
 
 @pytest.mark.parametrize(("reason", "rejected"), [("staff", 1), ("superseded", 0)])
@@ -132,3 +136,26 @@ async def test_replay_records_follow_c12_and_f9(db_session, tmp_path, reason, re
     assert report["per_lab"]["good"]["rejected"] == rejected
     if rejected:
         assert report["reasons"]["not_held"]["labs"] == ["good"]
+
+
+async def test_main_runs_the_replay_in_a_read_only_transaction(pg_url, tmp_path, monkeypatch, capsys):
+    """``_main`` opens its own engine from settings; pointed at the test database, the
+    session ``collect`` receives is already read-only, and a write on it is refused."""
+    seen = {}
+
+    async def spy_collect(db, scope, *, profiles_dir, samples):
+        seen["read_only"] = (await db.execute(text("SHOW transaction_read_only"))).scalar_one()
+        try:
+            await db.execute(text("CREATE TEMPORARY TABLE replay_write_probe (x int)"))
+        except DBAPIError as exc:
+            seen["write_error"] = str(exc)
+        return {"totals": {}}
+
+    monkeypatch.setattr(replay, "get_settings", lambda: types.SimpleNamespace(database_url=pg_url))
+    monkeypatch.setattr(replay, "collect", spy_collect)
+    args = argparse.Namespace(run=None, since=None, agent=None, samples=5, format="json",
+                              profiles_dir=str(tmp_path))
+    assert await replay._main(args) == 0
+    assert seen["read_only"] == "on"
+    assert "read-only transaction" in seen["write_error"]
+    assert json.loads(capsys.readouterr().out) == {"totals": {}}
