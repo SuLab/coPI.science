@@ -7,13 +7,13 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#activity": "f7057fae84268c3a7090a9e06a5110673674b53914c1d1efeb9e960116c51da2",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/activity.html": "1ed12241f6977d813032f4617979bf8b735cba87b83e74019e79f20220357368",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "assessment-card": {
     "audience": "all",
@@ -23,16 +23,16 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#assessment-card": "454ec3db48fcce1a4313aff1241c1ad575c1d7ea6fc018d3de112932dfced014",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
       "templates/assessments/_body.html": "d266679c50888354bf8c710e1c9c2e47c58b04d6fbf94f6b9790f05baf295ca7",
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessments.html": "700a1506992d84b894b5c077b52234817cb6150a38fb1c3b6a3b990ab9deded6",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "assessments-list": {
     "audience": "all",
@@ -42,16 +42,16 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#assessments-list": "fbb91748c75427b0885d34d75ee167288979e4dcb33cdd3653cbffc280eb8476",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
       "templates/assessments/_body.html": "d266679c50888354bf8c710e1c9c2e47c58b04d6fbf94f6b9790f05baf295ca7",
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessments.html": "700a1506992d84b894b5c077b52234817cb6150a38fb1c3b6a3b990ab9deded6",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "assign-to": {
     "audience": "staff",
@@ -61,17 +61,17 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#assign-to": "049d17cea0a41ed1bdc718a5230465545384f24b46fc94213ac7de3a3cc76eb5",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
       "templates/assessments/_chat_drawer.html": "081f1a3ea7ec572c52f7f995a6a76db89ecbea463802df77e53cadfacd455336",
       "templates/assessments/_detail_body.html": "9f953123db708a1d6b1378c665ff13c3719f77116bb538c997761ee73eb4f106",
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "card-rubric-gating": {
     "audience": "all",
@@ -81,16 +81,16 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#card-rubric-gating": "5609d1170380ac17d6ced60e7e8bd0aa91fb362ad776487a77993179c3850816",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
       "templates/assessments/_body.html": "d266679c50888354bf8c710e1c9c2e47c58b04d6fbf94f6b9790f05baf295ca7",
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessments.html": "700a1506992d84b894b5c077b52234817cb6150a38fb1c3b6a3b990ab9deded6",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "chat-drawer": {
     "audience": "all",
@@ -100,17 +100,17 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#chat-drawer": "bff926b223b15710a3645add20bfbaf1860937aac6e7e81c41cc60543311a071",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
       "templates/assessments/_chat_drawer.html": "081f1a3ea7ec572c52f7f995a6a76db89ecbea463802df77e53cadfacd455336",
       "templates/assessments/_detail_body.html": "9f953123db708a1d6b1378c665ff13c3719f77116bb538c997761ee73eb4f106",
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "detail-brief": {
     "audience": "all",
@@ -120,17 +120,17 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#detail-brief": "d56981af99b7d835163cfb8fb44afcde3f51513b5e5ed3d63b0a81f2c56283d8",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
       "templates/assessments/_chat_drawer.html": "081f1a3ea7ec572c52f7f995a6a76db89ecbea463802df77e53cadfacd455336",
       "templates/assessments/_detail_body.html": "9f953123db708a1d6b1378c665ff13c3719f77116bb538c997761ee73eb4f106",
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "detail-evidence": {
     "audience": "all",
@@ -140,17 +140,17 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#detail-evidence": "3148a5cbcab10f9f70d96a3249d897d394356bb41f5e1595fccd98cbf6e17b40",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
       "templates/assessments/_chat_drawer.html": "081f1a3ea7ec572c52f7f995a6a76db89ecbea463802df77e53cadfacd455336",
       "templates/assessments/_detail_body.html": "9f953123db708a1d6b1378c665ff13c3719f77116bb538c997761ee73eb4f106",
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "detail-panel-gating": {
     "audience": "all",
@@ -160,17 +160,17 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#detail-panel-gating": "744dc330f47c5d07128f93440eafa9c0ce4605e1626259071be86a46ca491d1e",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
       "templates/assessments/_chat_drawer.html": "081f1a3ea7ec572c52f7f995a6a76db89ecbea463802df77e53cadfacd455336",
       "templates/assessments/_detail_body.html": "9f953123db708a1d6b1378c665ff13c3719f77116bb538c997761ee73eb4f106",
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "detail-timeline": {
     "audience": "all",
@@ -180,17 +180,17 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#detail-timeline": "d4961954f27aa38df693328efc786bd1b472c635dbc95fb0d8ff138a85dd188b",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
       "templates/assessments/_chat_drawer.html": "081f1a3ea7ec572c52f7f995a6a76db89ecbea463802df77e53cadfacd455336",
       "templates/assessments/_detail_body.html": "9f953123db708a1d6b1378c665ff13c3719f77116bb538c997761ee73eb4f106",
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "discussions": {
     "audience": "staff",
@@ -200,15 +200,15 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#discussions": "3c7e0522db8016f08b8cda745ff6643e128808a6d3d6e0933652274921993f1b",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/discussions/_threads.html": "aeffa8783a49374b6fde8144f41057bc6227c685f9b71232f7a832faf794ed89",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/discussions.html": "dd2683323c03fd179783988bcdc3c5ed2764ea57cc0441284f63ea61284330ed",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "intro-prompt": {
     "audience": "all",
@@ -218,11 +218,11 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#intro-prompt": "b26a9397f5a04c13beb2381cafe452b5ef19aca09b8d5f353618741db28cb4c3",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "pi-account-edit": {
     "audience": "staff",
@@ -232,20 +232,20 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#pi-account-edit": "5b646f607aa0c453c95b1a0a18cf1cbf54618d4616103038e66692d83a1b8da6",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
       "templates/_profile_errors.html": "3506eeb1dcaf84b298d2ff570cf54c69d028c2e8f0228196bbcdd2ad36c62815",
       "templates/_tag_field.html": "f0d5004245726bf1554ee395d101fc6ce19af445cc8ac87c67e6fb146cdf3062",
       "templates/admin/_microsoft_link.html": "d42d402b4c28b55e0a135f0467bdd48c225dcdc215e5da7281a10e402bf87cee",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/pis/_bot_action.html": "f4ea7d8f70eea58713af57458875eed07f6f41972f1bcab49b77020023c0817b",
       "templates/pis/_detail_errors.html": "bd08f23c28a00b0d9a843f069d23bfecf8e15088e58c3b800308ba0d70803af7",
-      "templates/pis/_profile_review.html": "922d0b145947346bf2c9a9da15a56a3a4e4e31d13c864a583e48b32252292b37",
+      "templates/pis/_profile_review.html": "b00296edcf1a6dc05f01e76ea51f613c5ec483d7c9e947cda3cabfc70c33462a",
       "templates/pis/_revision_history.html": "7f21279bcd9d19086382f840758abc0915a60678aa5e85c6d19fa34d64941cb7",
-      "templates/workspace/pi_detail.html": "81aa90ba0a115c159af5dbb4c5acc37e66ae2fa937d99cf94fdc313346ec0629",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "templates/workspace/pi_detail.html": "cb6cbf51c0b3a2d42a72eb8e57878c85d1566b1ffcac29538aa6baf01f0343cc",
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "pi-companies": {
     "audience": "staff",
@@ -255,20 +255,20 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#pi-companies": "be6abe58a0f6e570693a74382ba71d912096f52ab9bc7bd3c5f5b3d43f7af7cf",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
       "templates/_profile_errors.html": "3506eeb1dcaf84b298d2ff570cf54c69d028c2e8f0228196bbcdd2ad36c62815",
       "templates/_tag_field.html": "f0d5004245726bf1554ee395d101fc6ce19af445cc8ac87c67e6fb146cdf3062",
       "templates/admin/_microsoft_link.html": "d42d402b4c28b55e0a135f0467bdd48c225dcdc215e5da7281a10e402bf87cee",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/pis/_bot_action.html": "f4ea7d8f70eea58713af57458875eed07f6f41972f1bcab49b77020023c0817b",
       "templates/pis/_detail_errors.html": "bd08f23c28a00b0d9a843f069d23bfecf8e15088e58c3b800308ba0d70803af7",
-      "templates/pis/_profile_review.html": "922d0b145947346bf2c9a9da15a56a3a4e4e31d13c864a583e48b32252292b37",
+      "templates/pis/_profile_review.html": "b00296edcf1a6dc05f01e76ea51f613c5ec483d7c9e947cda3cabfc70c33462a",
       "templates/pis/_revision_history.html": "7f21279bcd9d19086382f840758abc0915a60678aa5e85c6d19fa34d64941cb7",
-      "templates/workspace/pi_detail.html": "81aa90ba0a115c159af5dbb4c5acc37e66ae2fa937d99cf94fdc313346ec0629",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "templates/workspace/pi_detail.html": "cb6cbf51c0b3a2d42a72eb8e57878c85d1566b1ffcac29538aa6baf01f0343cc",
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "pi-detail-reviewer": {
     "audience": "all",
@@ -278,20 +278,20 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#pi-detail-reviewer": "66ce5d1f964c84be63b151692b298476ddcff4bda65f78a5fb4c6d4f20677e9c",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
       "templates/_profile_errors.html": "3506eeb1dcaf84b298d2ff570cf54c69d028c2e8f0228196bbcdd2ad36c62815",
       "templates/_tag_field.html": "f0d5004245726bf1554ee395d101fc6ce19af445cc8ac87c67e6fb146cdf3062",
       "templates/admin/_microsoft_link.html": "d42d402b4c28b55e0a135f0467bdd48c225dcdc215e5da7281a10e402bf87cee",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/pis/_bot_action.html": "f4ea7d8f70eea58713af57458875eed07f6f41972f1bcab49b77020023c0817b",
       "templates/pis/_detail_errors.html": "bd08f23c28a00b0d9a843f069d23bfecf8e15088e58c3b800308ba0d70803af7",
-      "templates/pis/_profile_review.html": "922d0b145947346bf2c9a9da15a56a3a4e4e31d13c864a583e48b32252292b37",
+      "templates/pis/_profile_review.html": "b00296edcf1a6dc05f01e76ea51f613c5ec483d7c9e947cda3cabfc70c33462a",
       "templates/pis/_revision_history.html": "7f21279bcd9d19086382f840758abc0915a60678aa5e85c6d19fa34d64941cb7",
-      "templates/workspace/pi_detail.html": "81aa90ba0a115c159af5dbb4c5acc37e66ae2fa937d99cf94fdc313346ec0629",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "templates/workspace/pi_detail.html": "cb6cbf51c0b3a2d42a72eb8e57878c85d1566b1ffcac29538aa6baf01f0343cc",
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "pi-grants": {
     "audience": "staff",
@@ -301,20 +301,20 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#pi-grants": "b1971ed2a88851f4bc4e33f1140900d365afb8ea93c21ff9300ba99836c9c0bc",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
       "templates/_profile_errors.html": "3506eeb1dcaf84b298d2ff570cf54c69d028c2e8f0228196bbcdd2ad36c62815",
       "templates/_tag_field.html": "f0d5004245726bf1554ee395d101fc6ce19af445cc8ac87c67e6fb146cdf3062",
       "templates/admin/_microsoft_link.html": "d42d402b4c28b55e0a135f0467bdd48c225dcdc215e5da7281a10e402bf87cee",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/pis/_bot_action.html": "f4ea7d8f70eea58713af57458875eed07f6f41972f1bcab49b77020023c0817b",
       "templates/pis/_detail_errors.html": "bd08f23c28a00b0d9a843f069d23bfecf8e15088e58c3b800308ba0d70803af7",
-      "templates/pis/_profile_review.html": "922d0b145947346bf2c9a9da15a56a3a4e4e31d13c864a583e48b32252292b37",
+      "templates/pis/_profile_review.html": "b00296edcf1a6dc05f01e76ea51f613c5ec483d7c9e947cda3cabfc70c33462a",
       "templates/pis/_revision_history.html": "7f21279bcd9d19086382f840758abc0915a60678aa5e85c6d19fa34d64941cb7",
-      "templates/workspace/pi_detail.html": "81aa90ba0a115c159af5dbb4c5acc37e66ae2fa937d99cf94fdc313346ec0629",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "templates/workspace/pi_detail.html": "cb6cbf51c0b3a2d42a72eb8e57878c85d1566b1ffcac29538aa6baf01f0343cc",
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "pi-header-pending": {
     "audience": "staff",
@@ -324,20 +324,20 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#pi-header-pending": "f9353033bdb6d6417f81056a0c122e8af372bcec7c3c7b2d6bb7536a52d37478",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
       "templates/_profile_errors.html": "3506eeb1dcaf84b298d2ff570cf54c69d028c2e8f0228196bbcdd2ad36c62815",
       "templates/_tag_field.html": "f0d5004245726bf1554ee395d101fc6ce19af445cc8ac87c67e6fb146cdf3062",
       "templates/admin/_microsoft_link.html": "d42d402b4c28b55e0a135f0467bdd48c225dcdc215e5da7281a10e402bf87cee",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/pis/_bot_action.html": "f4ea7d8f70eea58713af57458875eed07f6f41972f1bcab49b77020023c0817b",
       "templates/pis/_detail_errors.html": "bd08f23c28a00b0d9a843f069d23bfecf8e15088e58c3b800308ba0d70803af7",
-      "templates/pis/_profile_review.html": "922d0b145947346bf2c9a9da15a56a3a4e4e31d13c864a583e48b32252292b37",
+      "templates/pis/_profile_review.html": "b00296edcf1a6dc05f01e76ea51f613c5ec483d7c9e947cda3cabfc70c33462a",
       "templates/pis/_revision_history.html": "7f21279bcd9d19086382f840758abc0915a60678aa5e85c6d19fa34d64941cb7",
-      "templates/workspace/pi_detail.html": "81aa90ba0a115c159af5dbb4c5acc37e66ae2fa937d99cf94fdc313346ec0629",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "templates/workspace/pi_detail.html": "cb6cbf51c0b3a2d42a72eb8e57878c85d1566b1ffcac29538aa6baf01f0343cc",
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "pi-industry": {
     "audience": "staff",
@@ -347,43 +347,43 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#pi-industry": "c38fc38d3713dedfceab1283878f69542c929d8dfa6eee2a36a06bac3afd3f1b",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
       "templates/_profile_errors.html": "3506eeb1dcaf84b298d2ff570cf54c69d028c2e8f0228196bbcdd2ad36c62815",
       "templates/_tag_field.html": "f0d5004245726bf1554ee395d101fc6ce19af445cc8ac87c67e6fb146cdf3062",
       "templates/admin/_microsoft_link.html": "d42d402b4c28b55e0a135f0467bdd48c225dcdc215e5da7281a10e402bf87cee",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/pis/_bot_action.html": "f4ea7d8f70eea58713af57458875eed07f6f41972f1bcab49b77020023c0817b",
       "templates/pis/_detail_errors.html": "bd08f23c28a00b0d9a843f069d23bfecf8e15088e58c3b800308ba0d70803af7",
-      "templates/pis/_profile_review.html": "922d0b145947346bf2c9a9da15a56a3a4e4e31d13c864a583e48b32252292b37",
+      "templates/pis/_profile_review.html": "b00296edcf1a6dc05f01e76ea51f613c5ec483d7c9e947cda3cabfc70c33462a",
       "templates/pis/_revision_history.html": "7f21279bcd9d19086382f840758abc0915a60678aa5e85c6d19fa34d64941cb7",
-      "templates/workspace/pi_detail.html": "81aa90ba0a115c159af5dbb4c5acc37e66ae2fa937d99cf94fdc313346ec0629",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "templates/workspace/pi_detail.html": "cb6cbf51c0b3a2d42a72eb8e57878c85d1566b1ffcac29538aa6baf01f0343cc",
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "pi-paper-review": {
     "audience": "staff",
-    "alt": "Corpus and profile review: the pending draft, a candidate paper, an unanchored paper and an excluded one.",
+    "alt": "Corpus and profile review: the latest generation notes, the pending draft, a candidate paper, a withheld paper, an unanchored paper and an excluded one with its reason.",
     "width": 896,
-    "height": 919,
+    "height": 1331,
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
-      "shots.py#pi-paper-review": "f13f0231d521c4a93b3ff8711b62f6ebc34077160a8ecbcc1c3479d603ebdab2",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
+      "shots.py#pi-paper-review": "0adc87950d2b8a5502557c2af3ede7cb9c5303a22fb48b1c9c984cf03a66ed73",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
       "templates/_profile_errors.html": "3506eeb1dcaf84b298d2ff570cf54c69d028c2e8f0228196bbcdd2ad36c62815",
       "templates/_tag_field.html": "f0d5004245726bf1554ee395d101fc6ce19af445cc8ac87c67e6fb146cdf3062",
       "templates/admin/_microsoft_link.html": "d42d402b4c28b55e0a135f0467bdd48c225dcdc215e5da7281a10e402bf87cee",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/pis/_bot_action.html": "f4ea7d8f70eea58713af57458875eed07f6f41972f1bcab49b77020023c0817b",
       "templates/pis/_detail_errors.html": "bd08f23c28a00b0d9a843f069d23bfecf8e15088e58c3b800308ba0d70803af7",
-      "templates/pis/_profile_review.html": "922d0b145947346bf2c9a9da15a56a3a4e4e31d13c864a583e48b32252292b37",
+      "templates/pis/_profile_review.html": "b00296edcf1a6dc05f01e76ea51f613c5ec483d7c9e947cda3cabfc70c33462a",
       "templates/pis/_revision_history.html": "7f21279bcd9d19086382f840758abc0915a60678aa5e85c6d19fa34d64941cb7",
-      "templates/workspace/pi_detail.html": "81aa90ba0a115c159af5dbb4c5acc37e66ae2fa937d99cf94fdc313346ec0629",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "templates/workspace/pi_detail.html": "cb6cbf51c0b3a2d42a72eb8e57878c85d1566b1ffcac29538aa6baf01f0343cc",
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "pis-list-manager": {
     "audience": "staff",
@@ -393,13 +393,13 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#pis-list-manager": "897bc91fffc7eabc282f986166a5f162fe1250b92730fec7be508e97bc7acc79",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/pis.html": "84853662a3a4edae4122e57f01915d1c33893356c013c2d60ab4410f1b527c85",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "pis-list-reviewer": {
     "audience": "all",
@@ -409,13 +409,13 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#pis-list-reviewer": "a83bc8c4159bb90baf5095b47216243708aff1dcbe3632d0e65f25f85c19be04",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/pis.html": "84853662a3a4edae4122e57f01915d1c33893356c013c2d60ab4410f1b527c85",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "prompt-suggestion-detail": {
     "audience": "staff",
@@ -425,14 +425,14 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#prompt-suggestion-detail": "495a84c08885db57c7815c9119fea93649ab6544a96bf2a4b0f7443e4380336c",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/prompt_suggestion_detail.html": "7eed854a2cab648f2321a89b9cb1b9011bcb8158fe56cd8803298e95575ed890",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "prompt-suggestions": {
     "audience": "staff",
@@ -442,13 +442,13 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#prompt-suggestions": "ae0324c9dbd786503eb1613b5905dbee3917a35c8907fc5c664084417eafb656",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/prompt_suggestions.html": "c750299bebdc6b59ab2357a5507abdfd0e7b48486af74989f4eff57102669a67",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "review-form": {
     "audience": "all",
@@ -458,17 +458,17 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#review-form": "827a362f8921dd50737f78418b3eb440e721ad00d1ac0fbd1495b634631d3306",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
       "templates/assessments/_chat_drawer.html": "081f1a3ea7ec572c52f7f995a6a76db89ecbea463802df77e53cadfacd455336",
       "templates/assessments/_detail_body.html": "9f953123db708a1d6b1378c665ff13c3719f77116bb538c997761ee73eb4f106",
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "slack-bots": {
     "audience": "staff",
@@ -478,14 +478,14 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#slack-bots": "c8a8ada3d6022173eaad987cc4137a15dd020d47d4103cfbb53f42d6d7c4cf14",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/pis/_bot_action.html": "f4ea7d8f70eea58713af57458875eed07f6f41972f1bcab49b77020023c0817b",
       "templates/workspace/slack_bots.html": "3c87828545c3d2e71fc50db4fd2c574da01575bed223483f155ad9f7631d538f",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "staff-form": {
     "audience": "staff",
@@ -495,13 +495,13 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#staff-form": "a3fdf0d1ba52db2a478cbdca7d8673afc0826b2d20cfb40bf7eeb507273b3688",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
-      "templates/workspace/staff.html": "38325b7f941f78292b0e95124e2be6309adc7e5348ee55a710ae9e328e46e482",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "templates/workspace/staff.html": "47e8ab4638ba3e2ba6fd5fc279ef51693bb11d577105be36c6be98320124f95b",
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "staff-preview": {
     "audience": "staff",
@@ -511,13 +511,13 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#staff-preview": "b85a3e295c872ac9fe9facb9091c4dad49fb99a51c10f33f749af56dcbae94a1",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
-      "templates/workspace/staff.html": "38325b7f941f78292b0e95124e2be6309adc7e5348ee55a710ae9e328e46e482",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "templates/workspace/staff.html": "47e8ab4638ba3e2ba6fd5fc279ef51693bb11d577105be36c6be98320124f95b",
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "staff-table": {
     "audience": "staff",
@@ -527,13 +527,13 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#staff-table": "4bcd4362264cd7c7d1637390a5bae74e292669c68e6c67757198641d664d75b8",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
-      "templates/workspace/staff.html": "38325b7f941f78292b0e95124e2be6309adc7e5348ee55a710ae9e328e46e482",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "templates/workspace/staff.html": "47e8ab4638ba3e2ba6fd5fc279ef51693bb11d577105be36c6be98320124f95b",
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   },
   "topbar-help": {
     "audience": "all",
@@ -543,10 +543,10 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#topbar-help": "9c2721a7838e7c1ef0e55f0ef837d06cfc6018b1ee52bf9a8d3fb267246a5ef3",
-      "static/css/app.css": "391a9637f8fe26133f8cfb3535e520af49253c495e2d2f06661df206bdf8340b",
-      "templates/base.html": "f24c1106113810aced52623e86de33315eac10ce55358a86d5d716c85c798b59",
-      "tests/e2e/help_shots/seed.py": "30293f918232400d5ce2d4f3322d4cc2b656b66d5619fb7a509d35c2541b211e"
+      "static/css/app.css": "c6a3a9c63682094578c07226efb4702983bc5aefc8d1703596bb65fee00f399f",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
+      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "b3f5ce126c43a4bd50da7ccd3a2ce20fea596d1a"
+    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
   }
 }
