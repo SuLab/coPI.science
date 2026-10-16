@@ -393,6 +393,16 @@ async def test_baseline_line_with_a_failed_refetch_has_no_rows(monkeypatch):
     assert line["gate_inputs"] is None
 
 
+async def test_a_refetch_bug_costs_one_pi_not_the_run(monkeypatch):
+    """Strict mode re-raises any non-per-item failure (a KeyError from a bad response too);
+    it becomes that PI's resolve_error instead of ending the baseline."""
+    _guards(monkeypatch)
+    monkeypatch.setattr(audit, "fetch_pubmed_records", _raising(KeyError("PubmedArticle")))
+    line = await audit.baseline_line(_pi(anchored=(("101", "s1"),)), skip_resolve=True)
+    assert line["resolve_error"] == "PubMed refetch failed: 'PubmedArticle'"
+    assert line["rows"] == []
+
+
 async def _baseline_exit(monkeypatch, pi, *, skip_resolve):
     async def fake_rows(db, orcids):
         return [pi]

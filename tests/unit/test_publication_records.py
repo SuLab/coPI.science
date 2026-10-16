@@ -77,15 +77,16 @@ def test_build_record_keeps_profile_ids_of_other_exclusions(reason):
 
 
 @pytest.mark.parametrize("reason", OTHER_REASONS)
-def test_an_identifier_another_exclusion_holds_is_not_subtracted(reason):
-    """Spec C12: an identifier is dropped only when every row holding it is excluded as not
-    the PI's; one a superseded (or other-reason) row also holds stays the lab's own."""
+def test_another_exclusion_does_not_shield_a_not_theirs_identifier(reason):
+    """C12 / F9 (spec §18 X16): a row excluded for another reason is a copy or version of
+    the same paper (a PubMed twin, a title duplicate), so it does not undo staff's "not the
+    PI's"; only an in-use row does."""
     ids = records_from_rows(["a"], [
         ("a", "10.1000/x", "9", TS, "staff"),
         ("a", "10.1000/X", "9", TS, reason),
     ])["a"]
-    assert ids.not_theirs_dois == frozenset() and ids.not_theirs_pmids == frozenset()
-    assert build_record(PERSONA, ids).ids == {"10.1000/x", "9"}
+    assert ids.not_theirs_dois == {"10.1000/x"} and ids.not_theirs_pmids == {"9"}
+    assert build_record(PERSONA, ids).ids == frozenset()
 
 
 def test_a_legacy_exclusion_does_not_protect_an_identifier():

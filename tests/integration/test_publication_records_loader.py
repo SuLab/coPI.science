@@ -36,8 +36,8 @@ async def test_load_publication_ids_reads_in_use_and_not_theirs_rows(db_session)
     assert smith.in_use_pmids == {"1"}
     assert smith.in_use_dois == {"10.5555/oa.1"}
     assert smith.not_theirs_pmids == {"2", "5"}
-    # The superseded row holds the twin's DOI too, so it stays the lab's own (C12).
-    assert smith.not_theirs_dois == frozenset()
+    # The superseded twin is not loaded, so it does not shield the DOI staff excluded (X16).
+    assert smith.not_theirs_dois == {"10.5555/twin"}
     assert smith.row_count == 2
     assert out["blackbird"] == PublicationIds()
     assert out["nobody"] == PublicationIds()

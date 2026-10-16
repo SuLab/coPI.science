@@ -445,7 +445,7 @@ async def baseline_line(pi: BaselinePi, *, skip_resolve: bool) -> dict[str, Any]
     pmids = [pmid for pmid, _provenance in pi.anchored_rows]
     try:
         fetched = await fetch_pubmed_records(pmids, strict=True) if pmids else []
-    except _RESOLVE_ERRORS as exc:
+    except Exception as exc:  # strict mode re-raises anything not per-item; one PI, not the run
         return _empty_line(pi, f"PubMed refetch failed: {str(exc) or type(exc).__name__}")
     by_pmid = {str(r.get("pmid")): r for r in fetched}
     rows: list[dict[str, Any]] = []

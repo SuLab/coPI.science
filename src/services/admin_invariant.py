@@ -17,11 +17,17 @@ class LastAdminError(ValueError):
     """Removing `user` from adminhood would leave no admin able to log in."""
 
 
+async def lock_admin_invariant(db: AsyncSession) -> None:
+    """Take the admin-invariant advisory lock, held to the end of the caller's transaction.
+    Re-entrant within one transaction, so a caller may take it before ensure_admin_remains."""
+    await db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": ADMIN_INVARIANT_LOCK_KEY})
+
+
 async def ensure_admin_remains(db: AsyncSession, *, user: User) -> None:
     """Take the admin-invariant lock (held to the end of the caller's transaction),
     then raise LastAdminError when `user` is an admin and at most one allowed
     admin exists. The caller must write the change in the same transaction."""
-    await db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": ADMIN_INVARIANT_LOCK_KEY})
+    await lock_admin_invariant(db)
     if user.user_role != USER_ROLE_ADMIN:
         return
     count = await db.scalar(

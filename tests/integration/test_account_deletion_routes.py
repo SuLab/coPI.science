@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 from itsdangerous import TimestampSigner
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from src.config import get_settings
 from src.models import Publication, User
@@ -235,24 +235,48 @@ async def test_a_non_pi_with_research_data_cannot_delete_their_own_account(
     assert (await research_data_for(db_session, [uid]))[uid].has_any
 
 
+async def _stale(asgi_app, db_session, uid, role):
+    """Serve the request a user whose in-memory role is ``role`` while the row says
+    otherwise: a role change committed after the request loaded the user."""
+    from sqlalchemy.orm.attributes import set_committed_value
+
+    from src.dependencies import get_current_user
+
+    loaded = await db_session.get(User, uid)
+    set_committed_value(loaded, "user_role", role)
+    asgi_app.dependency_overrides[get_current_user] = lambda: loaded
+
+
 async def test_a_conversion_after_the_request_loaded_the_user_is_still_refused(
     client, asgi_app, db_session,
 ):
     """The request loaded a PI; a staff conversion committed before the guard ran. The role
     is re-read under the row lock, so the now-manager account is still refused (F18)."""
-    from src.dependencies import get_current_user
-
     user = await factories.make_user(db_session, user_role="manager", access_status="allowed")
     uid = user.id
     await _give(db_session, uid, "publication")
     await db_session.commit()
-    stale = SimpleNamespace(id=uid, user_role="pi", may_use_pi_surfaces=True,
-                            _is_impersonated=False)
-    asgi_app.dependency_overrides[get_current_user] = lambda: stale
+    await _stale(asgi_app, db_session, uid, "pi")
     r = await client.post("/profile/delete-account", headers=_auth(uid), data={"confirm": "delete"})
     assert r.headers["location"] == "/profile/delete-account?error=research_data"
     assert await db_session.scalar(
         select(func.count()).select_from(User).where(User.id == uid)) == 1
+
+
+async def test_a_promotion_after_the_request_loaded_the_user_keeps_the_last_admin(
+    client, asgi_app, db_session,
+):
+    """The last-admin check decides on the re-read role too: an account promoted to the only
+    admin after the request loaded it as a PI is not deleted."""
+    await db_session.execute(
+        update(User).where(User.user_role == "admin").values(access_status="denied"))
+    user = await factories.make_user(db_session, user_role="admin", access_status="allowed")
+    uid = user.id
+    await db_session.commit()
+    await _stale(asgi_app, db_session, uid, "pi")
+    r = await client.post("/profile/delete-account", headers=_auth(uid), data={"confirm": "delete"})
+    assert r.headers["location"] == "/profile/delete-account?error=last_admin"
+    assert await db_session.get(User, uid) is not None
 
 
 async def test_a_non_pi_without_research_data_still_deletes_their_own_account(client, db_session):

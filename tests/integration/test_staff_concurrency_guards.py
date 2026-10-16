@@ -264,5 +264,84 @@ async def test_deleting_a_reviewer_waits_for_a_persona_writer_without_deadlock(
         async with factory() as s:
             assert await s.get(User, reviewer.id) is None
     finally:
+        async with factory() as s:  # the deletion's audit row outlives both users
+            await s.execute(text("DELETE FROM admin_audit_events WHERE payload->>'user_id' = :u"),
+                            {"u": str(reviewer.id)})
+            await s.commit()
         await _delete(factory, reviewer.id)
         await _delete(factory, admin.id)
+
+
+async def test_self_delete_waits_for_a_first_ingest_then_refuses(engine):
+    """A converted PI's first-ingest pipeline holds the persona lock and is still inserting
+    publications (each FK check takes FOR KEY SHARE on the users row). The self-delete must
+    wait on the persona lock without holding the users row FOR UPDATE, then see the
+    committed rows and refuse (F18), not deadlock."""
+    from types import SimpleNamespace
+
+    from src.routers.profile import delete_account
+    from src.services.advisory_locks import lock_agent_persona
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    manager = await _committed_pi(factory, user_role=USER_ROLE_MANAGER, access_status="allowed")
+    try:
+        async with factory() as pipeline:
+            await pipeline.execute(text("SET LOCAL lock_timeout = '5s'"))
+            await lock_agent_persona(pipeline, manager.id)
+
+            async def self_delete():
+                async with factory() as s:
+                    await s.execute(text("SET LOCAL lock_timeout = '10s'"))
+                    user = await s.get(User, manager.id)
+                    return await delete_account(
+                        SimpleNamespace(session={}), confirm="delete", db=s, current_user=user)
+
+            task = asyncio.create_task(self_delete())
+            await asyncio.sleep(0.5)
+            assert not task.done()  # waiting on the persona lock
+            pipeline.add(Publication(user_id=manager.id, pmid="31000004", title="First ingest"))
+            await pipeline.flush()  # the FK check: FOR KEY SHARE on the users row
+            await pipeline.commit()
+            response = await asyncio.wait_for(task, 20)
+        assert response.headers["location"] == "/profile/delete-account?error=research_data"
+        async with factory() as s:
+            assert await s.get(User, manager.id) is not None
+    finally:
+        await _delete(factory, manager.id)
+
+
+async def test_self_delete_and_a_role_change_take_the_admin_lock_first(engine, tmp_path,
+                                                                         monkeypatch):
+    """The admin role route takes the admin-invariant lock, then updates the users row. A
+    self-delete must take the same lock before it locks its own row, or the two deadlock."""
+    from types import SimpleNamespace
+
+    from src.routers.profile import delete_account
+    from src.services.admin_invariant import lock_admin_invariant
+
+    for name in ("_PUBLIC_DIR", "_MEMORY_DIR", "_COMPANIES_DIR", "_ORPHANED_DIR"):
+        (tmp_path / name).mkdir()
+        monkeypatch.setattr(user_deletion, name, tmp_path / name)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    pi = await _committed_pi(factory, access_status="allowed")
+    try:
+        async with factory() as role_route:
+            await role_route.execute(text("SET LOCAL lock_timeout = '5s'"))
+            await lock_admin_invariant(role_route)
+
+            async def self_delete():
+                async with factory() as s:
+                    await s.execute(text("SET LOCAL lock_timeout = '10s'"))
+                    user = await s.get(User, pi.id)
+                    return await delete_account(
+                        SimpleNamespace(session={}), confirm="delete", db=s, current_user=user)
+
+            task = asyncio.create_task(self_delete())
+            await asyncio.sleep(0.5)
+            await role_route.execute(
+                update(User).where(User.id == pi.id).values(user_role=USER_ROLE_PI))
+            await role_route.commit()
+            response = await asyncio.wait_for(task, 20)
+        assert response.headers["location"] == "/login?deleted=1"
+    finally:
+        await _delete(factory, pi.id)

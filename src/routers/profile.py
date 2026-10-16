@@ -17,7 +17,12 @@ from src.dependencies import (
 )
 from src.models import AgentRegistry, Publication, ResearcherProfile, User
 from src.models.user import PI_SURFACE_ROLES
-from src.services.admin_invariant import LastAdminError, ensure_admin_remains
+from src.services.admin_invariant import (
+    LastAdminError,
+    ensure_admin_remains,
+    lock_admin_invariant,
+)
+from src.services.advisory_locks import lock_agent_persona
 from src.services.grant_sections import load_grant_sections
 from src.services.profile_edit import (
     apply_profile_edits,
@@ -239,19 +244,28 @@ async def delete_account(
     if confirm.lower() != "delete":
         return RedirectResponse(url="/profile/delete-account?error=1", status_code=302)
 
+    # Lock order, as the admin role route takes it: the admin-invariant lock, then the
+    # users row. The role and access status are re-read under both, so a role change
+    # committed after this request loaded the user decides F18 and the last-admin check.
+    # FOR NO KEY UPDATE waits for a role change but not for the FOR KEY SHARE a persona
+    # writer's FK check takes, so a PI's own agent writing a revision does not deadlock
+    # with delete_user_account's agents lock.
+    user_id = current_user.id
+    await lock_admin_invariant(db)
+    await db.refresh(
+        current_user, ["user_role", "access_status"], with_for_update={"key_share": True},
+    )
     # F18: a manager or reviewer whose account holds research data (a converted PI's
     # profile, publications or agent) may not destroy it; an admin deletes the account.
-    # The role is re-read under a row lock, so a staff conversion committed after this
-    # request loaded the user decides. FOR NO KEY UPDATE waits for a role change but not
-    # for the FOR KEY SHARE a persona writer's FK check takes, so a PI's own agent writing
-    # a revision does not deadlock with delete_user_account's agents lock. A non-PI's row
-    # is then locked FOR UPDATE, so no profile, publication or agent row can be added
-    # before the decision (the FK check takes FOR KEY SHARE on it).
-    user_id = current_user.id
-    role = await db.scalar(
-        select(User.user_role).where(User.id == user_id).with_for_update(key_share=True)
-    )
-    if role not in PI_SURFACE_ROLES:
+    # The persona locks come first, as every profile writer takes them (profile_publish),
+    # so a pipeline still writing this account's first rows finishes and is seen. Then
+    # the users row FOR UPDATE: no profile, publication or agent row can be added before
+    # the decision (the FK check takes FOR KEY SHARE on it).
+    if current_user.user_role not in PI_SURFACE_ROLES:
+        await db.execute(
+            select(AgentRegistry.id).where(AgentRegistry.user_id == user_id).with_for_update()
+        )
+        await lock_agent_persona(db, user_id)
         await db.execute(select(User.id).where(User.id == user_id).with_for_update())
         if (await research_data_for(db, [user_id]))[user_id].has_any:
             logger.info("Self-delete of %s refused: the account holds research data", user_id)
