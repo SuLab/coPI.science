@@ -29,10 +29,10 @@
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
-      "templates/workspace/assessments.html": "700a1506992d84b894b5c077b52234817cb6150a38fb1c3b6a3b990ab9deded6",
+      "templates/workspace/assessments.html": "364e05bf4b0ce0b6858a15a6ea3fec94989b6e37d7769f0dc9f0b6605f1c5a7c",
       "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
+    "commit": "95da09aa6523d61b6398a93660b4ccb61207be3d"
   },
   "assessments-list": {
     "audience": "all",
@@ -48,10 +48,10 @@
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
-      "templates/workspace/assessments.html": "700a1506992d84b894b5c077b52234817cb6150a38fb1c3b6a3b990ab9deded6",
+      "templates/workspace/assessments.html": "364e05bf4b0ce0b6858a15a6ea3fec94989b6e37d7769f0dc9f0b6605f1c5a7c",
       "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
+    "commit": "95da09aa6523d61b6398a93660b4ccb61207be3d"
   },
   "assign-to": {
     "audience": "staff",
@@ -87,10 +87,10 @@
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
-      "templates/workspace/assessments.html": "700a1506992d84b894b5c077b52234817cb6150a38fb1c3b6a3b990ab9deded6",
+      "templates/workspace/assessments.html": "364e05bf4b0ce0b6858a15a6ea3fec94989b6e37d7769f0dc9f0b6605f1c5a7c",
       "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "be9ff7752e57b2e073035a12a67a8c3bf40b058c"
+    "commit": "95da09aa6523d61b6398a93660b4ccb61207be3d"
   },
   "chat-drawer": {
     "audience": "all",
