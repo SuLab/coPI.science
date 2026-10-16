@@ -473,7 +473,9 @@ async def journey_corpus_and_draft_review(h) -> dict:
         await _submit(h, page, page.locator(
             f'form[action="/workspace/pis/{pi}/candidates/{h.ids["p3_candidate"]}/accept"] button'), csp)
         steps["accepted"] = await page.locator("body").inner_text()
-        await _submit(h, page, page.locator(
+        # The Unanchored card's Exclude: since publication handling Phase 4 (R4.10) the
+        # Publications list offers the same form on every row, so scope to the review card.
+        await _submit(h, page, page.locator("#review").locator(
             f'form[action="/workspace/pis/{pi}/publications/{h.ids["p3_unanchored"]}/exclude"] button'), csp)
         steps["excluded"] = await page.locator("body").inner_text()
         await _submit(h, page, page.locator(
