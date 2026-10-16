@@ -467,6 +467,45 @@ the admin page follows the same claim protocol for a stopped run through
 `HeadlineAnnouncer`, the engine-free announcer the supervisor builds; nothing else uses
 `HeadlineAnnouncer`.
 
+**Hub declines without an assessment (migration `0071`).** The hub closes most interviews
+with a ⏸️ decline and no `<assessment_json>` sidecar (`phase4-thread-reply.md`, Outcome 2),
+so such an interview left no `opportunity_assessments` row and appeared nowhere. Owner
+decision 2026-10-16: every such close gets a `hub_declines` row, an entry on the
+Assessments page and a `#assessments-summary` headline, and the hub prompt is unchanged.
+
+- **What is recorded** (`src/models/hub_decline.py`): one row per run and interview
+  (`uq_hub_declines_run_thread`): the hub (`agent_id`), the lab (`subject_agent_id`), the
+  channel, the thread, the `slack_ts` of the hub's closing reply (NULL when it was not
+  mirrored to Slack) and the reply's text as `reason_text`, at most 4,000 characters. An
+  interview that also has an assessment never gets a row: the assessment is its record. A
+  lab's own ⏸️ close is not a hub decline.
+- **Headline** (`render_decline_headline` in `src/services/assessment_headline.py`):
+  `⏸️ <PI> — declined without an assessment. <reason> — <permalink|View interview>`, with
+  "(link unavailable)" in place of the link when there is no permalink. The reason
+  (`decline_reason`) is the gates the reply names as not met or unconfirmed, or else the
+  first sentence of its first paragraph, at most 300 characters. The reply is already public
+  in the interview thread; the owner signed off on quoting it, for decline headlines only.
+- **Claim protocol** (`src/services/decline_claims.py`): the assessment headline's three
+  steps, keyed by the row's id: `claim` (refused when already claimed or posted), post, then
+  `mark_posted`, or `release_claim` on a definite failure. A transport error with no Slack
+  response keeps the claim; `list_in_doubt` lists it after 10 minutes, and nothing re-posts
+  it automatically. A headline posts at most once.
+- **Shutdown, Finalize and backfill.** The engine writes the row when the hub closes the
+  interview and announces its headline under the claim protocol. A row it cannot write (a
+  database error, or a schema before `0071`) logs one WARNING and posts nothing. A decline
+  still owed when the engine stops is announced at every stop, HOLD included (its interview
+  has ended), within the shutdown cap left after the assessment headlines. **Finalize run** announces
+  a stopped run's owed declines through `HeadlineAnnouncer.announce_decline`
+  (`build_finalize_announcer`), which returns `posted`, `lost`, `in_doubt` or `skipped`.
+  For runs that ended before the release, `scripts/backfill_hub_declines.py --run <uuid>`
+  previews the declines it finds (a `no_proposal` decision closed by `scout_hub`, whose hub
+  agent has `agents.role = 'scout_hub'`, with no assessment and no row yet); `--apply`
+  inserts them, and `--post` announces every owed decline headline of the run the way
+  Finalize does. Both write modes hold the engine lock and exit 2 while an engine holds it;
+  exit 1 means a headline was `lost` or `in_doubt`. For the finished test run `e91c35df`
+  the owner chose to backfill its decline and post its headline (the deploy box for
+  `0071_hub_declines` in `docs/operations/migration-deploy-notes.md`).
+
 **Drop vocabulary.** `assessment_drops.reason` includes `reply_failed`: an interview
 abandoned after repeated non-transient model errors. `reply_failed` and `empty_reply`
 are the two reasons that do not get a concluding reply.

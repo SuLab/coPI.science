@@ -24,6 +24,7 @@ from src.models import (
     AgentRegistry,
     AssessmentDrop,
     AssessmentReviewAssignment,
+    HubDecline,
     Job,
     OpportunityAssessment,
     PiGrant,
@@ -43,6 +44,7 @@ from src.services.assessment_detail import (
     panel_state,
     unvetted_panel_filter,
 )
+from src.services.assessment_headline import decline_reason
 from src.services.assessment_reviews import EMPTY_REVIEW_COLUMNS, review_columns_for
 from src.services.blackbird_rubric import (
     BANDING,
@@ -566,9 +568,17 @@ async def _filtered_assessment_query(
         lab_options_query = lab_options_query.where(
             OpportunityAssessment.simulation_run_id == selected_run_id
         )
-    lab_options = sorted(
-        {row[0] for row in await db.execute(lab_options_query.distinct())}
-    )
+    lab_ids = {row[0] for row in await db.execute(lab_options_query.distinct())}
+    if assignee_user_id is None:
+        # A lab whose only record in the scope is a hub decline is still selectable.
+        # Declines have no assignments, so an assignee-scoped page leaves them out.
+        lab_ids |= set((await db.execute(
+            select(HubDecline.subject_agent_id).where(
+                HubDecline.subject_agent_id.is_not(None),
+                *_run_scope(HubDecline.simulation_run_id, selected_run_id, show_all_runs),
+            ).distinct()
+        )).scalars())
+    lab_options = sorted(lab_ids)
     lab_filter = lab if lab in lab_options else None
     if lab_filter:
         query = query.where(OpportunityAssessment.subject_agent_id == lab_filter)
@@ -781,6 +791,48 @@ async def _drop_counts(
     return list(drops_result.all())
 
 
+async def _declines(
+    db: AsyncSession,
+    selected_run_id: uuid.UUID | str | None,
+    show_all_runs: bool,
+    lab_filter: str | None,
+) -> list[dict[str, Any]]:
+    """The hub declines that carried no assessment, newest first, under the page's run
+    selection and its APPLIED ``lab_filter`` (a ``subject_agent_id``, as for the
+    assessment rows). ``pi_label`` and ``pi_user_id`` resolve the lab the way the
+    rows' Lab cell does: the ``subject_agent_id``, linked only when a live roster entry
+    has a linked user."""
+    query = select(HubDecline).where(
+        *_run_scope(HubDecline.simulation_run_id, selected_run_id, show_all_runs)
+    )
+    if lab_filter:
+        query = query.where(HubDecline.subject_agent_id == lab_filter)
+    rows = (
+        await db.execute(query.order_by(HubDecline.created_at.desc(), HubDecline.id))
+    ).scalars().all()
+    subject_ids = {r.subject_agent_id for r in rows if r.subject_agent_id}
+    pi_user_ids: dict[str, str] = {}
+    if subject_ids:
+        registry = (await db.execute(
+            select(AgentRegistry.agent_id, AgentRegistry.user_id)
+            .where(AgentRegistry.agent_id.in_(subject_ids))
+        )).all()
+        pi_user_ids = {r.agent_id: str(r.user_id) for r in registry if r.user_id is not None}
+    return [
+        {
+            "pi_label": r.subject_agent_id or "—",
+            "pi_user_id": pi_user_ids.get(r.subject_agent_id or ""),
+            "subject_agent_id": r.subject_agent_id,
+            "channel_name": r.channel_name,
+            "created_at": r.created_at,
+            "reason": decline_reason(r.reason_text),
+            "reason_text": r.reason_text,
+            "headline_posted": r.summary_posted_at is not None,
+        }
+        for r in rows
+    ]
+
+
 async def list_assessments(
     db: AsyncSession,
     run_id: str | None,
@@ -834,6 +886,10 @@ async def list_assessments(
     (all stored rows, across assignments). Like ``sort`` and ``lab``, ``review``
     is unvalidated query-string
     input and falls back to ``ASSESSMENT_REVIEW_DEFAULT`` silently.
+
+    ``declines`` lists the run's hub declines that carried no assessment
+    (``HubDecline``), newest first, narrowed by the applied ``lab`` filter only;
+    ``sort``, ``review`` and ``assignee_user_id`` do not apply to them.
     """
     runs = await runs_ordered(db)
 
@@ -905,6 +961,14 @@ async def list_assessments(
     drop_counts = await _drop_counts(db, selected_run_id, show_all_runs)
     drops_total = sum(n for _, n in drop_counts)
 
+    # Declines have no assignments and no reviews: never on an assignee-scoped page or
+    # the "reviewed" tab.
+    declines = (
+        await _declines(db, selected_run_id, show_all_runs, lab_filter)
+        if assignee_user_id is None and review_key != "reviewed"
+        else []
+    )
+
     return {
         "assessments": assessments,
         # (The per-row score chips, and the rubric_weights / row_scales keys
@@ -956,6 +1020,9 @@ async def list_assessments(
         "band_counts": band_counts,
         "assessment_counts_by_run": assessment_counts_by_run,
         "off_rubric_count": off_rubric_count,
+        # Hub declines with no assessment, under the same run and lab filter; the
+        # sort and review filters do not apply to them.
+        "declines": declines,
     }
 
 

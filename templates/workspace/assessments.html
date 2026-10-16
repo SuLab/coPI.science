@@ -35,4 +35,28 @@
 {% macro pi_link(a) %}{% if a.subject_agent_id and pi_user_ids.get(a.subject_agent_id) %}<a class="underline text-indigo-600 hover:text-indigo-800" href="{{ page_url(request, 'workspace_pi_detail', user_id=pi_user_ids[a.subject_agent_id]) }}">{{ a.subject_agent_id }}</a>{% else %}{{ a.subject_agent_id or "—" }}{% endif %}{% endmacro %}
 {% set list_surface = 'workspace-list' %}
 {% include "assessments/_body.html" %}
+{# Hub declines that carried no assessment: same run and lab filter as the list
+   above, never the sort or review tab. The closing reply is the hub's own text,
+   autoescaped and shown with its line breaks; never mark it safe. #}
+{% if declines %}
+<section id="declined" class="mt-8" aria-labelledby="declined-heading">
+    <h2 id="declined-heading" class="text-lg font-semibold text-gray-800 mb-4">Declined without an assessment</h2>
+    <div class="space-y-4">
+        {% for d in declines %}
+        <div class="assessment-decline bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+            <div class="text-xs text-gray-500">
+                Lab: <span class="font-medium text-gray-700">{% if d.pi_user_id %}<a class="underline text-indigo-600 hover:text-indigo-800" href="{{ page_url(request, 'workspace_pi_detail', user_id=d.pi_user_id) }}">{{ d.pi_label }}</a>{% else %}{{ d.pi_label }}{% endif %}</span>
+                &middot; #{{ d.channel_name }}
+                &middot; {{ d.created_at | ts }}
+            </div>
+            <div class="mt-1 text-sm text-gray-700">{{ d.reason or "—" }}</div>
+            <details class="mt-3 border-t border-gray-100 pt-3">
+                <summary class="cursor-pointer text-sm font-medium text-gray-700">Hub's closing reply</summary>
+                <div class="mt-2 text-sm text-gray-800 whitespace-pre-wrap">{{ d.reason_text }}</div>
+            </details>
+        </div>
+        {% endfor %}
+    </div>
+</section>
+{% endif %}
 {% endblock %}

@@ -8,6 +8,8 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 import anthropic
+from sqlalchemy import exists, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from src.agent.agent import Agent
 from src.agent.claim_check import feedback_text
@@ -15,12 +17,19 @@ from src.agent.engine import deps
 from src.agent.engine.constants import ABANDONED_OUTCOME, TRUNCATION_NOTICE
 from src.agent.engine.context import EngineContext, RunState, via
 from src.agent.engine.helpers import _thread_phase_label, _was_truncated
-from src.agent.engine.sidecar import _extract_slack_message, _reply_closes_thread
+from src.agent.engine.sidecar import (
+    _ASSESSMENT_UNCLOSED_RE,
+    _extract_slack_message,
+    _reply_closes_thread,
+    _strip_assessment_sidecar,
+)
 from src.agent.role_capabilities import capabilities_for, hub_role_names
 from src.agent.state import ThreadState
 from src.agent.thread_guidance import phase4_guidance
 from src.agent.tools import execute_tool, live_profile_ids, tools_for_role
+from src.models import HubDecline, OpportunityAssessment
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE
+from src.models.hub_decline import REASON_MAX_CHARS
 
 if TYPE_CHECKING:
     from src.agent.engine.channel_directory import ChannelDirectory
@@ -75,6 +84,8 @@ class ReplyLane:
     _thread_locks = via("ctx", "thread_locks")
     agents = via("ctx")
     message_log = via("ctx")
+    session_factory = via("ctx")
+    simulation_run_id = via("ctx")
     _running = via("_run_state", "running")
     _channel_id_map = via("_channel_directory")
     _channel_visibility = via("_channel_directory")
@@ -92,6 +103,9 @@ class ReplyLane:
     _capture_hub_assessment = via("_verdicts")
     _record_assessment_drop = via("_verdicts")
     _warn_if_hub_conclude_missing_assessment = via("_verdicts")
+    # The headline unit, reached through Verdicts (which holds it) because the
+    # orchestrator does not hand it to this lane; used only to announce a hub decline.
+    _headlines = via("_verdicts")
 
     OWNED_STATE: tuple[str, ...] = ("_reply_in_flight", "_reply_sem")
 
@@ -1126,16 +1140,31 @@ class ReplyLane:
                     ),
                 )
 
-        # Check for thread outcome
-        await self._check_thread_outcome(agent, thread, response_text)
+        # Check for thread outcome. `posted` is the reply's canonical id: a hub
+        # decline records the Slack ts behind it. A reply that carried a sidecar
+        # (well-formed or not) is never a decline, even when its capture failed:
+        # the drop or the stored row is that interview's record.
+        await self._check_thread_outcome(
+            agent, thread, response_text, posted_ts=posted,
+            carried_sidecar=bool(_ASSESSMENT_UNCLOSED_RE.search(raw_response or "")),
+        )
 
     async def _check_thread_outcome(
         self,
         agent: Agent,
         thread: ThreadState,
         latest_reply: str,
+        *,
+        posted_ts: str | None = None,
+        carried_sidecar: bool = False,
     ) -> None:
         """Check if a thread should be closed based on the latest reply.
+
+        ``posted_ts`` is the canonical id `_post_message` returned for
+        ``latest_reply``; None from a caller that posted nothing (a test). A hub ⏸️
+        close of an interview with no assessment, whose reply carried no sidecar
+        (``carried_sidecar``) and whose other party is a lab, is recorded and
+        announced (`_record_hub_decline`) before the thread closes.
 
         The ✅-confirms-:memo: proposal handshake that used to live here was
         retired by the pitch-only reconciliation (there is no bilateral
@@ -1165,11 +1194,16 @@ class ReplyLane:
             # A hub ⏸️ decline is NOT this case: `phase4-thread-reply.md`'s
             # Outcome 2 is explicitly "close gracefully, emit no sidecar", and
             # most interviews are meant to end there. Only a close that leaves no
-            # verdict AND was not the hub's own decline is anomalous.
+            # verdict AND was not the hub's own decline is anomalous. The hub's
+            # decline is recorded in `hub_declines` and announced instead (owner
+            # decision 2026-10-16), so it appears on the Assessments page and in
+            # #assessments-summary.
             caps = capabilities_for(agent.role)
-            if not (caps is not None and caps.captures_verdicts) and (
-                thread.thread_id not in self._assessed_threads
-            ):
+            is_hub = caps is not None and caps.captures_verdicts
+            if is_hub and thread.thread_id not in self._assessed_threads:
+                if not carried_sidecar and self._other_party_is_a_lab(thread):
+                    await self._record_hub_decline(agent, thread, latest_reply, posted_ts)
+            elif not is_hub and thread.thread_id not in self._assessed_threads:
                 await self._record_assessment_drop(
                     agent.agent_id,
                     "closed_before_verdict",
@@ -1183,4 +1217,93 @@ class ReplyLane:
                 )
             await self._close_thread(
                 agent, thread, "no_proposal", closed_by_role=agent.role,
+            )
+
+    def _other_party_is_a_lab(self, thread: ThreadState) -> bool:
+        """Whether the hub's counterparty is a lab: a known agent of another role (a
+        second hub, a grant bot) is not, so its thread records no decline. An agent no
+        longer on the roster counts as a lab: only labs pitch the hub."""
+        other = self.agents.get(thread.other_agent_id) if thread.other_agent_id else None
+        return other is None or other.role == "pi_lab"
+
+    async def _record_hub_decline(
+        self, agent: Agent, thread: ThreadState, latest_reply: str, posted_ts: str | None,
+    ) -> None:
+        """Record a hub ⏸️ close that left no assessment as one ``hub_declines`` row,
+        then post its #assessments-summary headline (`Headlines.announce_hub_decline`).
+
+        ``reason_text`` is the reply as posted to Slack (the logged entry of
+        ``posted_ts``, sidecar already stripped; else ``latest_reply`` stripped the
+        same way), clipped to ``REASON_MAX_CHARS``; ``slack_ts`` is that entry's
+        Slack ts, NULL when the reply was not mirrored. The insert is ``ON CONFLICT
+        (simulation_run_id, thread_id) DO NOTHING``: a second close of the same
+        interview writes and announces nothing.
+
+        Skipped without a session factory or run id, where the headline still posts,
+        unclaimed, as an assessment headline does on a DB-less engine. Best-effort
+        like the assessment write: a failure, an ``UndefinedTable`` on a schema
+        before migration 0071 included, logs one WARNING and posts nothing. Never
+        raises.
+        """
+        try:
+            entry = self.message_log.get_entry(posted_ts) if posted_ts else None
+            slack_ts = entry.slack_ts if entry is not None else None
+            text = entry.content if entry is not None and entry.content else None
+            if text is None:
+                text = _strip_assessment_sidecar(latest_reply).strip()
+            reason_text = text[:REASON_MAX_CHARS]
+            decline_id = None
+            if self.session_factory and self.simulation_run_id:
+                async with self.session_factory() as db:
+                    assessed = await db.scalar(select(exists().where(
+                        OpportunityAssessment.simulation_run_id == self.simulation_run_id,
+                        OpportunityAssessment.thread_id == thread.thread_id,
+                    )))
+                    if assessed:
+                        logger.info(
+                            "[%s] Thread %s has a stored assessment; its ⏸️ close is "
+                            "not a decline", agent.agent_id, thread.thread_id,
+                        )
+                        return
+                    decline_id = (await db.execute(
+                        pg_insert(HubDecline)
+                        .values(
+                            simulation_run_id=self.simulation_run_id,
+                            agent_id=agent.agent_id,
+                            subject_agent_id=thread.other_agent_id or None,
+                            channel_name=thread.channel,
+                            thread_id=thread.thread_id,
+                            slack_ts=slack_ts,
+                            reason_text=reason_text,
+                        )
+                        .on_conflict_do_nothing(
+                            index_elements=["simulation_run_id", "thread_id"],
+                        )
+                        .returning(HubDecline.id)
+                    )).scalar_one_or_none()
+                    await db.commit()
+                if decline_id is None:
+                    logger.info(
+                        "[%s] Thread %s: the hub decline is already recorded; "
+                        "nothing more is written or announced",
+                        agent.agent_id, thread.thread_id,
+                    )
+                    return
+        except Exception as exc:  # noqa: BLE001 — never lose a posted reply over this
+            logger.warning(
+                "[%s] Could not record the hub decline of thread %s (no "
+                "#assessments-summary headline is posted for it): %s",
+                agent.agent_id, thread.thread_id, exc,
+            )
+            return
+        try:
+            await self._headlines.announce_hub_decline(
+                agent, thread, decline_id=decline_id,
+                reason_text=reason_text, slack_ts=slack_ts,
+            )
+        except Exception as exc:  # noqa: BLE001 — never lose a posted reply over this
+            logger.warning(
+                "[%s] Recorded the hub decline of thread %s but could not announce "
+                "it: %s — the shutdown sweep or %s can still post it",
+                agent.agent_id, thread.thread_id, exc, "scripts/backfill_hub_declines.py",
             )

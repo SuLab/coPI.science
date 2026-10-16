@@ -275,3 +275,105 @@ def render_assessment_headline(
         f":mag: {pi_label} — {project_text} → *{display}*{score_part}{link_part}"
         f"{pitch_part}"
     )
+
+
+#: The most of a hub decline's reason a decline headline shows (owner decision
+#: 2026-10-16: "⏸️ Declined, no assessment — <lab>: <the hub's stated reason>").
+DECLINE_REASON_DISPLAY_CHARS = 300
+
+_DECLINE_MARKER = re.compile(r"^\s*(?:⏸️|⏸|:double_vertical_bar:|:pause_button:)\s*")
+_FIRST_SENTENCE_END = re.compile(r"(?<=[.!?])\s")
+
+#: A gate's status: "not met" (also "not yet met", "not been met", "unmet"),
+#: "unconfirmed" or "met".
+_GATE_STATUS = r"(not (?:yet |been )?met|unmet|unconfirmed|met)"
+_STATUS_AFTER = re.compile(
+    r"\W*(?:gate |criterion )?(?:is |was |remains |stays |has |as )?" + _GATE_STATUS + r"\b"
+)
+_STATUS_BEFORE = re.compile(r"\b" + _GATE_STATUS + r"\W*$")
+#: A clause ends at one of these: the window a gate's status is read from.
+_CLAUSE_END = re.compile(r"[;.\n]")
+
+
+def _gate_text(text: str) -> str:
+    """``text`` for gate matching: no markdown emphasis, casefolded, spaces and tabs
+    collapsed (newlines kept, they end a clause), and no spaces around a slash
+    ("Life-sciences / biomedical")."""
+    plain = re.sub(r"[*_`]", "", text).casefold()
+    plain = re.sub(r"[ \t]+", " ", plain)
+    return re.sub(r" ?/ ?", "/", plain)
+
+
+def _normal_status(raw: str) -> str:
+    return "not met" if raw.startswith("not") or raw == "unmet" else raw
+
+
+def _gate_statuses(reply: str) -> dict[str, str]:
+    """``{gate title: "not met" | "unconfirmed"}`` for each rubric gate the reply names
+    with a status in the same clause: right after the title ("credible science **met**",
+    "translational potential: unconfirmed") or right before it ("not met: life-sciences
+    / biomedical"). The window stops at ``;``, ``.``, a newline or another gate's title,
+    so one clause's status never lends itself to the next gate. The first mention with
+    a status decides; a gate named as met, or not named, is absent."""
+    from src.services.blackbird_rubric import load_rubric
+
+    text = _gate_text(reply)
+    titles = {gate["title"]: _gate_text(gate["title"]) for gate in load_rubric().gating.values()}
+    found: dict[str, str] = {}
+    for title, needle in titles.items():
+        for match in re.finditer(re.escape(needle), text):
+            after = text[match.end():]
+            stops = [m.start() for m in (_CLAUSE_END.search(after),) if m]
+            stops += [after.find(other) for other in titles.values() if other != needle]
+            stop = min([p for p in stops if p >= 0] or [len(after)])
+            status = _STATUS_AFTER.match(after[:stop])
+            if status is None:
+                before = text[:match.start()]
+                start = max(before.rfind(c) for c in ";.\n") + 1
+                status = _STATUS_BEFORE.search(before[start:])
+            if status is not None:
+                normal = _normal_status(status.group(1))
+                if normal != "met":
+                    found[title] = normal
+                break
+    return found
+
+
+def decline_reason(reason_text: object) -> str | None:
+    """The hub's stated reason for a decline, at most ``DECLINE_REASON_DISPLAY_CHARS``;
+    None for a non-string or an empty reply.
+
+    The hub's ⏸️ instruction is to say "which gating criterion fails, or what evidence
+    is missing", so when the reply names rubric gates as not met or unconfirmed the
+    reason is those gates ("Not met: Life-sciences / biomedical; unconfirmed:
+    Translational potential."). Otherwise it is the first sentence of the reply's first
+    paragraph, without the leading ⏸️.
+
+    The closing reply is already public in the interview thread, so this publishes
+    nothing new, and it never reads a sidecar (a decline has none). It widens the
+    content policy above, signed off by the owner on 2026-10-16 for decline headlines
+    only."""
+    if not isinstance(reason_text, str):
+        return None
+    statuses = _gate_statuses(reason_text)
+    if statuses:
+        parts = [
+            f"{label}: " + ", ".join(t for t, s in statuses.items() if s == label)
+            for label in ("not met", "unconfirmed")
+            if label in statuses.values()
+        ]
+        joined = "; ".join(parts)
+        return _clip(joined[0].upper() + joined[1:] + ".", DECLINE_REASON_DISPLAY_CHARS)
+    paragraph = _DECLINE_MARKER.sub("", reason_text).strip().split("\n\n", 1)[0]
+    sentence = _FIRST_SENTENCE_END.split(" ".join(paragraph.split()), maxsplit=1)[0].strip()
+    return _clip(sentence, DECLINE_REASON_DISPLAY_CHARS)
+
+
+def render_decline_headline(*, pi_label: str, reason: str | None, permalink: str | None) -> str:
+    """The complete Slack text for one hub decline that carried no assessment:
+    ``⏸️ <PI> — declined without an assessment. <reason> — <permalink|View interview>``.
+    ``reason`` is ``decline_reason``'s output; the reason segment is omitted when None.
+    ``pi_label`` is used as is: ``AgentSlackClient`` escapes the whole headline on the wire."""
+    reason_part = f". {reason}" if reason else ""
+    link_part = f" — <{permalink}|View interview>" if permalink else " (link unavailable)"
+    return f"⏸️ {pi_label} — declined without an assessment{reason_part}{link_part}"

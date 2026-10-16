@@ -16,7 +16,7 @@ What follows --target and what does not:
     or the comparison FAILs; a snapshot ``target`` other than --target only WARNs.
   * The pinned table/column/index/constraint expectations (EXPECTED_TABLES,
     EXPECTED_COLUMNS, EXPECTED_INDEXES, EXPECTED_CONSTRAINTS) describe the 0019-0023
-    chain and the 0056, 0062, 0065, 0068, 0069 and 0070 objects only (VERIFIED_REVISIONS), whatever the target.
+    chain and the 0056, 0062, 0065, 0068, 0069, 0070 and 0071 objects only (VERIFIED_REVISIONS), whatever the target.
 
 Exit codes (contract):
 
@@ -161,20 +161,33 @@ EXPECTED_COLUMNS: tuple[tuple[str, str, str, bool, str | None], ...] = (
     ("authorship_claim_checks", "reasons", "jsonb", False, "'[]'::jsonb"),
     ("authorship_claim_checks", "excerpt", "text", False, ""),
     ("authorship_claim_checks", "created_at", "timestamp with time zone", False, "now()"),
+    # 0071 — hub_declines (owner decision 2026-10-16). The migration writes no row; past
+    # declines are recorded by scripts/backfill_hub_declines.py, run by an operator.
+    ("hub_declines", "id", "uuid", False, None),
+    ("hub_declines", "simulation_run_id", "uuid", False, ""),
+    ("hub_declines", "agent_id", "character varying", False, ""),
+    ("hub_declines", "subject_agent_id", "character varying", True, ""),
+    ("hub_declines", "channel_name", "character varying", False, ""),
+    ("hub_declines", "thread_id", "character varying", False, ""),
+    ("hub_declines", "slack_ts", "character varying", True, ""),
+    ("hub_declines", "reason_text", "text", False, ""),
+    ("hub_declines", "created_at", "timestamp with time zone", False, "now()"),
+    ("hub_declines", "summary_claimed_at", "timestamp with time zone", True, ""),
+    ("hub_declines", "summary_posted_at", "timestamp with time zone", True, ""),
 )
 
 EXPECTED_TABLES = (
     "pi_dm_messages", "cohorts", "cohort_memberships", "cohort_audit_events", "rubric_documents",
-    "publication_candidates", "authorship_claim_checks",
+    "publication_candidates", "authorship_claim_checks", "hub_declines",
 )
 
 #: Revisions this script's EXPECTED_TABLES/EXPECTED_COLUMNS/EXPECTED_INDEXES below
-#: actually verify. Pinned: 0019-0023, 0056, 0062, 0065, 0068, 0069 and 0070. Not pinned (documented omission):
+#: actually verify. Pinned: 0019-0023, 0056, 0062, 0065, 0068, 0069, 0070 and 0071. Not pinned (documented omission):
 #: the 0024-0055, 0057-0061, 0063-0064 and 0066-0067 objects, which preflight's PLANNED_OBJECTS collision check and
 #: tests/integration/test_model_migration_parity.py cover. Bump this tuple (and add the
 #: corresponding EXPECTED_* entries) to extend the pins. The row-count and enum checks
 #: do not read it: they are scoped by revision span instead.
-VERIFIED_REVISIONS: tuple[str, ...] = ("0019", "0020", "0021", "0022", "0023", "0056", "0062", "0065", "0068", "0069", "0070")
+VERIFIED_REVISIONS: tuple[str, ...] = ("0019", "0020", "0021", "0022", "0023", "0056", "0062", "0065", "0068", "0069", "0070", "0071")
 
 #: index name -> the exact pg_indexes.indexdef tail, so a same-named index on the WRONG
 #: columns (or a partial index that lost its predicate) fails too.
@@ -217,6 +230,8 @@ EXPECTED_INDEXES: dict[str, str] = {
     # 0070.
     "ix_authorship_claim_checks_run_agent": "USING btree (simulation_run_id, agent_id)",
     "ix_authorship_claim_checks_created_at": "USING btree (created_at)",
+    # 0071: the unique constraint's backing index.
+    "uq_hub_declines_run_thread": "USING btree (simulation_run_id, thread_id)",
 }
 
 #: constraint name -> (table, pg_get_constraintdef)
@@ -256,6 +271,12 @@ EXPECTED_CONSTRAINTS: dict[str, tuple[str, str]] = {
     ),
     "authorship_claim_checks_simulation_run_id_fkey": (
         "authorship_claim_checks", "REFERENCES simulation_runs(id) ON DELETE CASCADE",
+    ),
+    # 0071.
+    "uq_hub_declines_run_thread": ("hub_declines", "UNIQUE (simulation_run_id, thread_id)"),
+    "ck_hub_declines_reason_length": ("hub_declines", "char_length(reason_text) <= 4000"),
+    "hub_declines_simulation_run_id_fkey": (
+        "hub_declines", "REFERENCES simulation_runs(id) ON DELETE CASCADE",
     ),
 }
 

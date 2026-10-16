@@ -35,6 +35,7 @@ from src.models.cohort import (
     CohortMembership,
 )
 from src.models.delegate import AgentDelegate, DelegateInvitation
+from src.models.hub_decline import HubDecline
 from src.models.email_notification import (
     EmailEngagementTracker,
     EmailNotification,
@@ -149,4 +150,5 @@ __all__ = [
     "RubricDocument",
     "HelpIntroDismissal",
     "AuthorshipClaimCheck",
+    "HubDecline",
 ]

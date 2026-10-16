@@ -279,9 +279,9 @@ def test_supported_start_revisions_are_exactly_the_documented_set():
         "0039", "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048",
         "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058",
         "0059", "0060", "0061", "0062", "0063", "0064", "0065", "0066", "0067", "0068",
-        "0069",
+        "0069", "0070",
     )
-    assert pf.DEFAULT_TARGET == "0070"
+    assert pf.DEFAULT_TARGET == "0071"
 
 
 def test_every_post_branch_revision_is_a_supported_start():
@@ -2034,3 +2034,29 @@ def test_postflight_pins_the_0069_objects():
     assert po.EXPECTED_INDEXES["ix_profile_revisions_owner_user_id"] == "USING btree (owner_user_id)"
     assert po.EXPECTED_CONSTRAINTS["fk_profile_revisions_owner_user_id_users"] == (
         "profile_revisions", "FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE")
+
+
+def test_0071_plans_its_new_objects():
+    planned = {(o.kind, o.name) for o in pf.planned_objects_between("0070", "0071")}
+    assert planned == {
+        ("table", "hub_declines"),
+        ("constraint", "uq_hub_declines_run_thread"),
+        ("constraint", "ck_hub_declines_reason_length"),
+    }
+
+
+def test_postflight_pins_the_0071_objects():
+    assert "0071" in po.VERIFIED_REVISIONS
+    assert "hub_declines" in po.EXPECTED_TABLES
+    assert ("hub_declines", "simulation_run_id", "uuid", False, "") in po.EXPECTED_COLUMNS
+    assert ("hub_declines", "reason_text", "text", False, "") in po.EXPECTED_COLUMNS
+    assert ("hub_declines", "summary_posted_at", "timestamp with time zone", True, "") in (
+        po.EXPECTED_COLUMNS)
+    assert po.EXPECTED_INDEXES["uq_hub_declines_run_thread"] == (
+        "USING btree (simulation_run_id, thread_id)")
+    assert po.EXPECTED_CONSTRAINTS["uq_hub_declines_run_thread"] == (
+        "hub_declines", "UNIQUE (simulation_run_id, thread_id)")
+    assert po.EXPECTED_CONSTRAINTS["ck_hub_declines_reason_length"] == (
+        "hub_declines", "char_length(reason_text) <= 4000")
+    assert po.EXPECTED_CONSTRAINTS["hub_declines_simulation_run_id_fkey"] == (
+        "hub_declines", "REFERENCES simulation_runs(id) ON DELETE CASCADE")

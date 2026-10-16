@@ -176,6 +176,7 @@ VIEW_FIELDS = frozenset(
         "file_status filed filings finalized_at first first_fy for form form_d_status format former "
         "founder fragment frozen funder_name funding funding_as_of funding_note funding_source_url "
         "funding_usd fundings gating gating_definitions gating_descriptions gating_rationales "
+        "declines headline_posted pi_label reason_text "
         "gating_reasons ge grant_identity grant_sections grants has_agent has_bot_token has_research_data has_older_row has_profile has_token "
         "headers held_counts hours id identity identity_evidence in in_doubt in_tenure inactive "
         "incomplete_panel_count index_elements industry industry_evidence initiated_by input_truncated "

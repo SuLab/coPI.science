@@ -1637,3 +1637,47 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > image drops the table and its rows (never downgrade first). Never reuse revision id
 > `0070`. Nothing here starts a run; no prompt-set or rubric version changed, so a resume
 > stays legitimate.
+
+> **Deploy order for `0071_hub_declines` — migrate BEFORE the new images serve; rebuild all
+> three images; then backfill the declines of finished runs.** `0071` creates `hub_declines`:
+> one row per interview the hub closed with a ⏸️ decline and no assessment (agent, lab,
+> channel, thread, the closing reply's `slack_ts`, its text as `reason_text`, and the headline
+> claim columns `summary_claimed_at` and `summary_posted_at`), `simulation_run_id` NOT NULL
+> `ON DELETE CASCADE` from `simulation_runs`, with the unique constraint
+> `uq_hub_declines_run_thread` (one row per run and thread) and the CHECK
+> `ck_hub_declines_reason_length` (`reason_text` at most 4,000 characters). Owner decision
+> 2026-10-16; detail in `docs/operations/blackbird-hub.md` ("Hub declines without an
+> assessment").
+>
+> *Old code on the new schema* is safe: nothing old reads the table. *New code on the old
+> schema* records no decline: the engine's write is best-effort and logs a WARNING per
+> decline, and the Assessments page's read raises `UndefinedTable`, so the page fails. So
+> migrate before `$DC up -d blackbird-app worker`. **Images:** all three are rebuilt: the agent
+> writes the rows and posts their headlines, the app lists them on the Assessments page and
+> runs the backfill, and the worker is built with the app. **Lock:** the foreign key takes a
+> lock on `simulation_runs`; a running engine updates its run row every 30 s
+> (`RUN_STATS_UPDATE_INTERVAL`) in short transactions, so the apply may wait briefly, and a
+> 10 s `lock_timeout` rollback is harmless: re-run it.
+>
+> Before: `SELECT version_num FROM alembic_version;` reads `0070`, and
+> `SELECT to_regclass('public.hub_declines');` is NULL. Tag the rollback images
+> `rollback-pre-0071` first. After: `$DC run --rm blackbird-app alembic current` reads
+> `0071`.
+>
+> **Backfill.** The migration writes no row. For a finished run, record its past declines
+> from a one-off container off the new image, with no engine running (every write mode holds
+> the engine lock and exits 2 while an engine has it). Preview first; `--apply` writes,
+> `--post` announces the run's owed decline headlines, which cannot be retracted. For the
+> owner's test run `e91c35df`, the owner chose both:
+>
+>     $DC run --rm blackbird-app python scripts/backfill_hub_declines.py --run <run uuid>
+>     $DC run --rm blackbird-app python scripts/backfill_hub_declines.py --run <run uuid> --apply --post
+>
+> A re-run is a no-op: a recorded decline is not selected again and a posted headline is not
+> owed. Exit 1 means a headline was `lost` or `in_doubt`; check `#assessments-summary` before
+> anything re-posts it.
+>
+> **Rollback:** first run the `rollback-pre-0071` images (the table is harmless to old code);
+> only then, if wanted, `alembic downgrade 0070` from a one-off container off the NEW image
+> drops the table and every recorded decline (**never downgrade first**: the new images would
+> then fail as above). Never reuse revision id `0071`. Nothing here starts a run.

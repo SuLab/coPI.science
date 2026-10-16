@@ -40,6 +40,11 @@ stopping, restarting).
   terminal verdict when it is stored, or through `_announce_owed_headline` when the
   interview ends another way (timeout, abandoned thread, shutdown). A provisional
   verdict is never announced mid-interview.
+- A hub ⏸️ close with no assessment is a `hub_declines` row (migration `0071`,
+  `ReplyLane._record_hub_decline`) with its own once-only headline
+  (`render_decline_headline`, `src/services/decline_claims.py`); it quotes the hub's public
+  closing reply, never a sidecar. Owner decision 2026-10-16; see
+  `docs/operations/blackbird-hub.md`.
 - `weighted_score` and `band` are computed (`src/services/blackbird_rubric.py`), never
   taken from the model. `panel_owed` is decided once at write time (`panel_is_owed`)
   and replayed by the read path, never re-derived.

@@ -1,4 +1,8 @@
-"""The #assessments-summary headline: render and post, record it durably, announce owed headlines, and the bounded shutdown sweep (spec §7.1)."""
+"""The #assessments-summary headline: render and post, record it durably, announce owed headlines, and the bounded shutdown sweep (spec §7.1).
+
+Two kinds of headline post here under one claim protocol and one shutdown cap: an
+assessment's (``opportunity_assessments``, ``headline_claims``) and, since 2026-10-16, a
+hub decline's that carried no assessment (``hub_declines``, ``decline_claims``)."""
 
 from __future__ import annotations
 
@@ -19,9 +23,13 @@ from src.agent.engine.constants import ASSESSMENTS_SUMMARY_CHANNEL
 from src.agent.engine.context import EngineContext, RunState, VerdictLedgerPort, via
 from src.agent.engine.helpers import HEADLINE_IN_DOUBT, _HeadlineInDoubt
 from src.agent.state import ThreadState
-from src.models import AgentChannel, AgentRegistry, OpportunityAssessment, SimulationRun
-from src.services import headline_claims
-from src.services.assessment_headline import render_assessment_headline
+from src.models import AgentChannel, AgentRegistry, HubDecline, OpportunityAssessment, SimulationRun
+from src.services import decline_claims, headline_claims
+from src.services.assessment_headline import (
+    decline_reason,
+    render_assessment_headline,
+    render_decline_headline,
+)
 from src.services.interview_state import ended_thread_ids
 
 if TYPE_CHECKING:
@@ -97,8 +105,24 @@ class HeadlineInputs:
     band: str | None = None
 
 
+#: The repair script for a decline headline (written separately from this module).
+DECLINE_REPAIR_SCRIPT = (
+    "scripts/backfill_hub_declines.py --run <run id> (--post; --list-in-doubt, then "
+    "--release-in-doubt <decline id>)"
+)
+
+
+def decline_report_key(thread_id: str) -> str:
+    """A decline's key in ``FinalizeReport``: ``decline:<thread_id>``, apart from the
+    assessment keys (a bare thread id or row id)."""
+    return f"decline:{thread_id}"
+
+
 @dataclass
 class FinalizeReport:
+    """Finalize run's outcome per headline: an assessment keyed by its thread id (or
+    its row id when it has none), a decline by ``decline_report_key``."""
+
     posted: list[str] = field(default_factory=list)
     lost: list[str] = field(default_factory=list)
     in_doubt: list[str] = field(default_factory=list)
@@ -140,11 +164,12 @@ class HeadlineAnnouncer:
         self._pi_label_for = pi_label_for
         self._cap = cap
 
-    async def announce(
-        self, inputs: HeadlineInputs, *, trigger: str,
-        assessment_id: uuid.UUID | None = None,
-    ) -> str:
-        client = await asyncio.to_thread(self._client_for, inputs.agent_id)
+    async def _summary_transport(
+        self, agent_id: str, thread_id: str | None,
+    ) -> tuple[Any, str] | None:
+        """``(client, summary channel id)`` for ``agent_id``'s post, resolved in a
+        worker thread; None (logged) when there is no connected client or channel."""
+        client = await asyncio.to_thread(self._client_for, agent_id)
         channel_id = (
             await asyncio.to_thread(self._summary_channel_id, client)
             if client is not None else None
@@ -153,10 +178,39 @@ class HeadlineAnnouncer:
             logger.warning(
                 "[%s] Skipping #assessments-summary headline for thread %s: "
                 "channel_id=%r, transport %s",
-                inputs.agent_id, inputs.thread_id, channel_id,
+                agent_id, thread_id, channel_id,
                 "missing" if not client else "not connected",
             )
+            return None
+        return client, channel_id
+
+    async def _permalink(
+        self, client: Any, agent_id: str, thread_id: str | None,
+        channel_name: str, slack_ts: str | None,
+    ) -> str | None:
+        """The permalink of ``slack_ts`` in ``channel_name``; None when either is
+        unknown or the lookup raised (the headline then says "link unavailable")."""
+        source = self._source_channel_id(channel_name)
+        if not (source and slack_ts):
+            return None
+        try:
+            return await client.aget_permalink(source, slack_ts)
+        except Exception:
+            logger.warning(
+                "[%s] Could not resolve a permalink for thread %s's verdict; "
+                "posting the headline without one",
+                agent_id, thread_id, exc_info=True,
+            )
+            return None
+
+    async def announce(
+        self, inputs: HeadlineInputs, *, trigger: str,
+        assessment_id: uuid.UUID | None = None,
+    ) -> str:
+        transport = await self._summary_transport(inputs.agent_id, inputs.thread_id)
+        if transport is None:
             return "lost"
+        client, channel_id = transport
         ids: list[uuid.UUID] | None = None
         if self._sf is not None and self._run_id is not None:
             async with self._sf() as db:
@@ -169,17 +223,9 @@ class HeadlineAnnouncer:
                     ids = await headline_claims.claim_thread(db, self._run_id, inputs.thread_id)
             if not ids:
                 return "skipped"
-        permalink = None
-        source = self._source_channel_id(inputs.channel_name)
-        if source and inputs.slack_ts:
-            try:
-                permalink = await client.aget_permalink(source, inputs.slack_ts)
-            except Exception:
-                logger.warning(
-                    "[%s] Could not resolve a permalink for thread %s's verdict; "
-                    "posting the headline without one",
-                    inputs.agent_id, inputs.thread_id, exc_info=True,
-                )
+        permalink = await self._permalink(
+            client, inputs.agent_id, inputs.thread_id, inputs.channel_name, inputs.slack_ts,
+        )
         text = render_assessment_headline(
             pi_label=self._pi_label_for(inputs.subject_agent_id),
             project=inputs.project,
@@ -223,11 +269,92 @@ class HeadlineAnnouncer:
                 await headline_claims.mark_posted(db, ids)
         return "posted"
 
+    async def announce_decline(self, row: HubDecline) -> str:
+        """Claim, render, post and stamp one hub decline's headline
+        (``decline_claims``), posted by ``row.agent_id``'s client. Returns the same
+        outcome strings as ``announce``. Without a session factory or run id the
+        post goes ahead unclaimed, as ``announce`` does.
+
+        Engine-free: ``scripts/backfill_hub_declines.py`` calls it on the
+        announcer ``build_finalize_announcer`` returns."""
+        transport = await self._summary_transport(row.agent_id, row.thread_id)
+        if transport is None:
+            return "lost"
+        client, channel_id = transport
+        claimed = False
+        if self._sf is not None and self._run_id is not None:
+            try:
+                async with self._sf() as db:
+                    if not await decline_claims.claim(db, row.id):
+                        return "skipped"
+            except Exception:
+                logger.exception(
+                    "[%s] Could not claim the decline headline of thread %s (decline "
+                    "%s); nothing was posted", row.agent_id, row.thread_id, row.id,
+                )
+                return "lost"
+            claimed = True
+        permalink = await self._permalink(
+            client, row.agent_id, row.thread_id, row.channel_name, row.slack_ts,
+        )
+        text = render_decline_headline(
+            pi_label=self._pi_label_for(row.subject_agent_id),
+            reason=decline_reason(row.reason_text),
+            permalink=permalink,
+        )
+        try:
+            posted = await client.apost_message(ASSESSMENTS_SUMMARY_CHANNEL, text)
+        except Exception:
+            logger.exception(
+                "[%s] IN DOUBT: the #assessments-summary decline headline for thread "
+                "%s (decline %s) hit a transport error with no Slack response. Its "
+                "claim is kept and it will not be re-posted automatically; check "
+                "Slack, then release it with %s if it is not there",
+                row.agent_id, row.thread_id, row.id, DECLINE_REPAIR_SCRIPT,
+            )
+            return "in_doubt"
+        if not posted:
+            logger.error(
+                "[%s] Slack refused the #assessments-summary decline headline for "
+                "thread %s (channel %s / %s): nothing was posted, so the claim is "
+                "released and the decline stays owed",
+                row.agent_id, row.thread_id, ASSESSMENTS_SUMMARY_CHANNEL, channel_id,
+            )
+            if claimed:
+                try:
+                    async with self._sf() as db:
+                        await decline_claims.release_claim(db, row.id)
+                except Exception:
+                    logger.exception(
+                        "[%s] Could not release the claim of decline %s; it stays "
+                        "claimed and is listed in doubt after %s",
+                        row.agent_id, row.id, DECLINE_REPAIR_SCRIPT,
+                    )
+            return "lost"
+        logger.info(
+            "[%s] Posted #assessments-summary decline headline for %s",
+            row.agent_id, row.subject_agent_id or "?",
+        )
+        if claimed:
+            try:
+                async with self._sf() as db:
+                    await decline_claims.mark_posted(db, row.id)
+            except Exception:
+                # Posted but not stamped: the claim stays, so nothing re-posts it.
+                logger.exception(
+                    "[%s] Posted the decline headline of thread %s but could not stamp "
+                    "decline %s; its claim is kept, so it is listed in doubt",
+                    row.agent_id, row.thread_id, row.id,
+                )
+                return "in_doubt"
+        return "posted"
+
     async def finalize(self) -> FinalizeReport:
         """Finalize run (B19): announce every owed headline of the run (the
-        newest row of each owed thread, then each owed NULL-thread row) up to
-        the shutdown cap, log LOST and IN DOUBT, then set ``finalized_at`` and
-        clear ``held_at`` even when some headlines could not post (SA4-04)."""
+        newest row of each owed thread, then each owed NULL-thread row, then
+        each owed hub decline) up to the shutdown cap, log LOST and IN DOUBT,
+        then set ``finalized_at`` and clear ``held_at`` even when some headlines
+        could not post (SA4-04)."""
         cap = self._cap if self._cap is not None else constants.HEADLINES_MAX_AT_SHUTDOWN
         report = FinalizeReport()
         async with self._sf() as db:
@@ -270,12 +397,42 @@ class HeadlineAnnouncer:
             elif outcome == "lost":
                 report.lost.append(key)
             # "skipped": another poster already holds or posted this thread.
-        if report.lost:
+        try:
+            async with self._sf() as db:
+                declines = await decline_claims.owed(db, self._run_id)
+        except Exception:  # noqa: BLE001 — finalized_at is set regardless (SA4-04)
+            logger.warning(
+                "Could not read the owed hub-decline headlines of run %s at Finalize "
+                "run; none were posted", self._run_id, exc_info=True,
+            )
+            declines = []
+        for index, decline in enumerate(declines, start=len(owed)):
+            key = decline_report_key(decline.thread_id)
+            if index >= cap:
+                report.lost.append(key)
+                continue
+            outcome = await self.announce_decline(decline)
+            if outcome == "posted":
+                report.posted.append(key)
+            elif outcome == "in_doubt":
+                report.in_doubt.append(key)
+            elif outcome == "lost":
+                report.lost.append(key)
+        lost_declines = [k for k in report.lost if k.startswith("decline:")]
+        lost_assessments = [k for k in report.lost if not k.startswith("decline:")]
+        if lost_assessments:
             logger.error(
                 "LOST %d #assessments-summary headline(s) at Finalize run of %s "
                 "(threads/rows: %s). The assessment rows are safe; re-post with: "
                 "python scripts/backfill_assessment_headlines.py --run %s --finalize --apply",
-                len(report.lost), self._run_id, ", ".join(report.lost), self._run_id,
+                len(lost_assessments), self._run_id, ", ".join(lost_assessments), self._run_id,
+            )
+        if lost_declines:
+            logger.error(
+                "LOST %d #assessments-summary decline headline(s) at Finalize run of "
+                "%s (%s). The hub_declines rows are safe; re-post with %s",
+                len(lost_declines), self._run_id, ", ".join(lost_declines),
+                DECLINE_REPAIR_SCRIPT,
             )
         async with self._sf() as db:
             await db.execute(
@@ -297,7 +454,9 @@ async def build_finalize_announcer(session_factory, run_id: uuid.UUID) -> Headli
     tokens resolved as the engine resolves them (DB token when valid, else the
     env token), pi labels from the registry regardless of status, and the run's
     own channel ids for permalinks. With Slack disabled every headline is LOST
-    and ``finalized_at`` is still set (SA4-04)."""
+    and ``finalized_at`` is still set (SA4-04). Also what
+    ``scripts/backfill_hub_declines.py`` posts decline headlines through
+    (``announce_decline``)."""
     from src.agent.slack_client import AgentSlackClient
     from src.services.slack_tokens import env_token, is_valid_token
 
@@ -450,10 +609,11 @@ class Headlines:
 
         Never raises: a Slack failure here must not affect anything the
         caller already did (the assessment row's persistence, or the reply
-        already posted to Slack). Two levels of that, deliberately: the
-        permalink lookup has its own inner guard so a link failure DEGRADES
-        (design D16 — "(link unavailable)", never a dropped post), while the
-        outer one is the last resort for the post itself.
+        already posted to Slack). Two levels of that, deliberately, both in
+        `_post_summary_text`, which owns the transport: the permalink lookup
+        has its own inner guard so a link failure DEGRADES (design D16 —
+        "(link unavailable)", never a dropped post), while the outer one is
+        the last resort for the post itself.
 
         Only the headline's six fields are ever rendered — PI/lab name,
         project, recommendation, band/score, permalink, and — since
@@ -469,9 +629,52 @@ class Headlines:
         widening this further to interpolate `verdict` wholesale, or to add a
         "why" line, is a content-policy change, not a formatting one.
         """
+        subject_agent_id = thread.other_agent_id
+        posted = await self._post_summary_text(
+            agent.agent_id, thread.thread_id, thread.channel, slack_ts,
+            lambda permalink: render_assessment_headline(
+                pi_label=self._subject_label(subject_agent_id),
+                project=verdict.get("company_or_project"),
+                recommendation=verdict.get("recommendation"),
+                scores=verdict.get("scores"),
+                permalink=permalink,
+                score=score,
+                band=band,
+                elevator_pitch=verdict.get("elevator_pitch"),
+            ),
+        )
+        if posted is True:
+            logger.info(
+                "[%s] Posted #assessments-summary headline for %s (%s)",
+                agent.agent_id, subject_agent_id or "?",
+                verdict.get("recommendation"),
+            )
+        return posted
+
+    def _subject_label(self, subject_agent_id: str | None) -> str:
+        """The PI label a headline names the interviewed lab by: its ``pi_name``,
+        else its agent id, else "Unknown lab"."""
+        pi = self.agents.get(subject_agent_id) if subject_agent_id else None
+        return pi.pi_name if pi else (subject_agent_id or "Unknown lab")
+
+    async def _post_summary_text(
+        self, agent_id: str, thread_id: str | None, channel_name: str,
+        slack_ts: str | None, render: Callable[[str | None], str],
+    ) -> bool | _HeadlineInDoubt:
+        """Post one headline to the assessments-summary channel through
+        ``agent_id``'s client: resolve the permalink of ``slack_ts`` in
+        ``channel_name``, call ``render(permalink)`` for the text, and post it.
+        The shared transport of an assessment headline (`_post_assessment_summary`)
+        and a hub decline's (`announce_hub_decline`); the caller claims and settles.
+
+        Returns True when the headline reached Slack, False when nothing was
+        posted (no connected client or channel, a refusal Slack answered, or any
+        other error), and the falsy ``HEADLINE_IN_DOUBT`` when the post raised with
+        no Slack response. Never raises.
+        """
         try:
             channel_id = self._assessments_summary_channel_id
-            client = self.slack_clients.get(agent.agent_id)
+            client = self.slack_clients.get(agent_id)
             # ``is_connected`` is not redundant with ``channel_id``: with Slack
             # off, ``_ensure_assessments_summary_channel`` still fills that id in
             # with a ``local:`` placeholder, and the transport is then a
@@ -490,16 +693,12 @@ class Headlines:
                 logger.warning(
                     "[%s] Skipping #assessments-summary headline for thread %s: "
                     "channel_id=%r, transport %s",
-                    agent.agent_id, thread.thread_id, channel_id,
+                    agent_id, thread_id, channel_id,
                     "missing" if not client else "not connected",
                 )
                 return False
 
-            subject_agent_id = thread.other_agent_id
-            pi = self.agents.get(subject_agent_id) if subject_agent_id else None
-            pi_label = pi.pi_name if pi else (subject_agent_id or "Unknown lab")
-
-            source_channel_id = self._channel_id_map.get(thread.channel)
+            source_channel_id = self._channel_id_map.get(channel_name)
             permalink = None
             if source_channel_id and slack_ts:
                 # Its OWN try, narrower than the whole-method one below: design
@@ -510,27 +709,18 @@ class Headlines:
                 # transport-level error — or anything `_call_with_retry` gives
                 # up on that is not a rate limit — comes straight out of it.
                 # Left in the method-wide try, such a raise would skip the
-                # `apost_message` below entirely and lose a verdict's headline
-                # over a cosmetic link.
+                # `apost_message` below entirely and lose a headline over a
+                # cosmetic link.
                 try:
                     permalink = await client.aget_permalink(source_channel_id, slack_ts)
                 except Exception:
                     logger.warning(
                         "[%s] Could not resolve a permalink for thread %s's "
                         "verdict; posting the headline without one",
-                        agent.agent_id, thread.thread_id, exc_info=True,
+                        agent_id, thread_id, exc_info=True,
                     )
 
-            text = render_assessment_headline(
-                pi_label=pi_label,
-                project=verdict.get("company_or_project"),
-                recommendation=verdict.get("recommendation"),
-                scores=verdict.get("scores"),
-                permalink=permalink,
-                score=score,
-                band=band,
-                elevator_pitch=verdict.get("elevator_pitch"),
-            )
+            text = render(permalink)
             try:
                 posted = await client.apost_message(ASSESSMENTS_SUMMARY_CHANNEL, text)
             except Exception:
@@ -542,7 +732,7 @@ class Headlines:
                 logger.exception(
                     "[%s] The #assessments-summary headline for thread %s hit a "
                     "transport error with no Slack response — IN DOUBT",
-                    agent.agent_id, thread.thread_id,
+                    agent_id, thread_id,
                 )
                 return HEADLINE_IN_DOUBT
             if not posted:
@@ -566,23 +756,19 @@ class Headlines:
                 logger.error(
                     "[%s] Slack refused the #assessments-summary headline for "
                     "thread %s (channel %s / %s) — nothing was posted, so "
-                    "`summary_posted_at` stays NULL and the verdict remains "
-                    "discoverable by the shutdown sweep and by "
-                    "scripts/backfill_assessment_headlines.py",
-                    agent.agent_id, thread.thread_id,
+                    "`summary_posted_at` stays NULL and the row remains "
+                    "discoverable by the shutdown sweep and by the repair "
+                    "scripts (backfill_assessment_headlines.py, "
+                    "backfill_hub_declines.py)",
+                    agent_id, thread_id,
                     ASSESSMENTS_SUMMARY_CHANNEL, channel_id,
                 )
                 return False
-            logger.info(
-                "[%s] Posted #assessments-summary headline for %s (%s)",
-                agent.agent_id, subject_agent_id or "?",
-                verdict.get("recommendation"),
-            )
             return True
         except Exception:
             logger.exception(
                 "[%s] Failed to post assessments-summary headline for thread %s",
-                agent.agent_id, thread.thread_id,
+                agent_id, thread_id,
             )
             return False
 
@@ -686,6 +872,97 @@ class Headlines:
             return False
         self.mark_announced(thread.thread_id)
         return outcome == "posted"
+
+    async def announce_hub_decline(
+        self, agent: Agent, thread: ThreadState, *, decline_id: uuid.UUID | None,
+        reason_text: str, slack_ts: str | None,
+    ) -> str:
+        """Claim, post and settle the headline of one hub decline that carried no
+        assessment (``hub_declines``, owner decision 2026-10-16).
+
+        ``agent`` posts it; ``thread`` gives the interview's thread id, channel and
+        lab (``other_agent_id``, named as the assessment path names it);
+        ``slack_ts`` is the closing reply's, for the permalink. Same outcomes as
+        `_post_claimed_headline`: ``"posted"``; ``"failed"`` (definitely not
+        posted, claim released); ``"in_doubt"`` (transport error, claim KEPT, the
+        thread joins ``_in_doubt_headlines``); ``"unclaimed"`` (already claimed or
+        posted elsewhere).
+
+        Without a session factory or run id the post goes ahead unclaimed, as an
+        assessment headline does on a DB-less engine. With one, ``decline_id`` must
+        name the row (``None`` posts nothing: there is no row to claim). Never
+        raises. A decline does not touch the ``_announced`` ledger, which is keyed
+        to assessments.
+        """
+        has_db = bool(self.session_factory and self.simulation_run_id)
+        if has_db:
+            if decline_id is None:
+                return "failed"
+            try:
+                async with self.session_factory() as db:
+                    claimed = await decline_claims.claim(db, decline_id)
+            except Exception as exc:  # noqa: BLE001 — a failed claim must not post
+                logger.warning(
+                    "[%s] Could not claim the #assessments-summary decline headline "
+                    "for thread %s: %s — not posting it now",
+                    agent.agent_id, thread.thread_id, exc,
+                )
+                return "failed"
+            if not claimed:
+                logger.info(
+                    "[%s] The #assessments-summary decline headline for thread %s is "
+                    "already claimed or posted elsewhere; not posting it",
+                    agent.agent_id, thread.thread_id,
+                )
+                return "unclaimed"
+        subject_agent_id = thread.other_agent_id or None
+        outcome = await self._post_summary_text(
+            agent.agent_id, thread.thread_id, thread.channel, slack_ts,
+            lambda permalink: render_decline_headline(
+                pi_label=self._subject_label(subject_agent_id),
+                reason=decline_reason(reason_text),
+                permalink=permalink,
+            ),
+        )
+        if outcome is True:
+            logger.info(
+                "[%s] Posted #assessments-summary decline headline for %s",
+                agent.agent_id, subject_agent_id or "?",
+            )
+            if has_db:
+                try:
+                    async with self.session_factory() as db:
+                        await decline_claims.mark_posted(db, decline_id)
+                except Exception as exc:  # noqa: BLE001 — the headline already posted
+                    logger.warning(
+                        "Posted the #assessments-summary decline headline for thread "
+                        "%s but could not record it on decline %s: %s. Its claim "
+                        "stays, so nothing re-posts it automatically.",
+                        thread.thread_id, decline_id, exc,
+                    )
+            return "posted"
+        if outcome is HEADLINE_IN_DOUBT:
+            self._in_doubt_headlines.append(thread.thread_id)
+            logger.error(
+                "[%s] IN DOUBT: the #assessments-summary decline headline for thread "
+                "%s (decline %s) may or may not be in the channel. Its claim is kept "
+                "and nothing re-posts it automatically. Check Slack, then release "
+                "it with %s if it did not post",
+                agent.agent_id, thread.thread_id, decline_id, DECLINE_REPAIR_SCRIPT,
+            )
+            return "in_doubt"
+        if has_db:
+            try:
+                async with self.session_factory() as db:
+                    await decline_claims.release_claim(db, decline_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Could not release the decline headline claim %s for thread %s: "
+                    "%s — it reads as IN DOUBT after 10 minutes; release it with %s "
+                    "once you have checked Slack",
+                    decline_id, thread.thread_id, exc, DECLINE_REPAIR_SCRIPT,
+                )
+        return "failed"
 
     async def _mark_summary_posted(
         self, thread_id: str | None, ids: list[uuid.UUID] | None = None,
@@ -975,7 +1252,8 @@ class Headlines:
     ) -> None:
         """Announce every owed headline at a stop, decided by the end-reason
         class (``should_announce``, trigger ``shutdown``): ``end_reason`` None
-        is the default Stop (TODAY). Never raises.
+        is the default Stop (TODAY). Owed hub-decline headlines are announced
+        under every class. Never raises.
 
         ``only`` limits the sweep to those threads: ``stop()``'s second sweep,
         for verdicts and decisions that landed only in its final flush (a
@@ -989,8 +1267,9 @@ class Headlines:
                 "#assessments-summary headline, since another engine or the repair "
                 "script may hold the lock now. The owed headlines are left for: "
                 "python scripts/backfill_assessment_headlines.py --run %s --apply "
-                "(ended interviews), or --finalize --apply to release them all",
-                self.simulation_run_id,
+                "(ended interviews), or --finalize --apply to release them all; "
+                "owed hub-decline headlines are left for %s",
+                self.simulation_run_id, DECLINE_REPAIR_SCRIPT,
             )
             return
         end_class = end_reason_class(end_reason or "operator")
@@ -1013,7 +1292,9 @@ class Headlines:
         ``stop()``; never raises (the block's own except logs), so ``stop()``
         always reaches its "Simulation stopping..." line. ``end_class`` is the
         end-reason class ``stop()`` derived (``src/agent/end_reasons.py``);
-        ``only``, when given, restricts it to those threads."""
+        ``only``, when given, restricts it to those threads. Owed hub declines
+        follow the assessment headlines within the same
+        ``HEADLINES_MAX_AT_SHUTDOWN`` bound (`_sweep_owed_declines`)."""
         # Every interview still holding an unannounced verdict is over: the run
         # is ending, so no later turn will ever conclude or supersede it. This
         # is the last chance to honour D12, and it must run AFTER the assessment
@@ -1088,9 +1369,11 @@ class Headlines:
                 )
             in_doubt_before = len(self._in_doubt_headlines)
             unclaimed_before = len(self._unclaimed_headlines)
+            queued_before = len(self._pending_headlines)
             unposted = await self._drain_pending_headlines(
                 limit=constants.HEADLINES_MAX_AT_SHUTDOWN, trigger="shutdown",
             )
+            attempted = queued_before - len(self._pending_headlines)
             in_doubt = self._in_doubt_headlines[in_doubt_before:]
             unclaimed = self._unclaimed_headlines[unclaimed_before:]
             over_budget = list(self._pending_headlines)
@@ -1151,9 +1434,95 @@ class Headlines:
                     len(held_open), self._end_reason, ", ".join(held_open),
                     self.simulation_run_id,
                 )
+            # Hub declines last, in what is left of the same bound: a decline is
+            # an ended interview, so every end-reason class announces it, HOLD
+            # included. Only the first sweep: a decline row is written when the hub
+            # closes the interview, never in a flush, so the second sweep (`only`,
+            # for rows that landed in the final flush) has none to add, and running
+            # it again would spend a second budget past the bound.
+            if only is None:
+                await self._sweep_owed_declines(
+                    budget=max(constants.HEADLINES_MAX_AT_SHUTDOWN - attempted, 0),
+                )
         except Exception:
             logger.exception(
                 "Shutdown headline sweep failed; any un-announced verdict for "
                 "this run can still be repaired with "
                 "scripts/backfill_assessment_headlines.py"
+            )
+
+    async def _sweep_owed_declines(self, *, budget: int) -> None:
+        """Announce, at shutdown, the run's owed hub-decline headlines
+        (``decline_claims.owed``, oldest first), at most ``budget`` of them: what
+        the assessment headlines left of ``HEADLINES_MAX_AT_SHUTDOWN``. Called by the
+        first shutdown sweep only (see `_sweep_owed_headlines_at_shutdown`). Every end-reason
+        class announces them: a decline is an ended interview. Logs LOST, IN DOUBT
+        and CLAIMED ELSEWHERE like the assessment sweep. Without a database there is
+        no row to announce."""
+        if not (self.session_factory and self.simulation_run_id):
+            return
+        try:
+            async with self.session_factory() as db:
+                rows = await decline_claims.owed(db, self.simulation_run_id)
+        except Exception:
+            logger.exception(
+                "Could not read which hub declines owe a #assessments-summary "
+                "headline at shutdown; none were posted. Re-post them with %s",
+                DECLINE_REPAIR_SCRIPT,
+            )
+            return
+        over_budget = [r.thread_id for r in rows[budget:]]
+        lost: list[str] = []
+        in_doubt: list[str] = []
+        unclaimed: list[str] = []
+        for row in rows[:budget]:
+            agent = self.agents.get(row.agent_id)
+            if agent is None:
+                logger.warning(
+                    "Hub decline %s (thread %s) owes a #assessments-summary headline, "
+                    "but its author %r is not on this roster",
+                    row.id, row.thread_id, row.agent_id,
+                )
+                lost.append(row.thread_id)
+                continue
+            thread = ThreadState(
+                thread_id=row.thread_id,
+                channel=row.channel_name,
+                other_agent_id=row.subject_agent_id or "",
+            )
+            outcome = await self.announce_hub_decline(
+                agent, thread, decline_id=row.id,
+                reason_text=row.reason_text, slack_ts=row.slack_ts,
+            )
+            if outcome == "failed":
+                lost.append(row.thread_id)
+            elif outcome == "in_doubt":
+                in_doubt.append(row.thread_id)
+            elif outcome == "unclaimed":
+                unclaimed.append(row.thread_id)
+        if lost or over_budget:
+            logger.error(
+                "LOST %d #assessments-summary decline headline(s) at shutdown (%d "
+                "attempted and not posted: %s; %d never attempted past the "
+                "%d-headline shutdown bound: %s). The hub_declines rows are safe; "
+                "re-post with %s",
+                len(lost) + len(over_budget), len(lost), ", ".join(lost) or "none",
+                len(over_budget), constants.HEADLINES_MAX_AT_SHUTDOWN,
+                ", ".join(over_budget) or "none", DECLINE_REPAIR_SCRIPT,
+            )
+        if in_doubt:
+            logger.error(
+                "IN DOUBT %d #assessments-summary decline headline(s) at shutdown "
+                "(threads: %s): a transport error left no Slack response. Their "
+                "claims are kept and nothing re-posts them. Check the channel, then "
+                "release any that did not post with %s",
+                len(in_doubt), ", ".join(in_doubt), DECLINE_REPAIR_SCRIPT,
+            )
+        if unclaimed:
+            logger.error(
+                "CLAIMED ELSEWHERE %d #assessments-summary decline headline(s) at "
+                "shutdown (threads: %s): another holder's claim kept this sweep from "
+                "posting them. Check the channel, then release any that did not "
+                "post with %s",
+                len(unclaimed), ", ".join(unclaimed), DECLINE_REPAIR_SCRIPT,
             )

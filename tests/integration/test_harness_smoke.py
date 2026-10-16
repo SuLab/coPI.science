@@ -101,7 +101,8 @@ async def test_container_is_migrated(engine):
         # 0068 publications.excluded_reason (publication handling Phase 4)
         # 0069 profile_revisions.owner_user_id (publication handling Phase 5)
         # 0070 authorship_claim_checks (the authorship claim check)
-        assert v == "0070"
+        # 0071 hub_declines (a hub decline without an assessment)
+        assert v == "0071"
 
 
 async def test_writes_are_rolled_back_part1(db_session):
