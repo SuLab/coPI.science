@@ -1,6 +1,6 @@
 """Profile revision owner
 
-Design: the 2026-10-15 publication-handling design, C6 and §10 R5.17 (Phase 5). Additive:
+Design: the 2026-10-15 publication-handling design, C6 and §10 R5.17. Additive:
 
 - ``profile_revisions.owner_user_id`` (uuid, NULL): the user who owned the agent when the
   revision was written. Foreign key ``fk_profile_revisions_owner_user_id_users`` to

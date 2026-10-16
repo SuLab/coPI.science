@@ -187,7 +187,7 @@ def attribution_verdict(
     author list (capped at 100 in a list response) without the PI. ``"attributed"`` when the
     publisher's metadata carries the ORCID, an institution name or raw affiliation names
     Johns Hopkins, or one names an organization on the PI's ORCID record
-    (``_names_organization``); otherwise ``"unattributed"``. Phase 4's re-check excludes on
+    (``_names_organization``); otherwise ``"unattributed"``. The corpus re-check excludes on
     ``"unattributed"`` and leaves ``"unknown"`` alone (spec 2026-10-15 C4)."""
     if authorship is None:
         return "unknown"

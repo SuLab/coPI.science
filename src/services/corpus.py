@@ -10,7 +10,7 @@ and nothing else was ever asked. Stages here:
   S4  PubMed name+affiliation search (only when an institution is known)
 
 Identity gates, per the 2026-08-13 rehearsal's matcher (ported from the retired sparse-data
-seeding script) as upgraded by the 2026-10-15 publication-handling design (Phase 3): every
+seeding script) as upgraded by the 2026-10-15 publication-handling design: every
 record must carry the PI as a named INDIVIDUAL author (surname + forename discrimination:
 "R Lara Green" is not "Rachel Green"), OR as the author carrying the PI's ORCID iD whose
 surname still matches (a variant such as "Wilson, D Scott" for "Scott Wilson" is then

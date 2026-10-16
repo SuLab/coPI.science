@@ -633,7 +633,7 @@ def _authors(article: ET.Element) -> tuple[list[dict[str, Any]], bool]:
     """(authors, author_list_complete) from ``MedlineCitation/Article/AuthorList``. Every
     ``Author`` is listed and numbered, collectives and ``ValidYN="N"`` included. The list is
     complete unless it carries ``CompleteYN="N"``; with no AuthorList it is complete (C11:
-    Phase 3 keeps an anchored record whose list is incomplete, so a record with no list must
+    the corpus gate keeps an anchored record whose list is incomplete, so a record with no list must
     stay ``no_match`` rather than be stored with no author evidence)."""
     author_list = article.find("./MedlineCitation/Article/AuthorList")
     if author_list is None:

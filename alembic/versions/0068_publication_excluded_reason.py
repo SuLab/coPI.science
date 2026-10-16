@@ -1,4 +1,4 @@
-"""publications.excluded_reason: why a row is excluded (publication handling, Phase 4)
+"""publications.excluded_reason: why a row is excluded (publication handling)
 
 Design: the 2026-10-15 publication-handling design, contract C3 and R4.1.
 

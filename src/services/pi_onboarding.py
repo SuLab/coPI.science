@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 # Q21 (2026-10-15 publication-handling design): an iD must pass ORCID's ISO 7064
 # MOD 11-2 check digit, so a mistyped iD is refused before any ORCID fetch, and only a
 # well-formed iD reaches the ORCID URL path, PubMed [auid]/[Author] search terms and
-# the manager page's error redirect (audit L1).
+# the manager page's error redirect.
 def validate_orcid(orcid: str) -> str:
     """The canonical iD (``identifiers.normalize_orcid``; an orcid.org URL, a lowercase
     ``x``, hyphenless and single-spaced forms are accepted), shared by Add-PI, the Staff

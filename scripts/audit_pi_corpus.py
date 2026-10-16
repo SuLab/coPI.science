@@ -35,8 +35,8 @@ Its session is read-only and ends before any network call; it writes no file.
 inputs with the new code and applies the F6 stop rule of the 2026-10-15
 publication-handling design: more than 1% of the evaluated rows newly failing, or any PI
 whose in-use count would rise by more than 25% and more than 10 papers. Exit 0 PASS,
-2 STOP FOR OWNER REVIEW, 1 INCOMPLETE. ``--baseline`` imports only names the pre-Phase-3
-image has (tests/unit/test_audit_pi_corpus.py pins them).
+2 STOP FOR OWNER REVIEW, 1 INCOMPLETE. ``--baseline`` imports only names the image being
+replaced (before the publication-handling release) has (tests/unit/test_audit_pi_corpus.py pins them).
 """
 
 from __future__ import annotations
@@ -566,7 +566,7 @@ def _author_label(match: Any, record: dict[str, Any]) -> str:
 
 def compare_pi(base: dict[str, Any]) -> dict[str, Any]:
     """One ``audit_pi_corpus.compare/1`` line: the baseline's inputs re-judged by this code."""
-    # Compare-only: absent from the pre-Phase-3 image, where --baseline must still load.
+    # Compare-only: absent from the image being replaced, where --baseline must still load.
     from src.services.corpus import _match_pi_author_full
 
     line: dict[str, Any] = {

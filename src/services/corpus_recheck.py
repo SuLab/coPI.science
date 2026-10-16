@@ -140,7 +140,7 @@ def _recheck_pubmed_row(
     if row.provenance is not None and not _STAGE_LIST.match(row.provenance):
         return  # "unanchored" or "openalex": nothing more to relabel (F26)
     if row.pmid in gate_failed:
-        # I13: after Phase 3 a record an anchor stage returned can only be flagged
+        # I13: a record an anchor stage returned can only be flagged
         # no_individual_author_match; every other flag means it lost its anchor this run, so
         # an incomplete lookup must not turn that into an identity failure.
         if row.pmid in anchored or outcome.absence_skipped is None:

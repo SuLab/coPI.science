@@ -559,7 +559,7 @@ class SlackIO:
             )
             outcome = claim_check.outcome_of(verdict)
         except Exception:
-            # Fail open in every mode (audit defect 2): a fault in the rules or in reading
+            # Fail open in every mode: a fault in the rules or in reading
             # the mode must never stop a post, and in log mode nothing a model or Slack
             # sees may change.
             logger.warning(

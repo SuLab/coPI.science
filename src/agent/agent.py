@@ -354,7 +354,7 @@ class Agent:
         data after a one-line notice, Q17) and, when the loaded records are empty,
         ``NO_PUBLICATION_RECORDS_SECTION``, then "## Your Working Memory".
         ``trailing_newline`` adds the final ``\\n`` ``build_system_prompt`` has always
-        ended with (it used to precede the removed lab directory, spec 2026-10-05 D29).
+        ended with (it preceded the lab directory, removed by spec 2026-10-05 D29).
         A hub role has neither section (D26): Blackbird's brief for labs is served by
         ``retrieve_profile``."""
         base_prompt = self._load_prompt("agent-system.md", _default_system_prompt())

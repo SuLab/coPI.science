@@ -570,7 +570,7 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject(
         "0067", "constraint", "ck_help_intro_dismissals_via", "help_intro_dismissals"
     ),
-    # 0068_publication_excluded_reason (publication handling Phase 4, contract C3).
+    # 0068_publication_excluded_reason (publication handling, contract C3).
     PlannedObject("0068", "column", "excluded_reason", "publications"),
     PlannedObject("0068", "constraint", "ck_publications_excluded_reason", "publications"),
     # 0069_profile_revision_owner (the 2026-10-15 publication-handling design, C6).
