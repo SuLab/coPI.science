@@ -1,8 +1,9 @@
 """Adaptive pacing of bulk OpenAlex work on the free tier (spec 2026-10-05 D67).
 
-OpenAlex meters keyless use per IP and per UTC day. Every response carries the meter
+OpenAlex meters use per UTC day: per IP without a key, per key with OPENALEX_API_KEY (ten
+times the keyless budget; `openalex_auth`). Every response carries the meter
 (measured 2026-10-06): `x-ratelimit-limit`
-(1000 credits), `x-ratelimit-remaining` and `x-ratelimit-reset` (seconds to the next
+(1000 credits keyless), `x-ratelimit-remaining` and `x-ratelimit-reset` (seconds to the next
 00:00 UTC). A list request costs one credit; a singleton lookup costs none
 (`x-ratelimit-cost-usd: 0`), so reading the meter is free.
 
@@ -30,6 +31,7 @@ import httpx
 
 from src.config import get_settings
 from src.services.job_queue import JobDeferred
+from src.services.openalex_auth import openalex_headers
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +142,7 @@ def fallback_interval(credits: int) -> timedelta:
 def _make_client() -> httpx.AsyncClient:
     """Client factory: a seam so tests can inject httpx.MockTransport. Redirects are
     followed, so a merged probe work still answers with the meter."""
-    return httpx.AsyncClient(timeout=15, follow_redirects=True)
+    return httpx.AsyncClient(timeout=15, follow_redirects=True, headers=openalex_headers())
 
 
 def _seconds_to_utc_midnight(now: datetime) -> int:

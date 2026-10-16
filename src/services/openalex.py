@@ -25,6 +25,7 @@ from src.config import get_settings
 from src.services import openalex_budget
 from src.services.http_pacing import TRANSIENT_STATUSES, with_retries
 from src.services.identifiers import normalize_orcid, normalize_pmid
+from src.services.openalex_auth import openalex_headers
 from src.services.query_escaping import openalex_filter_value
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ _MAX_PAGES = 5  # 1,000 works — far past any realistic single-PI corpus
 
 def _make_client() -> httpx.AsyncClient:
     """Client factory — a seam so tests can inject httpx.MockTransport."""
-    return httpx.AsyncClient(timeout=60, follow_redirects=True)
+    return httpx.AsyncClient(timeout=60, follow_redirects=True, headers=openalex_headers())
 
 
 def _pmid_from_url(url: str | None) -> str | None:

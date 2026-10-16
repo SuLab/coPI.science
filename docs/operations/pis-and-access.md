@@ -131,8 +131,12 @@ computed when the page renders, from each PI's latest row of the current
 industry-interest score are manager-only surfaces on `/manager/pis/{id}`: each RePORTER
 grant, ORCID funding and piece of industry evidence is individually vetoable ("not this
 PI's"), and staff can pin the PI's RePORTER profile or confirm the PI has none, via the
-routes below. OpenAlex is keyless here: 1000 credits/day per IP (`x-ratelimit-limit`),
-reset at 00:00 UTC; a spent budget makes OpenAlex unavailable for that run while the other
+routes below. OpenAlex runs on this deployment's own free key (`OPENALEX_API_KEY`, sent as
+an `Authorization: Bearer` header by `src/services/openalex_auth.py`): its daily budget is ten
+times the keyless 1000 credits per IP, and `x-ratelimit-limit` reports whichever applies.
+Without a key OpenAlex serves only the first page (200 works) of a list (HTTP 401 "API key
+required for cursor paging", since October 2026), so a PI with more works fails the corpus's
+OpenAlex stage. The budget resets at 00:00 UTC; a spent budget makes OpenAlex unavailable for that run while the other
 sources still refresh. Re-run every PI through `scripts/_bulk_enqueue.py`: the worker
 reads OpenAlex's free meter (a singleton lookup costs nothing) before each BULK job that
 spends credits and defers it to 00:00 UTC once its estimate exceeds the available free

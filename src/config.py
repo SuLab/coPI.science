@@ -136,6 +136,10 @@ class Settings(BaseSettings):
     # Sent as `email=` on every E-utilities request. NCBI requires it (with `tool=`)
     # and throttles or blocks unidentified clients. Falls back to ses_sender_email.
     ncbi_contact_email: str = ""
+    # OpenAlex: this deployment's own free key (openalex.org/settings/api). Without one,
+    # OpenAlex serves only the first page of a list (200 works), so a PI with more works
+    # fails the corpus's OpenAlex stage. Sent as a Bearer header (src/services/openalex_auth.py).
+    openalex_api_key: str = ""
     # SEC EDGAR, for company discovery (spec §7.6). Sent verbatim as the User-Agent of
     # every SEC request; SEC's fair-access rules require "<Company Name> <admin email>".
     # Its contact address is also the contact in the Wikidata User-Agent. Empty = no SEC

@@ -8,11 +8,12 @@ import httpx
 from src.config import get_settings
 from src.services import openalex_budget
 from src.services.http_pacing import TRANSIENT_STATUSES, Pacer, with_retries
+from src.services.identifiers import normalize_orcid
 from src.services.industry_sources import JHU_OPENALEX_IDS, EvidenceItem, Paged
 from src.services.industry_sources.companies import classify_company
 from src.services.jhu_rules import is_hopkins_affiliation
-from src.services.identifiers import normalize_orcid
 from src.services.openalex import _NO_SUCH_WORK, _lookup_doi_ok
+from src.services.openalex_auth import openalex_headers
 from src.services.person_names import PersonName, given_names_agree, name_key, parse_person_name
 from src.services.query_escaping import openalex_filter_value
 
@@ -185,7 +186,7 @@ async def fetch_works_for_pmids(pmids: list[str]) -> Paged:
     truncated = False
     contact = getattr(get_settings(), "ncbi_contact_email", None)
     clean = [v for v in (openalex_filter_value(p) for p in pmids) if v]
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30, headers=openalex_headers()) as client:
         for i in range(0, len(clean), _PMID_CHUNK):
             params = {"filter": f"pmid:{'|'.join(clean[i:i + _PMID_CHUNK])}", "select": _SELECT,
                       "per-page": _PMID_PAGE}
@@ -215,7 +216,7 @@ async def fetch_works_for_dois(dois: list[str], *, skipped: list[str] | None = N
     params = {"select": _SELECT, **({"mailto": contact} if contact else {})}
     run_sig: tuple[str, int | str] | None = None
     run_len = 0
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=openalex_headers()) as client:
         for doi in dict.fromkeys(d.strip() for d in dois):
             if not _lookup_doi_ok(doi):
                 continue
@@ -257,7 +258,7 @@ async def company_funder_ids(funder_ids: set[str]) -> set[str]:
     contact = getattr(get_settings(), "ncbi_contact_email", None)
     mailto = {"mailto": contact} if contact else {}
     ordered = sorted(v for v in (openalex_filter_value(f) for f in funder_ids) if v)
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30, headers=openalex_headers()) as client:
         for i in range(0, len(ordered), 50):
             chunk = "|".join(ordered[i:i + 50])
             resp = await _get(client, f"{OA}/funders", {

@@ -441,7 +441,9 @@ printf '%s\n' "$out" | grep -oE 'api_key=[^&"[:space:]]*' \
   | awk '{print ($0 == "api_key=REDACTED") ? "redacted" : "LEAK"}' | sort | uniq -c   # only "N redacted"
 ```
 
-A `LEAK` line stops the rollout; the pipeline prints the word, never the value. Another deployment that shared the key is told only once all three containers run on the new key (F17). `scripts/scrub_job_error_api_keys.py` scrubs stored values: it previews by default, writes only with `--apply`, and prints counts only.
+A `LEAK` line stops the rollout; the pipeline prints the word, never the value.
+
+**The OpenAlex API key.** `OPENALEX_API_KEY` is a free key from this deployment's own OpenAlex account (openalex.org/settings/api). OpenAlex refuses keyless cursor paging past the first page, so without it every PI with more than 200 OpenAlex works fails the corpus's OpenAlex stage. Only `src/services/openalex_auth.py` reads it, and it travels as an `Authorization: Bearer` header, never in a URL. After a change, recreate `blackbird-app` and `worker`, and `agent` only with no live run (its `retrieve_abstract` falls back to OpenAlex). Another deployment that shared the key is told only once all three containers run on the new key (F17). `scripts/scrub_job_error_api_keys.py` scrubs stored values: it previews by default, writes only with `--apply`, and prints counts only.
 
 **Graceful web shutdown (LC-01, operator step, compose file stays uncommitted — D5).**
 In the working tree's `docker-compose.prod.yml`, under `blackbird-app`, add
