@@ -448,7 +448,7 @@ async def test_all_admin_methods_deny_nonadmin_effective_identity(client, db_ses
         effective = await factories.make_user(db_session, user_role=as_role) if as_role else None
         headers = auth_headers(actor.id, impersonate=effective.id if effective else None)
     routes = list(_routes(admin.router))
-    assert len(routes) == 46
+    assert len(routes) == 47  # + GET /authorship-checks (2026-10-15 design, R6.17)
     from src.services import profile_export
 
     persona_root = profile_export.PROFILES_DIR.parent
@@ -486,7 +486,7 @@ async def test_all_admin_methods_deny_nonadmin_effective_identity(client, db_ses
 
 def test_admin_route_inventory_has_no_unregistered_methods():
     routes = list(_routes(admin.router))
-    assert len(routes) == 46
+    assert len(routes) == 47  # + GET /authorship-checks (2026-10-15 design, R6.17)
     methods = {method for route in routes for method in getattr(route, "methods", ())
                if method not in {"HEAD", "OPTIONS"}}
     assert methods == {"GET", "POST"}
