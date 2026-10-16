@@ -727,6 +727,88 @@ class TestStatePruning:
         await eng._recompute_allowed_sender_ids()
         assert [p.post_id for p in su.state.interesting_posts] == ["h"]
 
+    # The producers (_scan_posts, PIHandler.handle_channel_tag) store a human
+    # author's display name in sender_agent_id — never "" — so the tests below
+    # build PostRefs the way production does and put the post in the log.
+
+    def _gated_engine(self, monkeypatch):
+        _patch(monkeypatch, cohort_isolation_enabled=True,
+               cohort_default_policy=POLICY_ISOLATED)
+        c1 = uuid.uuid4()
+        return _engine(["su", "wiseman", "cravatt"],
+                       membership_rows=[(c1, "su"), (c1, "wiseman")])
+
+    @staticmethod
+    def _logged(eng, ts, sender_agent_id, sender_name, is_bot, channel="general"):
+        eng.message_log.append(LogEntry(
+            ts=ts, channel=channel, sender_agent_id=sender_agent_id,
+            sender_name=sender_name, content="post", posted_at=float(ts), is_bot=is_bot,
+        ))
+
+    async def test_pruning_keeps_a_human_post_banked_under_its_display_name(self, monkeypatch):
+        eng = self._gated_engine(monkeypatch)
+        self._logged(eng, "5", None, "Jane Human", is_bot=False)
+        su = eng.agents["su"]
+        su.state.interesting_posts = [
+            PostRef(post_id="5", channel="general", sender_agent_id="Jane Human",
+                    content_snippet="from a human", posted_at=5.0),
+        ]
+        await eng._recompute_allowed_sender_ids()
+        assert [p.post_id for p in su.state.interesting_posts] == ["5"]
+
+    @pytest.mark.parametrize("root_author, kept", [("wiseman", True), ("cravatt", False)])
+    async def test_a_pi_tag_is_judged_by_the_thread_it_points_at(
+        self, monkeypatch, root_author, kept,
+    ):
+        eng = self._gated_engine(monkeypatch)
+        self._logged(eng, "6", root_author, f"{root_author.capitalize()}Bot", is_bot=True)
+        su = eng.agents["su"]
+        # handle_channel_tag's shape: post_id is the thread root, the sender
+        # field is the tagging PI's display name.
+        su.state.interesting_posts = [
+            PostRef(post_id="6", channel="general", sender_agent_id="Andrew Su (PI)",
+                    content_snippet="@SuBot please engage", posted_at=7.0,
+                    pi_priority=True),
+        ]
+        await eng._recompute_allowed_sender_ids()
+        assert [p.post_id for p in su.state.interesting_posts] == (["6"] if kept else [])
+
+    async def test_pruning_keeps_an_unlogged_post_banked_under_a_display_name(self, monkeypatch):
+        eng = self._gated_engine(monkeypatch)
+        su = eng.agents["su"]
+        su.state.interesting_posts = [
+            PostRef(post_id="not-in-log", channel="general", sender_agent_id="Andrew Su (PI)",
+                    content_snippet="@SuBot please engage", posted_at=7.0,
+                    pi_priority=True),
+        ]
+        await eng._recompute_allowed_sender_ids()
+        assert [p.post_id for p in su.state.interesting_posts] == ["not-in-log"]
+
+    async def test_pruning_keeps_a_private_channel_post_from_a_non_cohort_bot(self, monkeypatch):
+        eng = self._gated_engine(monkeypatch)
+        eng._channel_visibility["collab-su-cravatt"] = VISIBILITY_COLLAB_PRIVATE
+        self._logged(eng, "8", "cravatt", "CravattBot", is_bot=True,
+                     channel="collab-su-cravatt")
+        su = eng.agents["su"]
+        su.state.interesting_posts = [
+            PostRef(post_id="8", channel="collab-su-cravatt", sender_agent_id="cravatt",
+                    content_snippet="refinement", posted_at=8.0),
+        ]
+        await eng._recompute_allowed_sender_ids()
+        assert [p.post_id for p in su.state.interesting_posts] == ["8"]
+
+    async def test_pruning_judges_a_logged_post_by_its_entry_not_sender_field(self, monkeypatch):
+        eng = self._gated_engine(monkeypatch)
+        # A non-cohort bot's post whose PostRef carries a non-agent-id label.
+        self._logged(eng, "9", "cravatt", "CravattBot", is_bot=True)
+        su = eng.agents["su"]
+        su.state.interesting_posts = [
+            PostRef(post_id="9", channel="general", sender_agent_id="",
+                    content_snippet="non-mate", posted_at=9.0),
+        ]
+        await eng._recompute_allowed_sender_ids()
+        assert su.state.interesting_posts == []
+
     async def test_no_pruning_when_gate_off(self, monkeypatch):
         _patch(monkeypatch, cohort_isolation_enabled=False)
         eng = _engine(["su"], membership_rows=[])

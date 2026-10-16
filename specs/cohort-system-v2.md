@@ -331,7 +331,12 @@ Not implemented. Because the gate is a read-time filter, posts accumulated
 
 **Requirement.** On every membership resync, for each agent under an active gate,
 drop entries from `agent.state.interesting_posts` whose author is a bot not in
-`allowed_sender_ids`. Log the count at DEBUG.
+`allowed_sender_ids`. Log the count at DEBUG. The author is judged from the
+post's log entry exactly as the read-time gate judges it (humans and
+`collab_private` posts pass), never from `PostRef.sender_agent_id`, which holds a
+human author's display name. A PI-priority entry (the agent's own PI tagged it
+to engage) is judged by the post the PI pointed at, so it survives unless that
+is a non-cohort bot's thread.
 
 Under DB-primary this is not cosmetic: `_rebuild_agent_state` restores
 `interesting_posts` from the rebuilt log with no gate applied (§8), so the first

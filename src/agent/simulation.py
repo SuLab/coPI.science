@@ -37,7 +37,7 @@ from src.agent.inbound_state import (
     PI_INBOUND_PENDING,
 )
 from src.agent.mentions import BOT_TAG_RE, extract_bot_mentions
-from src.agent.message_log import LogEntry, MessageLog, is_funding_post
+from src.agent.message_log import LogEntry, MessageLog, _entry_allowed, is_funding_post
 from src.agent.prompt_safety import delimit
 from src.agent.roles import load_role
 from src.agent.slack_client import SlackListingIncomplete, ThreadNotFound
@@ -1384,8 +1384,8 @@ class SimulationEngine:
 
         True when it has at least ``unreviewed_proposal_block_count`` unreviewed
         non-funding proposals and is not in ``UNBLOCK_EXEMPT_AGENTS``. Phase 5
-        then acts only on funding and collab_private posts, and Phase 2 scans
-        only the posts that survive the block. Both read this one
+        then acts only on funding, collab_private and PI-priority posts, and
+        Phase 2 scans only the posts that survive the block. Both read this one
         predicate so they cannot disagree about who is blocked.
         """
         if agent.agent_id in UNBLOCK_EXEMPT_AGENTS:
@@ -1399,8 +1399,11 @@ class SimulationEngine:
     def _survives_unreviewed_block(self, entry: LogEntry) -> bool:
         """Whether Phase 5 can still act on this top-level post under the block.
 
-        Mirrors the bypass in ``_phase5_new_post``: funding posts and
-        collab_private posts. A private post is recognised by either its persisted visibility or the
+        Mirrors the bypass in ``_phase5_new_post`` for the posts a scan can
+        produce: funding posts and collab_private posts. (Its third member, a
+        PI-priority post, only ever comes from ``PIHandler.handle_channel_tag``
+        or a private-refinement seed, never from a scan.) A private post is
+        recognised by either its persisted visibility or the
         engine's channel map; over-including one only costs a scan, while
         missing one would stall a PI-requested refinement.
         """
@@ -1580,9 +1583,14 @@ class SimulationEngine:
             result = _extract_json(response)
             keep_ids = set(result.get("keep_post_ids", []))
 
+            # A PI-priority post is the agent's own PI asking it to engage, not
+            # a relevance call for the prune LLM to overrule — the prompt does
+            # not even mark it as one. Phase 5 drops one that can no longer be
+            # answered (_drop_unanswerable_pi_priority_posts).
             before = len(agent.state.interesting_posts)
             agent.state.interesting_posts = [
-                p for p in agent.state.interesting_posts if p.post_id in keep_ids
+                p for p in agent.state.interesting_posts
+                if p.pi_priority or p.post_id in keep_ids
             ]
             logger.info(
                 "[%s] Phase 2 prune: %d → %d",
@@ -2902,6 +2910,46 @@ class SimulationEngine:
     # Phase 5: New Post (conditional)
     # ------------------------------------------------------------------
 
+    def _drop_unanswerable_pi_priority_posts(self, agent: Agent) -> None:
+        """Remove PI-priority posts Phase 5 can never reply to.
+
+        The prune never drops a PI-priority post, so one that can no longer be
+        answered would otherwise sit in interesting_posts for good — defeating
+        the random Phase 5 skip and keeping Phase 5 running every turn. Only
+        permanent exclusions count; a thread that is merely active (Phase 4
+        owns it) or waiting on the partner's turn keeps its post.
+
+        - The thread has closed: replying would silently restart a concluded
+          thread (a PI who wants that reopens it, which clears
+          ``_closed_thread_ids``).
+        - The private channel's refinement is finalized.
+        - The agent is outside the thread's allowed set — the rule the post-LLM
+          reply check enforces, so every reply would be rejected. This is also
+          where handle_channel_tag's "thread already has two agents" post ends.
+          Not applied in a collab_private channel, which is flat.
+        """
+        def unanswerable(post: PostRef) -> bool:
+            if post.post_id in self._closed_thread_ids:
+                return True
+            if post.channel in self._finalized_private_channels:
+                return True
+            if self._channel_visibility.get(post.channel) == VISIBILITY_COLLAB_PRIVATE:
+                return False
+            allowed = self.message_log.get_thread_allowed_agents(post.post_id)
+            return bool(allowed and agent.agent_id not in allowed)
+
+        kept: list[PostRef] = []
+        for post in agent.state.interesting_posts:
+            if post.pi_priority and unanswerable(post):
+                logger.info(
+                    "[%s] Phase 5: dropping PI-priority post %s in #%s — it can "
+                    "no longer be answered",
+                    agent.agent_id, post.post_id, post.channel,
+                )
+                continue
+            kept.append(post)
+        agent.state.interesting_posts = kept
+
     async def _phase5_new_post(self, agent: Agent, phase4_thread_ids: set[str] | None = None) -> None:
         """Optionally start a new thread or reply to an interesting post."""
         settings = get_settings()
@@ -2914,6 +2962,7 @@ class SimulationEngine:
         agent.state.last_phase5_action_time = time.time()
 
         today_posts = self._count_today_posts(agent)
+        self._drop_unanswerable_pi_priority_posts(agent)
 
         # Check preconditions
         at_thread_threshold = self._non_funding_thread_count(agent) >= settings.active_thread_threshold
@@ -2939,7 +2988,7 @@ class SimulationEngine:
             is_funding = self.message_log.is_funding_thread(post.post_id)
             # Posts in collab_private channels are by definition PI-engaged
             # refinement; they must bypass the unreviewed-proposal block for
-            # the same reason funding posts do. Without this,
+            # the same reason pi_priority and funding posts do. Without this,
             # an agent with any unrelated pending proposal would silently skip
             # the handover message that migrated the conversation into the
             # private channel in the first place.
@@ -2953,12 +3002,15 @@ class SimulationEngine:
             if post.channel in self._finalized_private_channels:
                 continue
 
-            # Only funding and private-channel posts bypass regular blocking —
-            # the same set the post-LLM block check below accepts. A
-            # PI-priority post in a public channel waits for the block to
-            # lift: offering it here only bought an Opus call whose reply was
-            # then rejected, every turn until the block lifted.
-            if blocked_for_regular and not is_funding and not is_private:
+            # Funding, private-channel and PI-priority posts bypass regular
+            # blocking — the same set the post-LLM block check below accepts.
+            # A PI-priority post is the agent's own PI tagging it to engage
+            # (specs/pi-interaction.md), which neither the unreviewed-proposal
+            # block nor the active-thread threshold may override.
+            if (
+                blocked_for_regular and not is_funding and not is_private
+                and not post.pi_priority
+            ):
                 continue
 
             # Turn-taking in flat private channels: don't reply if we were
@@ -3228,8 +3280,11 @@ class SimulationEngine:
                 return
 
             # If agent is blocked, only allow bypass-eligible actions: funding
-            # replies, funding posts, or replies to a post in a collab_private
-            # channel (the PI has explicitly engaged that refinement).
+            # replies, funding posts, replies to a post in a collab_private
+            # channel (the PI has explicitly engaged that refinement), or
+            # replies to a PI-priority post this turn actually offered (the PI
+            # tagged the agent on it). Checked against available_posts, not the
+            # whole list, so a target the prompt never showed cannot pass.
             if blocked_for_regular:
                 is_funding_reply = (
                     action == "reply" and target_post_id
@@ -3244,7 +3299,17 @@ class SimulationEngine:
                         == VISIBILITY_COLLAB_PRIVATE
                     ):
                         is_private_reply = True
-                if not is_funding_reply and not is_funding_post and not is_private_reply:
+                is_pi_priority_reply = bool(
+                    action == "reply" and target_post_id
+                    and any(
+                        p.post_id == target_post_id and p.pi_priority
+                        for p in available_posts
+                    )
+                )
+                if (
+                    not is_funding_reply and not is_funding_post
+                    and not is_private_reply and not is_pi_priority_reply
+                ):
                     logger.info(
                         "[%s] Phase 5: Blocked non-funding action while proposals pending",
                         agent.agent_id,
@@ -7755,7 +7820,8 @@ class SimulationEngine:
         2. **Prune** banked ``interesting_posts`` whose author is no longer
            permitted. Read-time filtering never removes posts that were
            already accepted, so without this a membership change leaves stale posts
-           driving Phase 5 forever.
+           driving Phase 5 forever. The author is judged by
+           ``_banked_post_allowed``.
         """
         newly_grandfathered = 0
         pruned_total = 0
@@ -7800,7 +7866,7 @@ class SimulationEngine:
             if before:
                 agent.state.interesting_posts = [
                     p for p in agent.state.interesting_posts
-                    if not p.sender_agent_id or p.sender_agent_id in allowed
+                    if self._banked_post_allowed(p, allowed)
                 ]
                 dropped = before - len(agent.state.interesting_posts)
                 if dropped:
@@ -7815,6 +7881,34 @@ class SimulationEngine:
                 "[cohort] state reconciled: %d threads grandfathered, %d stale posts pruned",
                 newly_grandfathered, pruned_total,
             )
+
+    def _banked_post_allowed(self, post: PostRef, allowed: set[str]) -> bool:
+        """Whether a banked interesting post survives the cohort-gate reconcile.
+
+        - A post in a collab_private channel is kept, for the same reason
+          ``_entry_allowed`` exempts those channels.
+        - Otherwise the post's log entry is judged exactly as the read-time
+          gate (``_entry_allowed``) judges it, so a human-authored post passes.
+          For a PI-priority post that entry is the post the PI pointed at, so
+          a PI's tag survives unless it points at a non-cohort bot's thread,
+          where the partner's own gate would hide every reply anyway.
+          ``PostRef.sender_agent_id`` cannot decide this: both producers
+          (``_scan_posts``, ``PIHandler.handle_channel_tag``) store a human
+          author's display name there, because the prompts show it as the
+          author, and a display name is never in ``allowed``.
+        - A post whose entry is not in the log falls back to that field: a
+          value that names no known agent (empty, or a display name) passes as
+          human, a known agent id must be in ``allowed``.
+        """
+        if self._channel_visibility.get(post.channel) == VISIBILITY_COLLAB_PRIVATE:
+            return True
+        entry = self.message_log.get_entry(post.post_id)
+        if entry is not None:
+            return _entry_allowed(entry, allowed)
+        sender = post.sender_agent_id
+        if not sender or sender not in set(self._bot_name_to_id.values()):
+            return True
+        return sender in allowed
 
     def cohort_topology_snapshot(self) -> dict[str, Any]:
         """Serialise the gate configuration and its observed effects.

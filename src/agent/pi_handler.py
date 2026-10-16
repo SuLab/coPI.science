@@ -371,6 +371,13 @@ class PIHandler:
         target_post_id = entry.thread_ts or entry.ts
         pi_text = entry.content
 
+        # One queued post per target: a later tag on the same thread replaces
+        # the earlier one. PI-priority posts are never pruned, so stacking a
+        # copy per tag would grow interesting_posts without bound.
+        agent.state.interesting_posts = [
+            p for p in agent.state.interesting_posts if p.post_id != target_post_id
+        ]
+
         # Check if thread already has 2 agent participants
         allowed = self.message_log.get_thread_allowed_agents(target_post_id)
         if allowed and len(allowed) >= 2 and agent_id not in allowed:

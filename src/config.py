@@ -365,9 +365,10 @@ class Settings(BaseSettings):
     max_thread_messages: int = 12           # system-enforced thread close
     interesting_posts_cap: int = 20         # triggers prune
     # Phase 2 scan under the unreviewed-proposal block. Phase 5 of a blocked
-    # agent discards every post except funding and collab_private ones, so
-    # scanning (and pruning) regular posts only refilled a list it could not act
-    # on — most of the scan+prune spend in the 2026-10 usage audit. When True, a
+    # agent discards every post except funding, collab_private and PI-priority
+    # ones, and a scan never produces a PI-priority one (only a PI's tag does),
+    # so scanning (and pruning) regular posts only refilled a list it could not
+    # act on — most of the scan+prune spend in the 2026-10 usage audit. When True, a
     # blocked agent scans only posts Phase 5 can still act on; once the block
     # lifts, the regular posts it skipped are scanned once, limited to the last
     # scan_catchup_window_hours and the newest scan_catchup_max_posts of them.
