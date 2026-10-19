@@ -36,6 +36,7 @@ from src.models.cohort import (
 )
 from src.models.delegate import AgentDelegate, DelegateInvitation
 from src.models.hub_decline import HubDecline
+from src.models.interview_trajectory import InterviewTrajectory
 from src.models.email_notification import (
     EmailEngagementTracker,
     EmailNotification,
@@ -151,4 +152,5 @@ __all__ = [
     "HelpIntroDismissal",
     "AuthorshipClaimCheck",
     "HubDecline",
+    "InterviewTrajectory",
 ]

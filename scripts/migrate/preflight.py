@@ -75,7 +75,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0071"
+DEFAULT_TARGET = "0072"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -112,7 +112,7 @@ DEFAULT_TARGET = "0071"
 #: tables, no backfill), and the 0036-0062 objects enumerated in PLANNED_OBJECTS (and
 #: PLANNED_RECREATES) below, plus 0063's two nullable columns, 0064's one, 0065's
 #: index (its CHECK swap recreates an existing constraint, which the collision check must
-#: not list), 0066's table, 0067's table, 0068's column and CHECK, 0069's column, foreign key and index, 0070's table and 0071's table. 0063's ADD VALUE on
+#: not list), 0066's table, 0067's table, 0068's column and CHECK, 0069's column, foreign key and index, 0070's table, 0071's table and 0072's table, unique, CHECK and index. 0063's ADD VALUE on
 #: thread_outcome_enum enumerates nothing: adding a value to an existing type creates
 #: no object to collide with — the same reason 0058's job_type_enum ADD VALUE has no
 #: entry either.
@@ -121,7 +121,7 @@ SUPPORTED_START_REVISIONS = (
     "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040",
     "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
     "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060",
-    "0061", "0062", "0063", "0064", "0065", "0066", "0067", "0068", "0069", "0070",
+    "0061", "0062", "0063", "0064", "0065", "0066", "0067", "0068", "0069", "0070", "0071",
 )
 
 #: Tables whose row counts are snapshotted for postflight. Empty = every user table.
@@ -603,11 +603,23 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0071", "table", "hub_declines"),
     PlannedObject("0071", "constraint", "uq_hub_declines_run_thread", "hub_declines"),
     PlannedObject("0071", "constraint", "ck_hub_declines_reason_length", "hub_declines"),
+    # 0072_interview_trajectories (model-written lines for the Interviews page). Its foreign
+    # key to simulation_runs is inline and unnamed, as 0070's is.
+    PlannedObject("0072", "table", "interview_trajectories"),
+    PlannedObject(
+        "0072", "constraint", "uq_interview_trajectories_run_thread", "interview_trajectories",
+    ),
+    PlannedObject(
+        "0072", "constraint", "ck_interview_trajectories_status", "interview_trajectories",
+    ),
+    PlannedObject(
+        "0072", "index", "ix_interview_trajectories_updated", "interview_trajectories",
+    ),
 )
 
 #: What ``upgrade()`` DROPS. Kept apart from PLANNED_OBJECTS because the collision check
 #: must never treat a drop's precondition (the object exists) as a collision. 0026 is
-#: the only upgrade-time ``drop_table`` in 0019-0071.
+#: the only upgrade-time ``drop_table`` in 0019-0072.
 PLANNED_DROPS: tuple[PlannedObject, ...] = (
     PlannedObject("0026", "table", "grantbot_posted_foas"),
 )
@@ -626,7 +638,7 @@ REVISION_ORDER = (
     "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039",
     "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
     "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060",
-    "0061", "0062", "0063", "0064", "0065", "0066", "0067", "0068", "0069", "0070", "0071",
+    "0061", "0062", "0063", "0064", "0065", "0066", "0067", "0068", "0069", "0070", "0071", "0072",
 )
 
 

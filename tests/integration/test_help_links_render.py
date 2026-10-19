@@ -43,6 +43,7 @@ LINKED_PAGES: tuple[tuple[Callable[[GateWorld], str], str, bool], ...] = (
     (lambda w: "/workspace/slack-bots", "/help/managing-pis#slack-bots", True),
     (lambda w: "/workspace/staff", "/help/staff-accounts", True),
     (lambda w: "/workspace/discussions", "/help/discussions-activity#discussions", True),
+    (lambda w: "/workspace/interviews", "/help/discussions-activity#interviews", True),
     (lambda w: "/workspace/activity", "/help/discussions-activity#activity", True),
     (lambda w: f"/workspace/activity/{w.run.id}", "/help/discussions-activity#run-detail", True),
     (lambda w: "/workspace/prompt-suggestions", "/help/prompt-suggestions", True),

@@ -16,7 +16,7 @@ What follows --target and what does not:
     or the comparison FAILs; a snapshot ``target`` other than --target only WARNs.
   * The pinned table/column/index/constraint expectations (EXPECTED_TABLES,
     EXPECTED_COLUMNS, EXPECTED_INDEXES, EXPECTED_CONSTRAINTS) describe the 0019-0023
-    chain and the 0056, 0062, 0065, 0068, 0069, 0070 and 0071 objects only (VERIFIED_REVISIONS), whatever the target.
+    chain and the 0056, 0062, 0065, 0068, 0069, 0070, 0071 and 0072 objects only (VERIFIED_REVISIONS), whatever the target.
 
 Exit codes (contract):
 
@@ -174,20 +174,38 @@ EXPECTED_COLUMNS: tuple[tuple[str, str, str, bool, str | None], ...] = (
     ("hub_declines", "created_at", "timestamp with time zone", False, "now()"),
     ("hub_declines", "summary_claimed_at", "timestamp with time zone", True, ""),
     ("hub_declines", "summary_posted_at", "timestamp with time zone", True, ""),
+    # 0072 — interview_trajectories. The migration writes no row; the worker back-fills past
+    # runs under INTERVIEW_TRAJECTORIES_DAILY_USD_LIMIT.
+    ("interview_trajectories", "id", "uuid", False, None),
+    ("interview_trajectories", "simulation_run_id", "uuid", False, ""),
+    ("interview_trajectories", "thread_id", "character varying", False, ""),
+    ("interview_trajectories", "status", "character varying", False, ""),
+    ("interview_trajectories", "lines", "jsonb", True, ""),
+    ("interview_trajectories", "error_code", "character varying", True, ""),
+    ("interview_trajectories", "attempts", "integer", False, "1"),
+    ("interview_trajectories", "model", "character varying", False, ""),
+    ("interview_trajectories", "served_by_model", "character varying", True, ""),
+    ("interview_trajectories", "prompt_sha256_12", "character varying", False, ""),
+    ("interview_trajectories", "posts_sha256_12", "character varying", False, ""),
+    ("interview_trajectories", "usage_by_model", "jsonb", True, ""),
+    ("interview_trajectories", "latency_ms", "integer", True, ""),
+    ("interview_trajectories", "created_at", "timestamp with time zone", False, "now()"),
+    ("interview_trajectories", "updated_at", "timestamp with time zone", False, "now()"),
 )
 
 EXPECTED_TABLES = (
     "pi_dm_messages", "cohorts", "cohort_memberships", "cohort_audit_events", "rubric_documents",
     "publication_candidates", "authorship_claim_checks", "hub_declines",
+    "interview_trajectories",
 )
 
 #: Revisions this script's EXPECTED_TABLES/EXPECTED_COLUMNS/EXPECTED_INDEXES below
-#: actually verify. Pinned: 0019-0023, 0056, 0062, 0065, 0068, 0069, 0070 and 0071. Not pinned (documented omission):
+#: actually verify. Pinned: 0019-0023, 0056, 0062, 0065, 0068, 0069, 0070, 0071 and 0072. Not pinned (documented omission):
 #: the 0024-0055, 0057-0061, 0063-0064 and 0066-0067 objects, which preflight's PLANNED_OBJECTS collision check and
 #: tests/integration/test_model_migration_parity.py cover. Bump this tuple (and add the
 #: corresponding EXPECTED_* entries) to extend the pins. The row-count and enum checks
 #: do not read it: they are scoped by revision span instead.
-VERIFIED_REVISIONS: tuple[str, ...] = ("0019", "0020", "0021", "0022", "0023", "0056", "0062", "0065", "0068", "0069", "0070", "0071")
+VERIFIED_REVISIONS: tuple[str, ...] = ("0019", "0020", "0021", "0022", "0023", "0056", "0062", "0065", "0068", "0069", "0070", "0071", "0072")
 
 #: index name -> the exact pg_indexes.indexdef tail, so a same-named index on the WRONG
 #: columns (or a partial index that lost its predicate) fails too.
@@ -232,6 +250,9 @@ EXPECTED_INDEXES: dict[str, str] = {
     "ix_authorship_claim_checks_created_at": "USING btree (created_at)",
     # 0071: the unique constraint's backing index.
     "uq_hub_declines_run_thread": "USING btree (simulation_run_id, thread_id)",
+    # 0072: the unique constraint's backing index and the spend ceiling's index.
+    "uq_interview_trajectories_run_thread": "USING btree (simulation_run_id, thread_id)",
+    "ix_interview_trajectories_updated": "USING btree (updated_at)",
 }
 
 #: constraint name -> (table, pg_get_constraintdef)
@@ -277,6 +298,14 @@ EXPECTED_CONSTRAINTS: dict[str, tuple[str, str]] = {
     "ck_hub_declines_reason_length": ("hub_declines", "char_length(reason_text) <= 4000"),
     "hub_declines_simulation_run_id_fkey": (
         "hub_declines", "REFERENCES simulation_runs(id) ON DELETE CASCADE",
+    ),
+    # 0072.
+    "uq_interview_trajectories_run_thread": (
+        "interview_trajectories", "UNIQUE (simulation_run_id, thread_id)",
+    ),
+    "ck_interview_trajectories_status": ("interview_trajectories", "'refused'"),
+    "interview_trajectories_simulation_run_id_fkey": (
+        "interview_trajectories", "REFERENCES simulation_runs(id) ON DELETE CASCADE",
     ),
 }
 

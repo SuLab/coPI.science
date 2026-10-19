@@ -361,7 +361,7 @@ async def test_all_workspace_get_and_head_routes_follow_effective_role(client, d
     paths = (
         "/workspace", "/workspace/pis", f"/workspace/pis/{pi.id}",
         "/workspace/assessments", f"/workspace/assessments/{ids['assessment_id']}",
-        "/workspace/slack-bots", "/workspace/staff", "/workspace/discussions", "/workspace/activity",
+        "/workspace/slack-bots", "/workspace/staff", "/workspace/discussions", "/workspace/interviews", "/workspace/activity",
         f"/workspace/activity/{ids['run_id']}", "/workspace/prompt-suggestions",
         f"/workspace/prompt-suggestions/{ids['suggestion_id']}",
     )
@@ -387,6 +387,8 @@ async def test_all_workspace_get_and_head_routes_follow_effective_role(client, d
             assert response.status_code in {200, 302}, path
         head = await client.head(path, headers=headers, follow_redirects=False)
         assert head.status_code == response.status_code, path
+        if path == "/workspace/interviews":
+            continue  # no /manager alias exists for this page
         legacy = await client.get(path.replace("/workspace", "/manager", 1), headers=headers, follow_redirects=False)
         legacy_head = await client.head(path.replace("/workspace", "/manager", 1), headers=headers, follow_redirects=False)
         assert legacy_head.status_code == legacy.status_code, path

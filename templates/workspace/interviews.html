@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% from "help/_link.html" import help_link %}
+{% from "_run_bar.html" import run_bar as run_bar_macro %}
+{% block title %}Workspace — Interviews — Blackbird{% endblock %}
+{% block content %}
+{% set panel_glyph = {'blocking': '&#9940;', 'gap': '&#9888;', 'adequate': '&#9745;', 'caution': '&#9888;', 'clear': '&#10003;'} %}
+{% set panel_color = {'blocking': 'text-red-600', 'gap': 'text-amber-700', 'adequate': 'text-green-700', 'caution': 'text-amber-700', 'clear': 'text-green-700'} %}
+{% set badge_class = {'verdict': 'bg-green-100 text-green-700', 'decline': 'bg-amber-100 text-amber-700', 'timeout': 'bg-red-100 text-red-700', 'abandoned': 'bg-red-100 text-red-700', 'lab_pause': 'bg-amber-100 text-amber-700', 'closed': 'bg-gray-100 text-gray-600', 'dropped': 'bg-red-100 text-red-700', 'open': 'bg-blue-100 text-blue-700', 'ended': 'bg-gray-100 text-gray-600'} %}
+<div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 mb-6"><h1 class="text-2xl font-bold text-gray-900">Interview trajectories</h1>{{ help_link(request, effective_user, 'discussions-activity', 'interviews') }}</div>
+{% if not selected_run_id %}<p class="text-gray-600 text-sm">No simulation runs found.</p>{% else %}
+{{ run_bar_macro(page_url(request, 'workspace_interviews'), 'interviews-run-select', run_bar, selected_run_id, False, '', 'interviews', ('Runs with interviews', 'Runs with no interviews'), 'Counts are interviews with at least one reply.', []) }}
+<p class="text-sm text-gray-600 mb-1">{{ interview_total }} interviews · {{ unanswered_count }} unanswered pitches not listed</p>
+<p class="text-xs text-gray-600 mb-4">Each line is a model-written summary of one post; a line marked “first sentence” is the post's own opening.</p>
+{% for interview in interviews %}
+<details class="bg-white rounded-xl shadow-sm border border-gray-200 mb-3">
+<summary class="px-4 py-3 cursor-pointer flex flex-wrap items-center gap-x-4 gap-y-1"><span class="text-sm font-medium text-gray-900">{{ interview.lab | capitalize if interview.lab else '(unknown sender)' }}</span><span class="text-xs text-gray-600">{{ interview.started_at | ts }}</span><span class="px-2 py-0.5 rounded-full text-xs {{ badge_class.get(interview.outcome_kind, 'bg-gray-100 text-gray-600') }}">{{ interview.outcome_label }}{% if interview.band %} · {{ interview.band }}{% endif %}</span>{% if interview.assessment_id %}<a href="{{ page_url(request, 'workspace_assessment_detail', assessment_id=interview.assessment_id) }}" class="text-xs text-indigo-700 hover:underline">assessment</a>{% elif interview.decline_listed %}<a href="{{ page_url(request, 'workspace_assessments', query={'run_id': selected_run_id}, fragment='declined') }}" class="text-xs text-indigo-700 hover:underline">decline</a>{% endif %}</summary>
+<ol class="px-4 pb-3 space-y-1 list-none">
+{% for line in interview.lines %}{% if line.source == 'panel' %}<li class="thread-panel text-xs text-gray-500 whitespace-nowrap">Panel:{% for entry in line.panel %}{% if entry.reply_truncated %} <span class="panel-cut-off text-gray-600">{{ entry.domain }}&hellip;</span>{% else %} <span class="{{ panel_color.get(entry.verdict_signal, 'text-gray-600') }}">{{ entry.domain }}{{ panel_glyph.get(entry.verdict_signal, '&bull;') | safe }}</span>{% endif %}{% endfor %}</li>{% else %}<li class="text-sm text-gray-800"><span class="text-xs text-gray-600">#{{ line.n }} · {{ line.speaker }} ·</span> {{ line.text }}{% if line.source == 'first_sentence' %} <span class="text-xs text-gray-600">first sentence</span>{% endif %}</li>{% endif %}{% endfor %}
+</ol>
+</details>
+{% else %}<p class="text-gray-600 text-sm">No interviews in this run.</p>{% endfor %}
+{% endif %}
+{% endblock %}

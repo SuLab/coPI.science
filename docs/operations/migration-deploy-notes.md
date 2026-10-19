@@ -1681,3 +1681,35 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > only then, if wanted, `alembic downgrade 0070` from a one-off container off the NEW image
 > drops the table and every recorded decline (**never downgrade first**: the new images would
 > then fail as above). Never reuse revision id `0071`. Nothing here starts a run.
+
+> **Deploy order for `0072_interview_trajectories` — migrate BEFORE the new images serve;
+> rebuild `blackbird-app` and `worker`; the agent image is untouched.** `0072` creates
+> `interview_trajectories`: one row per run and interview (`thread_id`) holding the model-written
+> line for each post of the interview on the Interviews page (`lines`, keyed by the post's first
+> `agent_messages.id`), its `status` (`ready`, `failed` or `refused`), `attempts`, the model and
+> its usage ledger, with `simulation_run_id` NOT NULL `ON DELETE CASCADE` from `simulation_runs`,
+> the unique constraint `uq_interview_trajectories_run_thread` (one row per run and thread), the
+> CHECK `ck_interview_trajectories_status`, and the index `ix_interview_trajectories_updated`
+> (the daily spend ceiling sums rows updated in the last 24 hours).
+>
+> *Old code on the new schema* is safe: nothing old reads the table. *New code on the old
+> schema* fails: the worker's generator raises `UndefinedTable` into one logged error per idle
+> tick and the Interviews page's read fails. So migrate before `$DC up -d blackbird-app worker`.
+> **Images:** `blackbird-app` and `worker` are rebuilt; nothing under `src/agent/` changes.
+> **Lock:** the foreign key takes a lock on `simulation_runs`; a running engine updates its run
+> row every 30 s in short transactions, so the apply may wait briefly, and a 10 s `lock_timeout`
+> rollback is harmless: re-run it.
+>
+> Before: `SELECT version_num FROM alembic_version;` reads `0071`, and
+> `SELECT to_regclass('public.interview_trajectories');` is NULL. Tag the rollback images
+> `rollback-pre-0072` first. After: `$DC run --rm blackbird-app alembic current` reads `0072`.
+>
+> **Back-fill.** The migration writes no row and there is no script: the worker writes the
+> lines of every past run's finished interviews by itself, an interview per idle tick, under
+> `INTERVIEW_TRAJECTORIES_DAILY_USD_LIMIT`. Until a row is `ready` the page shows each post's
+> first sentence.
+>
+> **Rollback:** first run the `rollback-pre-0072` images (the table is harmless to old code);
+> only then, if wanted, `alembic downgrade 0071` from a one-off container off the NEW image
+> drops the table and every row (**never downgrade first**: the new images would then fail as
+> above). Never reuse revision id `0072`. Nothing here starts a run.

@@ -11,6 +11,7 @@ from . import (
     activity,
     assessments,
     discussions,
+    interviews,
     pi_bots,
     pi_directory,
     pi_evidence,
@@ -41,6 +42,7 @@ for feature in (
     assessments,
     activity,
     discussions,
+    interviews,
     prompt_suggestions,
     staff,
 ):

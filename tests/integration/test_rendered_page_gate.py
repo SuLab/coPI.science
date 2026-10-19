@@ -74,6 +74,7 @@ PAGES: dict[str, Callable[[GateWorld], str]] = {
     "/admin/activity": lambda w: "/admin/activity",
     "/admin/activity/{run_id}": lambda w: f"/admin/activity/{w.run.id}",
     "/workspace/activity": lambda w: "/workspace/activity",
+    "/workspace/interviews": lambda w: "/workspace/interviews",
     "/workspace/activity/{run_id}": lambda w: f"/workspace/activity/{w.run.id}",
     "/admin/activity/{run_id}/llm-calls": lambda w: f"/admin/activity/{w.run.id}/llm-calls",
     "/admin/agents": lambda w: "/admin/agents",

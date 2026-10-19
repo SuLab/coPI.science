@@ -19,6 +19,7 @@ WORKSPACE_NAVIGATION = (
     NavigationItem("slack-bots", "Slack Bots", "workspace_slack_bots", True),
     NavigationItem("staff", "Staff", "workspace_staff", True),
     NavigationItem("discussions", "Discussions", "workspace_discussions", True),
+    NavigationItem("interviews", "Interviews", "workspace_interviews", True),
     NavigationItem("activity", "Activity", "workspace_activity", True),
     NavigationItem(
         "prompt-suggestions", "Prompt Suggestions", "workspace_prompt_suggestions", True

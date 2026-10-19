@@ -279,9 +279,9 @@ def test_supported_start_revisions_are_exactly_the_documented_set():
         "0039", "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048",
         "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058",
         "0059", "0060", "0061", "0062", "0063", "0064", "0065", "0066", "0067", "0068",
-        "0069", "0070",
+        "0069", "0070", "0071",
     )
-    assert pf.DEFAULT_TARGET == "0071"
+    assert pf.DEFAULT_TARGET == "0072"
 
 
 def test_every_post_branch_revision_is_a_supported_start():
@@ -2045,6 +2045,16 @@ def test_0071_plans_its_new_objects():
     }
 
 
+def test_0072_plans_its_new_objects():
+    planned = {(o.kind, o.name) for o in pf.planned_objects_between("0071", "0072")}
+    assert planned == {
+        ("table", "interview_trajectories"),
+        ("constraint", "uq_interview_trajectories_run_thread"),
+        ("constraint", "ck_interview_trajectories_status"),
+        ("index", "ix_interview_trajectories_updated"),
+    }
+
+
 def test_postflight_pins_the_0071_objects():
     assert "0071" in po.VERIFIED_REVISIONS
     assert "hub_declines" in po.EXPECTED_TABLES
@@ -2060,3 +2070,21 @@ def test_postflight_pins_the_0071_objects():
         "hub_declines", "char_length(reason_text) <= 4000")
     assert po.EXPECTED_CONSTRAINTS["hub_declines_simulation_run_id_fkey"] == (
         "hub_declines", "REFERENCES simulation_runs(id) ON DELETE CASCADE")
+
+
+def test_postflight_pins_the_0072_objects():
+    assert "0072" in po.VERIFIED_REVISIONS
+    assert "interview_trajectories" in po.EXPECTED_TABLES
+    assert ("interview_trajectories", "simulation_run_id", "uuid", False, "") in (
+        po.EXPECTED_COLUMNS)
+    assert ("interview_trajectories", "attempts", "integer", False, "1") in po.EXPECTED_COLUMNS
+    assert ("interview_trajectories", "lines", "jsonb", True, "") in po.EXPECTED_COLUMNS
+    assert po.EXPECTED_INDEXES["uq_interview_trajectories_run_thread"] == (
+        "USING btree (simulation_run_id, thread_id)")
+    assert po.EXPECTED_INDEXES["ix_interview_trajectories_updated"] == "USING btree (updated_at)"
+    assert po.EXPECTED_CONSTRAINTS["uq_interview_trajectories_run_thread"] == (
+        "interview_trajectories", "UNIQUE (simulation_run_id, thread_id)")
+    assert po.EXPECTED_CONSTRAINTS["ck_interview_trajectories_status"] == (
+        "interview_trajectories", "'refused'")
+    assert po.EXPECTED_CONSTRAINTS["interview_trajectories_simulation_run_id_fkey"] == (
+        "interview_trajectories", "REFERENCES simulation_runs(id) ON DELETE CASCADE")
