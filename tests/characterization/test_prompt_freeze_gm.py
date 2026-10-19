@@ -59,6 +59,17 @@ hash stamps, and the new `role.toml` comment and version lines, checked line by 
 licenses no other regeneration. `test_agent_turn_gm.ambr`'s seven lab-profile blocks are
 regenerated under the same approval.
 
+A further owner-approved exception (D1 of
+docs/specs/2026-10-19-run-selector-hub-conduct-learn-default-trajectory-design.md, the
+scout_hub 1.12.0 bump and the eight specialist personas). It covers
+`test_hub_reply_final_text_truncation_retry_gm`, `test_hub_reply_forced_final_and_its_retry_gm`,
+`test_hub_reply_tool_error_and_truncated_variants_gm`,
+`test_hub_reply_with_a_gathered_consult_round_gm`,
+`test_review_bot_request_over_a_superseded_verdict_gm`, `test_run_start_marker_gm` and
+`test_specialist_consult_request_gm`, regenerated once. The `.ambr` diff must be exactly
+the prompt diff plus the scout_hub version and hash stamps, checked line by line. It
+licenses no other regeneration, and `test_agent_turn_gm.ambr` is not touched by it.
+
 An owner-approved fixture change (2026-10-15, Phase 4 integration): `test_export_via_pipeline_gm`
 seeds its stored profile with `evidence_pub_count=0`, a known zero. Under PIPE-15 a NULL stored
 count is protected, which would keep the stored text and so change what this entry pins; with a

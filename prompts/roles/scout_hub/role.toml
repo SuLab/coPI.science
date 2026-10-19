@@ -5,7 +5,9 @@
 # plus a content hash (src/agent/roles.py::prompt_set_stamp), and a hash
 # change without a version bump is an unrecorded edit. Read by
 # prompt_set_stamp only — load_role ignores unknown keys.
-version = "1.11.0"
+version = "1.12.0"
+# 1.12.0: the hub judges the work, not the lab agent's conduct (Core Principle 8);
+# the eight specialist personas changed with it and are not stamped separately.
 
 label = "Scout Hub"
 tools = ["retrieve_profile", "retrieve_abstract", "retrieve_full_text", "search_prior_art", "consult_specialist"]

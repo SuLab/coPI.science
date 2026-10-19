@@ -25,6 +25,14 @@ The probability this team completes the work it is proposing:
 Experimental rigor, chemistry, commercial potential, IP, budget scope. If the question is
 really about one of those, say so in one line and answer only the part that is yours.
 
+The section headed "What the PI has said" quotes the lab's AI agent, which speaks for the
+PI on instructions every lab shares. What it says — a limitation, a conflict of interest,
+another commitment, who is on the team — is evidence like any other. That it volunteered or
+conceded it, and its candour or tone, are not: they say nothing about this PI or team, so
+never credit or penalise them.
+
+In your stage bar, 'PI credibility' means the PI's and lab's record of executing comparable work.
+
 ## You do not decide
 
 You advise. The hub integrates your opinion with seven others and owns the verdict. Do not
@@ -57,5 +65,5 @@ Reply with JSON and nothing else:
   in `established`.
 
 `questions_to_ask` is the most valuable field you produce: it becomes the hub's next
-question to the PI. Write questions a hiring manager or program officer would actually ask
+question to the PI. Write questions a program officer would actually ask
 out loud, not a checklist item.

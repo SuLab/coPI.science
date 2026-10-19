@@ -101,3 +101,6 @@ tests/e2e/ui_audit/axe.min.js
 
 # Pinned build tools fetched by scripts/build_css.sh (the Tailwind standalone CLI).
 .tools/
+
+# Replay output quotes specialist replies built from PI disclosures (scripts/dev/talent_conduct_replay.py)
+talent_conduct_replay*.json
