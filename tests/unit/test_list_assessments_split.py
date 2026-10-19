@@ -21,4 +21,6 @@ async def test_equal(db_session, seeded_assessments, kw):  # noqa: F811
     old = await frozen_list(db_session, run_id, **kw)
     # `declines` (migration 0071) postdates the frozen copy; the seed has none.
     assert new.pop("declines") == []
+    # `run_bar` (the 2026-10-19 run bar) postdates it too; it lists every seeded run.
+    assert [entry["id"] for entry in new.pop("run_bar")] == [run.id for run in new["runs"]]
     assert new == old

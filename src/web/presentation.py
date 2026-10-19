@@ -222,6 +222,7 @@ VIEW_FIELDS = frozenset(
         "user_data user_id user_role user_submitted_texts user_total valid_user_roles value "
         "verdict_revision verdict_signal verdict_signals verified_email version vetoed_at viewer_is_staff "
         "weight weight_note wikidata worst year "
+        "run_bar is_live is_current held_at decline_listed interviews interview_total unanswered_count outcome_label outcome_kind band lines speaker panel "
     ).split()
 )
 DYNAMIC_MAP_FIELDS = frozenset(

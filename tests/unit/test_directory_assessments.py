@@ -576,6 +576,7 @@ async def test_the_view_returns_no_new_top_level_context_key(db_session):
         "assessment_counts_by_run",
         "off_rubric_count",
         "declines",
+        "run_bar",
     }
 
     # The one canonical renderer projects this unchanged business read model.

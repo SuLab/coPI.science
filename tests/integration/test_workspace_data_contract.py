@@ -77,13 +77,13 @@ async def test_assignment_precedes_cap_counts_lab_and_review_filters(client, db_
     assert all_runs['total_count'] == 4 and 'older' in all_runs['lab_options']
     html = (await client.get(f'/workspace/assessments?run_id={current.id}&assignment=mine&lab=lab-a&review=all',
                             headers=auth_headers(reviewer.id))).text
-    assert '4 stored across all labs and assignments' in html
+    assert '— 4 stored' in html
     assert 'All (2)' in html and 'Reviewed (1)' in html and 'Unreviewed (1)' in html
-    assert 'across all labs and assignments.' in html
+    assert 'Counts are stored assessments across every lab and assignment.' in html
     assert 'Tab counts follow the selected run, lab and assignment filters.' in html
     empty_html = (await client.get('/workspace/assessments?assignment=mine', headers=auth_headers(absent.id))).text
     assert 'No assessments match the current run, lab and assignment filters' in empty_html
-    assert '4 stored across all labs and assignments' in empty_html
+    assert '— 4 stored' in empty_html
     assert 'the run menu shows stored counts across all labs and assignments.' in empty_html
 
 

@@ -55,7 +55,7 @@ from src.services.blackbird_rubric import (
 from src.services.grant_sections import load_grant_sections
 from src.services.industry_score import SCORER_VERSION, IndustryView, cohort_raw, industry_view
 from src.services.rubric_revisions import RubricRevisionView, resolve_revision
-from src.services.runs import runs_ordered
+from src.services.runs import live_run_id, run_bar_entries, runs_ordered
 from src.services.tenure_scope import (
     publication_in_use,
     publication_order_by,
@@ -1019,6 +1019,9 @@ async def list_assessments(
         "dimension_stats": dimension_stats,
         "band_counts": band_counts,
         "assessment_counts_by_run": assessment_counts_by_run,
+        "run_bar": run_bar_entries(
+            runs, assessment_counts_by_run, live_id=await live_run_id(db)
+        ),
         "off_rubric_count": off_rubric_count,
         # Hub declines with no assessment, under the same run and lab filter; the
         # sort and review filters do not apply to them.
@@ -1268,15 +1271,59 @@ async def build_discussions_view(
     the agent list consider every non-poster replier, and an orphan sorts by its last
     decision.
 
+    ``run_bar`` is ``run_bar_entries`` over every run with its thread count: root posts plus
+    orphan threads (a decision whose root post is gone), the two kinds the thread list
+    shows.
+
     Stops before the router's ``if export:`` branch, and both the no-runs early return
     and the normal return yield the same keys, so a template can rely on them.
     """
     runs = await runs_ordered(db)
     selected_run_id = _select_run(runs, run_id)
 
+    # Threads per run — the run bar's count, before any filter: root posts, plus orphan
+    # threads whose decisions outlived their root post (both are rows of the thread list).
+    root_counts = dict(
+        (
+            await db.execute(
+                select(AgentMessage.simulation_run_id, func.count())
+                .where(AgentMessage.phase == "new_post", AgentMessage.thread_ts.is_(None))
+                .group_by(AgentMessage.simulation_run_id)
+            )
+        ).all()
+    )
+    root_exists = (
+        select(AgentMessage.id)
+        .where(
+            AgentMessage.simulation_run_id == ThreadDecision.simulation_run_id,
+            AgentMessage.message_ts == ThreadDecision.thread_id,
+            AgentMessage.phase == "new_post",
+            AgentMessage.thread_ts.is_(None),
+        )
+        .exists()
+    )
+    orphan_counts = dict(
+        (
+            await db.execute(
+                select(
+                    ThreadDecision.simulation_run_id,
+                    func.count(func.distinct(ThreadDecision.thread_id)),
+                )
+                .where(~root_exists)
+                .group_by(ThreadDecision.simulation_run_id)
+            )
+        ).all()
+    )
+    thread_counts = {
+        run_id: root_counts.get(run_id, 0) + orphan_counts.get(run_id, 0)
+        for run_id in set(root_counts) | set(orphan_counts)
+    }
+    run_bar = run_bar_entries(runs, thread_counts, live_id=await live_run_id(db))
+
     if not selected_run_id:
         return {
             "runs": runs,
+            "run_bar": run_bar,
             "selected_run_id": None,
             "threads": [],
             "counts": {},
@@ -1312,6 +1359,7 @@ async def build_discussions_view(
 
     return {
         "runs": runs,
+        "run_bar": run_bar,
         "selected_run_id": selected_run_id,
         "threads": listed,
         "counts": counts,

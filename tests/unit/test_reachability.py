@@ -1050,10 +1050,12 @@ def test_static_link_resolution_coverage_is_reported():
     # The 2026-10-15 publication-handling design adds two PubMed links (the withheld-papers
     # card and the manager PI page's outside-the-tenure-window list), and builds every
     # PubMed and DOI link through the `pubmed_url`/`doi_url` globals (count unchanged).
+    # The shared run bar (2026-10-19) takes its form action as a parameter, so its one
+    # `{{ action }}` is unresolvable; each page passes `page_url(...)` of itself.
     unresolvable = len(values) - len(resolvable)
-    assert unresolvable <= 64, (
+    assert unresolvable <= 65, (
         f"{unresolvable} of {len(values)} href/action values do not resolve to a "
-        "checkable local path (was 64) — the matcher probably regressed, or a new "
+        "checkable local path (was 65) — the matcher probably regressed, or a new "
         "link is built from a variable"
     )
 

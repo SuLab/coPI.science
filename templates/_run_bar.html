@@ -1,0 +1,53 @@
+{# The run bar shared by Assessments, Discussions and Interviews: the selected run's
+   summary and the Run menu, as its own GET form.
+
+   run_bar(action, select_id, entries, selected_id, all_selected, all_label, count_noun,
+           groups, note, hidden)
+   - action: the form's URL (page_url of the page itself)
+   - select_id: the select's id; its name is always run_id
+   - entries: src.services.runs.run_bar_entries(...) dicts
+   - selected_id: the selected run's id, or None
+   - all_selected: True when "All Runs" is selected
+   - all_label: "All Runs", or "" for a page with no All option
+   - count_noun: the word after each run's count ("stored", "threads", "interviews")
+   - groups: (label for runs with a count, label for runs with none)
+   - note: the one-line scope sentence under the control
+   - hidden: (name, value) pairs written as hidden inputs; repeat a name for a
+     multi-valued filter #}
+{% macro run_bar(action, select_id, entries, selected_id, all_selected, all_label, count_noun, groups, note, hidden) %}
+{% set sel = namespace(entry=none) %}
+{% for e in entries %}{% if not all_selected and selected_id is not none and (e.id | string) == (selected_id | string) %}{% set sel.entry = e %}{% endif %}{% endfor %}
+<form method="GET" action="{{ action }}" class="mb-4 rounded-xl border border-gray-200 bg-white p-4">
+    <div class="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
+        <div class="flex flex-wrap items-center gap-2 text-sm text-gray-700 min-w-0">
+            {% if all_selected %}
+            <span class="font-medium text-gray-900">All runs</span>
+            {% elif sel.entry %}
+            <span class="font-medium text-gray-900">{{ sel.entry.started_at | ts }}</span>
+            {% if sel.entry.badge == 'Live' %}<span class="rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-800">{{ sel.entry.badge }}</span>
+            {% elif sel.entry.badge == 'Held' %}<span class="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">{{ sel.entry.badge }}</span>
+            {% elif sel.entry.badge == 'Finalized' %}<span class="rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-700">{{ sel.entry.badge }}</span>
+            {% else %}<span class="rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-700">{{ sel.entry.badge }}</span>{% endif %}
+            {% if sel.entry.is_current %}<span class="rounded-full bg-indigo-100 px-2 py-0.5 text-xs font-medium text-indigo-800">Current</span>{% endif %}
+            <span>{{ sel.entry.count }} {{ count_noun }}</span>
+            {% if sel.entry.rubric_version %}<span>rubric {{ sel.entry.rubric_version }}</span>{% endif %}
+            {% endif %}
+        </div>
+        <div class="flex flex-wrap items-center justify-end gap-2 min-w-0 max-w-full">
+            {% for name, value in hidden %}<input type="hidden" name="{{ name }}" value="{{ value if value is not none else '' }}">{% endfor %}
+            <label for="{{ select_id }}" class="text-sm text-gray-700">Run</label>
+            <select id="{{ select_id }}" name="run_id" class="min-w-0 max-w-full text-sm border border-gray-300 rounded-md shadow-sm">
+                {% if all_label %}<option value="all" {% if all_selected %}selected{% endif %}>{{ all_label }}</option>{% endif %}
+                {% for in_group, label in [(true, groups[0]), (false, groups[1])] %}
+                {% set members = entries | selectattr('count', 'gt', 0) | list if in_group else entries | selectattr('count', 'le', 0) | list %}
+                {% if members %}<optgroup label="{{ label }}">
+                    {% for e in members %}<option value="{{ e.id }}" {% if not all_selected and selected_id is not none and (e.id | string) == (selected_id | string) %}selected{% endif %}>{{ e.started_at | ts }} — {{ e.count }} {{ count_noun }}{% if e.rubric_version %} · rubric {{ e.rubric_version }}{% endif %}{% if e.is_current %} (current){% endif %}</option>{% endfor %}
+                </optgroup>{% endif %}
+                {% endfor %}
+            </select>
+            <button type="submit" class="px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">Show</button>
+        </div>
+    </div>
+    <p class="mt-2 text-xs text-gray-600">{{ note }}</p>
+</form>
+{% endmacro %}

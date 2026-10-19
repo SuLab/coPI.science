@@ -142,9 +142,9 @@ async def journey_assignment_filter_and_global_detail(h) -> dict:
             html = await page.content()
             text = ' '.join((await page.locator('main').inner_text()).split())
             run_label = await page.locator('#assessments-run-select option:checked').inner_text()
-            scope_labels = (f"{len(assignment['all'])} stored across all labs and assignments" in run_label
+            scope_labels = (f"— {len(assignment['all'])} stored" in run_label
                             and 'Tab counts follow the selected run, lab and assignment filters.' in html
-                            and 'across all labs and assignments.' in html)
+                            and 'Counts are stored assessments across every lab and assignment.' in html)
             warning_counts = ('1 verdict lost' in text and
                               '1 verdict with an incomplete, unverified or unrecorded specialist panel' in text)
             narrow_viewport = await page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
