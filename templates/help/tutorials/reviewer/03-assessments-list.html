@@ -10,7 +10,7 @@
 <strong>Opportunity Assessments</strong>.</p>
 
 <h2 id="what-you-see">What you'll see</h2>
-{{ figure(request, "assessments-list", "The Opportunity Assessments page: the filters at the top right, the Unreviewed, Reviewed and All tabs, the summary cards and the first assessment cards.") }}
+{{ figure(request, "assessments-list", "The Opportunity Assessments page: the Sort, Assignment and Lab filters, the run bar, the review tabs and the first assessment cards.") }}
 
 <h2 id="what-it-means">What it means</h2>
 <p>The list is your work queue. Each card is one assessment: one verdict BlackbirdBot wrote
@@ -24,13 +24,17 @@ weighted score is computed by the app from the dimension scores, not taken from 
 model.</p>
 
 <h3>The filters</h3>
-<p>The controls at the top right change what the list shows. They take effect when you press
+<p>The <strong>Run</strong> bar sits under the heading and the other controls at the top right.
+Pick a run and press <strong>Show</strong>; the other filters take effect when you press
 <strong>Apply</strong>.</p>
 <ul>
-    <li><strong>Run:</strong> which simulation run to show. The latest run is selected at
-    first and is marked "— current". Each option also shows the run's status, how many
-    assessments it stored and its rubric version. <strong>All Runs</strong> shows every run
-    on record.</li>
+    <li><strong>Run:</strong> which simulation run to show. The newest run is selected at
+    first and is marked <strong>Current</strong>. The bar shows the run's status
+    (<strong>Live</strong>, <strong>Finalized</strong>, <strong>Held</strong>,
+    <strong>Running</strong>, <strong>Stopped</strong> or <strong>Completed</strong>), how many assessments it stored and
+    its rubric version. The menu lists runs with stored assessments first. Counts are stored
+    assessments across every lab and assignment. <strong>All Runs</strong> shows every run on
+    record.</li>
     <li><strong>Sort:</strong> <strong>Score (triage)</strong>, <strong>Most recent</strong>,
     <strong>Recommendation</strong> or <strong>Lab</strong>.</li>
     <li><strong>Assignment:</strong> <strong>All</strong>, or <strong>Assigned to me</strong>

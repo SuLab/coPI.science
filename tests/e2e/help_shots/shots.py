@@ -177,9 +177,9 @@ SHOTS: tuple[Shot, ...] = (
          "and Don't show again.",
          ("templates/base.html",)),
     Shot("assessments-list", AUDIENCE_ALL, "reviewer", _assessments, None,
-         "The Opportunity Assessments page: the Run, Sort, Assignment and Lab filters, the "
-         "review tabs and the first assessment cards.",
-         (_ASSESSMENTS, _ASSESSMENTS_BODY)),
+         "The Opportunity Assessments page: the Sort, Assignment and Lab filters, the run bar, "
+         "the review tabs and the first assessment cards.",
+         (_ASSESSMENTS, _ASSESSMENTS_BODY, "templates/_run_bar.html")),
     Shot("assessment-card", AUDIENCE_ALL, "reviewer", _main_card, ".assessment-card",
          "One assessment card: the recommendation, the headline, the summary and the "
          "quick-scoring form.",
@@ -263,8 +263,9 @@ SHOTS: tuple[Shot, ...] = (
          "The staff Accounts table with approved, pending and revoked accounts.",
          ("templates/workspace/staff.html",)),
     Shot("discussions", AUDIENCE_STAFF, "manager", _discussions, None,
-         "The Discussions page: thread counts by outcome, the filters and the thread list.",
-         ("templates/workspace/discussions.html", "templates/discussions/_threads.html")),
+         "The Discussions page: the run bar, thread counts by outcome, the filters and the thread list.",
+         ("templates/workspace/discussions.html", "templates/discussions/_threads.html",
+          "templates/_run_bar.html")),
     Shot("activity", AUDIENCE_STAFF, "manager", _activity, None,
          "The Agent Activity page: run totals and the list of simulation runs.",
          ("templates/workspace/activity.html",)),

@@ -32,7 +32,11 @@ the **worker**, which now bind-mounts `./prompts` read-only for exactly this
 purpose and reads the prompt files as plain data through the dependency-free
 `src/services/interview_transcript.py` loader — it deliberately never imports
 `blackbird_rubric.py` (see that module's comment, and the import probe in
-`tests/`). The model is `settings.llm_review_model` (`claude-opus-5`), a
+`tests/`). The worker *process* does load `blackbird_rubric` and `rubric_revisions`, through
+`src/services/assessment_chat.py`, which both the chat-suggestions generator and (since
+2026-10-19) the interview-trajectory generator import; measured 2026-10-19, it already did
+before the trajectory generator existed. So a malformed rubric document stops the worker,
+whatever the review bot's loader does. The model is `settings.llm_review_model` (`claude-opus-5`), a
 setting distinct from the simulation's own model config. A suggestion is never
 auto-applied to any prompt file — it is stored as a `PromptChangeSuggestion`
 row and surfaced at `/manager/prompt-suggestions` for a human (admin or
@@ -637,3 +641,58 @@ design (spec 2026-10-15, §10).
 - The hub's prompts are unchanged, and scout_hub is not bumped. No `prompts/` text changed:
   both additions are composed in code, and the version bump records the changed lab prompt.
 - A run after this release starts FRESH, on a rebuilt agent image (`src/agent/` changed).
+
+**scout_hub 1.12.0 (2026-10-19): judge the work, not the agent's conduct.** Spec: the
+2026-10-19 run-selector / hub-conduct / Learn-default / trajectory design, §2.
+
+- **What changed.** Core Principle 8 in `agent-system.md`; the four phase-4 edits (the panel
+  sentence, the sidecar preamble pair, item 11's wording and the reply rule); the two
+  `agent-system.md` sentence replacements (the confidence-label sentence and the pitch
+  sentence); the same paragraph in all eight specialist personas; and the talent persona's
+  "PI credibility" gloss and "program officer" wording.
+- **Why.** 59 of 64 rubric-3.x assessments credited the lab agent's conduct (candour,
+  volunteered limitations, conceding under challenge). The pi_lab prompts instruct the agent
+  to volunteer limitations, so that behaviour is shared by every lab and says nothing about
+  the PI. The hub also asked the talent specialist about candour.
+- **Persona edits are not stamped.** `prompt_set_stamp` hashes only `prompts/roles/<role>`, so
+  1.12.0 implies the new persona text.
+- **The review bot** reads prompt files per job, so the worker sees the new files as soon as
+  they land, while judging assessments made under 1.11.0.
+- **The next run starts FRESH:** the version bump requires it, and the hub's working memory
+  already carries conduct wording that a resume would inject into every hub prompt.
+- **Release checks.** The panel calibration ladder and `scripts/dev/talent_conduct_replay.py`.
+- **Unchanged.** No rubric, `thread_guidance.py`, `tools.py` or pi_lab text changed. Stored
+  assessments are kept as written.
+
+**Interview trajectories (2026-10-19, migration `0072`).** Spec: the 2026-10-19
+run-selector / hub-conduct / Learn-default / trajectory design, §4.
+
+- **The page.** `/workspace/interviews` (the **Interviews** tab), admins and managers only
+  (`get_staff_user`; reviewers, PIs and an admin impersonating a PI get 403). One run at a
+  time, no "All runs". It lists every interview of the run (a root lab post with a reply
+  from another author), one numbered line per post, one folded **Panel:** line per hub turn
+  that followed consults, and an outcome label; it never shows a post's full text. Lines can
+  carry a PI's unpublished disclosures, so they are staff-only and never posted to Slack.
+- **The lines** are model-written by the worker (`src/services/trajectory_generation.py`,
+  prompt `prompts/interview-trajectory.md`, read per generation), one call per finished
+  interview, and stored in `interview_trajectories` keyed by each post's first
+  `agent_messages.id`. Until a line exists, or when a post has none, the page shows the
+  post's first sentence, marked "first sentence". A post is consecutive rows by one author
+  under 2 s apart (`src/services/interview_posts.py`).
+- **Settings.** `INTERVIEW_TRAJECTORIES_ENABLED` (default on),
+  `INTERVIEW_TRAJECTORIES_DAILY_USD_LIMIT` (default 10.0, rolling 24 h over these rows only)
+  and `LLM_INTERVIEW_TRAJECTORIES_MODEL` (default `claude-opus-5`, which must be priced; see
+  `src/config.py` on why not 5.5). A `.env` change needs a worker recreate.
+- **Cost and retries.** The row is claimed before the call. An attempt whose cost is unknown
+  is reserved at its own worst case (`attempt_reserve`, about $0.28 on claude-opus-5), at
+  most three attempts 30 minutes apart, a refusal is never retried, and a 429/5xx answer
+  costs no attempt. The worker makes at most one generator call per idle tick (the chat
+  suggestions and the trajectories share that one slot).
+- **Back-fill.** Every finished interview of every past run is a candidate, newest run
+  first, so after a deploy the worker back-fills the archive under the daily ceiling
+  (measured 2026-10-19: 121 interviews, roughly $5-15 in all). A posts set that changes after
+  its lines were written (the engine's shutdown flush) is noticed by the thread's row count
+  and newest timestamp, and the lines are regenerated.
+- **Logs** name ids, status, models, tokens and latency only; a result that cannot be stored
+  is logged by exception type, never with its lines.
+

@@ -98,7 +98,7 @@ HELP_PAGES: tuple[HelpPage, ...] = (
     HelpPage("discussions-activity", "Discussions and Activity",
              "What the simulation's threads, outcomes and run statistics show.",
              AUDIENCE_STAFF, "help/pages/discussions-activity.html",
-             ("discussions", "activity", "run-detail")),
+             ("discussions", "interviews", "activity", "run-detail")),
     HelpPage("prompt-suggestions", "Prompt suggestions",
              "What prompt-change suggestions are, how to generate them and how to mark them.",
              AUDIENCE_STAFF, "help/pages/prompt-suggestions.html",

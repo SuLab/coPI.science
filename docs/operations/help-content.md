@@ -22,9 +22,11 @@ done until its help is updated in the same change:
 | `templates/workspace/pis.html`, `pi_detail.html` | `pis` (`directory`, `detail`); for staff cards, `managing-pis` and `pi-evidence`; manager steps 3–6, reviewer step 8 |
 | `templates/pis/_profile_review.html` (the staff Corpus and profile review card on the PI page) | `managing-pis` (`paper-review`, `finding-papers`), the glossary's candidate, unanchored and stages terms; manager step 5 |
 | `templates/workspace/assessments.html`, `assessment_detail.html`, the assessment card and chat | `assessments`; reviewer steps 3–7, manager step 8 |
+| `templates/_run_bar.html` | `assessments` (`list`), `discussions-activity` (`discussions`); reviewer step 3, manager step 10 |
 | `templates/workspace/slack_bots.html` | `managing-pis#slack-bots`; manager step 7 |
 | `templates/workspace/staff.html` | `staff-accounts`; manager step 9 |
 | `templates/workspace/discussions.html`, `activity.html`, `activity_detail.html` | `discussions-activity`; manager step 10 |
+| `templates/workspace/interviews.html` | `discussions-activity` (`interviews`); manager step 10 |
 | `templates/workspace/prompt_suggestions.html`, `prompt_suggestion_detail.html` | `prompt-suggestions`; manager step 10 |
 | `templates/settings.html` | `getting-started#settings` (and `#microsoft`); reviewer step 2, manager step 2 |
 | `templates/login.html`, `templates/access_pending.html`, `templates/profile/delete_account.html` | `getting-started` (`signing-in`, `access-problems`) |

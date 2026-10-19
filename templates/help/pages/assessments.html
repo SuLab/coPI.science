@@ -13,15 +13,18 @@ Unfamiliar terms are in the <a href="{{ page_url(request, 'help_page', slug='glo
 <h2 id="list">The Assessments list</h2>
 <p>The page is titled <strong>Opportunity Assessments</strong>. It opens on the current
 simulation run, sorted for triage, on the <strong>Unreviewed</strong> tab.</p>
-{{ figure(request, "assessments-list", "The Assessments list: the filters at the top right, the review tabs, and the summary cards.") }}
+{{ figure(request, "assessments-list", "The Assessments list: the title with the filters beside it, the run bar under them, the review tabs, and the summary cards.") }}
 <h3>Filters</h3>
-<p>The controls at the top right apply when you press <strong>Apply</strong>:</p>
+<p><strong>Run</strong> sits in its own bar under the title. The bar shows the selected
+run's start time, its status &mdash; <strong>Live</strong> while the simulation is running it,
+otherwise <strong>Finalized</strong>, <strong>Held</strong>, <strong>Running</strong>,
+<strong>Stopped</strong> or <strong>Completed</strong> &mdash; how many assessments it has stored, the rubric version it
+used and, on the newest run, <strong>Current</strong>. The menu lists runs with stored
+assessments first, then runs with none; <strong>All Runs</strong> shows every run on record.
+Pick one and press <strong>Show</strong>. The other filters apply when you press
+<strong>Apply</strong>; each button keeps the other form's current choices but not a change you
+have not applied.</p>
 <ul>
-    <li><strong>Run:</strong> which simulation run to show. Each run is listed by its start
-    time and status, with how many assessments it has stored and, where recorded, the rubric
-    version it used.
-    The newest run is marked "current". <strong>All Runs</strong> shows every run on
-    record.</li>
     <li><strong>Sort:</strong> <strong>Score (triage)</strong>, the default, puts the
     highest weighted score first. <strong>Most recent</strong>, <strong>Recommendation</strong>
     (advance first, then conditional, route-to-incubation, and pass under the rubric's label) and
@@ -40,7 +43,7 @@ submitted feedback on the assessment. Being assigned does not make an assessment
 and neither does an approval status. Each tab shows its count, and the counts follow the
 selected run, lab and assignment.</p>
 <h3>The header</h3>
-<p>The line under the title says which rubric version the page uses. It also prints the
+<p>The line under the run bar says which rubric version the page uses. It also prints the
 score bands: the weighted score needed for advance and for conditional, and the rubric's
 label for scores below that. The
 weighted score is computed from the dimension scores and the rubric's weights. It is not
@@ -249,8 +252,8 @@ these parts:</p>
     blank if you cannot judge it.</li>
     <li><strong>Comment</strong> (optional): up to 10,000 characters. Use it to explain your
     rating and to flag anything the assessment got wrong.</li>
-    <li><strong>Feedback mode</strong>, required: <strong>Learn</strong> or <strong>Don't
-    learn — log only</strong>.</li>
+    <li><strong>Feedback mode</strong>: <strong>Learn</strong> is selected unless you choose
+    <strong>Don't learn — log only</strong>.</li>
 </ul>
 <p>Press <strong>Submit feedback</strong>. Each submission adds a new entry; it does not
 replace your earlier one. Quick scoring on a card is the same form without the dimension

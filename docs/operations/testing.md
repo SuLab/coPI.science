@@ -119,6 +119,12 @@ copi copi_xN`, and give concurrent suites distinct names so they do not
 migrate each other's schema mid-run. Never point `TEST_DATABASE_URL` at `copi`,
 the dev database.
 
+**Host CI and the engine fallback (2026-10-19).** Settings read the host's `.env`, which turns
+the engine's server-side refusal fallback on, and that changes the request three pi_lab
+entries of `tests/characterization/test_prompt_freeze_gm.py` pin. Run the gate on the host as
+`ENGINE_REFUSAL_FALLBACK_ENABLED=false ./scripts/ci.sh`; with the fallback on, those three
+entries fail although nothing in the tree changed them.
+
 ## Browser harness (before every web deploy)
 
 `tests/e2e/ui_audit/` (spec `docs/specs/2026-10-01-web-ui-remediation-design.md`, D17) stands

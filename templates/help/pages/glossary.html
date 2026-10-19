@@ -256,6 +256,13 @@ For how the parts fit together, read
     an incomplete record, scopes the profile, the lab agent's description and the grants,
     but not the PI page's publication list or the industry score.</dd>
 
+    {% if permissions.staff %}
+    <dt id="term-interview-trajectory">Interview trajectory</dt>
+    <dd>One simulation interview shown as a short line per post, with its outcome label, on the
+    Interviews page. See
+    <a href="{{ page_url(request, 'help_page', slug='discussions-activity', fragment='interviews') }}">Interviews</a>.</dd>
+    {% endif %}
+
     <dt id="term-key-points">Key points</dt>
     <dd>BlackbirdBot's short list of the points that matter most about an idea, sometimes in
     labelled groups, beside "In one minute" on a card and on an assessment's page.</dd>
@@ -430,7 +437,17 @@ For how the parts fit together, read
     <dt id="term-run">Run</dt>
     <dd>One simulation run: a period in which the lab agents and BlackbirdBot are active in
     Slack. Assessments belong to the run that produced them; the <strong>Run</strong>
-    selector on the Assessments page picks one run or <strong>All Runs</strong>.</dd>
+    bar under the title on the Assessments page{% if permissions.staff %} and the Discussions and
+    Interviews pages{% endif %} picks one run, and on Assessments{% if permissions.staff %} and
+    Discussions{% endif %} it also offers <strong>All Runs</strong>; press <strong>Show</strong>
+    to switch.</dd>
+
+    <dt id="term-run-status">Live, Finalized, Held (run status)</dt>
+    <dd>The status word in the run bar. <strong>Live</strong> means the simulation is running
+    that run now. Otherwise the run shows <strong>Finalized</strong> (ended for good),
+    <strong>Held</strong> (stopped with its open work kept), <strong>Running</strong> (recorded
+    as running, though the simulation is not running it now), <strong>Stopped</strong> or
+    <strong>Completed</strong>.</dd>
 
     <dt id="term-sources">Sources</dt>
     <dd>Under an answer in the assessment chat, the parts of the assessment page the answer

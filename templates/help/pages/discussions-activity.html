@@ -16,14 +16,19 @@
     Open <a href="{{ page_url(request, 'workspace_discussions') }}">Discussions</a> from the
     Workspace. If no simulation run exists yet, the page says "No simulation runs found."
 </p>
-{{ figure(request, "discussions", "The Discussions page: run selector, status cards, filters and the threads table.") }}
+{{ figure(request, "discussions", "The Discussions page: the run bar, thread counts by outcome, the filters and the thread list.") }}
 
 <h3>Choosing a run</h3>
 <p>
-    The <strong>Run:</strong> selector at the top lists each run by its start time and status,
-    plus <strong>All Runs</strong>. Pick one and press <strong>Apply</strong>. With no choice
-    made, the page shows the newest run. If all runs together hold too many threads to list,
-    the page asks you to choose a single run.
+    <strong>Run</strong> sits in its own bar under the title. The bar shows the selected run's
+    start time, its status &mdash; <strong>Live</strong> while the simulation is running it,
+    otherwise <strong>Finalized</strong>, <strong>Held</strong>, <strong>Running</strong>,
+    <strong>Stopped</strong> or <strong>Completed</strong> &mdash; how many threads it holds
+    and, on the newest run, <strong>Current</strong>. The menu lists runs with threads first,
+    then runs with none, after <strong>All Runs</strong>. Pick one and press
+    <strong>Show</strong>; the filters below keep their current choices. With no choice made,
+    the page shows the newest run. If all runs together hold too many threads to list, the
+    page asks you to choose a single run.
 </p>
 
 <h3>Status cards</h3>
@@ -117,6 +122,39 @@
     Only an admin can export the threads or read a specialist's reply verbatim.
 </p>
 {% endcall %}
+
+<h2 id="interviews">Interviews</h2>
+<p>
+    Open <a href="{{ page_url(request, 'workspace_interviews') }}">Interviews</a> from the
+    Workspace. The page, headed <strong>Interview trajectories</strong>, lists each interview
+    of the selected run that has at least one reply, one line per post. Pitches that were never
+    answered are counted in the line under the run bar, not listed. Pick a run in the run bar and press
+    <strong>Show</strong>; counts are interviews with at least one reply. A run with none says
+    "No interviews in this run."
+</p>
+<p>Each interview carries an outcome label:</p>
+<ul>
+    <li><strong>Verdict: &lt;recommendation&gt;</strong>: the interview ended in an assessment,
+    and the label names its recommendation. The interview links to that assessment, whose
+    timeline has the full posts.</li>
+    <li><strong>Hub decline</strong>: BlackbirdBot declined the pitch. Where the decline is
+    listed on the Assessments page, the interview links to that list.</li>
+    <li><strong>Timeout</strong> and <strong>Abandoned</strong>: the thread ended without a
+    proposal for that reason.</li>
+    <li><strong>Lab ⏸️</strong>: the lab agent closed the thread without a proposal.</li>
+    <li><strong>Closed</strong>: the thread was closed with no more specific outcome
+    recorded.</li>
+    <li><strong>Verdict dropped</strong>: BlackbirdBot gave a verdict that was not stored.</li>
+    <li><strong>Open</strong>: the interview is still going in the live run.</li>
+    <li><strong>Run ended before a close</strong>: the run stopped before the thread closed.</li>
+</ul>
+<p>
+    Each post shows as one short line, a model-written summary of that post, written once the
+    interview has ended; until then, and when a line could not be written, the line is the
+    post's first sentence, marked <em>first sentence</em>. A hub turn that followed specialist consults also has a
+    folded line beginning <strong>Panel:</strong> that gives the specialist panel's view. The page never shows a post's
+    full text.
+</p>
 
 <h2 id="activity">Activity</h2>
 <p>
