@@ -7,8 +7,8 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
 > ⚠️ **`origin` (`SuLab/coPI.science`) is public — do not push `blackbird` blind.**
 > `docs/audits/` and `docs/plans/2026-09-25-rca-remediation-plan.md` describe open
 > weaknesses of the live host, tracked in `docs/audits/open-findings.md`. Until its
-> C2 row (pre-fix images still on the host, removed by decision D1) and the SSH
-> host-key row are closed, scrub those records before any push.
+> SSH host-key row is closed, scrub those records before any push (the C2 row, pre-fix
+> images on the host, closed on 2026-10-08 when D1 deleted them).
 
 | Before you… | read |
 |---|---|
@@ -100,7 +100,7 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
   request.
 - `.env` changes need a container recreate, not a restart, of every service that reads
   it: `$DC up -d --force-recreate blackbird-app worker`, and `agent` only with no live run.
-- `0056` (head is `0062` since the corpus remediation): run `scripts/migrate/remediate_0056.py --jobs --provisions --publications --emails`
+- `0056` (head is `0072` since the interview trajectories): run `scripts/migrate/remediate_0056.py --jobs --provisions --publications --emails`
   as a dry run first, and apply the publications dedupe only with the owner's go-ahead
   (the "Deploy order for `0056`" box in `docs/operations/migration-deploy-notes.md`).
 - A migration that alters `jobs` (`0053`) needs the worker idle (no `processing` row) or
@@ -171,6 +171,8 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
   agent with an unknown role, or a role whose `role.toml` fails strict validation, is
   skipped by the engine (it used to run as pi_lab). `scripts/migrate/preflight.py`
   BLOCKs on such a role.
+- Microsoft sign-in is a second login for admins, managers and reviewers, linked to an existing
+  ORCID account by `(tid, oid)` — never by email. Runbook and limits: `docs/operations/pis-and-access.md`.
 
 ## Data you must not destroy
 
