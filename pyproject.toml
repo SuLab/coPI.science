@@ -17,7 +17,11 @@ dependencies = [
     # nothing today — the point is that a future resolve cannot walk back into them.
     "jinja2>=3.1.6",
     "python-multipart>=0.0.31,<1.0.0",
-    "authlib>=1.7.1,<2.0.0",
+    "authlib>=1.8.0,<2.0.0",
+    # Imported directly by src/services/{id_tokens,microsoft_identity}.py; already in the
+    # lock via authlib.
+    "joserfc>=1.7.5",
+    "cryptography>=45.0.1",
     # Caps on the PRE-1.0 packages (#27 I4's second Fix clause). A 0.x minor bump is a
     # breaking change by convention, and these five sit on request-handling and database
     # paths where a silent upgrade is how a deploy breaks: uvicorn serves, httpx is every
