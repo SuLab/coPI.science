@@ -16,9 +16,19 @@ from starlette.middleware.sessions import SessionMiddleware
 from src.agent.ids import WRITER_WEB, set_default_writer_id
 from src.config import get_settings
 from src.database import get_session_factory
-from src.routers import admin, agent_page, auth, invite, onboarding, profile, public
+from src.routers import (
+    admin,
+    agent_page,
+    auth,
+    invite,
+    microsoft_auth,
+    onboarding,
+    profile,
+    public,
+)
 from src.routers import settings as settings_router
 from src.services.io_executor import shutdown_io_executor
+from src.services.microsoft_identity import load_config as load_microsoft_config
 from src.services.slack_executor import shutdown_slack_executor
 
 logging.basicConfig(
@@ -279,6 +289,11 @@ def create_app() -> FastAPI:
         same_site="lax",
     )
 
+    # Microsoft sign-in (spec 2026-10-21 §5.2). Validated here, in the web process only: a bad
+    # MICROSOFT_* value stops the web app at start (MicrosoftConfigError) but never the worker,
+    # agent or grantbot, which load the same .env. None = off.
+    application.state.microsoft_sign_in = load_microsoft_config(settings)
+
     # Static files
     try:
         application.mount("/static", StaticFiles(directory="static", html=True), name="static")
@@ -288,6 +303,7 @@ def create_app() -> FastAPI:
     # Include routers
     application.include_router(public.router, tags=["public"])
     application.include_router(auth.router, tags=["auth"])
+    application.include_router(microsoft_auth.router, tags=["auth"])
     application.include_router(onboarding.router, prefix="/onboarding", tags=["onboarding"])
     application.include_router(profile.router, prefix="/profile", tags=["profile"])
     application.include_router(agent_page.router, prefix="/agent", tags=["agent"])
