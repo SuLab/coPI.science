@@ -84,6 +84,9 @@ MUST_EXCLUDE = [
     # build must never win.
     "static/css/app.min.css",
     ".cache/tailwindcss/tailwindcss-v4.3.3",
+    # Private keys (Microsoft sign-in certificate key) at any depth.
+    "key.pem",
+    "certs/signin.key",
 ]
 
 # Paths the running app/worker/agent/grantbot reads from the tree at runtime —

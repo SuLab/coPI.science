@@ -47,6 +47,7 @@ Full view of a single user's data.
 - Name, email, ORCID, institution, department
 - Admin status, onboarding complete, claimed_at
 - Agent (link + status) and Cohorts, with whether the membership is in effect
+- Microsoft sign-in (shown while the feature is on): sign-in name, tenant ID, linked and last-used dates, and a Remove form (static `confirm()`). Removal deletes the link and ends every session of that user; an admin can remove a link, never create one.
 
 **Profile:**
 - Research summary
@@ -212,6 +213,7 @@ Admins can assume the identity of any user to see the app as they see it.
 |---|---|
 | `GET /admin/users` | Users overview |
 | `GET /admin/users/{id}` | User detail |
+| `POST /admin/users/{user_id}/microsoft/unlink` | Remove a user's Microsoft sign-in link and end all their sessions |
 | `GET /admin/jobs` | Job queue |
 | `GET /admin/activity` | Agent activity overview |
 | `GET /admin/activity/{run_id}` | Simulation run detail |

@@ -127,7 +127,7 @@ flags every prod compose command needs.
 
 ```
 src/agent/        agent loop, Slack client, tools, GrantBot, pi_handler
-src/routers/      FastAPI routes (auth, onboarding, profile, admin, …)
+src/routers/      FastAPI routes (auth, microsoft_auth, onboarding, profile, admin, …)
 src/services/     LLM, ORCID/PubMed, profile pipeline, email, grants
 src/worker/       background job runner
 src/models/       SQLAlchemy models
