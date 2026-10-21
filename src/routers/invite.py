@@ -3,12 +3,13 @@
 import logging
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
+from src.dependencies import session_account
 from src.models import AgentDelegate, AgentRegistry, DelegateInvitation, User
 from src.templating import templates
 
@@ -19,6 +20,21 @@ _INVITE_EMAIL_MISMATCH_MSG = (
     "This invitation was sent to a different email address. Please sign in with "
     "the ORCID account whose email matches the invitation."
 )
+
+
+async def _signed_in_account(request: Request, db: AsyncSession) -> User | None:
+    """The real signed-in account, or None when there is no usable session.
+
+    Goes through session_account so a revoked, denied or unknown-user session is
+    refused (and already cleared) rather than trusted. Invites act on the real
+    account, never an impersonated one.
+    """
+    if not request.session.get("user_id"):
+        return None
+    try:
+        return await session_account(request, db)
+    except HTTPException:
+        return None
 
 
 def _invite_matches_user(invitation: DelegateInvitation, user: User) -> bool:
@@ -77,22 +93,13 @@ async def accept_invite(
         )
 
     # Valid invitation — check if user is logged in
-    user_id_str = request.session.get("user_id")
-    if not user_id_str:
+    user = await _signed_in_account(request, db)
+    if not user:
         # Store the token and send them to the login page — not /login/start,
         # which 302s straight out to orcid.org. Someone who followed an invite
         # from their inbox has no idea what CoPI is yet; /login explains it
         # before the external consent screen. The token rides in the session,
         # so the extra hop costs nothing (auth_callback pops it).
-        request.session["pending_invite_token"] = token
-        return RedirectResponse(url="/login", status_code=302)
-
-    # User is logged in — check onboarding
-    user_result = await db.execute(
-        select(User).where(User.id == user_id_str)
-    )
-    user = user_result.scalar_one_or_none()
-    if not user:
         request.session["pending_invite_token"] = token
         return RedirectResponse(url="/login", status_code=302)
 
@@ -156,12 +163,7 @@ async def confirm_accept_invite(
             {"request": request, "error": "This invitation has expired. Ask the PI to send a new one."},
         )
 
-    user_id_str = request.session.get("user_id")
-    if not user_id_str:
-        return RedirectResponse(url=f"/invite/{token}", status_code=302)
-
-    user_result = await db.execute(select(User).where(User.id == user_id_str))
-    user = user_result.scalar_one_or_none()
+    user = await _signed_in_account(request, db)
     if not user:
         return RedirectResponse(url=f"/invite/{token}", status_code=302)
 

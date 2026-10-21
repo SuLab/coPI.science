@@ -22,6 +22,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 from testcontainers.postgres import PostgresContainer
 
+from tests.oidc_fakes import fake_idp  # noqa: F401
+
+# Environment variables override `.env`: a host `.env` with Microsoft settings must neither
+# turn the feature on in tests nor, if invalid, stop collection when a test module imports
+# `src.main` (which runs `create_app()` at import).
+os.environ["MICROSOFT_CLIENT_ID"] = ""
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -123,8 +130,8 @@ async def db_session(engine):
 
 
 @pytest_asyncio.fixture
-async def client(db_session, engine, monkeypatch):
-    """ASGI TestClient over create_app() with get_db routed to the rolled-back session.
+async def asgi_app(db_session, engine, monkeypatch):
+    """The FastAPI app from create_app() with get_db routed to the rolled-back session.
 
     Also repoints AgentBadgeMiddleware's session factory at the test engine. The
     middleware (src/main.py) calls src.database.get_session_factory() directly rather
@@ -156,10 +163,16 @@ async def client(db_session, engine, monkeypatch):
         yield db_session
 
     app.dependency_overrides[get_db] = _override_get_db
-    transport = ASGITransport(app=app)
+    yield app
+    app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def client(asgi_app):
+    """httpx client serving `asgi_app` in-process."""
+    transport = ASGITransport(app=asgi_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
         yield c
-    app.dependency_overrides.clear()
 
 
 @pytest.fixture

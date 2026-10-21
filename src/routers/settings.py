@@ -1,24 +1,30 @@
-"""User settings router — email notification preferences and unsubscribe."""
+"""User settings router — email notification preferences, unsubscribe, and the Microsoft
+sign-in section (shown while the feature is on; the user can unlink there)."""
 
 import logging
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import get_db
-from src.dependencies import get_current_user
+from src.dependencies import account_of, get_current_user, impersonating, refuse_impersonation
 from src.models import EmailNotificationPreference, EmailEngagementTracker, User
 from src.services.email_notifications import (
     CATEGORY_DEFAULTS,
     get_or_create_pref,
     _verify_unsubscribe_token,
 )
+from src.services.microsoft_identity import link_view, message_for, unlink
+from src.services.session_epoch import bump_session_epoch
+from src.sign_in_session import fresh_orcid_sign_in
 from src.templating import templates
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+_DB = Depends(get_db)
+_USER = Depends(get_current_user)
 
 VALID_FREQUENCIES = {"daily", "twice_weekly", "weekly", "biweekly", "monthly", "off"}
 
@@ -48,6 +54,29 @@ def _template_context(request: Request, user: User, **kwargs) -> dict:
     return ctx
 
 
+def _microsoft_on(request: Request) -> bool:
+    return getattr(request.app.state, "microsoft_sign_in", None) is not None
+
+
+async def _microsoft_section(request: Request, db: AsyncSession, user: User) -> dict | None:
+    """What the Microsoft section shows; None hides it.
+
+    Hidden when the feature is off and while impersonating, either because the session
+    resolved to an impersonated user or because the session's own admin carries an
+    impersonation cookie: an admin's fresh ORCID sign-in must never count for someone else.
+    """
+    if (
+        not _microsoft_on(request)
+        or getattr(user, "_is_impersonated", False)
+        or impersonating(request, account_of(user))
+    ):
+        return None
+    return {
+        "link": await link_view(db, user.id),
+        "can_link": fresh_orcid_sign_in(request.session),
+    }
+
+
 @router.get("", response_class=HTMLResponse)
 async def settings_page(
     request: Request,
@@ -55,6 +84,7 @@ async def settings_page(
     current_user: User = Depends(get_current_user),
 ):
     """User settings page."""
+    flash = message_for(request.query_params.get("microsoft"))
     # Get engagement tracker for status display
     tracker_result = await db.execute(
         select(EmailEngagementTracker).where(
@@ -88,8 +118,33 @@ async def settings_page(
             tracker=tracker,
             frequency_labels=FREQUENCY_LABELS,
             prefs=prefs,
+            microsoft=await _microsoft_section(request, db, current_user),
+            flash_message=flash[0] if flash else None,
+            flash_type=flash[1] if flash else None,
         ),
     )
+
+
+@router.post("/microsoft/unlink")
+async def microsoft_unlink(request: Request, current_user: User = _USER, db: AsyncSession = _DB):
+    """Remove the user's own Microsoft sign-in and end every session, this one included."""
+    if not _microsoft_on(request):
+        raise HTTPException(status_code=404, detail="Not Found")
+    refuse_impersonation(
+        current_user, "Microsoft sign-in changes are disabled while impersonating."
+    )
+    user_id = current_user.id
+    removed = await unlink(db, user_id)
+    if removed is None:
+        return RedirectResponse(url="/settings?microsoft=nothing_linked", status_code=302)
+    # Unconditional: this request already passed the epoch check, and a session issued after
+    # it (a sign-in through the link being removed, after a logout elsewhere moved the epoch)
+    # must end too.
+    await bump_session_epoch(db, user_id)
+    await db.commit()
+    logger.info("User %s removed their Microsoft sign-in (tid=%s)", user_id, removed.tenant_id)
+    request.session.clear()
+    return RedirectResponse(url="/login?error=microsoft_unlinked", status_code=302)
 
 
 def _resolve_frequency(on: str, freq: str) -> str:

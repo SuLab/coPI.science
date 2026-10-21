@@ -17,7 +17,7 @@ Agent profiles and working memory are stored as **filesystem markdown files**, n
 | name | string | From ORCID |
 | institution | string | From ORCID or user-provided |
 | department | string | Optional |
-| orcid | string | Unique, required (ORCID OAuth is the only auth method) |
+| orcid | string | Unique, required (ORCID is the only way to create an account) |
 | is_admin | boolean | Default false |
 | email_notifications_enabled | boolean | Default true |
 | email_notification_frequency | string(20) | Default `'weekly'`. Values: daily, twice_weekly, weekly, biweekly, off. |
@@ -25,10 +25,27 @@ Agent profiles and working memory are stored as **filesystem markdown files**, n
 | onboarding_complete | boolean | Default false. True after user reviews profile on first login. |
 | access_status | string(20) | Default `'pending'`. Values: `allowed`, `pending`, `denied`. Pre-release access gate — only `allowed` users can sign in. |
 | claimed_at | timestamp | Nullable. Set when a seeded profile is claimed via ORCID login. |
+| session_epoch | integer | Nullable, NULL reads as 0 (migration 0031). Sessions store the value at sign-in; a mismatch refuses the session, so bumping it ends every session of the account. |
 | created_at | timestamp | |
 | updated_at | timestamp | |
 
 **Relationships:** profile (ResearcherProfile, one-to-one), publications (Publication, one-to-many), jobs (Job, one-to-many), agent (AgentRegistry, one-to-one)
+
+### UserMicrosoftIdentity
+
+Table `user_microsoft_identities` (migration 0031): the one Microsoft account a user has linked as a second sign-in. No relationship on `User`.
+
+| Field | Type | Notes |
+|---|---|---|
+| id | uuid | Primary key |
+| user_id | uuid | Required, unique (one link per user), FK to `users.id` `ON DELETE CASCADE` |
+| tenant_id | uuid | Required, Microsoft `tid` |
+| object_id | uuid | Required, Microsoft `oid` |
+| sign_in_name | string(255) | Nullable. `preferred_username`; display only. |
+| linked_at | timestamp | Server default `now()` |
+| last_sign_in_at | timestamp | Nullable |
+
+**Constraints:** Unique on `(tenant_id, object_id)`. Lookups use `(tenant_id, object_id)` only, never email.
 
 ### ResearcherProfile
 
@@ -359,7 +376,7 @@ The memory-synthesis step runs per segment, and no private segment ever feeds in
 ## Account Deletion
 
 When a user deletes their account:
-- **Deleted:** ResearcherProfile, Publications, Jobs
+- **Deleted:** ResearcherProfile, Publications, Jobs, the Microsoft sign-in link (by `ON DELETE CASCADE`)
 - **Preserved:** nothing (no cross-user data exists to preserve)
 
 ## Seeded Profiles

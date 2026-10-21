@@ -39,6 +39,7 @@ from src.models.email_notification import (
 )
 from src.models.grantbot_posted import GrantbotPostedFoa
 from src.models.job import Job
+from src.models.microsoft_identity import UserMicrosoftIdentity
 from src.models.profile import ResearcherProfile
 from src.models.profile_revision import ProfileRevision
 from src.models.proposal_vote import VOTE_DOWN, VOTE_UP, ProposalVote
@@ -48,6 +49,7 @@ from src.models.user import User
 
 __all__ = [
     "User",
+    "UserMicrosoftIdentity",
     "ResearcherProfile",
     "Publication",
     "Job",
