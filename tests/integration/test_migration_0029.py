@@ -247,7 +247,7 @@ async def test_0029_downgrade_is_idempotent_when_the_columns_are_already_gone(sc
 # "0029 is the only head" was checked here until migration 0030 landed and
 # made it false by construction — 0029 is now an interior revision, not the
 # head. That single-head property is exactly the thing
-# test_migration_0030.py::test_0030_is_the_only_head (and
+# test_migration_0031.py::test_0031_is_the_only_head (and
 # tests/unit/test_migration_checks.py's `test_alembic_scripts_agrees_with_the_
 # real_tree`, which reads `pf.DEFAULT_TARGET` rather than a literal) exist to
 # keep current for whichever revision is actually the head, so it is not

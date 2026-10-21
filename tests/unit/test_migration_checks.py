@@ -911,6 +911,7 @@ def test_chain_created_tables_is_derived_from_planned_objects_not_relisted():
         "cohorts",
         "cohort_memberships",
         "cohort_audit_events",
+        "user_microsoft_identities",
     }
 
 
@@ -1004,7 +1005,7 @@ def test_planned_objects_matches_what_the_migration_files_actually_create():
     }
     for revision in (
         "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
-        "0029", "0030",
+        "0029", "0030", "0031",
     ):
         matches = list(versions_dir.glob(f"{revision}_*.py"))
         assert len(matches) == 1, (revision, matches)
@@ -1151,6 +1152,8 @@ def test_new_chain_objects_are_planned():
     assert "pi_inbound_state" in names                     # 0029
     assert "sender_user_id" in names                       # 0030
     assert "handled_at" in names                           # 0030
+    assert "session_epoch" in names                        # 0031
+    assert "user_microsoft_identities" in names            # 0031
 
 
 # --------------------------------------------------------------------------- #

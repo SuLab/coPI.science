@@ -71,7 +71,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0030"
+DEFAULT_TARGET = "0031"
 
 #: The oldest stamp this tooling will migrate from. Below it the chain has never been
 #: rehearsed end to end and the runbook does not describe it; 0018 is `main` before PR19
@@ -232,6 +232,19 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0030", "constraint", "agent_messages_sender_user_id_fkey", "agent_messages"),
     PlannedObject("0030", "index", "ix_agent_messages_sender_user_id", "agent_messages"),
     PlannedObject("0030", "column", "handled_at", "pi_dm_messages"),
+    # 0031_session_epoch_and_microsoft_identities
+    PlannedObject("0031", "column", "session_epoch", "users"),
+    PlannedObject("0031", "table", "user_microsoft_identities"),
+    PlannedObject(
+        "0031", "constraint", "user_microsoft_identities_user_id_fkey", "user_microsoft_identities"
+    ),
+    PlannedObject(
+        "0031", "constraint", "uq_user_microsoft_identities_user_id", "user_microsoft_identities"
+    ),
+    PlannedObject(
+        "0031", "constraint", "uq_user_microsoft_identities_tenant_object",
+        "user_microsoft_identities",
+    ),
 )
 
 #: Every revision in the chain, in order. A revision missing from here is invisible
@@ -240,7 +253,7 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
 #: whose target it cannot find in the list.
 REVISION_ORDER = (
     "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027",
-    "0028", "0029", "0030",
+    "0028", "0029", "0030", "0031",
 )
 
 #: Every revision an upgrade may legitimately START from: the whole chain from
@@ -290,6 +303,9 @@ REVISION_COST_NOTES: dict[str, str] = {
     "0029": "0029 two more nullable ADD COLUMNs (catalogue-only, no rewrite)",
     "0030": "0030 two more nullable ADD COLUMNs plus one small backfill UPDATE "
             "on pi_dm_messages (catalogue-only column adds, no table rewrite)",
+    "0031": "0031 one nullable ADD COLUMN on users (ACCESS EXCLUSIVE on users, "
+            "catalogue-only, no rewrite) plus one new empty table whose foreign key "
+            "takes SHARE ROW EXCLUSIVE on users",
 }
 
 
