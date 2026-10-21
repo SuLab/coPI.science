@@ -29,7 +29,14 @@ def _req() -> Request:
         "/x\x00",  # null byte
         "relative/no/leading/slash",  # not path-absolute
         "",  # empty
-        "x" * 2001,  # over the 2000-char cap
+        "x" * 2001,  # far over the cap
+        "/profile?q=" + "x" * 1014,  # a real page, 1025 characters: one over MAX_NEXT_URL_CHARS
+        "///profile",  # browsers resolve this as the host "profile"
+        "/profile?q=é",  # non-ASCII
+        '/profile?q="',  # a double quote doubles in the cookie's JSON
+        "/profile?q=\x01",  # control character
+        "/profile?q=\x7f",  # DEL
+        "/profile?q=a b",  # space
     ],
 )
 def test_is_safe_next_url_rejects_open_redirects(target):
