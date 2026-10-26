@@ -696,3 +696,104 @@ run-selector / hub-conduct / Learn-default / trajectory design, §4.
 - **Logs** name ids, status, models, tokens and latency only; a result that cannot be stored
   is logged by exception type, never with its lines.
 
+**BlackbirdBot projects (2026-10-26, migration `0073`).** Spec: "BlackbirdBot projects
+prototype: literature research finds new uses for each lab's work, refined with that lab —
+design", revision 4. Once per `PROJECT_INTERVAL_HOURS` of run time each live lab gets one
+project: an idea BlackbirdBot researches from the lab's public profile, posts to the lab, and
+refines with it in a Slack thread. Staff and reviewers read and review the results on
+`/workspace/projects`. Models and statuses: `src/models/hub_project.py`.
+
+- **The switch.** `HUB_PROJECTS_ENABLED` (default off) gates new requests, postings and lab
+  replies. The engine snapshots it at start, so a `.env` change needs
+  `$DC up -d --force-recreate agent`, only when `/admin/simulation` shows no live run. It never
+  changes how project threads are recognised or what is switched off inside them: a run resumed
+  with the switch off still treats its open project threads as projects. Host CI runs with it
+  forced off (`docs/operations/testing.md`, "Host CI and the engine fallback").
+- **Who and when.** A lab is live when its bot has a lab role, is active, is on the engine's
+  roster and has a public profile with a Research Summary; a muted bot gets none. A per-run
+  clock (`hub_project_clocks`) counts running time only: the engine adds at most 15 minutes per
+  tick, and a stop, hold or crash adds nothing. A lab is due when it has no open project in the
+  run and either has had none in this run or the interval has passed since its last request.
+  At most one open project per lab, so slow research or a slow thread delays the next one.
+- **Research (worker).** `src/services/project_research.py`, after interview trajectories in
+  the worker's idle chain, one model call per idle slot, live run only: five specialist
+  research sessions (clinical, scientific, technologic, commercial, legal) with
+  `search_pubmed`, `search_trials`, `search_prior_art` and `retrieve_abstract`, then one choice
+  call (`prompts/projects/research.md`, `prompts/projects/choose.md`). Code checks
+  anchors (whole profile items), sources (retrieved in that session), other labs' names, `@`
+  and links, then assembles and stores the posting; a failed choice is retried once. Source
+  titles come from PubMed, ClinicalTrials.gov and USPTO, not the model: the posting drops `<`,
+  `>` and `@` from them and leaves out a title that carries a link or a bare domain. Settings:
+  `PROJECT_RESEARCH_ENABLED` (default on), `LLM_PROJECT_RESEARCH_MODEL` (default
+  `claude-opus-5`, must be priced), `PROJECT_RESEARCH_MAX_TOOL_ROUNDS` (default 8).
+- **Ledger and ceiling.** Every research and choice call is claimed in `hub_project_calls`
+  before it runs, at its worst case, and updated with its real usage after.
+  `PROJECT_RESEARCH_DAILY_USD_LIMIT` (default 25.0) sums the rows touched in the rolling 24
+  hours; a step that meets it waits. A rate limit or 5xx is retried without counting; three
+  other failures (any other error, including one the client raises before sending, reserved at
+  the call's worst case, and a paid reply the worker cannot apply) end a session; a refusal ends
+  it at once. A step whose call never finished
+  (worker restart) runs again, and its claimed row still counts.
+- **What the engine posts, and when.** From its once-a-minute projects tick the engine requests
+  due projects and posts each `ready_to_post` one as BlackbirdBot in `#general` (phase
+  `hub_project`, the stored text, no model call), only while BlackbirdBot is on the roster; a
+  claim is written first, so a crash cannot post twice. The lab's reply is offered inside the
+  lab's own Phase-5 turn, before its daily-cap check: one call
+  (`prompts/phase5-project-reply.md`), posted with the header `:test_tube: *Blackbird project:*
+  <title>` as phase `project_reply`. It does not count toward the lab's daily cap or
+  `--max-proposals`. A thread rooted at a `project_reply` post is a project thread: both bots
+  get project prompts and guidance (`src/agent/project_guidance.py`), BlackbirdBot also gets
+  `search_pubmed` and `search_trials`, and verdict capture, assessment drops, ⏸️ declines, the
+  panel floor, panel notes and every headline are off. BlackbirdBot's close carries a
+  `<project_json>` block (stripped before posting), and the thread closes with outcome
+  `project_closed`. Project threads stay out of both bots' working memory and prior-thread lists.
+  A project thread whose project is missing or already finished (a resume reopening it, or a
+  reply linked after the project ended) is closed as abandoned at its next turn, with no model
+  call.
+- **Reading a project's calls.** Replies in a project thread are logged with phase
+  `project_thread` and `thread_phase` `project_open`, `project_refine`, `project_final` or
+  `project_close`; consults keep `consult_<domain>`. The details page's admin-only "Model calls"
+  link is `/admin/activity/<run_id>/llm-calls?thread=<reply_ts>`, which lists the thread's
+  replies and consults. The lab's reply step (phase `project_reply`, made before the thread
+  exists) is not listed there but is counted in the page's refinement cost; research cost comes
+  from the ledger.
+- **The `--max-proposals` drain.** Once the run reaches its target, no project is requested or
+  posted, and unposted projects end "not finished" (`run_ended_before_posting`). The drain also
+  waits for each posted project's lab reply while that lab is live: the drain warning names the
+  open interviews and the awaited replies, and the Projects page lists those projects as
+  "In progress". During a drain a failed reply attempt counts (outside it, only an unposted
+  reply does), and the second counted failure ends the project (`reply_failed`). A lab that has
+  left the roster ends its project (`lab_not_live`) and stops counting; a switched-off run does
+  not wait for replies.
+- **Stop, resume, finalize.** A stop or hold keeps open projects as they are; the Projects page
+  shows them "Paused", and a resume continues them. Finalizing, by any path, leaves open project
+  rows as they are: the page and the report count a finalized run's open projects as "not
+  finished" ("The run was finalized first") from the run's `finalized_at`.
+- **Statistics.** Interviews opened, consults per interview (`specialist_mix`,
+  `consult_fanout`), cost per interview and the lab page's thread count leave out threads rooted
+  at a `project_reply` post, and so do Discussions and Interviews. `cost_by_stage` keeps project
+  calls under their own `project_*` stage names. The end-of-run specialist tallies include
+  project-thread consults.
+- **Reviews.** `hub_project_reviews`, separate from `assessment_reviews`: a 1–5 rating, a
+  comment and fund or don't fund, one per person per project, written through `/reviews/…`
+  (refused under impersonation), edited by the author, deleted by admins only. Nothing else
+  reads them: not the review bot, not the assessment counts, not any agent.
+- **Scripts.** `scripts/projects_dry_run.py` runs the research and choice in memory (no rows, no
+  posting) and writes one JSON file outside the checkout, stopping at `--max-usd` (default 40):
+  `mkdir -p ~/backups-blackbird/projects-dry-run`, then
+  `$DC run --rm --no-deps -T -v ~/backups-blackbird/projects-dry-run:/out worker python scripts/projects_dry_run.py --out /out/<date>.json --max-usd <agreed>`;
+  never in a live container. `scripts/projects_thread_replay.py` replays one dry-run project's
+  thread against a scratch database with real model calls (the owner approves each use).
+  `scripts/projects_report.py --run <id> [--format md|json] [--out <path>]` is read-only and
+  prints the run's measures (outcomes and reasons, research and refinement cost, missed
+  intervals, gaps, anchors, sources, review figures); it refuses an `--out` inside the
+  repository.
+- **Freeze exception.** scout_hub `1.13.0` adds `agent-system-project.md` and
+  `phase4-project-reply.md` and a capability flag for the posting; pi_lab `1.3.0` adds
+  `phase5-project-reply.md` and `phase4-project-reply.md`. No existing prompt file, rubric,
+  `thread_guidance.py` string, `TOOL_DEFINITIONS` entry or `role.toml` `tools`/`post_types`
+  changed. Two golden-master entries were regenerated under review
+  (`test_run_start_marker_gm`, `test_review_bot_request_over_a_superseded_verdict_gm`);
+  `test_agent_turn_gm.ambr` was not.
+- **The next run starts FRESH:** both prompt sets were bumped. Project threads run on the bots'
+  existing rate allowances, which were not raised.

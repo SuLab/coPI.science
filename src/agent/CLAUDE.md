@@ -27,6 +27,10 @@ stopping, restarting).
   level the PI has already made public: an unpublished result, unfiled construct,
   undisclosed compound or volunteered limitation stays in the sidecar. No code or test
   checks that.
+- A project thread (its root's phase is `project_reply`; `src/agent/engine/projects.py`) is
+  not an interview: no assessment, drop, decline, panel note or headline, and ⏸️ never closes
+  it. BlackbirdBot closes it with a `<project_json>` sidecar, stripped before posting, and the
+  thread is recognised from the root's phase even with `HUB_PROJECTS_ENABLED` off.
 - The engine's `#assessments-summary` headline (`src/services/assessment_headline.py`)
   does publish sidecar data: the band/score and the first `PITCH_DISPLAY_CHARS` (600)
   characters of `elevator_pitch`, which can carry unpublished disclosures. Do not widen

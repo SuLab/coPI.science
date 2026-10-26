@@ -22,6 +22,7 @@ done until its help is updated in the same change:
 | `templates/workspace/pis.html`, `pi_detail.html` | `pis` (`directory`, `detail`); for staff cards, `managing-pis` and `pi-evidence`; manager steps 3–6, reviewer step 8 |
 | `templates/pis/_profile_review.html` (the staff Corpus and profile review card on the PI page) | `managing-pis` (`paper-review`, `finding-papers`), the glossary's candidate, unanchored and stages terms; manager step 5 |
 | `templates/workspace/assessments.html`, `assessment_detail.html`, the assessment card and chat | `assessments`; reviewer steps 3–7, manager step 8 |
+| `templates/workspace/projects.html`, `project_detail.html` | `projects` (`list`, `detail`, `reviewing`); `getting-started#navigation`; reviewer step 1, manager step 2 |
 | `templates/_run_bar.html` | `assessments` (`list`), `discussions-activity` (`discussions`); reviewer step 3, manager step 10 |
 | `templates/workspace/slack_bots.html` | `managing-pis#slack-bots`; manager step 7 |
 | `templates/workspace/staff.html` | `staff-accounts`; manager step 9 |

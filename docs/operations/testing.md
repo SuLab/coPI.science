@@ -119,11 +119,13 @@ copi copi_xN`, and give concurrent suites distinct names so they do not
 migrate each other's schema mid-run. Never point `TEST_DATABASE_URL` at `copi`,
 the dev database.
 
-**Host CI and the engine fallback (2026-10-19).** Settings read the host's `.env`, which turns
-the engine's server-side refusal fallback on, and that changes the request three pi_lab
-entries of `tests/characterization/test_prompt_freeze_gm.py` pin. Run the gate on the host as
-`ENGINE_REFUSAL_FALLBACK_ENABLED=false ./scripts/ci.sh`; with the fallback on, those three
-entries fail although nothing in the tree changed them.
+**Host CI and the engine fallback (2026-10-19; projects switch 2026-10-26).** Settings read the
+host's `.env`, which turns the engine's server-side refusal fallback on, and that changes the
+request three pi_lab entries of `tests/characterization/test_prompt_freeze_gm.py` pin. Once the
+BlackbirdBot projects switch is on there too (`HUB_PROJECTS_ENABLED=true`), engine tests that run
+the main loop would request projects. Run the gate on the host as
+`ENGINE_REFUSAL_FALLBACK_ENABLED=false HUB_PROJECTS_ENABLED=false ./scripts/ci.sh`; with either
+setting on, those tests fail although nothing in the tree changed them.
 
 ## Browser harness (before every web deploy)
 
