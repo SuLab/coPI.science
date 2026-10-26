@@ -279,9 +279,9 @@ def test_supported_start_revisions_are_exactly_the_documented_set():
         "0039", "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048",
         "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058",
         "0059", "0060", "0061", "0062", "0063", "0064", "0065", "0066", "0067", "0068",
-        "0069", "0070", "0071",
+        "0069", "0070", "0071", "0072",
     )
-    assert pf.DEFAULT_TARGET == "0072"
+    assert pf.DEFAULT_TARGET == "0073"
 
 
 def test_every_post_branch_revision_is_a_supported_start():
@@ -2055,6 +2055,25 @@ def test_0072_plans_its_new_objects():
     }
 
 
+def test_0073_plans_its_new_objects():
+    planned = {(o.kind, o.name) for o in pf.planned_objects_between("0072", "0073")}
+    assert planned == {
+        ("table", "hub_projects"),
+        ("table", "hub_project_calls"),
+        ("table", "hub_project_clocks"),
+        ("table", "hub_project_reviews"),
+        ("constraint", "uq_hub_projects_run_agent_slot"),
+        ("constraint", "ck_hub_projects_status"),
+        ("constraint", "ck_hub_project_calls_status"),
+        ("constraint", "uq_hub_project_clocks_run"),
+        ("constraint", "uq_hub_project_reviews_project_reviewer"),
+        ("constraint", "ck_hub_project_reviews_rating"),
+        ("index", "ix_hub_projects_run_reply"),
+        ("index", "ix_hub_project_calls_updated"),
+        ("index", "ix_hub_project_calls_project"),
+    }
+
+
 def test_postflight_pins_the_0071_objects():
     assert "0071" in po.VERIFIED_REVISIONS
     assert "hub_declines" in po.EXPECTED_TABLES
@@ -2088,3 +2107,21 @@ def test_postflight_pins_the_0072_objects():
         "interview_trajectories", "'refused'")
     assert po.EXPECTED_CONSTRAINTS["interview_trajectories_simulation_run_id_fkey"] == (
         "interview_trajectories", "REFERENCES simulation_runs(id) ON DELETE CASCADE")
+
+
+def test_postflight_pins_the_0073_objects():
+    assert "0073" in po.VERIFIED_REVISIONS
+    for table in ("hub_projects", "hub_project_calls", "hub_project_clocks", "hub_project_reviews"):
+        assert table in po.EXPECTED_TABLES
+    assert ("hub_projects", "reply_failures", "integer", False, "0") in po.EXPECTED_COLUMNS
+    assert ("hub_project_reviews", "reviewer_user_id", "uuid", True, "") in po.EXPECTED_COLUMNS
+    assert po.EXPECTED_CONSTRAINTS["hub_projects_simulation_run_id_fkey"] == (
+        "hub_projects", "REFERENCES simulation_runs(id) ON DELETE CASCADE")
+    assert po.EXPECTED_CONSTRAINTS["hub_project_calls_project_id_fkey"] == (
+        "hub_project_calls", "REFERENCES hub_projects(id) ON DELETE CASCADE")
+    assert po.EXPECTED_CONSTRAINTS["hub_project_clocks_simulation_run_id_fkey"] == (
+        "hub_project_clocks", "REFERENCES simulation_runs(id) ON DELETE CASCADE")
+    assert po.EXPECTED_CONSTRAINTS["hub_project_reviews_project_id_fkey"] == (
+        "hub_project_reviews", "REFERENCES hub_projects(id) ON DELETE CASCADE")
+    assert po.EXPECTED_CONSTRAINTS["hub_project_reviews_reviewer_user_id_fkey"] == (
+        "hub_project_reviews", "REFERENCES users(id) ON DELETE SET NULL")

@@ -230,3 +230,22 @@ def test_every_self_name_in_a_unit_resolves():
                     and n.attr not in known):
                 problems.append(f"{holder}:{n.lineno} self.{n.attr}")
     assert problems == [], "\n".join(problems)
+
+
+@pytest.mark.asyncio
+async def test_projects_is_a_unit(monkeypatch):
+    from src.agent.engine import deps
+    from src.agent.engine.projects import Projects
+
+    async def _no_model_call(*args, **kwargs):
+        raise AssertionError("no model call without a database")
+
+    monkeypatch.setattr(deps, "generate_agent_response", _no_model_call)
+    eng = _engine()
+    assert sim._UNIT_CLASSES["projects"] is Projects
+    assert eng.post_lane._projects is eng.projects
+    assert eng.reply_lane._projects is eng.projects
+    eng._enabled = True  # even switched on, no database means nothing to do
+    await eng._projects_tick(draining=False)
+    assert eng._last_tick is None and eng._awaiting_project_reply_count() == 0
+    assert await eng._offer_project_reply(eng.agents["su"], draining=False) is False

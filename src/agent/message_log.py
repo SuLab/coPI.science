@@ -23,6 +23,17 @@ logger = logging.getLogger(__name__)
 # prompt file had to change to keep it out of a prompt. See `is_panel_note`.
 PHASE_PANEL_NOTE = "panel_note"
 
+# `AgentMessage.phase` for BlackbirdBot's project posting to a lab (spec §5.6).
+# Hidden like a panel note, and so is every reply in its thread (`is_hidden_entry`):
+# the lab answers with a post of its own, so the posting must never reach an agent
+# as a pitch to interview, a thread to reply in, or a tag to act on.
+PHASE_HUB_PROJECT = "hub_project"
+# `AgentMessage.phase` for a lab's reply to its project posting: a new root whose
+# thread is the project thread (`is_project_thread`). Visible to the hub like any
+# root, but never one of the lab's own pitches (`get_agent_top_level_posts`).
+PHASE_PROJECT_REPLY = "project_reply"
+_PROJECT_PHASES = frozenset({PHASE_HUB_PROJECT, PHASE_PROJECT_REPLY})
+
 
 @dataclass
 class LogEntry:
@@ -56,8 +67,8 @@ class LogEntry:
     # "derive it from the shape" — `_flush_persisted` writes 'thread_reply' for
     # an entry with a thread_ts and 'new_post' otherwise, which is what every
     # pre-existing caller wants and gets by leaving this unset. It is set
-    # explicitly only for a message that is NOT conversation:
-    # PHASE_PANEL_NOTE. Restored from the row on every DB-origin ingest path
+    # explicitly only for a message that is not an ordinary post or reply:
+    # PHASE_PANEL_NOTE, PHASE_HUB_PROJECT, PHASE_PROJECT_REPLY. Restored from the row on every DB-origin ingest path
     # (`_rebuild_state_from_db`) so the exclusions
     # below survive a restart.
     phase: str | None = None
@@ -150,29 +161,30 @@ class MessageLog:
     UNGATED by design — thread-internal, self-authored, or bookkeeping:
         get_entry, get_thread_history, get_thread_message_count,
         get_agent_top_level_posts, get_thread_allowed_agents,
-        latest_timestamp
+        latest_timestamp, is_hidden_entry, is_project_thread, is_project_entry
 
     Writes (``append`` / ``load_entry`` / ``_record``) are NEVER gated: the log is
     shared by every agent in the process, so filtering at ingest would filter for
     all of them at once. The gate belongs at the per-agent read. See v2 §6.2.
 
-    **Panel notes are excluded from EVERY list-returning read**, GATED and
-    UNGATED alike (``is_panel_note`` / ``PHASE_PANEL_NOTE``). One invariant,
-    stated once: no read on this class ever hands an agent a panel note. The
-    two top-level readers (``get_new_top_level_posts``,
-    ``get_agent_top_level_posts``) would also exclude them structurally — a
-    panel note is always a threaded reply — but they filter explicitly anyway,
-    so the invariant is a property of the class rather than of a coincidence in
-    two of its methods.
+    **Hidden entries are excluded from EVERY list-returning read**, GATED and
+    UNGATED alike (``is_hidden_entry``): panel notes (``PHASE_PANEL_NOTE``),
+    BlackbirdBot's project postings (``PHASE_HUB_PROJECT``) and every reply in a
+    posting's thread. One invariant, stated once: no read on this class ever
+    hands an agent a hidden entry. The two top-level readers
+    (``get_new_top_level_posts``, ``get_agent_top_level_posts``) would also
+    exclude panel notes structurally — a panel note is always a threaded reply
+    — but they filter explicitly anyway, so the invariant is a property of the
+    class rather than of a coincidence in two of its methods.
 
     The two deliberate exceptions are not agent reads:
 
     * ``get_entry`` — a single-id lookup that must answer for ANY id in the
       log. It backs the idempotency check in ``append``, the live Slack
       poller's dedup and ``SimulationEngine._slack_parent_ts``; filtering it
-      would re-ingest a panel note from Slack as a brand-new inbound message,
+      would re-ingest a hidden entry from Slack as a brand-new inbound message,
       i.e. would produce exactly the leak the exclusions exist to prevent.
-    * ``latest_timestamp`` — a cursor high-water mark. A panel note IS a real
+    * ``latest_timestamp`` — a cursor high-water mark. A hidden entry IS a real
       message on the transport, and a cursor that stopped short of one would
       make the poller re-fetch it forever.
     """
@@ -360,6 +372,46 @@ class MessageLog:
         """
         return self._by_ts.get(ts)
 
+    def is_hidden_entry(self, entry: LogEntry) -> bool:
+        """Whether no agent may be handed ``entry``: a panel note, a
+        ``PHASE_HUB_PROJECT`` posting, or any entry whose thread root is one.
+
+        A reply in a posting's thread is hidden too: the lab answers a posting
+        with a post of its own, so nothing said under the posting is
+        conversation, and an ``@BlackbirdBot`` there must not activate a thread.
+
+        COHORT-GATE: UNGATED — a visibility rule for every agent, not a cohort read.
+        """
+        if is_panel_note(entry) or entry.phase == PHASE_HUB_PROJECT:
+            return True
+        if entry.thread_ts is None:
+            return False
+        root = self._by_ts.get(entry.thread_ts)
+        return root is not None and root.phase == PHASE_HUB_PROJECT
+
+    def is_project_thread(self, thread_ts: str) -> bool:
+        """Whether ``thread_ts`` roots a project thread: its root's phase is
+        ``PHASE_PROJECT_REPLY`` (a lab's reply to its posting). False when the
+        root is not in the log.
+
+        COHORT-GATE: UNGATED — a property of one known thread.
+        """
+        root = self._by_ts.get(thread_ts)
+        return root is not None and root.phase == PHASE_PROJECT_REPLY
+
+    def is_project_entry(self, entry: LogEntry) -> bool:
+        """Whether ``entry`` belongs to a project: its own phase is
+        ``PHASE_HUB_PROJECT`` or ``PHASE_PROJECT_REPLY``, or its thread root's is.
+
+        COHORT-GATE: UNGATED — a property of one known entry.
+        """
+        if entry.phase in _PROJECT_PHASES:
+            return True
+        if entry.thread_ts is None:
+            return False
+        root = self._by_ts.get(entry.thread_ts)
+        return root is not None and root.phase in _PROJECT_PHASES
+
     def get_new_top_level_posts(
         self,
         since: float,
@@ -384,7 +436,7 @@ class MessageLog:
         """
         results = []
         for entry in self._since(since):
-            if is_panel_note(entry):
+            if self.is_hidden_entry(entry):
                 continue
             if entry.thread_ts is not None:
                 continue
@@ -410,10 +462,11 @@ class MessageLog:
         thread's parent by definition, even if a reply carries an earlier
         posted_at (a writer's clock can run behind the engine's).
 
-        Panel notes are dropped (PHASE_PANEL_NOTE). This is THE read that
-        becomes an agent's prompt (``_reply_to_thread`` -> ``thread_history``
-        -> ``build_phase4_prompt``), so it is the reason no prompt file had to
-        change to keep panel notes out of a prompt.
+        Hidden entries are dropped (``is_hidden_entry``), so a posting's thread
+        reads as empty. This is THE read that becomes an agent's prompt
+        (``_reply_to_thread`` -> ``thread_history`` -> ``build_phase4_prompt``),
+        so it is the reason no prompt file had to change to keep panel notes
+        out of a prompt.
 
         COHORT-GATE: UNGATED by design — once a thread is open its full history
         is context, including a partner who has since left the cohort (v2 §8).
@@ -422,7 +475,7 @@ class MessageLog:
         replies = sorted(
             (
                 e for e in self._by_thread.get(thread_ts, [])
-                if not is_panel_note(e)
+                if not self.is_hidden_entry(e)
             ),
             # (posted_at, insertion seq) makes the sort explicitly what the old
             # stable sort over insertion-ordered _entries was implicitly.
@@ -430,10 +483,10 @@ class MessageLog:
         )
         result = []
         # The root can never BE a panel note (a note is always posted with a
-        # thread_ts, so no thread is ever rooted at one), but the guard is
-        # written out anyway: the invariant is "this method never returns a
-        # panel note", not "it happens not to".
-        if root and not is_panel_note(root):
+        # thread_ts, so no thread is ever rooted at one), but it can be a
+        # hidden project posting: the invariant is "this method never returns
+        # a hidden entry".
+        if root and not self.is_hidden_entry(root):
             result.append(root)
         result.extend(replies)
         return result
@@ -441,7 +494,7 @@ class MessageLog:
     def get_thread_message_count(self, thread_ts: str) -> int:
         """Count total messages in a thread (root + replies).
 
-        Panel notes do not count. This number is the interview's turn budget:
+        Hidden entries do not count. This number is the interview's turn budget:
         ``_reply_to_thread`` assigns it to ``thread.message_count``, which
         drives both ``phase4_guidance``'s EXPLORE/DECIDE/CONCLUDE ordinal and
         the ``max_thread_messages`` close — so counting notes would spend a
@@ -450,10 +503,11 @@ class MessageLog:
 
         COHORT-GATE: UNGATED by design — bookkeeping over one thread.
         """
-        count = 1 if thread_ts in self._by_ts else 0
+        root = self._by_ts.get(thread_ts)
+        count = 1 if root is not None and not self.is_hidden_entry(root) else 0
         count += sum(
             1 for e in self._by_thread.get(thread_ts, [])
-            if not is_panel_note(e)
+            if not self.is_hidden_entry(e)
         )
         return count
 
@@ -464,12 +518,16 @@ class MessageLog:
         older history (DB poll / Slack reconcile — see _record) would otherwise
         push a genuinely recent post out of the slice, which silently weakens both
         callers — the Phase 5 dedup context and the daily post cap.
+
+        A lab's reply to its project posting (``PHASE_PROJECT_REPLY``) is a
+        top-level post but not one of the agent's pitches, so it counts toward
+        neither.
                 COHORT-GATE: UNGATED by design — the agent's own posts.
         """
         posts = sorted(
             (
                 e for e in self._top_level_by_sender.get(agent_id, [])
-                if not is_panel_note(e)
+                if not self.is_hidden_entry(e) and e.phase != PHASE_PROJECT_REPLY
             ),
             key=lambda e: (e.posted_at, self._seq_by_ts[e.ts]),
         )
@@ -499,7 +557,7 @@ class MessageLog:
         agent_post_ts = self._top_level_ts_by_sender.get(agent_id, set())
         results = []
         for entry in self._since(since):
-            if is_panel_note(entry):
+            if self.is_hidden_entry(entry):
                 continue
             if entry.thread_ts not in agent_post_ts:
                 continue
@@ -535,10 +593,11 @@ class MessageLog:
         tag = f"@{agent_bot_name}".lower()
         results = []
         for entry in self._since(since):
-            if is_panel_note(entry):
-                # The note quotes the hub's own question back, so a bot name
+            if self.is_hidden_entry(entry):
+                # A panel note quotes the hub's own question back, so a bot name
                 # inside that question would otherwise read as an @-mention and
-                # activate a thread on the strength of the hub's bookkeeping.
+                # activate a thread on the strength of the hub's bookkeeping. A
+                # reply under a project posting is not conversation either.
                 continue
             if not _entry_allowed(entry, allowed_sender_ids):
                 continue
@@ -625,7 +684,7 @@ class MessageLog:
         writer that produced such rows was retired with the proposal flow).
         """
         for entry in self._by_thread.get(thread_ts, []):
-            if is_panel_note(entry):
+            if self.is_hidden_entry(entry):
                 # The load-bearing one for panel notes. A note is authored by
                 # the hub, so it passes the `sender_agent_id == agent_id` skip
                 # below only for the OTHER party — i.e. it would tell the PI's

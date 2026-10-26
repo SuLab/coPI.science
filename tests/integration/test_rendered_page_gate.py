@@ -43,6 +43,7 @@ from src.models import (
     DelegateInvitation,
     PromptChangeSuggestion,
 )
+from src.models.hub_project import STATUS_READY, HubProject, HubProjectReview
 from tests import factories
 from tests.assessment_chat_support import seed_interview
 from tests.integration.test_manager_access import auth_headers
@@ -64,6 +65,7 @@ class GateWorld:
     cohort: Any
     suggestion: Any
     invite_token: str
+    project_id: uuid.UUID
 
 
 PAGES: dict[str, Callable[[GateWorld], str]] = {
@@ -75,6 +77,8 @@ PAGES: dict[str, Callable[[GateWorld], str]] = {
     "/admin/activity/{run_id}": lambda w: f"/admin/activity/{w.run.id}",
     "/workspace/activity": lambda w: "/workspace/activity",
     "/workspace/interviews": lambda w: "/workspace/interviews",
+    "/workspace/projects": lambda w: "/workspace/projects",
+    "/workspace/projects/{project_id}": lambda w: f"/workspace/projects/{w.project_id}",
     "/workspace/activity/{run_id}": lambda w: f"/workspace/activity/{w.run.id}",
     "/admin/activity/{run_id}/llm-calls": lambda w: f"/admin/activity/{w.run.id}/llm-calls",
     "/admin/agents": lambda w: "/admin/agents",
@@ -333,6 +337,73 @@ def test_every_get_route_is_walked_or_skipped():
     assert set(NO_200_EXPECTED) <= set(PAGES)
 
 
+def project_plan(**overrides: Any) -> dict[str, Any]:
+    """A filled plan with the ten template keys, ``lab_tools`` a list as the choice stores it."""
+    plan: dict[str, Any] = {
+        "indication": "Gate indication", "target": "Gate kinase",
+        "model": "A cell assay of gate kinase activity", "positive_control": "A known inhibitor",
+        "negative_control": "An isotype antibody", "standard_of_care": "None exists, because gate",
+        "readout": "Kinase activity; a halving counts as success",
+        "design": "Three groups of six; the result decides a mouse study",
+        "time_and_budget": "Within the fundable range", "lab_tools": ["cryo-EM"],
+    }
+    plan.update(overrides)
+    return plan
+
+
+async def seed_ready_project(db, *, run, lab_agent_id: str) -> HubProject:
+    """One ``ready`` project of ``run`` for ``lab_agent_id``: a stored ``choice`` in the
+    research worker's resolved shape (one anchor, one PubMed and one trial source), a ``final``
+    in the close's shape, and the posting, the lab's reply and one hub reply in the log."""
+    now = datetime.now(UTC)
+    base = now.timestamp() - 1800
+    posting_ts, reply_ts = f"{base:.6f}", f"{base + 60:.6f}"
+    choice = {
+        "chosen": {"use": "Gate kinase inhibitor screen", "why": "Fits the lab's cryo-EM work",
+                   "domain": "scientific"},
+        "why_chosen": "It builds on the lab's own structures.",
+        "others": [{"use": "Gate assay in a new field", "domain": "technologic",
+                    "note": "Weaker evidence."}],
+        "title": "Gate kinase inhibitor screen",
+        "summary": "Blackbird proposes a structure-guided screen for gate kinase inhibitors.",
+        "plan": project_plan(design="To settle with the lab"),
+        "anchors": [{"section": "Key Methods and Technologies", "item": "cryo-EM"}],
+        "sources": [
+            {"key": "pmid:31500698", "kind": "pubmed", "title": "A gate kinase structure",
+             "domain": "scientific", "shows": "The kinase's binding pocket."},
+            {"key": "nct:NCT01903460", "kind": "trial", "title": "A gate kinase trial",
+             "domain": "clinical", "shows": "An inhibitor reached patients."},
+        ],
+    }
+    final = {
+        "plan": project_plan(),
+        "tool_marks": [{"item": "cryo-EM", "in_profile": True}],
+        "hub_position": "agree", "lab_position": "agree", "gaps": [], "disagreements": [],
+    }
+    project = HubProject(
+        simulation_run_id=run.id, agent_id=lab_agent_id, slot=1, status=STATUS_READY,
+        requested_run_seconds=0.0, choice=choice, title=choice["title"],
+        posting_text=":test_tube: *Blackbird project for the Gate lab*\nGate posting.",
+        posting_ts=posting_ts, posted_at=now - timedelta(minutes=30), reply_ts=reply_ts,
+        final=final, finished_at=now - timedelta(minutes=5), finished_run_seconds=1500.0,
+    )
+    db.add(project)
+    for agent_id, ts, thread_ts, phase, content, at in (
+        ("blackbird", posting_ts, None, "hub_project", project.posting_text, base),
+        (lab_agent_id, reply_ts, None, "project_reply",
+         ":test_tube: *Blackbird project:* Gate kinase inhibitor screen\nWe would use cryo-EM.",
+         base + 60),
+        ("blackbird", f"{base + 120:.6f}", reply_ts, "thread_reply",
+         "✅ Final plan: as above.", base + 120),
+    ):
+        await factories.make_agent_message(
+            db, run=run, agent_id=agent_id, channel_name="general", message_ts=ts,
+            thread_ts=thread_ts, phase=phase, content=content, posted_at=at,
+        )
+    await db.flush()
+    return project
+
+
 @pytest.fixture
 async def gate_world(db_session) -> GateWorld:
     users = {
@@ -383,6 +454,11 @@ async def gate_world(db_session) -> GateWorld:
         transcript_available=True,
     )
     db_session.add(suggestion)
+    project = await seed_ready_project(db_session, run=run, lab_agent_id="gatepi")
+    db_session.add(HubProjectReview(
+        project_id=project.id, reviewer_user_id=users["reviewer"].id,
+        reviewer_name="Gate Reviewer", rating=4, comment="Gate project review", fund=True,
+    ))
     db_session.add(DelegateInvitation(
         agent_registry_id=agent.id, invited_by_user_id=users["pi"].id,
         email="invitee@example.org", token="gate-invite-token", status="pending",
@@ -392,7 +468,7 @@ async def gate_world(db_session) -> GateWorld:
     return GateWorld(
         users=users, agent=agent, run=run, assessment_id=interview.assessment_id,
         root_ts=interview.root_ts, cohort=cohort, suggestion=suggestion,
-        invite_token="gate-invite-token",
+        invite_token="gate-invite-token", project_id=project.id,
     )
 
 

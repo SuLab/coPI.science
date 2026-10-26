@@ -364,8 +364,13 @@ class ThreadDecision(Base):
     #: than one that concluded: two consecutive empty/unparseable replies, two
     #: consecutive suppressed posts, or two consecutive non-transient model errors.
     #: It carries no verdict and is NOT a ``timeout`` — see ``closed_by_role``.
+    #: ``project_closed`` (migration 0073) ends a BlackbirdBot project thread
+    #: (``src/models/hub_project.py``); it carries no verdict either.
     outcome: Mapped[str] = mapped_column(
-        Enum("proposal", "no_proposal", "timeout", "abandoned", name="thread_outcome_enum"),
+        Enum(
+            "proposal", "no_proposal", "timeout", "abandoned", "project_closed",
+            name="thread_outcome_enum",
+        ),
         nullable=False,
     )
     summary_text: Mapped[str | None] = mapped_column(Text, nullable=True)

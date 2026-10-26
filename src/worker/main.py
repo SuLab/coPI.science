@@ -6,10 +6,11 @@ company_discovery).
 `monthly_refresh` is retired and fails loudly.
 
 While no job is waiting it also generates the assessment chat's opening questions,
-one set at a time (`src.services.assessment_chat_suggestions.generate_due`), and, when
+one set at a time (`src.services.assessment_chat_suggestions.generate_due`); when
 that had nothing to do, one finished interview's trajectory lines
-(`src.services.trajectory_generation.generate_due`), so a job waits behind at most one
-of those calls (CALL_TIMEOUT_SECONDS, 3 minutes, at worst),
+(`src.services.trajectory_generation.generate_due`); and, when neither made a call, one
+step of BlackbirdBot project research (`src.services.project_research.research_projects`),
+so a job waits behind at most one of those calls (CALL_TIMEOUT_SECONDS, 3 minutes, at worst),
 and runs the daily persona re-export sweep when it is due
 (`src.services.persona_sweep.run_persona_sweep`, spec 2026-10-05 D54).
 
@@ -61,6 +62,10 @@ from src.services.persona_sweep import (
     run_persona_sweep,
 )
 from src.services.profile_pipeline import run_profile_pipeline
+from src.services.project_research import (
+    SWEEP_INTERVAL_SECONDS as PROJECT_SWEEP_SECONDS,
+)
+from src.services.project_research import research_projects
 from src.services.review_bot import execute_review_analysis
 from src.services.trajectory_generation import (
     SWEEP_INTERVAL_SECONDS as TRAJECTORY_SWEEP_SECONDS,
@@ -545,6 +550,7 @@ async def run_worker():
     last_stale_check = asyncio.get_event_loop().time()
     last_suggestion_check: float | None = None
     last_trajectory_check: float | None = None
+    last_project_check: float | None = None
     persona_sweep_due = 0.0
 
     while not _shutdown:
@@ -557,8 +563,8 @@ async def run_worker():
                 await process_job(job.id, job.type, job.attempts, job.max_attempts, session_factory)
             else:
                 # No jobs: idle work, then sleep before polling again — unless a
-                # suggestion or trajectory call was made, which took long enough that a
-                # job may be waiting.
+                # suggestion, trajectory or project research call was made, which took
+                # long enough that a job may be waiting.
                 generated = False
                 now = asyncio.get_event_loop().time()
                 persona_sweep_due = await _maybe_sweep_personas(
@@ -573,6 +579,12 @@ async def run_worker():
                 ):
                     last_trajectory_check = now
                     generated = await generate_trajectories(session_factory)
+                if not generated and (
+                    last_project_check is None
+                    or now - last_project_check >= PROJECT_SWEEP_SECONDS
+                ):
+                    last_project_check = now
+                    generated = await research_projects(session_factory)
                 if not generated:
                     await asyncio.sleep(settings.worker_poll_interval)
 

@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% from "help/_link.html" import help_link %}
+{% block title %}Workspace — Project — Blackbird{% endblock %}
+{% block content %}
+{# Model-written text (the posting, the replies, the plan, the consults) renders autoescaped,
+   never `| safe`. The only links that are not routes are each source's `url` (PubMed or
+   ClinicalTrials.gov, built by src/services/projects_view.py) and the admin's `calls_url`.
+   Review forms post to literal /reviews/ paths (src/routers/reviews.py). #}
+{% set badge_class = {'ready': 'bg-green-100 text-green-700', 'not_agreed': 'bg-amber-100 text-amber-700', 'not_finished': 'bg-red-100 text-red-700', 'paused': 'bg-gray-100 text-gray-600', 'in_progress': 'bg-blue-100 text-blue-700'} %}
+{% macro review_fields(prefix, review) %}
+<div>
+    <label for="{{ prefix }}rating" class="block text-sm font-medium text-gray-700">Rating (1–5)</label>
+    <select id="{{ prefix }}rating" name="rating" required class="text-sm border border-gray-300 rounded-md shadow-sm">
+        {% for n in range(1, 6) %}<option value="{{ n }}" {% if review and review.rating == n %}selected{% endif %}>{{ n }}</option>{% endfor %}
+    </select>
+</div>
+<div class="mt-2">
+    <label for="{{ prefix }}comment" class="block text-sm font-medium text-gray-700">Comment</label>
+    <textarea id="{{ prefix }}comment" name="comment" rows="4" maxlength="10000" class="w-full text-sm border border-gray-300 rounded-md shadow-sm">{{ review.comment if review else '' }}</textarea>
+</div>
+<fieldset class="mt-2">
+    <legend class="text-sm font-medium text-gray-700">Funding</legend>
+    <div class="flex items-center gap-4 text-sm text-gray-700">
+        <span><input type="radio" id="{{ prefix }}fund" name="fund" value="fund" required {% if review and review.fund %}checked{% endif %}> <label for="{{ prefix }}fund">Fund</label></span>
+        <span><input type="radio" id="{{ prefix }}no-fund" name="fund" value="no_fund" {% if review and not review.fund %}checked{% endif %}> <label for="{{ prefix }}no-fund">Don't fund</label></span>
+    </div>
+</fieldset>
+{% endmacro %}
+<p class="mb-2 text-sm"><a href="{{ page_url(request, 'workspace_projects') }}" class="text-indigo-700 hover:underline">Back to Projects</a></p>
+<div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 mb-6"><h1 class="text-2xl font-bold text-gray-900">{{ project.title or 'Untitled project' }}</h1>{{ help_link(request, effective_user, 'projects', 'detail') }}</div>
+
+<section class="mb-6">
+    <h2 class="text-lg font-semibold text-gray-900 mb-2">Outcome</h2>
+    <p class="text-sm text-gray-700"><span class="px-2 py-0.5 rounded-full text-xs {{ badge_class.get(project.outcome_kind, 'bg-gray-100 text-gray-600') }}">{{ project.outcome_label }}</span>{% if project.reason_label %} <span class="text-gray-600">{{ project.reason_label }}</span>{% endif %}</p>
+    <dl class="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-sm text-gray-700">
+        <div><dt class="inline text-gray-600">Lab:</dt> <dd class="inline">{{ project.lab }}</dd></div>
+        <div><dt class="inline text-gray-600">Run:</dt> <dd class="inline">{{ project.run_id }}</dd></div>
+        <div><dt class="inline text-gray-600">Requested:</dt> <dd class="inline">{{ project.requested_at | ts }}</dd></div>
+        <div><dt class="inline text-gray-600">Posted:</dt> <dd class="inline">{{ project.posted_at | ts }}</dd></div>
+        <div><dt class="inline text-gray-600">Finished:</dt> <dd class="inline">{{ project.finished_at | ts }}</dd></div>
+    </dl>
+    {% if project.summary %}<p class="mt-2 text-sm text-gray-800 whitespace-pre-line">{{ project.summary }}</p>{% endif %}
+    {% if project.research_cost_usd is defined %}
+    <p class="mt-2 text-sm text-gray-700">Cost: research ${{ '%.2f' | format(project.research_cost_usd) }}, refinement ${{ '%.2f' | format(project.refinement_cost_usd) }}{% if project.calls_url %} · <a href="{{ project.calls_url }}" class="text-indigo-700 hover:underline">Model calls</a>{% endif %}</p>
+    {% endif %}
+</section>
+
+<section class="mb-6">
+    <h2 class="text-lg font-semibold text-gray-900 mb-2">Plan</h2>
+    <dl class="space-y-1 text-sm">
+        {% for row in project.plan_rows %}<div><dt class="inline font-medium text-gray-700">{{ row.label }}:</dt> <dd class="inline text-gray-800">{{ row.value or '—' }}</dd></div>{% endfor %}
+    </dl>
+    {% if project.tool_rows %}
+    <h3 class="mt-3 text-sm font-semibold text-gray-900">The lab's tools and models</h3>
+    <ul class="mt-1 space-y-1 text-sm text-gray-800">
+        {% for tool in project.tool_rows %}<li>{{ tool.item }} — {% if tool.in_profile %}<span class="text-green-700">in the lab's profile</span>{% else %}<span class="text-amber-700">not found in the lab's profile</span>{% endif %}</li>{% endfor %}
+    </ul>
+    {% endif %}
+</section>
+
+<section class="mb-6">
+    <h2 class="text-lg font-semibold text-gray-900 mb-2">Positions</h2>
+    <p class="text-sm text-gray-700">BlackbirdBot: {{ project.hub_position or 'No close recorded' }} · The lab: {{ project.lab_position or 'No close recorded' }}</p>
+    {% if project.gaps %}
+    <h3 class="mt-3 text-sm font-semibold text-gray-900">Gaps</h3>
+    <ul class="list-disc list-inside text-sm text-gray-800">{% for gap in project.gaps %}<li>{{ gap }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% if project.disagreements %}
+    <h3 class="mt-3 text-sm font-semibold text-gray-900">Disagreements</h3>
+    <ul class="list-disc list-inside text-sm text-gray-800">{% for item in project.disagreements %}<li>{{ item }}</li>{% endfor %}</ul>
+    {% endif %}
+</section>
+
+<section class="mb-6">
+    <h2 class="text-lg font-semibold text-gray-900 mb-2">Why this use</h2>
+    {% if project.why_chosen %}<p class="text-sm text-gray-800 whitespace-pre-line">{{ project.why_chosen }}</p>{% else %}<p class="text-sm text-gray-600">No reason recorded.</p>{% endif %}
+    {% if project.others %}
+    <h3 class="mt-3 text-sm font-semibold text-gray-900">Also considered</h3>
+    <ul class="list-disc list-inside text-sm text-gray-800">{% for other in project.others %}<li>{{ other.use }}{% if other.note %} — {{ other.note }}{% endif %}</li>{% endfor %}</ul>
+    {% endif %}
+</section>
+
+<section class="mb-6">
+    <h2 class="text-lg font-semibold text-gray-900 mb-2">Built on</h2>
+    {% if project.anchors %}
+    <ul class="list-disc list-inside text-sm text-gray-800">{% for anchor in project.anchors %}<li><span class="text-gray-600">{{ anchor.section }}:</span> {{ anchor.item }}</li>{% endfor %}</ul>
+    {% else %}<p class="text-sm text-gray-600">No anchors recorded.</p>{% endif %}
+</section>
+
+<section class="mb-6">
+    <h2 class="text-lg font-semibold text-gray-900 mb-2">Research</h2>
+    {% if project.sources %}
+    <ul class="space-y-1 text-sm text-gray-800">
+        {% for source in project.sources %}<li>{% if source.url %}<a href="{{ source.url }}" class="text-indigo-700 hover:underline" rel="noopener noreferrer" target="_blank">{{ source.ident }}</a>{% else %}{{ source.ident }}{% endif %} — {{ source.title }}{% if source.specialist %} <span class="text-xs text-gray-600">found by the {{ source.specialist }} specialist</span>{% endif %}</li>{% endfor %}
+    </ul>
+    {% else %}<p class="text-sm text-gray-600">No sources recorded.</p>{% endif %}
+</section>
+
+<section class="mb-6">
+    <h2 class="text-lg font-semibold text-gray-900 mb-2">Opening plan</h2>
+    <dl class="space-y-1 text-sm">
+        {% for row in project.opening_rows %}<div><dt class="inline font-medium text-gray-700">{{ row.label }}:</dt> <dd class="inline text-gray-800">{{ row.value or '—' }}</dd></div>{% endfor %}
+    </dl>
+</section>
+
+<section class="mb-6">
+    <h2 class="text-lg font-semibold text-gray-900 mb-2">Conversation</h2>
+    {% if project.timeline %}
+    <ol class="space-y-3 list-none">
+        {% for post in project.timeline %}<li class="bg-white rounded-xl shadow-sm border border-gray-200 px-4 py-3"><p class="text-xs text-gray-600">{{ post.speaker }} · {{ post.at | ts }}{% if post.kind == 'posting' %} · posting{% endif %}</p><p class="mt-1 text-sm text-gray-800 whitespace-pre-line">{{ post.text }}</p></li>{% endfor %}
+    </ol>
+    {% else %}<p class="text-sm text-gray-600">Nothing has been posted yet.</p>{% endif %}
+    {% if project.consults %}
+    <h3 class="mt-4 text-sm font-semibold text-gray-900">Specialist consults</h3>
+    <ul class="mt-1 space-y-2 text-sm text-gray-800">
+        {% for consult in project.consults %}<li class="bg-white rounded-xl border border-gray-200 px-4 py-2">
+            <p><span class="font-medium">{{ consult.domain }}</span>: {{ consult.question }}</p>
+            {% if consult.established %}<p class="mt-1 text-gray-600">Established:</p><ul class="list-disc list-inside">{% for line in consult.established %}<li>{{ line }}</li>{% endfor %}</ul>{% endif %}
+            {% if consult.concerns %}<p class="mt-1 text-gray-600">Concerns:</p><ul class="list-disc list-inside">{% for line in consult.concerns %}<li>{{ line }}</li>{% endfor %}</ul>{% endif %}
+            {% if consult.questions_to_ask %}<p class="mt-1 text-gray-600">Questions to ask:</p><ul class="list-disc list-inside">{% for line in consult.questions_to_ask %}<li>{{ line }}</li>{% endfor %}</ul>{% endif %}
+        </li>{% endfor %}
+    </ul>
+    {% endif %}
+</section>
+
+<section class="mb-6">
+    <h2 id="reviews" class="text-lg font-semibold text-gray-900 mb-2">Reviews</h2>
+    {% if project.reviews %}
+    <ul class="space-y-2">
+        {% for review in project.reviews %}<li class="bg-white rounded-xl border border-gray-200 px-4 py-2 text-sm text-gray-800">
+            <p><span class="font-medium">{{ review.reviewer_name }}</span> · {{ review.rating }}/5 · {{ 'Fund' if review.fund else "Don't fund" }} · <span class="text-xs text-gray-600">{{ review.created_at | ts }}</span></p>
+            {% if review.comment %}<p class="mt-1 whitespace-pre-line">{{ review.comment }}</p>{% endif %}
+            {% if review.can_edit %}
+            <details class="mt-2">
+                <summary class="cursor-pointer text-sm text-indigo-700">Edit your review</summary>
+                <form method="post" action="/reviews/project-reviews/{{ review.id }}/edit" class="mt-2">
+                    {{ review_fields('edit-', review) }}
+                    <button type="submit" class="mt-2 text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Save</button>
+                </form>
+            </details>
+            {% endif %}
+            {% if permissions.admin and not impersonation_banner %}
+            <form method="post" action="/reviews/project-reviews/{{ review.id }}/delete" class="mt-1" data-confirm="Delete this review? This cannot be undone.">
+                <button type="submit" class="text-sm text-red-600 hover:text-red-800">Delete</button>
+            </form>
+            {% endif %}
+        </li>{% endfor %}
+    </ul>
+    {% else %}<p class="text-sm text-gray-600">No reviews yet.</p>{% endif %}
+    {% if project.can_review_projects and not project.my_review %}
+    <form method="post" action="/reviews/projects/{{ project.id }}/review" class="mt-4 bg-white rounded-xl border border-gray-200 px-4 py-3">
+        <h3 class="text-sm font-semibold text-gray-900 mb-2">Your review</h3>
+        {{ review_fields('new-', none) }}
+        <button type="submit" class="mt-2 text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Save review</button>
+    </form>
+    {% endif %}
+</section>
+{% endblock %}

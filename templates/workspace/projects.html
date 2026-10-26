@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% from "help/_link.html" import help_link %}
+{% from "_run_bar.html" import run_bar as run_bar_macro %}
+{% block title %}Workspace — Projects — Blackbird{% endblock %}
+{% block content %}
+{% set badge_class = {'ready': 'bg-green-100 text-green-700', 'not_agreed': 'bg-amber-100 text-amber-700', 'not_finished': 'bg-red-100 text-red-700', 'paused': 'bg-gray-100 text-gray-600', 'in_progress': 'bg-blue-100 text-blue-700'} %}
+<div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 mb-6"><h1 class="text-2xl font-bold text-gray-900">Projects</h1>{{ help_link(request, effective_user, 'projects', 'list') }}</div>
+{% if not selected_run_id %}<p class="text-gray-600 text-sm">No simulation runs found.</p>{% else %}
+{{ run_bar_macro(page_url(request, 'workspace_projects'), 'projects-run-select', run_bar, selected_run_id, False, '', 'projects', ('Runs with projects', 'Runs with no projects'), 'Counts are projects requested in the run.', [('lab', lab_filter or ''), ('outcome', outcome_filter), ('mine', '1' if mine else '')]) }}
+<p class="text-sm text-gray-600 mb-4">{{ summary.counts.get('ready', 0) }} ready · {{ summary.counts.get('not_agreed', 0) }} not agreed · {{ summary.counts.get('not_finished', 0) }} not finished · {{ summary.counts.get('paused', 0) + summary.counts.get('in_progress', 0) }} paused or in progress · {{ summary.review_count }} reviews{% if summary.mean_rating is not none %} · mean rating {{ summary.mean_rating }}{% endif %}{% if summary.fund_share is not none %} · {{ (summary.fund_share * 100) | round | int }}% fund{% endif %}</p>
+<form method="get" action="{{ page_url(request, 'workspace_projects') }}" class="mb-4 flex flex-wrap items-end gap-3">
+    <input type="hidden" name="run_id" value="{{ selected_run_id }}">
+    <div>
+        <label for="projects-lab" class="block text-sm text-gray-700">Lab</label>
+        <select id="projects-lab" name="lab" class="text-sm border border-gray-300 rounded-md shadow-sm">
+            <option value="" {% if not lab_filter %}selected{% endif %}>All labs</option>
+            {% for option in lab_options %}<option value="{{ option }}" {% if option == lab_filter %}selected{% endif %}>{{ option }}</option>{% endfor %}
+        </select>
+    </div>
+    <div>
+        <label for="projects-outcome" class="block text-sm text-gray-700">Outcome</label>
+        <select id="projects-outcome" name="outcome" class="text-sm border border-gray-300 rounded-md shadow-sm">
+            {% for value, label in [('', 'Ready and not agreed'), ('ready', 'Ready'), ('not_agreed', 'Not agreed'), ('not_finished', 'Not finished'), ('paused', 'Paused or in progress')] %}<option value="{{ value }}" {% if value == outcome_filter %}selected{% endif %}>{{ label }}</option>{% endfor %}
+        </select>
+    </div>
+    <div class="flex items-center gap-2">
+        <input type="checkbox" id="projects-mine" name="mine" value="1" {% if mine %}checked{% endif %}>
+        <label for="projects-mine" class="text-sm text-gray-700">Not reviewed by me</label>
+    </div>
+    <button type="submit" class="px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">Apply</button>
+</form>
+{% for p in projects %}
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 mb-3 px-4 py-3">
+    <h2 class="text-base font-medium text-gray-900"><a href="{{ page_url(request, 'workspace_project_detail', project_id=p.id) }}" class="text-indigo-700 hover:underline">{{ p.title or 'Untitled project' }}</a></h2>
+    <div class="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-gray-700">
+        <span>{{ p.lab }}</span>
+        <span class="px-2 py-0.5 rounded-full text-xs {{ badge_class.get(p.outcome_kind, 'bg-gray-100 text-gray-600') }}">{{ p.outcome_label }}</span>
+        {% if p.reason_label %}<span class="text-xs text-gray-600">{{ p.reason_label }}</span>{% endif %}
+        {% if p.finished_at %}<span class="text-xs text-gray-600">Finished {{ p.finished_at | ts }}</span>{% endif %}
+        <span class="text-xs text-gray-600">{{ p.review_count }} reviews{% if p.mean_rating is not none %} · mean rating {{ p.mean_rating }}{% endif %} · {{ p.fund_count }} fund{% if p.reviewed_by_me %} · reviewed by you{% endif %}</span>
+    </div>
+</div>
+{% else %}<p class="text-gray-600 text-sm">No projects match these filters in this run.</p>{% endfor %}
+{% endif %}
+{% endblock %}

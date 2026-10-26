@@ -40,6 +40,10 @@ logger = logging.getLogger(__name__)
 
 #: The feedback and row key of a pitch, which has no thread (main AGT-14).
 PHASE5_THREAD_KEY = "phase5"
+#: The feedback and row key of a lab's reply to its project posting, which is a new root
+#: with no thread yet. Kept apart from ``PHASE5_THREAD_KEY`` so a blocked reply's reason
+#: reaches the next reply draft, not the lab's next pitch.
+PROJECT_REPLY_THREAD_KEY = "project_reply"
 #: Rejection reasons kept in memory, oldest evicted first (main AGT-14).
 FEEDBACK_CAP = 1000
 #: The reason code of a memory line the sweep would strip (R6.13).

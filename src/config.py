@@ -423,6 +423,21 @@ class Settings(BaseSettings):
     interview_trajectories_enabled: bool = True
     interview_trajectories_daily_usd_limit: float = 10.0
 
+    # BlackbirdBot projects (the projects prototype). HUB_PROJECTS_ENABLED is the master
+    # switch, read once at engine start (a change applies at the next start); off, no
+    # project is requested. The worker researches each requested project with
+    # LLM_PROJECT_RESEARCH_MODEL, which must be priced in src/services/llm_pricing.py, or
+    # nothing is researched; PROJECT_RESEARCH_ENABLED=false stops the research step alone.
+    # The ceiling is rolling 24 h over hub_project_calls' own usage. A research session
+    # runs at most PROJECT_RESEARCH_MAX_TOOL_ROUNDS tool rounds; each live lab gets one
+    # project per PROJECT_INTERVAL_HOURS of run time.
+    hub_projects_enabled: bool = False
+    project_research_enabled: bool = True
+    project_research_daily_usd_limit: float = 25.0
+    llm_project_research_model: str = "claude-opus-5"
+    project_research_max_tool_rounds: int = 8
+    project_interval_hours: float = 24.0
+
     # Worker
     worker_poll_interval: int = 5  # seconds
 
@@ -686,6 +701,8 @@ class Settings(BaseSettings):
             "assessment_chat_max_turns",
             "assessment_chat_suggestions_daily_usd_limit",
             "interview_trajectories_daily_usd_limit",
+            "project_research_daily_usd_limit",
+            "project_interval_hours",
             "company_discovery_daily_usd_limit",
         ):
             value = getattr(self, name)

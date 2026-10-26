@@ -35,10 +35,21 @@ def test_load_role_results_equal_todays():
 
 def test_prompt_files_moved_verbatim():
     assert roles.ROLE_PROMPT_FILES == {
-        "pi_lab": ("agent-system.md", "identity.md", "phase4-thread-reply.md", "phase5-new-post.md"),
+        "pi_lab": (
+            "agent-system.md", "identity.md", "phase4-thread-reply.md", "phase5-new-post.md",
+            "phase5-project-reply.md", "phase4-project-reply.md",
+        ),
         # lab-brief.md: stamped and snapshotted, never composed (spec 2026-10-05 D26).
-        "scout_hub": ("agent-system.md", "identity.md", "phase4-thread-reply.md", "lab-brief.md"),
+        "scout_hub": (
+            "agent-system.md", "identity.md", "phase4-thread-reply.md", "lab-brief.md",
+            "agent-system-project.md", "phase4-project-reply.md",
+        ),
     }
+
+
+def test_posts_project_ideas_only_for_the_hub():
+    assert ROLE_CAPABILITIES["scout_hub"].posts_project_ideas is True
+    assert ROLE_CAPABILITIES["pi_lab"].posts_project_ideas is False
 
 
 def test_derived_sets_are_todays_sets():

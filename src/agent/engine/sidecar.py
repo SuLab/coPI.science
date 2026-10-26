@@ -187,6 +187,46 @@ def _extract_assessment_json(text: str) -> dict | None:
     return None
 
 
+# BlackbirdBot's close of a project thread (spec §5.8). Exact-case tags: the prompt
+# gives the tag verbatim, and a variant that slips past both regexes reaches Slack as
+# text rather than as a close, which the close-unreadable outcome already covers.
+_PROJECT_JSON_RE = re.compile(r"<project_json>\s*(.*?)\s*</project_json>", re.DOTALL)
+# An opening tag with no close (a truncated reply): everything from it to the end is
+# dropped, for the same reason as `_ASSESSMENT_UNCLOSED_RE`.
+_PROJECT_UNCLOSED_RE = re.compile(r"<project_json>.*\Z", re.DOTALL)
+
+
+def _extract_project_json(raw: str | None) -> dict | None:
+    """The LAST closed ``<project_json>`` block of ``raw`` as a dict, or None.
+
+    One optional wrapping code fence is tolerated (``_unfence_sidecar``). Only the last
+    block is read, unlike ``_extract_assessment_json``: a close is one decision, and an
+    unusable final block is an unreadable close rather than a cue to fall back to an
+    earlier draft. None when there is no block, the block does not parse, or it is not an
+    object whose ``plan`` is an object. Never raises.
+    """
+    blocks = _PROJECT_JSON_RE.findall(raw or "")
+    if not blocks:
+        return None
+    try:
+        parsed = json.loads(_unfence_sidecar(blocks[-1]))
+    except (json.JSONDecodeError, ValueError) as exc:
+        logger.warning("[project] close block unparseable: %s", exc)
+        return None
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("plan"), dict):
+        logger.warning("[project] close block is not an object with a plan object")
+        return None
+    return parsed
+
+
+def _strip_project_sidecar(text: str) -> str:
+    """Remove every ``<project_json>`` block from ``text`` before it reaches Slack: closed
+    blocks whole, then an unclosed tail to the end of the text; the result is stripped."""
+    text = _PROJECT_JSON_RE.sub("", text)
+    text = _PROJECT_UNCLOSED_RE.sub("", text)
+    return text.strip()
+
+
 def _sidecar_has_valid_json_block(text: str) -> bool:
     """True if any <assessment_json> block in ``text`` is syntactically valid
     JSON, whatever its shape.

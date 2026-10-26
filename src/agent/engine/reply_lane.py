@@ -19,22 +19,31 @@ from src.agent.engine.context import EngineContext, RunState, via
 from src.agent.engine.helpers import _thread_phase_label, _was_truncated
 from src.agent.engine.sidecar import (
     _ASSESSMENT_UNCLOSED_RE,
+    _extract_project_json,
     _extract_slack_message,
     _reply_closes_thread,
     _strip_assessment_sidecar,
 )
+from src.agent.project_guidance import (
+    THREAD_KIND_INTERVIEW,
+    THREAD_KIND_PROJECT,
+    ProjectTurn,
+    project_turn,
+)
 from src.agent.role_capabilities import capabilities_for, hub_role_names
 from src.agent.state import ThreadState
 from src.agent.thread_guidance import phase4_guidance
-from src.agent.tools import execute_tool, live_profile_ids, tools_for_role
+from src.agent.tools import execute_tool, live_profile_ids, tools_for_role, tools_for_thread
 from src.models import HubDecline, OpportunityAssessment
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE
 from src.models.hub_decline import REASON_MAX_CHARS
+from src.models.hub_project import STATUS_REFINING, THREAD_OUTCOME_PROJECT_CLOSED
 
 if TYPE_CHECKING:
     from src.agent.engine.channel_directory import ChannelDirectory
     from src.agent.engine.panel import Panel
     from src.agent.engine.post_lane import PostLane
+    from src.agent.engine.projects import Projects
     from src.agent.engine.scheduler import Scheduler
     from src.agent.engine.slack_io import SlackIO
     from src.agent.engine.threads import Threads
@@ -121,6 +130,7 @@ class ReplyLane:
         panel: Panel,
         slack_io: SlackIO,
         channel_directory: ChannelDirectory,
+        projects: Projects,
     ) -> None:
         self.ctx = ctx
         self._run_state = run_state
@@ -131,6 +141,8 @@ class ReplyLane:
         self._panel = panel
         self._slack_io = slack_io
         self._channel_directory = channel_directory
+        # Project threads: their project's context, the lab's position and the close.
+        self._projects = projects
         # Bounds concurrent reply-lane tasks PROCESS-WIDE. Constructed once,
         # here, and never re-constructed per call/per turn — the whole reason
         # the OLD Phase-4 fan-out semaphore (`_llm_fanout_sem`, deleted here)
@@ -484,6 +496,9 @@ class ReplyLane:
         is held — that nesting order (thread-lock-outer, agent-lock-inner) is
         the one documented on `_thread_locks` in __init__ and must never
         invert.
+
+        A project thread (``MessageLog.is_project_thread``) leaves this method right
+        after the preflight for `_reply_to_project_thread`.
         """
         # Monotonic latch for the specialist floor's fail-open snapshot
         # (ThreadState.floor_armed), re-evaluated at the START of every turn on
@@ -535,6 +550,9 @@ class ReplyLane:
 
         thread_history = await self._reply_preflight(agent, thread, settings)
         if thread_history is None:
+            return
+        if self.message_log.is_project_thread(thread.thread_id):
+            await self._reply_to_project_thread(agent, thread, thread_history, settings)
             return
 
         # Get other agent info
@@ -656,7 +674,11 @@ class ReplyLane:
                 type(exc).__name__,
             )
             caps = capabilities_for(agent.role)
-            if caps is not None and caps.captures_verdicts:
+            # A project thread owes no assessment, so its abandon is no lost verdict.
+            if (
+                caps is not None and caps.captures_verdicts
+                and not self.message_log.is_project_thread(thread.thread_id)
+            ):
                 await self._verdicts._record_assessment_drop(
                     agent.agent_id, "reply_failed",
                     subject_agent_id=thread.other_agent_id,
@@ -754,11 +776,14 @@ class ReplyLane:
         return thread_history
 
     def _reply_tool_executor(
-        self, agent: Agent, thread: ThreadState
+        self, agent: Agent, thread: ThreadState, kind: str = THREAD_KIND_INTERVIEW,
     ) -> Callable[[str, dict], Awaitable[str]]:
         """Build the tool executor bound to this thread's state (with the durable
         consult record and the Slack panel note). Defining the closures has no side
-        effect, so building them before the rate-limit reservation is equivalent."""
+        effect, so building them before the rate-limit reservation is equivalent.
+        ``kind`` is the thread's kind: a project thread gets the project tools
+        (`execute_tool`'s ``thread_kind``) and no panel notes, so a consult there is
+        recorded but never posted."""
         # The durable twin of `on_consult` below, plus the workspace-visible
         # one. In-memory stays authoritative in-process (the floor reads it, and
         # a failed write must never un-count a consult that happened) — the row
@@ -788,9 +813,10 @@ class ReplyLane:
                 channel_name=_ch,
                 **fields,
             )
-            await self._post_panel_note(
-                agent.agent_id, channel=_ch, thread_ts=_t, **fields,
-            )
+            if kind != THREAD_KIND_PROJECT:
+                await self._post_panel_note(
+                    agent.agent_id, channel=_ch, thread_ts=_t, **fields,
+                )
 
         # Create tool executor bound to this thread's state
         async def tool_executor(tool_name: str, tool_input: dict) -> str:
@@ -817,6 +843,7 @@ class ReplyLane:
                 },
                 allowed_sender_ids=agent.allowed_sender_ids,
                 profile_ids=live_profile_ids(self.agents.values()),
+                thread_kind=kind,
             )
         return tool_executor
 
@@ -1045,52 +1072,9 @@ class ReplyLane:
             )
             response_text = response_text.rstrip() + TRUNCATION_NOTICE
 
-        # Post the reply
-        posted = await self._post_message(
-            agent.agent_id, thread.channel, response_text,
-            thread_ts=thread.thread_id, landed_check=True,
-        )
-        if not posted:
-            # _post_message already logged why (e.g. the text stripped to
-            # empty once its own sidecar/tag stripping ran, even though it
-            # passed the empty-response check above). Nothing reached
-            # Slack, so this turn must not count and the reply must not be
-            # treated as sent — has_pending_reply stays True so the next
-            # Phase 4 pass tries again instead of silently dropping the
-            # thread (mirrors the phase-5 new-post suppression handling).
-            thread.suppressed_post_count += 1
-            logger.info(
-                "[%s] Phase 4: reply to thread %s suppressed — not "
-                "counted, nothing persisted (count=%d)",
-                agent.agent_id, thread.thread_id, thread.suppressed_post_count,
-            )
-            if thread.suppressed_post_count >= 2:
-                # Same backoff the empty-response branch above uses. Without
-                # it this thread is retried every turn forever at full Opus
-                # price: nothing it does advances message_count, so the
-                # max_thread_messages close can never rescue it either.
-                thread.has_pending_reply = False
-                logger.info(
-                    "[%s] Phase 4: Backing off thread %s after %d suppressed posts",
-                    agent.agent_id, thread.thread_id, thread.suppressed_post_count,
-                )
-                # CLOSE IT (0063). This branch LOOKS recoverable and is not: a
-                # later PI reply would reset `empty_response_count`
-                # (`_pending_reply_pairs`) but never `suppressed_post_count`,
-                # which clears only after a SUCCESSFUL post, and the
-                # counterparty cannot post again anyway — its own
-                # has_pending_reply was cleared when it posted, and the
-                # suppressed text never reached the log, so its `has_new` stays
-                # False. Both sides go quiet and the thread leaks exactly as the
-                # empty-reply branch did. (`ThreadNotFound` is the one subcase
-                # that already evicted itself in `_post_message`, so it never
-                # reaches here.)
-                await self._close_thread(agent, thread, ABANDONED_OUTCOME)
+        posted = await self._post_reply(agent, thread, response_text)
+        if posted is None:
             return
-        agent.message_count += 1
-        thread.has_pending_reply = False
-        thread.empty_response_count = 0
-        thread.suppressed_post_count = 0
 
         # Does this reply END the interview? Decided ONCE here, then read
         # twice: `_capture_hub_assessment` needs it to judge the reply's
@@ -1144,6 +1128,200 @@ class ReplyLane:
         carried = bool(_ASSESSMENT_UNCLOSED_RE.search(raw_response or ""))
         await self._check_thread_outcome(
             agent, thread, response_text, posted_ts=posted, carried_sidecar=carried)
+
+    async def _post_reply(
+        self, agent: Agent, thread: ThreadState, response_text: str,
+    ) -> str | None:
+        """Post a thread reply (interview or project) with the landed check, and keep the
+        thread's counters: on success the reply counts and the thread owes nothing; a
+        suppressed post counts nothing, and the second suppressed post in a row backs the
+        thread off and closes it as abandoned. Returns the posted id, or None when nothing
+        was posted."""
+        posted = await self._post_message(
+            agent.agent_id, thread.channel, response_text,
+            thread_ts=thread.thread_id, landed_check=True,
+        )
+        if not posted:
+            # _post_message already logged why (e.g. the text stripped to
+            # empty once its own sidecar/tag stripping ran, even though it
+            # passed the caller's empty-response check). Nothing reached
+            # Slack, so this turn must not count and the reply must not be
+            # treated as sent — has_pending_reply stays True so the next
+            # Phase 4 pass tries again instead of silently dropping the
+            # thread (mirrors the phase-5 new-post suppression handling).
+            thread.suppressed_post_count += 1
+            logger.info(
+                "[%s] Phase 4: reply to thread %s suppressed — not "
+                "counted, nothing persisted (count=%d)",
+                agent.agent_id, thread.thread_id, thread.suppressed_post_count,
+            )
+            if thread.suppressed_post_count >= 2:
+                # Same backoff the caller's empty-response branch uses. Without
+                # it this thread is retried every turn forever at full Opus
+                # price: nothing it does advances message_count, so the
+                # max_thread_messages close can never rescue it either.
+                thread.has_pending_reply = False
+                logger.info(
+                    "[%s] Phase 4: Backing off thread %s after %d suppressed posts",
+                    agent.agent_id, thread.thread_id, thread.suppressed_post_count,
+                )
+                # CLOSE IT (0063). This branch LOOKS recoverable and is not: a
+                # later PI reply would reset `empty_response_count`
+                # (`_pending_reply_pairs`) but never `suppressed_post_count`,
+                # which clears only after a SUCCESSFUL post, and the
+                # counterparty cannot post again anyway — its own
+                # has_pending_reply was cleared when it posted, and the
+                # suppressed text never reached the log, so its `has_new` stays
+                # False. Both sides go quiet and the thread leaks exactly as the
+                # empty-reply branch did. (`ThreadNotFound` is the one subcase
+                # that already evicted itself in `_post_message`, so it never
+                # reaches here.)
+                await self._close_thread(agent, thread, ABANDONED_OUTCOME)
+            return None
+        agent.message_count += 1
+        thread.has_pending_reply = False
+        thread.empty_response_count = 0
+        thread.suppressed_post_count = 0
+        return posted
+
+    async def _reply_to_project_thread(
+        self, agent: Agent, thread: ThreadState, thread_history: list[dict], settings: Any,
+    ) -> None:
+        """One turn in a project thread (spec §5.8): the project prompts and tools, the
+        turn's band from `project_turn`, then `_handle_project_reply_response`. Runs
+        under the same thread lock as `_reply_to_thread`, after its preflight (so a full
+        thread has already closed as a time-out). A thread whose project cannot be read
+        just now is skipped with a warning and the reply stays owed. A thread whose project is
+        missing or no longer ``refining`` (ended by the tick, or reopened by a resume after it
+        ended) is closed as abandoned without a model call: nothing it wrote could be recorded,
+        and an open thread would hold a ``--max-proposals`` drain."""
+        project = await self._projects._project_thread_context(thread.thread_id)
+        if project is None:
+            logger.warning(
+                "[%s] Project thread %s has no readable project; skipping this turn",
+                agent.agent_id, thread.thread_id,
+            )
+            return
+        if project["status"] != STATUS_REFINING:
+            logger.info(
+                "[%s] Project thread %s: its project is %s; closing the thread",
+                agent.agent_id, thread.thread_id, project["status"] or "missing",
+            )
+            await self._close_thread(agent, thread, ABANDONED_OUTCOME)
+            return
+        other_agent = self.agents.get(thread.other_agent_id)
+        other_name = other_agent.bot_name if other_agent else thread.other_agent_id
+        other_lab = other_agent.pi_name if other_agent else "Unknown"
+        ordinal = thread.message_count + 1
+        lab_agrees = agent.role in hub_role_names() and self._projects._latest_lab_position(
+            thread.thread_id, thread.other_agent_id
+        ) == "agree"
+        turn = project_turn(agent.role, ordinal, lab_agrees=lab_agrees)
+        claim_reason = self.ctx.claim_feedback.get(agent.agent_id, thread.thread_id)
+        system_prompt, messages = agent.build_project_thread_prompt(
+            thread=thread,
+            thread_history=thread_history,
+            other_agent_name=other_name,
+            other_agent_lab=other_lab,
+            project=project,
+            turn=turn,
+            visibility=self._resolve_channel_visibility(thread.channel),
+            channel_id=self._channel_id_map.get(thread.channel),
+            authorship_feedback=feedback_text(claim_reason) if claim_reason else None,
+        )
+        tool_executor = self._reply_tool_executor(agent, thread, kind=THREAD_KIND_PROJECT)
+
+        if not agent.try_reserve(
+            self._allowance_for(agent), deps.get_settings().llm_rate_window_seconds
+        ):
+            logger.warning(
+                "[%s] rate-limited; deferring this reply", agent.agent_id,
+            )
+            return
+        agent.record_api_call(already_reserved=True)
+        stop_reasons: list[str] = []
+        try:
+            raw_response = await deps.generate_with_tools(
+                system_prompt=system_prompt,
+                messages=messages,
+                tools=tools_for_thread(agent.role, THREAD_KIND_PROJECT),
+                tool_executor=tool_executor,
+                model=settings.llm_agent_model_opus,
+                # The interview reply's ceiling, for the same reasons (adaptive
+                # thinking shares it; the close carries a sidecar): `_generate_reply`.
+                max_tokens=16000,
+                log_meta={
+                    "agent_id": agent.agent_id,
+                    "phase": "project_thread",
+                    "channel": thread.channel,
+                    "thread_ts": thread.thread_id,
+                    "thread_phase": turn.log_phase,
+                    "message_ordinal": ordinal,
+                },
+                on_retry=agent.record_api_call,
+                on_stop_reason=stop_reasons.append,
+                should_continue=lambda: self._running,
+            )
+        except Exception as exc:  # noqa: BLE001 — back off, never spin (as _reply_to_thread)
+            await self._note_reply_failure(agent, thread, exc)
+            return
+        self._note_reply_success(thread)
+        try:
+            await self._handle_project_reply_response(
+                agent, thread, raw_response, stop_reasons, turn
+            )
+        except Exception as exc:
+            logger.error(
+                "[%s] Project-thread reply to thread %s failed: %s",
+                agent.agent_id, thread.thread_id, exc,
+            )
+
+    async def _handle_project_reply_response(
+        self, agent: Agent, thread: ThreadState, raw_response: str,
+        stop_reasons: list[str], turn: ProjectTurn,
+    ) -> None:
+        """Act on a project-thread reply: back off on an empty one (the second closes the
+        thread as abandoned), mark a truncated one, post it, and for the hub decide the
+        close. A hub reply closes the project in its close band (``turn.must_close``),
+        or earlier when it carries a ``<project_json>`` block and the lab's latest reply
+        agreed (``turn.may_close_early``); any other block is stripped by
+        `_post_message` and ignored. The project's outcome is recorded before the thread's
+        decision, so the project is finished before its decision exists. Nothing an
+        interview writes happens here: no ⏸️ close, no assessment capture, no drop and no
+        decline."""
+        response_text = _extract_slack_message(raw_response)
+        if not response_text or not response_text.strip():
+            thread.empty_response_count += 1
+            logger.warning(
+                "[%s] Project thread %s: empty/unparseable response (count=%d), skipping",
+                agent.agent_id, thread.thread_id, thread.empty_response_count,
+            )
+            if thread.empty_response_count >= 2:
+                # As in `_handle_reply_response`: nothing re-queues the pair, so the
+                # thread is closed rather than leaked.
+                thread.has_pending_reply = False
+                logger.info(
+                    "[%s] Project thread %s: backing off after %d empty responses",
+                    agent.agent_id, thread.thread_id, thread.empty_response_count,
+                )
+                await self._close_thread(agent, thread, ABANDONED_OUTCOME)
+            return
+        if _was_truncated(stop_reasons):
+            logger.warning(
+                "[%s] Project thread %s: reply was TRUNCATED (%s) — posting the partial "
+                "text with an explicit marker",
+                agent.agent_id, thread.thread_id, ", ".join(stop_reasons) or "?",
+            )
+            response_text = response_text.rstrip() + TRUNCATION_NOTICE
+        posted = await self._post_reply(agent, thread, response_text)
+        if posted is None or agent.role not in hub_role_names():
+            return
+        close = _extract_project_json(raw_response)
+        if turn.must_close or (close is not None and turn.may_close_early):
+            await self._projects._record_project_close(agent, thread, raw_response, posted)
+            await self._close_thread(
+                agent, thread, THREAD_OUTCOME_PROJECT_CLOSED, closed_by_role=agent.role
+            )
 
     async def _check_thread_outcome(
         self,

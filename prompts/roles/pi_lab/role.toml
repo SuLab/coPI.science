@@ -1,11 +1,12 @@
-# Version of the pi_lab PROMPT SET (this manifest + the four BASE prompt files
-# prompts/{agent-system,identity,phase4-thread-reply,phase5-new-post}.md —
+# Version of the pi_lab PROMPT SET (this manifest + the six BASE prompt files
+# prompts/{agent-system,identity,phase4-thread-reply,phase5-new-post,phase5-project-reply,phase4-project-reply}.md —
 # pi_lab is the absence of overrides, see src/agent/roles.py). Bump on ANY
 # edit to those files; see the matching note in scout_hub/role.toml.
 # 1.1.0 records the lab-visible behavior changes: persona PMIDs, channels by tag
 # section, cohort-gated retrieve_profile and removal of the lab directory.
 # 1.2.0 fences the lab's own profile as <lab_profile> data and adds the "Publication Records" section for a lab with no publication records (publication handling, Phase 5).
-version = "1.2.0"
+# 1.3.0 adds phase5-project-reply.md and phase4-project-reply.md for BlackbirdBot's projects (projects prototype).
+version = "1.3.0"
 
 label = "PI Lab"
 tools = ["retrieve_profile", "retrieve_abstract", "retrieve_full_text"]

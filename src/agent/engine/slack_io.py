@@ -12,13 +12,19 @@ from src.agent.authorship_rules import check_draft_authorship
 from src.agent.engine import constants, deps
 from src.agent.engine.constants import POLL_ERROR_LOG_INTERVAL
 from src.agent.engine.context import EngineContext, TagFilter, ThreadGoneCallback, via
-from src.agent.engine.sidecar import _strip_assessment_sidecar
+from src.agent.engine.sidecar import _strip_assessment_sidecar, _strip_project_sidecar
 from src.agent.ids import WRITER_ENGINE, TsMinter
-from src.agent.message_log import PHASE_PANEL_NOTE, LogEntry
+from src.agent.message_log import (
+    PHASE_HUB_PROJECT,
+    PHASE_PANEL_NOTE,
+    PHASE_PROJECT_REPLY,
+    LogEntry,
+)
 from src.agent.run_marker import is_run_start_marker
 from src.agent.slack_client import AgentSlackClient, ThreadNotFound
 from src.models.agent_activity import VISIBILITY_PUBLIC
 from src.models.authorship_claim_check import MODE_ENFORCE, OUTCOME_GROUNDED, OUTCOME_REJECTED
+from src.services import project_plan
 
 if TYPE_CHECKING:
     from src.agent.agent import Agent
@@ -202,7 +208,14 @@ class SlackIO:
                     # log, but advance the cursor past it or this tick's
                     # newest message gets re-fetched forever. See
                     # src/agent/run_marker.py (prefix contract).
-                    if is_run_start_marker(msg.get("text")):
+                    # A project posting or a lab's project reply is skipped the
+                    # same way: only `_post_message` writes those, and it logs
+                    # them, so a copy the log lacks is an orphan of a post that
+                    # raised after Slack took it. Mirrored, it would become a
+                    # phase-less root, persisted as `new_post`, counted as a
+                    # pitch and open to an interview.
+                    text = msg.get("text")
+                    if is_run_start_marker(text) or project_plan.is_project_post_text(text):
                         if ts:
                             self._poll_cursors[ch_id] = ts
                         continue
@@ -327,9 +340,11 @@ class SlackIO:
         ``phase`` overrides the KIND stamped on the resulting rows. None (every
         pre-existing caller) keeps the derived value ``_flush_persisted`` has
         always written — 'thread_reply' with a thread_ts, 'new_post' without —
-        so this parameter changes nothing for a reply or a post. It is passed
-        only by ``_post_panel_note``, as PHASE_PANEL_NOTE, which is what makes
-        the resulting rows invisible to every agent-facing MessageLog read (see
+        so this parameter changes nothing for a reply or a post. Three callers
+        pass it: ``_post_panel_note`` as PHASE_PANEL_NOTE and the project
+        posting as PHASE_HUB_PROJECT, both hidden from every agent-facing
+        MessageLog read, and a lab's reply to its posting as
+        PHASE_PROJECT_REPLY, the root of a project thread (see
         src/agent/message_log.py). Carried on the LogEntry, not applied at
         flush time, so it survives the round trip through the log and back out
         of the DB on the next rebuild.
@@ -353,10 +368,12 @@ class SlackIO:
         ``str | None`` change.
         """
         # Final safety: strip any leaked <slack_message> tags, and any
-        # <assessment_json> sidecar — that block is for Blackbird staff and the DB,
-        # never for the channel. See _strip_assessment_sidecar for why an
-        # unclosed tag is handled differently from a well-formed pair.
+        # <assessment_json> or <project_json> sidecar — those blocks are for
+        # Blackbird staff and the DB, never for the channel. See
+        # _strip_assessment_sidecar for why an unclosed tag is handled
+        # differently from a well-formed pair.
         text = _strip_assessment_sidecar(text)
+        text = _strip_project_sidecar(text)
         text = re.sub(r"</?slack_message>", "", text).strip()
 
         # A sidecar-only or truncated response can strip to nothing — e.g. an
@@ -454,8 +471,12 @@ class SlackIO:
             agent_id, agent, channel, text, thread_ts, phase, mirrored,
         )
         # A post that went out clears the reason an earlier block left for this agent
-        # in this thread (main AGT-14: "cleared on post").
-        self.ctx.claim_feedback.clear(agent_id, thread_ts or claim_check.PHASE5_THREAD_KEY)
+        # in this thread (main AGT-14: "cleared on post"), keyed as `_authorship_gate`
+        # keys it.
+        self.ctx.claim_feedback.clear(agent_id, thread_ts or (
+            claim_check.PROJECT_REPLY_THREAD_KEY if phase == PHASE_PROJECT_REPLY
+            else claim_check.PHASE5_THREAD_KEY
+        ))
         # Write-through: the post is not done until its rows are in the database,
         # because a restart restores from the database only. Serialized with every
         # other flush by `_persist_flush_lock`. A failed flush re-queues the
@@ -540,8 +561,9 @@ class SlackIO:
         """Check ``text`` for first-person authorship claims and record the check.
         True means the post must not be made: only a rejected claim in enforce mode,
         which a hub role never reaches (``claim_check.effective_mode``). A panel note
-        is the hub's bookkeeping, not conversation, and is neither checked nor recorded."""
-        if phase == PHASE_PANEL_NOTE:
+        is the hub's bookkeeping and a project posting is assembled by code from checked
+        fields; neither is checked nor recorded."""
+        if phase in (PHASE_PANEL_NOTE, PHASE_HUB_PROJECT):
             return False
         try:
             mode = claim_check.effective_mode(
@@ -567,7 +589,12 @@ class SlackIO:
                 agent.agent_id, exc_info=True,
             )
             return False
-        thread_key = thread_ts or claim_check.PHASE5_THREAD_KEY
+        # A lab's project reply is a new root, so it has no thread yet; its own key
+        # keeps a blocked reply's reason away from the lab's next pitch draft.
+        thread_key = thread_ts or (
+            claim_check.PROJECT_REPLY_THREAD_KEY if phase == PHASE_PROJECT_REPLY
+            else claim_check.PHASE5_THREAD_KEY
+        )
         # Every check is recorded, no_claim included: the rows are the owner's
         # denominators. Called through the module so tests patch one name.
         await claim_check.record_check(

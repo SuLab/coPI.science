@@ -10,13 +10,14 @@ from src.agent.engine import deps
 from src.agent.engine.constants import _CALLS_PER_LOG_ROW, REBUILD_WINDOW_S
 from src.agent.engine.context import EngineContext, via
 from src.agent.engine.helpers import _restored_slack_ts
-from src.agent.message_log import LogEntry, is_panel_note
+from src.agent.message_log import PHASE_PROJECT_REPLY, LogEntry
 from src.models import (
     AgentMessage,
     LlmCallLog,
     ThreadDecision,
 )
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE
+from src.models.hub_project import THREAD_OUTCOME_PROJECT_CLOSED
 
 if TYPE_CHECKING:
     from src.agent.engine.channel_directory import ChannelDirectory
@@ -197,8 +198,27 @@ class Rebuild:
                         )
                     )
                     all_decisions = result.scalars().all()
+                    # This run's project threads, read from the database rather
+                    # than the log: the log holds only REBUILD_WINDOW_S, and a
+                    # project thread older than that must still stay out of
+                    # Phase 5's prior-thread context.
+                    project_roots = set((await db.execute(
+                        sa_select(AgentMessage.message_ts).where(
+                            AgentMessage.simulation_run_id == self.simulation_run_id,
+                            AgentMessage.phase == PHASE_PROJECT_REPLY,
+                            AgentMessage.thread_ts.is_(None),
+                        )
+                    )).scalars().all())
                     for td in all_decisions:
                         closed_thread_ids.add(td.thread_id)
+                        # A project close joins the closed set but is not an
+                        # interview, so it adds no prior-thread summary, as
+                        # `_close_thread` adds none in-process.
+                        if (
+                            td.thread_id in project_roots
+                            or td.outcome == THREAD_OUTCOME_PROJECT_CLOSED
+                        ):
+                            continue
                         # _prior_threads is a list per pair, so appending here
                         # unconditionally is not idempotent: a second rebuild —
                         # or a rebuild after _close_thread already recorded this
@@ -232,13 +252,16 @@ class Rebuild:
             for entry in self.message_log._entries:
                 if entry.sender_agent_id != aid:
                     continue
-                if is_panel_note(entry):
+                if self.message_log.is_hidden_entry(entry):
                     # Posting a note is not participating. Restoring a thread
                     # off one would resurrect, for the hub, an interview it had
                     # not yet said anything in — and would do it from an entry
                     # that `get_thread_history` (used further down for the
                     # participant and pending-reply decisions) cannot see, so
                     # the two halves of this reconstruction would disagree.
+                    # A project posting, and any reply in its thread, is hidden
+                    # the same way: the lab answers it with a new root, the
+                    # project thread, which is restored like any other.
                     continue
                 thread_id = entry.thread_ts or entry.ts
                 # Skip if already closed or already tracked

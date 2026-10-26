@@ -82,14 +82,15 @@ ALLOWED: dict[str, set[str]] = {
     "scheduler": {"context", "channel_directory"},
     "roster": {"context", "channel_directory", "slack_io"},
     "post_lane": {"context", "scheduler", "roster", "threads", "slack_io", "llm_log",
-                  "channel_directory", "panel"},
+                  "channel_directory", "panel", "projects"},
     # headlines: a hub decline's headline, reached through Verdicts' holder.
     "reply_lane": {"context", "scheduler", "post_lane", "threads", "verdicts", "panel",
-                   "slack_io", "channel_directory", "headlines"},
+                   "slack_io", "channel_directory", "headlines", "projects"},
     "rebuild": {"context", "threads", "verdicts", "slack_io", "panel", "post_lane",
                 "channel_directory"},
     "run_announcer": {"context", "slack_io", "channel_directory", "scheduler"},
     "control": {"context"},
+    "projects": {"context", "scheduler", "slack_io"},
 }
 PORT_HOLDERS = {"headlines": {"_ledger"}}
 
@@ -244,6 +245,21 @@ EXPECTED_METHOD_OWNER: dict[str, str] = {
     "_restore_slack_state": "rebuild",
     "_run_start_announcement_values": "run_announcer", "_announce_overrides": "run_announcer",
     "_announce_run_start": "run_announcer", "_record_run_start_announcement": "run_announcer",
+    "_rehydrate_projects": "projects", "_projects_tick": "projects",
+    "_awaiting_project_reply_count": "projects", "_offer_project_reply": "projects",
+    "_project_thread_context": "projects", "_unresolved_reply_claim": "projects", "_latest_lab_position": "projects",
+    "_record_project_close": "projects",
+    "_resolve_project_claims": "projects", "_advance_clock": "projects",
+    "_end_stale_projects": "projects", "_request_due_labs": "projects",
+    "_post_ready_projects": "projects",
+    "_run_project_step": "projects", "_resolve_logged_claim": "projects",
+    "_link_project_post": "projects", "_clear_project_claim": "projects",
+    "_finish_project": "projects", "_end_refining_projects": "projects",
+    "_link_or_keep": "projects", "_count_awaiting_replies": "projects",
+    "_project_lab_is_live": "projects", "_project_poster": "projects",
+    "_open_partnered_thread_count": "projects", "_unanswered_project": "projects",
+    "_compose_project_reply": "projects", "_post_project_reply": "projects",
+    "_count_project_reply_failure": "projects", "_close_values": "projects",
 }
 EXPECTED_STATE_OWNER: dict[str, str] = {
     "agents": "ctx", "slack_clients": "ctx", "message_log": "ctx", "session_factory": "ctx",
@@ -281,6 +297,8 @@ EXPECTED_STATE_OWNER: dict[str, str] = {
     "_cohort_log_signature": "roster", "_cohort_tags_stripped": "roster",
     "_fresh_start": "rebuild", "_reset_cursors": "rebuild",
     "_snapshot": "run_announcer",
+    "_enabled": "projects", "_clock_seconds": "projects", "_last_tick": "projects",
+    "_awaiting_reply": "projects", "_pending_links": "projects",
 }
 #: Members whose name differs on the owner (spec §7.1 table, this plan's Reference section).
 RENAMED = {"_rehydrate_assessed_threads": "rehydrate", "_agent_locks": "agent_locks",
@@ -354,7 +372,7 @@ ORCHESTRATOR = {"__init__", "start", "_run_main_loop", "_drain_and_flush", "stop
                 "__getattr__", "__setattr__", "__delattr__"}
 ALL_UNITS = {"persistence", "llm_log", "channel_directory", "slack_io", "panel", "headlines",
              "verdicts", "threads", "memory", "reply_lane", "post_lane", "scheduler", "control",
-             "roster", "rebuild", "run_announcer"}
+             "roster", "rebuild", "run_announcer", "projects"}
 
 
 def test_every_unit_is_wired_and_the_orchestrator_is_only_wiring():

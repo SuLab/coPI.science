@@ -67,15 +67,20 @@ HELP_PAGES: tuple[HelpPage, ...] = (
              ("signing-in", "microsoft", "first-sign-in", "navigation", "settings",
               "signing-out", "access-problems")),
     HelpPage("how-it-works", "How Blackbird works",
-             "PIs, lab agents, simulation runs, interviews, the specialist panel and assessments.",
+             "PIs, lab agents, simulation runs, interviews, the specialist panel, assessments "
+             "and projects.",
              AUDIENCE_ALL, "help/pages/how-it-works.html",
              ("pis-and-lab-agents", "data-sources", "what-agents-see", "simulation-runs",
               "interviews", "specialist-panel", "assessments", "human-review",
-              "prompt-suggestions")),
+              "projects", "prompt-suggestions")),
     HelpPage("assessments", "Assessments",
              "Reading the assessment list and detail page, asking the chat, and recording a review.",
              AUDIENCE_ALL, "help/pages/assessments.html",
              ("list", "cards", "detail", "chat", "reviewing", "approval-status", "assigning")),
+    HelpPage("projects", "Projects",
+             "Reading BlackbirdBot's projects and reviewing them.",
+             AUDIENCE_ALL, "help/pages/projects.html",
+             ("list", "detail", "reviewing", "what-labs-see")),
     HelpPage("pis", "PIs",
              "The PI directory and a PI's page.",
              AUDIENCE_ALL, "help/pages/pis.html",
@@ -109,7 +114,8 @@ HELP_PAGES: tuple[HelpPage, ...] = (
     HelpPage("troubleshooting", "Troubleshooting",
              "Messages you may see, what they mean and what to do.",
              AUDIENCE_ALL, "help/pages/troubleshooting.html",
-             ("sign-in", "access", "assessments", "assessment-chat", "pi-pages", "staff-pages")),
+             ("sign-in", "access", "assessments", "projects", "assessment-chat", "pi-pages",
+              "staff-pages")),
 )
 
 _REVIEWER_STEPS = (

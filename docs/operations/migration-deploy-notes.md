@@ -1713,3 +1713,48 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > only then, if wanted, `alembic downgrade 0071` from a one-off container off the NEW image
 > drops the table and every row (**never downgrade first**: the new images would then fail as
 > above). Never reuse revision id `0072`. Nothing here starts a run.
+
+> **Deploy order for `0073_hub_projects` — migrate BEFORE the new images serve; rebuild all
+> three images (`blackbird-app`, `worker` and `agent`).** `0073` belongs to the projects
+> prototype (the design "BlackbirdBot projects prototype: literature research finds new uses
+> for each lab's work, refined with that lab", revision 4). It adds
+> the value `project_closed` to `thread_outcome_enum` (the outcome a project thread closes
+> with) and creates four tables: `hub_projects` (one row per run, lab and slot, unique
+> `uq_hub_projects_run_agent_slot`, CHECK `ck_hub_projects_status`, index
+> `ix_hub_projects_run_reply`), `hub_project_calls` (the worker's per-call ledger, CHECK
+> `ck_hub_project_calls_status`, indexes `ix_hub_project_calls_updated` for the rolling 24 h
+> ceiling and `ix_hub_project_calls_project`), `hub_project_clocks` (one run-time clock per run,
+> unique `uq_hub_project_clocks_run`) and `hub_project_reviews` (unique
+> `uq_hub_project_reviews_project_reviewer`, CHECK `ck_hub_project_reviews_rating`, 1 to 5,
+> `reviewer_user_id` `ON DELETE SET NULL`). `hub_projects` and `hub_project_clocks` cascade from
+> `simulation_runs`; calls and reviews cascade from `hub_projects`.
+>
+> *Old code on the new schema* is safe: nothing old reads the tables, and only new code writes
+> `project_closed`. *New code on the old schema* fails: the engine's project tick logs one error
+> per minute, the worker's research step one per idle slot, the Projects page 500s, and a
+> `project_closed` decision raises `InvalidTextRepresentation` and is re-queued. So migrate
+> before `$DC up -d blackbird-app worker`. **Images:** the agent image imports `src.models`, so
+> rebuild it with this migration; recreate `agent` only when `/admin/simulation` shows no live
+> run. `HUB_PROJECTS_ENABLED` is off by default, so the deploy itself requests no project.
+> **Lock:** the foreign keys to `simulation_runs` take a lock a running engine also takes every
+> 30 s in short transactions; a 10 s `lock_timeout` rollback is harmless: re-run it.
+>
+> Before: `SELECT version_num FROM alembic_version;` reads `0072`, and
+> `SELECT to_regclass('public.hub_projects');` is NULL. Tag the rollback images
+> `rollback-pre-0073` first. After: `$DC run --rm blackbird-app alembic current` reads `0073`.
+> The migration writes no row; there is no back-fill.
+>
+> **Rollback hazard once a project has closed.** An old image loading a run's
+> `thread_decisions` through the ORM cannot map `project_closed`: SQLAlchemy raises
+> `LookupError` (pinned by
+> `tests/integration/test_migration_0073.py::test_pre_0073_enum_mapping_cannot_read_project_closed`),
+> and `Rebuild` swallows it into an empty closed set, so a resumed old engine would reopen every
+> closed thread of that run. Rolling back below `0073` is unsafe for a run that holds a
+> `project_closed` decision: start such an image FRESH, never resume that run.
+>
+> **Rollback:** first run the `rollback-pre-0073` images (subject to the hazard above); only
+> then, if wanted, `alembic downgrade 0072` from a one-off container off the NEW image drops
+> the four tables and every row and leaves the enum value (Postgres cannot drop one; the
+> upgrade's `IF NOT EXISTS` keeps a later upgrade clean). **Never downgrade first.** Never reuse
+> revision id `0073`. Never start a run as part of this deploy; runs start only from
+> `/admin/simulation`.

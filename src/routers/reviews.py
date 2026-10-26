@@ -2,8 +2,8 @@
 staff-only or admin-only declare a NARROWER singleton, which is the real gate
 for them. Feedback/status writes now ALLOW an impersonated session (F4,
 2026-09-10) and attribute the write to the impersonated user, with the real
-admin recorded via ``recorded_by``; assign/unassign and suggestion-status
-still refuse impersonation outright.
+admin recorded via ``recorded_by``; assign/unassign, suggestion-status and
+the project-review writes still refuse impersonation outright.
 
 Dependencies are module-level singletons (``_DB``/``_REVIEW``/``_STAFF``/
 ``_ADMIN``) rather than inline ``Depends(...)`` calls in argument defaults,
@@ -32,6 +32,7 @@ from src.dependencies import (
     refuse_impersonation,
 )
 from src.models import AssessmentReview, OpportunityAssessment, PromptChangeSuggestion, User
+from src.models.hub_project import HubProject, HubProjectReview
 from src.services.assessment_reviews import (
     DuplicateFeedbackError,
     assign_reviewer,
@@ -45,6 +46,12 @@ from src.services.directory import (
     ASSESSMENT_REVIEW_DEFAULT,
     ASSESSMENT_REVIEW_FILTERS,
     ASSESSMENT_SORTS,
+)
+from src.services.project_reviews import (
+    DuplicateProjectReviewError,
+    delete_project_review,
+    edit_project_review,
+    submit_project_review,
 )
 from src.web.flash import flash
 from src.web.urls import page_url
@@ -636,3 +643,137 @@ async def set_suggestion_status(
         url=page_url(request, "workspace_prompt_suggestion_detail", suggestion_id=suggestion_id),
         status_code=302,
     )
+
+
+#: The project review form's fund radio values (spec §5.11: fund or don't fund).
+_PROJECT_FUND_VALUES = {"fund": True, "no_fund": False}
+
+
+def _parse_fund(fund: str) -> bool:
+    if fund not in _PROJECT_FUND_VALUES:
+        raise HTTPException(status_code=400, detail="fund must be 'fund' or 'no_fund'")
+    return _PROJECT_FUND_VALUES[fund]
+
+
+async def _load_project(db: AsyncSession, project_id: uuid.UUID) -> HubProject:
+    project = await db.get(HubProject, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project
+
+
+async def _load_project_review(db: AsyncSession, review_id: uuid.UUID) -> HubProjectReview:
+    """The review row locked for the rest of the request's transaction, or 404."""
+    review = (
+        await db.execute(
+            select(HubProjectReview).where(HubProjectReview.id == review_id).with_for_update()
+        )
+    ).scalar_one_or_none()
+    if review is None:
+        raise HTTPException(status_code=404, detail="Review not found")
+    return review
+
+
+def _project_redirect(request: Request, project_id: uuid.UUID) -> RedirectResponse:
+    return RedirectResponse(
+        page_url(request, "workspace_project_detail", project_id=project_id, fragment="reviews"),
+        status_code=303,
+    )
+
+
+# Project reviews (spec §5.11). Unlike assessment feedback, every write refuses an
+# impersonated session, and the details page shows no form then. The handlers are not
+# named like the services they call: a same-named handler would rebind the import.
+
+
+@router.post("/projects/{project_id}/review")
+async def project_review_submit(
+    project_id: uuid.UUID,
+    request: Request,
+    rating: int = Form(...),
+    comment: str = Form(""),
+    fund: str = Form(...),
+    db: AsyncSession = _DB,
+    current_user: User = _REVIEW,
+):
+    refuse_impersonation(current_user)
+    fund_value = _parse_fund(fund)
+    project = await _load_project(db, project_id)
+    try:
+        await submit_project_review(
+            db,
+            project=project,
+            reviewer=current_user,
+            rating=rating,
+            comment=comment,
+            fund=fund_value,
+        )
+    except DuplicateProjectReviewError:
+        flash(request, "You have already reviewed this project; edit your review below.", "info")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    else:
+        await db.commit()
+        logger.info(
+            "Project review by %s (%s) on project %s: rating=%s fund=%s",
+            current_user.name,
+            current_user.id,
+            project_id,
+            rating,
+            fund_value,
+        )
+        flash(request, "Review saved.", "success")
+    return _project_redirect(request, project_id)
+
+
+@router.post("/project-reviews/{review_id}/edit")
+async def project_review_edit(
+    review_id: uuid.UUID,
+    request: Request,
+    rating: int = Form(...),
+    comment: str = Form(""),
+    fund: str = Form(...),
+    db: AsyncSession = _DB,
+    current_user: User = _REVIEW,
+):
+    refuse_impersonation(current_user)
+    fund_value = _parse_fund(fund)
+    review = await _load_project_review(db, review_id)
+    if review.reviewer_user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the author may edit this review")
+    try:
+        await edit_project_review(
+            db, review=review, rating=rating, comment=comment, fund=fund_value
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    logger.info(
+        "Project review %s edited by %s (%s): rating=%s fund=%s",
+        review_id,
+        current_user.name,
+        current_user.id,
+        rating,
+        fund_value,
+    )
+    flash(request, "Review updated.", "success")
+    return _project_redirect(request, review.project_id)
+
+
+@router.post("/project-reviews/{review_id}/delete")
+async def project_review_delete(
+    review_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = _DB,
+    current_user: User = _ADMIN,
+):
+    refuse_impersonation(current_user)
+    review = await _load_project_review(db, review_id)
+    project_id = review.project_id
+    await delete_project_review(db, review=review)
+    await db.commit()
+    logger.info(
+        "Project review %s deleted by %s (%s)", review_id, current_user.name, current_user.id
+    )
+    flash(request, "Review deleted.", "success")
+    return _project_redirect(request, project_id)

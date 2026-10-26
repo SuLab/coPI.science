@@ -158,7 +158,10 @@ ROUTE_ALLOWLIST: dict[tuple[str, str], str] = {
 
 for suffix in POST_SUFFIXES:
     ROUTE_ALLOWLIST[("POST", "/manager" + suffix)] = "Legacy manager POST alias executes the exact canonical callable before returning; existing clients may submit it."
-for path in ("/manager", "/manager/pis", "/manager/pis/{user_id}", "/manager/assessments", "/manager/assessments/{assessment_id}", "/manager/slack-bots", "/manager/staff", "/manager/discussions", "/manager/activity", "/manager/activity/{run_id}", "/manager/prompt-suggestions", "/manager/prompt-suggestions/{suggestion_id}", "/admin/assessments", "/admin/assessments/{assessment_id}", "/admin/discussions", "/admin/activity", "/admin/activity/{run_id}"):
+# `/admin/activity` needs no entry: src/services/projects_view.py builds the Projects
+# details page's calls link, f"/admin/activity/{run}/llm-calls?…", whose literal prefix
+# src_referenced_paths() credits to it.
+for path in ("/manager", "/manager/pis", "/manager/pis/{user_id}", "/manager/assessments", "/manager/assessments/{assessment_id}", "/manager/slack-bots", "/manager/staff", "/manager/discussions", "/manager/activity", "/manager/activity/{run_id}", "/manager/prompt-suggestions", "/manager/prompt-suggestions/{suggestion_id}", "/admin/assessments", "/admin/assessments/{assessment_id}", "/admin/discussions", "/admin/activity/{run_id}"):
     ROUTE_ALLOWLIST[("GET", path)] = "Guarded legacy GET compatibility endpoint; canonical workspace links are primary."
 
 # Optional third-party imports that are allowed to be absent at test time. Every
@@ -1052,10 +1055,11 @@ def test_static_link_resolution_coverage_is_reported():
     # PubMed and DOI link through the `pubmed_url`/`doi_url` globals (count unchanged).
     # The shared run bar (2026-10-19) takes its form action as a parameter, so its one
     # `{{ action }}` is unresolvable; each page passes `page_url(...)` of itself.
+    # The Projects details page (2026-10-26) adds two: each source's `{{ source.url }}` (PubMed or ClinicalTrials.gov) and the admin's `{{ project.calls_url }}`.
     unresolvable = len(values) - len(resolvable)
-    assert unresolvable <= 65, (
+    assert unresolvable <= 67, (
         f"{unresolvable} of {len(values)} href/action values do not resolve to a "
-        "checkable local path (was 65) — the matcher probably regressed, or a new "
+        "checkable local path (was 67) — the matcher probably regressed, or a new "
         "link is built from a variable"
     )
 

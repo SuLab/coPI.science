@@ -221,6 +221,10 @@ class Memory:
                 # its working memory — the one place a synthesis could quietly
                 # re-derive panel opinion into text every later prompt reads.
                 and not is_panel_note(e)
+                # A project posting, a lab's project reply and every message in
+                # a project thread stay out: a project is not an interview, and
+                # what it plans must not leak into later pitches or screens.
+                and not self.message_log.is_project_entry(e)
             ]
             messages_text = "\n".join(
                 f"[#{e.channel}] {e.content[:200]}"

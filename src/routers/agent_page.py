@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import distinct, func, select, tuple_
+from sqlalchemy import distinct, func, or_, select, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -42,6 +42,7 @@ from src.services.profile_edit import (
     parse_expected_version,
 )
 from src.services.profile_publish import persona_out_of_date
+from src.services.projects_view import project_thread_roots
 from src.services.runs import latest_run_id
 from src.services.validators import is_valid_email
 from src.web.flash import flash
@@ -216,6 +217,11 @@ async def agent_dashboard(
         select(func.count(distinct(AgentMessage.thread_ts))).where(
             AgentMessage.agent_id == aid,
             AgentMessage.phase == "thread_reply",
+            # Project threads are not interviews; NULL-safe, since NOT IN drops NULLs.
+            or_(
+                AgentMessage.thread_ts.is_(None),
+                AgentMessage.thread_ts.not_in(project_thread_roots()),
+            ),
         )
     )
     threads_count = threads_count_result.scalar() or 0

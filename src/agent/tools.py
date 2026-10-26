@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from src.agent.dois import canonical_doi, canonical_pmid, paper_ids_in
+from src.agent.project_guidance import THREAD_KIND_INTERVIEW, THREAD_KIND_PROJECT, project_turn
 from src.agent.prompt_safety import delimit
 from src.agent.prompt_snapshot import active as active_snapshot
 from src.agent.prompt_snapshot import role_spec
@@ -24,7 +25,8 @@ from src.agent.specialists import (
     read_state_for,
 )
 from src.agent.thread_guidance import CONCLUDE, phase4_guidance
-from src.agent.tool_definitions import TOOL_DEFINITIONS
+from src.agent.tool_definitions import PROJECT_TOOL_DEFINITIONS, TOOL_DEFINITIONS
+from src.services import project_search
 from src.services.blackbird_rubric import render_stage_bar_markdown
 from src.services.llm import generate_agent_response, is_truncated_stop
 from src.services.patents import PriorArtResult, search_prior_art
@@ -104,16 +106,42 @@ def tools_for_role(role: str) -> list[dict[str, Any]]:
     return [t for t in TOOL_DEFINITIONS if t["name"] in allowed]
 
 
-def _consult_thread_phase(role: str, thread_state: Any | None) -> str | None:
+#: The PubMed and ClinicalTrials.gov searches a hub may call in a project thread only.
+_PROJECT_TOOL_NAMES = frozenset(t["name"] for t in PROJECT_TOOL_DEFINITIONS)
+
+
+def _project_tools_open(role: str, thread_kind: str) -> bool:
+    """Whether ``PROJECT_TOOL_DEFINITIONS`` are open to ``role`` in a thread of
+    ``thread_kind``: a hub role in a project thread (spec §5.8). Not a ``role.toml``
+    tool, so no prompt set lists them."""
+    return thread_kind == THREAD_KIND_PROJECT and role in hub_role_names()
+
+
+def tools_for_thread(role: str, kind: str) -> list[dict[str, Any]]:
+    """The tools offered to ``role`` in a thread of ``kind``: ``tools_for_role`` plus
+    ``PROJECT_TOOL_DEFINITIONS`` for a hub role in a project thread."""
+    tools = tools_for_role(role)
+    if _project_tools_open(role, kind):
+        tools += PROJECT_TOOL_DEFINITIONS
+    return tools
+
+
+def _consult_thread_phase(
+    role: str, thread_state: Any | None, kind: str = THREAD_KIND_INTERVIEW,
+) -> str | None:
     """The same ``phase4_guidance()`` computation ``_reply_to_thread`` makes
     for its own ``llm_call_logs`` row (message_count + 1), recomputed here so
     a consult made mid-turn stamps the same phase band as the reply that
-    triggered it. ``None`` for a direct caller with no ``thread_state`` —
+    triggered it. In a project thread (``kind``) it is the turn's
+    ``project_turn(...).log_phase`` instead, which does not depend on the lab's
+    position. ``None`` for a direct caller with no ``thread_state`` —
     same convention ``thread_ts`` uses immediately below.
     """
     message_count = getattr(thread_state, "message_count", None)
     if message_count is None:
         return None
+    if kind == THREAD_KIND_PROJECT:
+        return project_turn(role, message_count + 1, lab_agrees=False).log_phase
     phase, _, _ = phase4_guidance(role, message_count + 1)
     return "conclude" if phase == CONCLUDE else phase.lower()
 
@@ -144,6 +172,7 @@ async def execute_tool(
     hub_agent_ids: Mapping[str, str] | None = None,
     allowed_sender_ids: AbstractSet[str] | None = None,
     profile_ids: Mapping[str, str] | None = None,
+    thread_kind: str = THREAD_KIND_INTERVIEW,
 ) -> str:
     """
     Execute a tool call and return the result as a string.
@@ -180,8 +209,13 @@ async def execute_tool(
     ``profile_ids`` is the live roster's id map (``live_profile_ids``);
     ``retrieve_profile`` resolves the model's argument through it, and None means no
     id resolves.
+    ``thread_kind`` is the kind of thread the call is made in: in a project thread a
+    hub may also call ``search_pubmed`` and ``search_trials`` (``tools_for_thread``),
+    and a consult's log row carries the project turn's phase.
     """
-    if tool_name not in role_spec(role).tools:
+    if tool_name not in role_spec(role).tools and not (
+        tool_name in _PROJECT_TOOL_NAMES and _project_tools_open(role, thread_kind)
+    ):
         logger.warning("[tools] %s: role %r may not call %s", agent_id, role, tool_name)
         return f"Tool '{tool_name}' is not available to this agent."
     try:
@@ -218,6 +252,11 @@ async def execute_tool(
                 _require_arg(tool_input, "query", tool_name)
             )
 
+        elif tool_name in _PROJECT_TOOL_NAMES:
+            return await _execute_project_search(
+                tool_name, _require_arg(tool_input, "query", tool_name)
+            )
+
         elif tool_name == "consult_specialist":
             return await _execute_consult_specialist(
                 _require_arg(tool_input, "domain", tool_name),
@@ -241,7 +280,7 @@ async def execute_tool(
                 # made during. `getattr` for the same direct-caller-with-no-
                 # thread reason.
                 thread_ts=getattr(thread_state, "thread_id", None),
-                thread_phase=_consult_thread_phase(role, thread_state),
+                thread_phase=_consult_thread_phase(role, thread_state, kind=thread_kind),
                 # The ordinal of the reply this consult was made for
                 # (`message_count + 1`, the same arithmetic `_reply_to_thread`
                 # and `_consult_thread_phase` use). Without it the consult's
@@ -646,7 +685,13 @@ def _scope_note(result: "PriorArtResult") -> str:
 
 
 async def _execute_search_prior_art(query: str) -> str:
-    """Search the USPTO ODP for prior art.
+    """Search the USPTO ODP for prior art, rendered by ``format_prior_art``."""
+    return format_prior_art(await search_prior_art(query))
+
+
+def format_prior_art(result: PriorArtResult | None) -> str:
+    """The text a prior-art search hands the model. Also used by the projects worker
+    (``project_search.search_prior_art_text``).
 
     Distinguishes four outcomes so the hub never mistakes an unreachable/unconfigured
     tool, or a caller-side empty query, for a clean novelty result:
@@ -655,7 +700,6 @@ async def _execute_search_prior_art(query: str) -> str:
       * empty ``hits``    → the search ran and matched nothing → caveat + scope + "no matches";
       * results           → caveat + scope + the filings.
     """
-    result = await search_prior_art(query)
     if result is None:
         return _PATENT_UNAVAILABLE
     if not result.terms_used:
@@ -681,6 +725,17 @@ async def _execute_search_prior_art(query: str) -> str:
         # external text (SEC-14); fence it.
         lines.append(delimit(block, "patent"))
     return "\n\n".join(lines)
+
+
+async def _execute_project_search(tool_name: str, query: str) -> str:
+    """``search_pubmed`` or ``search_trials`` in a project thread: the tool result's text.
+    A PubMed outage is answered in words rather than as a tool error."""
+    try:
+        if tool_name == "search_pubmed":
+            return (await project_search.search_pubmed(query)).text
+        return (await project_search.search_trials(query)).text
+    except project_search.PubMedUnavailable:
+        return "PubMed could not be searched just now."
 
 
 def _load_persona_text(domain: str) -> str | None:

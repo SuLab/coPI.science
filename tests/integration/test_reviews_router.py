@@ -56,10 +56,11 @@ def test_the_reviews_router_posts_are_an_explicit_allowlist():
     docs/plans/2026-08-28-human-review-feedback-implementation-plan.md, and by F2
     (2026-09-14, +1) with ``/suggestions/generate`` -- the MANUAL replacement
     for the auto-enqueue ``submit_feedback``/``edit_feedback`` used to do as a
-    side effect. Final size 8. It is listed here rather than left implicit
-    because that one route is the only thing in the system that spends a
-    70-90k-token Opus call on a human's say-so: a ninth path appearing
-    without a review is exactly what this test exists to stop."""
+    side effect. The BlackbirdBot projects prototype plan (2026-10-26, +3) added the
+    project-review submit, edit and delete. Final size 11. ``/suggestions/generate`` is
+    listed here rather than left implicit because that one route is the only thing in
+    the system that spends a 70-90k-token Opus call on a human's say-so: a twelfth path
+    appearing without a review is exactly what this test exists to stop."""
     allowed = {
         "/assessments/{assessment_id}/feedback",
         "/feedback/{feedback_id}/edit",
@@ -69,6 +70,9 @@ def test_the_reviews_router_posts_are_an_explicit_allowlist():
         "/assessments/{assessment_id}/unassign",
         "/suggestions/{suggestion_id}/status",
         "/suggestions/generate",
+        "/projects/{project_id}/review",
+        "/project-reviews/{review_id}/edit",
+        "/project-reviews/{review_id}/delete",
     }
     methods = {m for r in reviews_router.router.routes for m in getattr(r, "methods", ())}
     assert methods == {"POST"}

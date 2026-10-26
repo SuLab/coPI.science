@@ -47,6 +47,13 @@ BUILDER_TEMPLATES: dict[str, list[str]] = {
     "build_phase5_prompt": [
         "prompts/phase5-new-post.md",
     ],
+    "build_project_thread_prompt": [
+        "prompts/phase4-project-reply.md",
+        "prompts/roles/scout_hub/phase4-project-reply.md",
+    ],
+    "build_project_reply_post_prompt": [
+        "prompts/phase5-project-reply.md",
+    ],
 }
 
 

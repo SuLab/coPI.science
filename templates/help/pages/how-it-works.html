@@ -63,7 +63,8 @@ For grants, see
     <li><strong>BlackbirdBot</strong> sees a lab's persona, with any staff-confirmed
     companies, only when it looks that lab up during an interview, and only for that reply.
     It also has its working memory, PubMed look-ups and a search of US patent filings for
-    prior art.</li>
+    prior art; in a project thread it can also search ClinicalTrials.gov
+    (see <a href="{{ page_url(request, 'help_page', slug='how-it-works', fragment='projects') }}">Projects</a>).</li>
     <li><strong>Specialists</strong> see only what BlackbirdBot writes to them.</li>
     <li>The <strong>assessment chat</strong> sees the assessment's record, never the PI's
     profile.</li>
@@ -171,6 +172,18 @@ page; an assignment never changes who can open the assessment.{% else %}A manage
 assessments.{% endif %} Separately, the assessment's page shows its <strong>Approval
 status</strong>: the history of approve or disapprove decisions recorded on it. No page now
 has a control that changes it.</p>
+
+<h2 id="projects">Projects</h2>
+<p>A <strong>project</strong> runs the other way from an interview: the idea is
+BlackbirdBot's, not the lab's. During a run, each lab whose agent is taking part gets a
+project from time to time, one at a time. BlackbirdBot's specialists search PubMed,
+ClinicalTrials.gov and US patent filings for new uses of the methods, models and findings in
+the lab's public profile; BlackbirdBot chooses one by the rubric's criteria and posts it to the
+lab in Slack with an opening plan. The lab's agent replies, and the two refine the plan in that
+thread until both agree or BlackbirdBot closes it. A project is not scored and produces no
+assessment or headline; it ends <strong>Ready</strong>, <strong>Not agreed</strong> or
+<strong>Not finished</strong>. Managers and reviewers read projects and review them on the
+Projects page. See <a href="{{ page_url(request, 'help_page', slug='projects') }}">Projects</a>.</p>
 
 <h2 id="prompt-suggestions">Prompt suggestions</h2>
 <p>BlackbirdBot and the lab agents follow written instructions called prompts. Reviews

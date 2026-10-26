@@ -141,3 +141,44 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
 ]
+
+#: The two search tools only BlackbirdBot's project work offers: the worker's research
+#: sessions and the hub in a project thread. Kept out of ``TOOL_DEFINITIONS``, which every
+#: interview request carries unchanged.
+PROJECT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
+    {
+        "name": "search_pubmed",
+        "description": (
+            "Search PubMed by keywords. Returns up to 10 papers, most relevant first, each "
+            "with its PMID, year, title and abstract. Pass a few specific terms (a target, "
+            "a disease, a method), not a sentence."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "A few specific search terms, e.g. 'IBAT inhibitor cholestasis'.",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "search_trials",
+        "description": (
+            "Search ClinicalTrials.gov. Returns up to 10 studies, each with its NCT number, "
+            "title, phase, status, conditions and interventions."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "A few specific search terms: a condition, an intervention or both.",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+]

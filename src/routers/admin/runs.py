@@ -66,6 +66,7 @@ async def admin_llm_calls(
     phase: str | None = None,
     model: str | None = None,
     channel: str | None = None,
+    thread: str | None = None,
     page: int = _PAGE,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_admin_user),
@@ -80,6 +81,10 @@ async def admin_llm_calls(
     by any channel filter — they are still reachable with the filter cleared,
     which is why the dropdown never offers a "(none)" option that would look
     like a real grouping.
+
+    ``thread`` narrows to one Slack thread id (``thread_ts``). It has no dropdown:
+    a project's details page links here with it, to list that project thread's
+    replies and consults.
     """
     # Verify run exists
     run_result = await db.execute(
@@ -99,6 +104,8 @@ async def admin_llm_calls(
         query = query.where(LlmCallLog.model.contains(model))
     if channel:
         query = query.where(LlmCallLog.channel == channel)
+    if thread:
+        query = query.where(LlmCallLog.thread_ts == thread)
 
     # Total count for pagination. Loader options such as defer() apply only to the
     # top-level statement, so the subquery selects the id alone, not the bodies.
@@ -220,6 +227,7 @@ async def admin_llm_calls(
             filter_phase=phase,
             filter_model=model,
             filter_channel=channel,
+            filter_thread=thread,
         ),
     )
 

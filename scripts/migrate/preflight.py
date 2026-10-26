@@ -75,7 +75,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0072"
+DEFAULT_TARGET = "0073"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -112,8 +112,9 @@ DEFAULT_TARGET = "0072"
 #: tables, no backfill), and the 0036-0062 objects enumerated in PLANNED_OBJECTS (and
 #: PLANNED_RECREATES) below, plus 0063's two nullable columns, 0064's one, 0065's
 #: index (its CHECK swap recreates an existing constraint, which the collision check must
-#: not list), 0066's table, 0067's table, 0068's column and CHECK, 0069's column, foreign key and index, 0070's table, 0071's table and 0072's table, unique, CHECK and index. 0063's ADD VALUE on
-#: thread_outcome_enum enumerates nothing: adding a value to an existing type creates
+#: not list), 0066's table, 0067's table, 0068's column and CHECK, 0069's column, foreign key and index, 0070's table, 0071's table, 0072's table, unique, CHECK and index, and 0073's four tables with their
+#: uniques, CHECKs and indexes. 0063's and 0073's ADD VALUE on
+#: thread_outcome_enum enumerate nothing: adding a value to an existing type creates
 #: no object to collide with — the same reason 0058's job_type_enum ADD VALUE has no
 #: entry either.
 SUPPORTED_START_REVISIONS = (
@@ -122,6 +123,7 @@ SUPPORTED_START_REVISIONS = (
     "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
     "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060",
     "0061", "0062", "0063", "0064", "0065", "0066", "0067", "0068", "0069", "0070", "0071",
+    "0072",
 )
 
 #: Tables whose row counts are snapshotted for postflight. Empty = every user table.
@@ -615,11 +617,30 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject(
         "0072", "index", "ix_interview_trajectories_updated", "interview_trajectories",
     ),
+    # 0073_hub_projects (the projects prototype). Its five foreign keys are inline and
+    # unnamed, as 0072's is; its ADD VALUE on thread_outcome_enum creates no object.
+    PlannedObject("0073", "table", "hub_projects"),
+    PlannedObject("0073", "table", "hub_project_calls"),
+    PlannedObject("0073", "table", "hub_project_clocks"),
+    PlannedObject("0073", "table", "hub_project_reviews"),
+    PlannedObject("0073", "constraint", "uq_hub_projects_run_agent_slot", "hub_projects"),
+    PlannedObject("0073", "constraint", "ck_hub_projects_status", "hub_projects"),
+    PlannedObject("0073", "constraint", "ck_hub_project_calls_status", "hub_project_calls"),
+    PlannedObject("0073", "constraint", "uq_hub_project_clocks_run", "hub_project_clocks"),
+    PlannedObject(
+        "0073", "constraint", "uq_hub_project_reviews_project_reviewer", "hub_project_reviews",
+    ),
+    PlannedObject(
+        "0073", "constraint", "ck_hub_project_reviews_rating", "hub_project_reviews",
+    ),
+    PlannedObject("0073", "index", "ix_hub_projects_run_reply", "hub_projects"),
+    PlannedObject("0073", "index", "ix_hub_project_calls_updated", "hub_project_calls"),
+    PlannedObject("0073", "index", "ix_hub_project_calls_project", "hub_project_calls"),
 )
 
 #: What ``upgrade()`` DROPS. Kept apart from PLANNED_OBJECTS because the collision check
 #: must never treat a drop's precondition (the object exists) as a collision. 0026 is
-#: the only upgrade-time ``drop_table`` in 0019-0072.
+#: the only upgrade-time ``drop_table`` in 0019-0073.
 PLANNED_DROPS: tuple[PlannedObject, ...] = (
     PlannedObject("0026", "table", "grantbot_posted_foas"),
 )
@@ -639,6 +660,7 @@ REVISION_ORDER = (
     "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
     "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060",
     "0061", "0062", "0063", "0064", "0065", "0066", "0067", "0068", "0069", "0070", "0071", "0072",
+    "0073",
 )
 
 

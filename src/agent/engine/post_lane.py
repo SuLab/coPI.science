@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from src.agent.engine.channel_directory import ChannelDirectory
     from src.agent.engine.llm_log import LlmLog
     from src.agent.engine.panel import Panel
+    from src.agent.engine.projects import Projects
     from src.agent.engine.roster import Roster
     from src.agent.engine.scheduler import Scheduler
     from src.agent.engine.slack_io import SlackIO
@@ -82,6 +83,7 @@ class PostLane:
         channel_directory: ChannelDirectory,
         panel: Panel,
         max_proposals: int,
+        projects: Projects,
     ) -> None:
         self.ctx = ctx
         self._scheduler = scheduler
@@ -91,6 +93,7 @@ class PostLane:
         self._llm_log = llm_log
         self._channel_directory = channel_directory
         self._panel = panel
+        self._projects = projects
         # 0 = off. When >0, the engine stops opening NEW pitches once this many
         # top-level posts exist this run, then ends the run when every opened
         # interview has drained (see _proposal_target_drained). Rehydrated on
@@ -413,6 +416,17 @@ class PostLane:
             # bailing out early. Without this, a "skip" leaves the timer stale and
             # every subsequent turn re-fires Phase 5, burning an LLM call per turn.
             agent.state.last_phase5_action_time = deps.time.time()
+
+            # A lab with a posted project answers it before anything below can
+            # skip the turn: the reply is not a pitch, so neither the daily cap
+            # nor the proposal cap applies to it. True means the turn was spent
+            # on the reply; False (no project, or an uncounted failure) leaves
+            # the turn to the lab's own pitch.
+            if await self._projects._offer_project_reply(
+                agent,
+                draining=self.max_proposals > 0 and self._proposals_posted >= self.max_proposals,
+            ):
+                return
 
             # Daily post cap — pi_lab is capped to one pitch per day (design §9).
             # scout_hub never reaches this line (hard-gated above), and it is the
@@ -879,13 +893,16 @@ class PostLane:
 
     def _proposal_target_drained(self) -> bool:
         """True once the pitch cap is reached and no interview has been open
-        for PROPOSAL_DRAIN_SETTLE_TICKS consecutive checks. A METHOD, not a
+        and no posted project has awaited its lab's reply (the ``Projects``
+        unit's count) for PROPOSAL_DRAIN_SETTLE_TICKS consecutive checks. A METHOD, not a
         property, because it MUTATES ``_proposal_drain_streak`` — call it
         exactly once per loop iteration (the main-loop condition does)."""
         if self.max_proposals <= 0 or self._proposals_posted < self.max_proposals:
             self._proposal_drain_streak = 0
             return False
-        open_now = self._open_interview_count()
+        open_interviews = self._open_interview_count()
+        awaiting_replies = self._projects._awaiting_project_reply_count()
+        open_now = open_interviews + awaiting_replies
         if open_now > 0:
             # Loud ONCE per blocked run, not per tick. Run 652a6102 sat here for
             # 13.5 h emitting nothing at any level: the cap was reached, one
@@ -896,9 +913,11 @@ class PostLane:
                 self._drain_block_warned = True
                 logger.warning(
                     "Proposal cap %d/%d reached but %d interview(s) are still "
-                    "open — the run cannot reach its natural end until they "
-                    "close. Open: %s",
-                    self._proposals_posted, self.max_proposals, open_now,
+                    "open and %d posted project(s) await their lab's reply — "
+                    "the run cannot reach its natural end until they finish. "
+                    "Open: %s",
+                    self._proposals_posted, self.max_proposals, open_interviews,
+                    awaiting_replies,
                     ", ".join(sorted(self._open_interview_ids())) or "?",
                 )
             self._proposal_drain_streak = 0

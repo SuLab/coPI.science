@@ -30565,15 +30565,16 @@
             it says what was never asked or could not be established. Leave none as `""`.
             
             
-            --- FILE: prompts/roles/pi_lab/role.toml [PI lab bot (pi_lab) — the lab agents' prompt set] (sha256:79415706029a) ---
-            # Version of the pi_lab PROMPT SET (this manifest + the four BASE prompt files
-            # prompts/{agent-system,identity,phase4-thread-reply,phase5-new-post}.md —
+            --- FILE: prompts/roles/pi_lab/role.toml [PI lab bot (pi_lab) — the lab agents' prompt set] (sha256:c74232158399) ---
+            # Version of the pi_lab PROMPT SET (this manifest + the six BASE prompt files
+            # prompts/{agent-system,identity,phase4-thread-reply,phase5-new-post,phase5-project-reply,phase4-project-reply}.md —
             # pi_lab is the absence of overrides, see src/agent/roles.py). Bump on ANY
             # edit to those files; see the matching note in scout_hub/role.toml.
             # 1.1.0 records the lab-visible behavior changes: persona PMIDs, channels by tag
             # section, cohort-gated retrieve_profile and removal of the lab directory.
             # 1.2.0 fences the lab's own profile as <lab_profile> data and adds the "Publication Records" section for a lab with no publication records (publication handling, Phase 5).
-            version = "1.2.0"
+            # 1.3.0 adds phase5-project-reply.md and phase4-project-reply.md for BlackbirdBot's projects (projects prototype).
+            version = "1.3.0"
             
             label = "PI Lab"
             tools = ["retrieve_profile", "retrieve_abstract", "retrieve_full_text"]
@@ -30586,17 +30587,19 @@
             name = "pitch"
             
             
-            --- FILE: prompts/roles/scout_hub/role.toml [Scouting hub bot (scout_hub) — BlackbirdBot's prompt set] (sha256:7902fee682a1) ---
+            --- FILE: prompts/roles/scout_hub/role.toml [Scouting hub bot (scout_hub) — BlackbirdBot's prompt set] (sha256:b35d3ebaa75c) ---
             # Version of the scout_hub PROMPT SET (this manifest + agent-system.md,
-            # identity.md, phase4-thread-reply.md and lab-brief.md in this directory). The brief
+            # identity.md, phase4-thread-reply.md, lab-brief.md, agent-system-project.md and
+            # phase4-project-reply.md in this directory). The brief
             # is stamped but served only to labs by retrieve_profile. Bump on ANY edit to
             # those files; the run-start announcement stamps every run with this version
             # plus a content hash (src/agent/roles.py::prompt_set_stamp), and a hash
             # change without a version bump is an unrecorded edit. Read by
             # prompt_set_stamp only — load_role ignores unknown keys.
-            version = "1.12.0"
+            version = "1.13.0"
             # 1.12.0: the hub judges the work, not the lab agent's conduct (Core Principle 8);
             # the eight specialist personas changed with it and are not stamped separately.
+            # 1.13.0: project threads — agent-system-project.md and phase4-project-reply.md (projects prototype).
             
             label = "Scout Hub"
             tools = ["retrieve_profile", "retrieve_abstract", "retrieve_full_text", "search_prior_art", "consult_specialist"]
@@ -31820,8 +31823,8 @@
       - Started: 2026-09-29 12:00 UTC
       - Planned duration: indefinite (until stopped)
       - Code: commit d0c0cce on branch blackbird (clean)
-      - Hub prompts: v1.12.0 (hash 581f0baee450)
-      - PI prompts: v1.2.0 (hash d47aa8309807)
+      - Hub prompts: v1.13.0 (hash 6dfd8fddded4)
+      - PI prompts: v1.3.0 (hash 4271ca2233d5)
       - Rubric: v3.5.0 (hash f0b452e95057)
       Messages above this line belong to earlier runs.
     ''',
@@ -31836,8 +31839,8 @@
       - Started: 2026-09-29 12:00 UTC
       - Planned duration: 60 minutes
       - Code: commit d0c0cce on branch blackbird (clean)
-      - Hub prompts: v1.12.0 (hash 581f0baee450)
-      - PI prompts: v1.2.0 (hash d47aa8309807)
+      - Hub prompts: v1.13.0 (hash 6dfd8fddded4)
+      - PI prompts: v1.3.0 (hash 4271ca2233d5)
       - Rubric: v3.5.0 (hash f0b452e95057)
       Messages above this line belong to earlier runs.
     ''',
@@ -31845,10 +31848,10 @@
       'git_branch': 'blackbird',
       'git_commit': 'd0c0cce',
       'git_dirty': 'clean',
-      'hub_prompts_hash': '581f0baee450',
-      'hub_prompts_version': '1.12.0',
-      'pi_prompts_hash': 'd47aa8309807',
-      'pi_prompts_version': '1.2.0',
+      'hub_prompts_hash': '6dfd8fddded4',
+      'hub_prompts_version': '1.13.0',
+      'pi_prompts_hash': '4271ca2233d5',
+      'pi_prompts_version': '1.3.0',
       'rubric_hash': 'f0b452e95057',
       'rubric_version': '3.5.0',
       'run_duration': 'indefinite (until stopped)',

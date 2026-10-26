@@ -1,7 +1,8 @@
 """Read an exported persona (``profiles/public/<agent_id>.md``) by its ``## `` headings.
 
 Shared by the engine's channel subscription (spec 2026-10-05 §6.5, D28), the agent's
-own-paper ids (D49) and the activation gate (``src/services/persona_lifecycle.py``). The
+own-paper ids (D49), the activation gate (``src/services/persona_lifecycle.py``) and the
+anchors of BlackbirdBot's projects (``section_items``). The
 headings are defined here, and ``src/services/profile_export.py`` writes them (main SPEC
 EXP-11). The reader and the exporter share one line-break set, ``LINE_BREAK_CHARS`` (C10
 of the 2026-10-15 publication-handling design): ``sections`` normalises every break in it
@@ -64,6 +65,52 @@ def sections(persona: str | None) -> dict[str, str]:
     for i, match in enumerate(matches):
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         found.setdefault(match.group(1), text[match.end():end])
+    return found
+
+
+#: The tag section the exporter writes as one comma-separated line, not as ``- `` bullets.
+_KEYWORDS_HEADING = "Keywords"
+
+
+def _split_outside_parens(text: str) -> list[str]:
+    """``text`` split on commas that are not inside parentheses, each piece stripped and
+    empty pieces dropped."""
+    pieces: list[str] = []
+    depth = 0
+    start = 0
+    for i, char in enumerate(text):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        elif char == "," and depth == 0:
+            pieces.append(text[start:i])
+            start = i + 1
+    pieces.append(text[start:])
+    return [piece.strip() for piece in pieces if piece.strip()]
+
+
+def section_items(persona: str | None) -> dict[str, list[str]]:
+    """The items of each of ``TAG_SECTION_HEADINGS``, keyed by heading.
+
+    In the bulleted sections each line starting ``- `` gives one item (the text after the
+    dash, stripped); ``Keywords`` is split on commas outside parentheses, so
+    "open-source molecular modeling (OMSF, OpenFold)" stays one item. Empty items are
+    dropped, and a missing section gives ``[]``. The items are the profile's own text, which
+    project anchors must equal (``src/services/project_plan.py``)."""
+    parts = sections(persona)
+    found: dict[str, list[str]] = {}
+    for heading in TAG_SECTION_HEADINGS:
+        body = parts.get(heading, "")
+        if heading == _KEYWORDS_HEADING:
+            found[heading] = _split_outside_parens(body)
+            continue
+        items = []
+        for line in body.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("- ") and stripped[2:].strip():
+                items.append(stripped[2:].strip())
+        found[heading] = items
     return found
 
 

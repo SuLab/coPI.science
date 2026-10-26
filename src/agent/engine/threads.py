@@ -29,6 +29,7 @@ class Threads:
 
     _agent_locks = via("ctx", "agent_locks")
     agents = via("ctx")
+    message_log = via("ctx")
     session_factory = via("ctx")
     simulation_run_id = via("ctx")
     _assessed_threads = via("_verdicts")
@@ -137,22 +138,29 @@ class Threads:
         same acquisition order and cannot deadlock on each other.
 
         Clears every agent's authorship-claim feedback for the thread (back-off or conclusion, main AGT-14).
+
+        A project thread (root phase ``project_reply``) closes the same way —
+        decision row, closed set, active-thread removal — but adds no prior-thread
+        summary and queues no working-memory event: a project is not an interview,
+        and neither Phase 5's dedup context nor either bot's memory may learn of it.
         """
         self.ctx.claim_feedback.clear_thread(thread.thread_id)
+        is_project = self.message_log.is_project_thread(thread.thread_id)
         async with self._agent_locks.acquire_all(agent.agent_id, thread.other_agent_id):
             thread.status = "closed"
             self._closed_thread_ids.add(thread.thread_id)
 
             # Track for Phase 5 dedup context
-            pair_key = tuple(sorted([agent.agent_id, thread.other_agent_id]))
-            self._prior_threads.setdefault(pair_key, []).append({
-                "channel": thread.channel,
-                "outcome": outcome,
-                "summary": (summary_text or "")[:400] or None,
-            })
-            pair_list = self._prior_threads[pair_key]
-            if len(pair_list) > PRIOR_THREADS_KEPT_PER_PAIR:
-                del pair_list[: len(pair_list) - PRIOR_THREADS_KEPT_PER_PAIR]
+            if not is_project:
+                pair_key = tuple(sorted([agent.agent_id, thread.other_agent_id]))
+                self._prior_threads.setdefault(pair_key, []).append({
+                    "channel": thread.channel,
+                    "outcome": outcome,
+                    "summary": (summary_text or "")[:400] or None,
+                })
+                pair_list = self._prior_threads[pair_key]
+                if len(pair_list) > PRIOR_THREADS_KEPT_PER_PAIR:
+                    del pair_list[: len(pair_list) - PRIOR_THREADS_KEPT_PER_PAIR]
             # Remove from active threads
             agent.state.active_threads.pop(thread.thread_id, None)
 
@@ -189,13 +197,14 @@ class Threads:
             # protection the lock provided. summary_text is derived from a
             # cross-agent conversation, so it is fenced as untrusted before it
             # lands in working memory (SEC-14), same as before.
-            event = f"Thread in #{thread.channel} with {thread.other_agent_id} closed: {outcome}"
-            if summary_text:
-                event += f". Summary: {delimit(summary_text[:200], 'proposal_summary')}"
-            self._memory.enqueue(
-                (agent.agent_id, event, VISIBILITY_PUBLIC, None)
-            )
-            if other_agent:
+            if not is_project:
+                event = f"Thread in #{thread.channel} with {thread.other_agent_id} closed: {outcome}"
+                if summary_text:
+                    event += f". Summary: {delimit(summary_text[:200], 'proposal_summary')}"
+                self._memory.enqueue(
+                    (agent.agent_id, event, VISIBILITY_PUBLIC, None)
+                )
+            if other_agent and not is_project:
                 other_event = f"Thread in #{thread.channel} with {agent.agent_id} closed: {outcome}"
                 if summary_text:
                     other_event += f". Summary: {delimit(summary_text[:200], 'proposal_summary')}"

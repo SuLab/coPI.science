@@ -21,7 +21,8 @@
             {# A manager's or reviewer's account. Each clause follows from
                src/services/user_deletion.py::delete_user_account with its default
                remove_from_allowlist=False and the ondelete rule of each users.id foreign key:
-               reviews and approval events keep their name columns (SET NULL id); assignments
+               reviews (assessment and project) and approval events keep their name columns
+               (SET NULL id); assignments
                to the user and chat turns CASCADE; assignments made and prompt-suggestion
                statuses keep the actor's name; other manager attributions are SET NULL.
                Self-deletion leaves the ORCID iD on the access allowlist, so the copy never
@@ -29,6 +30,7 @@
             <ul class="list-disc list-inside mt-2 space-y-1">
                 <li>Your account is deleted, along with any Microsoft sign-in linked to it.</li>
                 <li>Assessment reviews you wrote and your approve/disapprove history are kept, with your name.</li>
+                <li>Project reviews you wrote are kept, with your name.</li>
                 <li>Your review assignments are deleted.</li>
                 <li>Your assessment-chat history is deleted.</li>
                 {% if effective_user.is_manager %}

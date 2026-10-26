@@ -15,6 +15,9 @@
 <p>
     Open <a href="{{ page_url(request, 'workspace_discussions') }}">Discussions</a> from the
     Workspace. If no simulation run exists yet, the page says "No simulation runs found."
+    The threads in which BlackbirdBot refines a project with a lab are not listed here or
+    counted on the cards; they are read on the
+    <a href="{{ page_url(request, 'workspace_projects') }}">Projects</a> page.
 </p>
 {{ figure(request, "discussions", "The Discussions page: the run bar, thread counts by outcome, the filters and the thread list.") }}
 
@@ -128,7 +131,8 @@
     Open <a href="{{ page_url(request, 'workspace_interviews') }}">Interviews</a> from the
     Workspace. The page, headed <strong>Interview trajectories</strong>, lists each interview
     of the selected run that has at least one reply, one line per post. Pitches that were never
-    answered are counted in the line under the run bar, not listed. Pick a run in the run bar and press
+    answered are counted in the line under the run bar, not listed, and a project's thread is not an
+    interview, so it is not listed either. Pick a run in the run bar and press
     <strong>Show</strong>; counts are interviews with at least one reply. A run with none says
     "No interviews in this run."
 </p>

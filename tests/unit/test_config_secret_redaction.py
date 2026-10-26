@@ -154,6 +154,7 @@ NON_SECRET_STR_FIELDS = {
     "llm_assessment_chat_model",
     "llm_assessment_chat_suggestions_model",
     "llm_interview_trajectories_model",
+    "llm_project_research_model",
     # COI founder-extraction model id (spec O14): a model id, not a credential.
     "llm_coi_model",
     # Channel names for the run-start announcement — public channel names,

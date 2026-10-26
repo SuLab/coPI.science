@@ -1039,11 +1039,28 @@ def _run_scope(column, selected_run_id, show_all_runs: bool) -> list[Any]:
     return [] if show_all_runs else [column == selected_run_id]
 
 
+def _project_root_exists(run_col, thread_col):
+    """EXISTS a ``project_reply`` root post with this run and message ts: the thread is
+    a project thread. Correlated, because the discussion rows can span runs."""
+    root = aliased(AgentMessage)
+    return (
+        select(root.id)
+        .where(
+            root.simulation_run_id == run_col,
+            root.message_ts == thread_col,
+            root.phase == "project_reply",
+        )
+        .exists()
+    )
+
+
 def _thread_rows(selected_run_id, show_all_runs: bool):
     """One SQL row per thread: every root post (``new_post``, no ``thread_ts``), then
     every thread whose decisions have no root post. A thread's decision is its LAST by
     ``decided_at``; reply counts span every run under ``run_id=all``. ``grp`` is 0 for
-    a root, 1 for an orphan; ``row_key`` is a unique tiebreak for stable paging."""
+    a root, 1 for an orphan; ``row_key`` is a unique tiebreak for stable paging.
+    A decision on a project thread (root phase ``project_reply`` in the decision's
+    run) is not an orphan and is left out: project threads are not discussions."""
     roots = (
         select(
             AgentMessage.message_ts.label("ts"),
@@ -1071,6 +1088,7 @@ def _thread_rows(selected_run_id, show_all_runs: bool):
     last_dec = (
         select(
             ThreadDecision.thread_id.label("ts"),
+            ThreadDecision.simulation_run_id.label("run_id"),
             ThreadDecision.id.label("decision_id"),
             cast(ThreadDecision.outcome, String).label("outcome"),
             ThreadDecision.channel,
@@ -1120,7 +1138,10 @@ def _thread_rows(selected_run_id, show_all_runs: bool):
             last_dec.c.decision_id,
         )
         .select_from(last_dec.outerjoin(replies, replies.c.ts == last_dec.c.ts))
-        .where(~select(roots.c.ts).where(roots.c.ts == last_dec.c.ts).exists())
+        .where(
+            ~select(roots.c.ts).where(roots.c.ts == last_dec.c.ts).exists(),
+            ~_project_root_exists(last_dec.c.run_id, last_dec.c.ts),
+        )
     )
     return union_all(root_rows, orphan_rows).subquery("threads")
 
@@ -1275,6 +1296,10 @@ async def build_discussions_view(
     orphan threads (a decision whose root post is gone), the two kinds the thread list
     shows.
 
+    Project threads (rooted at a lab's ``project_reply`` post) are left out of the list,
+    its counts and the run bar: their root is not a ``new_post``, and their closing
+    decision is not counted as an orphan. They have their own Projects page.
+
     Stops before the router's ``if export:`` branch, and both the no-runs early return
     and the normal return yield the same keys, so a template can rely on them.
     """
@@ -1309,7 +1334,12 @@ async def build_discussions_view(
                     ThreadDecision.simulation_run_id,
                     func.count(func.distinct(ThreadDecision.thread_id)),
                 )
-                .where(~root_exists)
+                .where(
+                    ~root_exists,
+                    ~_project_root_exists(
+                        ThreadDecision.simulation_run_id, ThreadDecision.thread_id
+                    ),
+                )
                 .group_by(ThreadDecision.simulation_run_id)
             )
         ).all()

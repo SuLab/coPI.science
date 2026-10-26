@@ -46,6 +46,12 @@ For how the parts fit together, read
     deleted; only an admin can change it).</dd>
     {% endif %}
 
+    <dt id="term-anchor">Anchor (project)</dt>
+    <dd>An item of a lab's public profile that a project builds on, such as one of its methods,
+    model systems or targets. Each must match an item of the profile. The details page lists
+    them under <strong>Built on</strong>.{% if permissions.staff %} Not the same as an anchored
+    paper.{% endif %}</dd>
+
     {% if permissions.staff %}
     <dt id="term-anchored">Anchored paper</dt>
     <dd>A paper that the PI's ORCID record or PubMed's ORCID field confirms as the PI's. An
@@ -227,6 +233,11 @@ For how the parts fit together, read
     <dd>BlackbirdBot's short pitch of the idea, at the top of an assessment's card and
     page.</dd>
 
+    <dt id="term-in-progress">In progress</dt>
+    <dd>A project outcome: the project is still open in the live run. The Projects list's
+    <strong>Paused</strong> filter shows these too. See
+    <a href="{{ page_url(request, 'help_page', slug='projects', fragment='list') }}">The Projects list</a>.</dd>
+
     {% if permissions.staff %}
     <dt id="term-inactive">Inactive</dt>
     <dd>Older name for <strong>Muted</strong>.</dd>
@@ -298,6 +309,22 @@ For how the parts fit together, read
     Activate first. Older name: <strong>Inactive</strong>.</dd>
     {% endif %}
 
+    <dt id="term-not-agreed">Not agreed</dt>
+    <dd>A project outcome: BlackbirdBot closed the project's thread, but the lab or
+    BlackbirdBot did not agree, a field of the plan was left open, or a disagreement was
+    recorded. The details page lists the gaps and disagreements.</dd>
+
+    <dt id="term-not-finished">Not finished</dt>
+    <dd>A project outcome: the project ended before a close could be recorded. The Projects
+    pages show the reason, for example "No idea found" or "The run was finalized first". See
+    <a href="{{ page_url(request, 'help_page', slug='projects', fragment='list') }}">The Projects list</a>.</dd>
+
+    <dt id="term-opening-plan">Opening plan</dt>
+    <dd>The plan BlackbirdBot posts with a project, one line per field (indication, target or
+    mechanism, model, controls, standard of care, readout, design, time and budget, and the
+    lab's tools and models), filled as far as its research supports. The lab and BlackbirdBot
+    then refine it into the final plan. The details page shows both.</dd>
+
     <dt id="term-opening-questions">Opening questions</dt>
     <dd>Suggested questions about one assessment, offered in its chat. Some also
     appear at the end of a section of the page, as buttons starting
@@ -325,6 +352,11 @@ For how the parts fit together, read
     panel was checked and complete. It is only about coverage: it says nothing about what
     the specialists found. A consulted specialist can still signal gap or blocking, as the
     domain chips below the banner on the assessment's page show.</dd>
+
+    <dt id="term-paused">Paused</dt>
+    <dd>A project outcome: the project is still open, and its run is stopped or held. It
+    carries on if the run is resumed; if the run is finalized instead, it becomes
+    <strong>Not finished</strong>.</dd>
 
     {% if permissions.staff %}
     <dt id="term-pending-update">Pending Update</dt>
@@ -360,6 +392,13 @@ For how the parts fit together, read
     name for Pending draft: <strong>Pending Update</strong>.</dd>
     {% endif %}
 
+    <dt id="term-project">Project</dt>
+    <dd>An idea BlackbirdBot researches and brings to a lab, with an opening plan, which the
+    lab's agent and BlackbirdBot then refine together in a Slack thread. A project is not
+    scored and has no assessment; it ends <strong>Ready</strong>, <strong>Not agreed</strong>
+    or <strong>Not finished</strong>, and managers and reviewers review it on the Projects page.
+    See <a href="{{ page_url(request, 'help_page', slug='projects', fragment='list') }}">Projects</a>.</dd>
+
     {% if permissions.staff %}
     <dt id="term-prompt-suggestion">Prompt suggestion</dt>
     <dd>A proposed change to a prompt or to the rubric, written by the prompt-suggestion bot
@@ -376,6 +415,10 @@ For how the parts fit together, read
     <dd>A short review form at the foot of each card on the Assessments page: an overall
     rating, a comment and a feedback mode. Dimension scores, and editing a review, are on
     the assessment's own page.</dd>
+
+    <dt id="term-ready">Ready</dt>
+    <dd>A project outcome: the lab and BlackbirdBot both agreed the final plan, and every
+    field of it is filled.</dd>
 
     <dt id="term-recommendation">Recommendation</dt>
     <dd>BlackbirdBot's own call on an idea: <strong>advance</strong>,
@@ -436,9 +479,9 @@ For how the parts fit together, read
 
     <dt id="term-run">Run</dt>
     <dd>One simulation run: a period in which the lab agents and BlackbirdBot are active in
-    Slack. Assessments belong to the run that produced them; the <strong>Run</strong>
-    bar under the title on the Assessments page{% if permissions.staff %} and the Discussions and
-    Interviews pages{% endif %} picks one run, and on Assessments{% if permissions.staff %} and
+    Slack. Assessments and projects belong to the run that produced them; the <strong>Run</strong>
+    bar under the title on the Assessments and Projects pages{% if permissions.staff %} and the
+    Discussions and Interviews pages{% endif %} picks one run, and on Assessments{% if permissions.staff %} and
     Discussions{% endif %} it also offers <strong>All Runs</strong>; press <strong>Show</strong>
     to switch.</dd>
 

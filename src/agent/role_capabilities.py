@@ -39,6 +39,9 @@ class RoleCapabilities:
     requires_linked_user: bool
     #: Its place in the star topology.
     star_topology_role: Literal["spoke", "hub", "none"]
+    #: May post stored project ideas as top-level posts (never a model-written
+    #: top-level post).
+    posts_project_ideas: bool
     #: The role's prompt-set files, in stamp order (moved verbatim from
     #: ``roles.ROLE_PROMPT_FILES``; ``prompt_set_stamp`` hashes them in this order,
     #: ``PromptSnapshot`` loads them). The composer reads its files by name, so a file
@@ -56,13 +59,16 @@ ROLE_CAPABILITIES: dict[str, RoleCapabilities] = {
         guidance_set="pi_lab",
         requires_linked_user=True,
         star_topology_role="spoke",
+        posts_project_ideas=False,
         prompt_files=(
             "agent-system.md", "identity.md",
             "phase4-thread-reply.md", "phase5-new-post.md",
+            "phase5-project-reply.md", "phase4-project-reply.md",
         ),
     ),
     # Reply-only: scout_hub omits phase5-new-post.md, so a pi-side edit to that
     # file never moves the hub's prompt-set hash, and holds the brief it serves to labs.
+    # Its project files follow the brief, so the earlier files keep their stamp order.
     "scout_hub": RoleCapabilities(
         posts_new_threads=False,
         auto_activates_on_lab_posts=True,
@@ -71,8 +77,10 @@ ROLE_CAPABILITIES: dict[str, RoleCapabilities] = {
         guidance_set="scout_hub",
         requires_linked_user=False,
         star_topology_role="hub",
+        posts_project_ideas=True,
         prompt_files=(
             "agent-system.md", "identity.md", "phase4-thread-reply.md", LAB_BRIEF_FILE,
+            "agent-system-project.md", "phase4-project-reply.md",
         ),
     ),
 }

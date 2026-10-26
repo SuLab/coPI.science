@@ -16,6 +16,7 @@ from . import (
     pi_directory,
     pi_evidence,
     pi_profile,
+    projects,
     prompt_suggestions,
     staff,
 )
@@ -43,6 +44,7 @@ for feature in (
     activity,
     discussions,
     interviews,
+    projects,
     prompt_suggestions,
     staff,
 ):

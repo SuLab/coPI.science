@@ -122,10 +122,10 @@ or an admin; a manager asks an admin.</p>
 
 <h3>"Manager access required"</h3>
 <p><strong>What it means:</strong> that page is for managers and admins only.{% if not permissions.staff %}
-Reviewers can open the PIs and Assessments pages, and the Help pages listed in Help.{% endif %}</p>
+Reviewers can open the PIs, Assessments and Projects pages, and the Help pages listed in Help.{% endif %}</p>
 <p><strong>What to do:</strong> {% if permissions.staff %}if you are a manager and see this,
 your account's role may have changed; ask an admin.{% else %}nothing: you have not done
-anything wrong. Go back and carry on from the PIs or Assessments page.{% endif %}</p>
+anything wrong. Go back and carry on from the PIs, Assessments or Projects page.{% endif %}</p>
 
 <h3>"Review access required"</h3>
 <p><strong>What it means:</strong> the Workspace and Help are for admins, managers and
@@ -195,6 +195,33 @@ again.</p>
 <p><strong>What it means:</strong> the review you tried to edit was written by someone
 else. You can edit only your own.</p>
 <p><strong>What to do:</strong> add a review of your own instead.</p>
+
+<h2 id="projects">Projects</h2>
+
+<h3>"You have already reviewed this project; edit your review below."</h3>
+<p><strong>What it means:</strong> you already have a review of this project, usually because
+the button was pressed twice. Each person keeps one review per project, so the second one was
+not saved.</p>
+<p><strong>What to do:</strong> to change it, open <strong>Edit your review</strong> in the
+project's <strong>Reviews</strong> section.</p>
+
+<h3>"rating must be a whole number from 1 to 5"</h3>
+<p><strong>What it means:</strong> the rating sent was not one of 1 to 5.</p>
+<p><strong>What to do:</strong> go back, choose a rating from 1 to 5, and submit again.</p>
+
+<h3>"fund must be 'fund' or 'no_fund'"</h3>
+<p><strong>What it means:</strong> the review did not carry a <strong>Fund</strong> or
+<strong>Don't fund</strong> choice.</p>
+<p><strong>What to do:</strong> go back, choose one, and submit again.</p>
+
+<h3>"Only the author may edit this review"</h3>
+<p><strong>What it means:</strong> the project review you tried to edit was written by
+someone else. You can edit only your own, and only an admin can delete a review.</p>
+<p><strong>What to do:</strong> add a review of your own instead.</p>
+
+<p>The two comment messages under
+<a href="{{ page_url(request, 'help_page', slug='troubleshooting', fragment='assessments') }}">Assessments</a>
+apply to project reviews too.</p>
 
 <h2 id="assessment-chat">Assessment chat</h2>
 <p>These appear in red under the question box in the chat.</p>

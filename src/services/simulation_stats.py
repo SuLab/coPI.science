@@ -43,7 +43,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Integer, case, column, func, select, true
+from sqlalchemy import Integer, case, column, func, or_, select, true
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -63,6 +63,7 @@ from src.services.assessment_detail import unvetted_panel_filter
 from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH, RUBRIC_VERSION
 from src.services.build_info import BuildInfo, get_build_info
 from src.services.llm_pricing import cost_for_tokens
+from src.services.projects_view import project_thread_roots
 
 #: Cap on how many `llm_call_logs` ROWS (not exploded calls) `stop_reason_taxonomy`
 #: and `latency_percentiles` will read, newest first. Exported so a caller (the
@@ -723,7 +724,16 @@ async def hourly_activity(db: AsyncSession, run_id: uuid.UUID) -> list[HourBucke
 # ---------------------------------------------------------------------------
 
 
+def _not_a_project_thread(thread_col, run_id: uuid.UUID):
+    """True for a row outside the run's project threads, NULL thread ids included: a
+    bare ``NOT IN`` is NULL, so false, for a NULL ``thread_col``, which would drop
+    every unattributed call and thread-less consult."""
+    return or_(thread_col.is_(None), thread_col.not_in(project_thread_roots(run_id)))
+
+
 async def funnel(db: AsyncSession, run_id: uuid.UUID) -> Funnel:
+    """``interviews_opened`` leaves out project threads (a ``project_reply`` root):
+    they close with a ``ThreadDecision`` but are not interviews."""
     assessment_rows = (
         await db.execute(
             select(OpportunityAssessment.thread_id, OpportunityAssessment.summary_posted_at)
@@ -757,6 +767,7 @@ async def funnel(db: AsyncSession, run_id: uuid.UUID) -> Funnel:
         if tid is not None and tid in closed_ids and posted is None
     )
     opened_ids = {tid for tid, _ in assessment_rows if tid is not None} | closed_ids
+    opened_ids -= set((await db.execute(project_thread_roots(run_id))).scalars().all())
 
     drop_rows = (
         await db.execute(
@@ -797,11 +808,15 @@ async def specialist_mix(db: AsyncSession, run_id: uuid.UUID) -> list[DomainMix]
     """`specialist_consults` grouped by domain x signal. The live three
     (`VERDICT_SIGNALS`) get their own column; anything else (the retired
     `caution`/`clear` pair, or any other unexpected value) is folded into
-    `historical` — counted, never dropped."""
+    `historical` — counted, never dropped. Consults made in a project thread are
+    left out; a consult with no thread id still counts."""
     rows = (
         await db.execute(
             select(SpecialistConsult.domain, SpecialistConsult.verdict_signal, func.count())
-            .where(SpecialistConsult.simulation_run_id == run_id)
+            .where(
+                SpecialistConsult.simulation_run_id == run_id,
+                _not_a_project_thread(SpecialistConsult.thread_id, run_id),
+            )
             .group_by(SpecialistConsult.domain, SpecialistConsult.verdict_signal)
         )
     ).all()
@@ -826,13 +841,15 @@ async def consult_fanout(db: AsyncSession, run_id: uuid.UUID) -> list[ConsultFan
     """The panel fan-out distribution (spec §4): how many consults each
     interview thread received, bucketed by that count. `thread_id`-less
     consults (pre-existing rows with no thread attribution) are excluded —
-    there is no interview to attribute the fan-out to."""
+    there is no interview to attribute the fan-out to. Project threads are not
+    interviews and are left out too."""
     rows = (
         await db.execute(
             select(SpecialistConsult.thread_id, func.count())
             .where(
                 SpecialistConsult.simulation_run_id == run_id,
                 SpecialistConsult.thread_id.is_not(None),
+                _not_a_project_thread(SpecialistConsult.thread_id, run_id),
             )
             .group_by(SpecialistConsult.thread_id)
         )
@@ -1126,7 +1143,9 @@ async def cost_per_interview(db: AsyncSession, run_id: uuid.UUID) -> list[Interv
     unattributed bucket (rows with no thread_ts — written before migration
     0042, or from a call site that never learned its thread) even when it is
     zero, so a reader can see the per-interview figures do not sum to the run
-    total without having to guess why."""
+    total without having to guess why. Calls made in a project thread are left
+    out entirely (they are neither an interview nor unattributed); ``cost_by_stage``
+    still counts them."""
     rows = (
         await db.execute(
             select(
@@ -1140,7 +1159,10 @@ async def cost_per_interview(db: AsyncSession, run_id: uuid.UUID) -> list[Interv
                     (LlmCallLog.cache_read_input_tokens.is_(None), 1), else_=0,
                 )),
             )
-            .where(LlmCallLog.simulation_run_id == run_id)
+            .where(
+                LlmCallLog.simulation_run_id == run_id,
+                _not_a_project_thread(LlmCallLog.thread_ts, run_id),
+            )
             .group_by(LlmCallLog.thread_ts, LlmCallLog.model)
         )
     ).all()

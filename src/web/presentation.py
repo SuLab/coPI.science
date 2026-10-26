@@ -136,7 +136,7 @@ STAFF_KEYS = frozenset(
 )
 ADMIN_KEYS = frozenset(
     "raw_verdict raw_opinion raw_opinion_truncated unplaced_turns held_counts in_doubt "
-    "microsoft_link".split()
+    "microsoft_link research_cost_usd refinement_cost_usd calls_url".split()
 )
 REVIEWER_SCHEMAS = {
     "PiGrantIdentity": SCHEMAS["PiGrantIdentity"] - {"candidates"},
@@ -223,6 +223,10 @@ VIEW_FIELDS = frozenset(
         "verdict_revision verdict_signal verdict_signals verified_email version vetoed_at viewer_is_staff "
         "weight weight_note wikidata worst year "
         "run_bar is_live is_current held_at decline_listed interviews interview_total unanswered_count outcome_label outcome_kind band lines speaker panel "
+        "projects project_total outcome_filter mine review_count mean_rating fund_count fund_share "
+        "reviewed_by_me reason_label finished_at posted_at project plan_rows opening_rows tool_rows item "
+        "in_profile hub_position lab_position gaps disagreements why_chosen others use sources ident fund "
+        "can_edit my_review can_review_projects research_cost_usd refinement_cost_usd calls_url "
     ).split()
 )
 DYNAMIC_MAP_FIELDS = frozenset(

@@ -16,7 +16,7 @@ What follows --target and what does not:
     or the comparison FAILs; a snapshot ``target`` other than --target only WARNs.
   * The pinned table/column/index/constraint expectations (EXPECTED_TABLES,
     EXPECTED_COLUMNS, EXPECTED_INDEXES, EXPECTED_CONSTRAINTS) describe the 0019-0023
-    chain and the 0056, 0062, 0065, 0068, 0069, 0070, 0071 and 0072 objects only (VERIFIED_REVISIONS), whatever the target.
+    chain and the 0056, 0062, 0065, 0068, 0069, 0070, 0071, 0072 and 0073 objects only (VERIFIED_REVISIONS), whatever the target.
 
 Exit codes (contract):
 
@@ -191,21 +191,72 @@ EXPECTED_COLUMNS: tuple[tuple[str, str, str, bool, str | None], ...] = (
     ("interview_trajectories", "latency_ms", "integer", True, ""),
     ("interview_trajectories", "created_at", "timestamp with time zone", False, "now()"),
     ("interview_trajectories", "updated_at", "timestamp with time zone", False, "now()"),
+    # 0073 — the projects prototype's four tables. The migration writes no row; NULL means
+    # "never asked" (not yet researched, posted or finished).
+    ("hub_projects", "id", "uuid", False, None),
+    ("hub_projects", "simulation_run_id", "uuid", False, ""),
+    ("hub_projects", "agent_id", "character varying", False, ""),
+    ("hub_projects", "slot", "integer", False, ""),
+    ("hub_projects", "status", "character varying", False, ""),
+    ("hub_projects", "reason_code", "character varying", True, ""),
+    ("hub_projects", "requested_run_seconds", "double precision", False, ""),
+    ("hub_projects", "requested_at", "timestamp with time zone", False, "now()"),
+    ("hub_projects", "research", "jsonb", True, ""),
+    ("hub_projects", "choice", "jsonb", True, ""),
+    ("hub_projects", "title", "character varying", True, ""),
+    ("hub_projects", "posting_text", "text", True, ""),
+    ("hub_projects", "posting_claimed_at", "timestamp with time zone", True, ""),
+    ("hub_projects", "posting_ts", "character varying", True, ""),
+    ("hub_projects", "posted_at", "timestamp with time zone", True, ""),
+    ("hub_projects", "reply_claimed_at", "timestamp with time zone", True, ""),
+    ("hub_projects", "reply_ts", "character varying", True, ""),
+    ("hub_projects", "reply_failures", "integer", False, "0"),
+    ("hub_projects", "final", "jsonb", True, ""),
+    ("hub_projects", "finished_at", "timestamp with time zone", True, ""),
+    ("hub_projects", "finished_run_seconds", "double precision", True, ""),
+    ("hub_projects", "next_step_after", "timestamp with time zone", True, ""),
+    ("hub_projects", "created_at", "timestamp with time zone", False, "now()"),
+    ("hub_projects", "updated_at", "timestamp with time zone", False, "now()"),
+    ("hub_project_calls", "id", "uuid", False, None),
+    ("hub_project_calls", "project_id", "uuid", False, ""),
+    ("hub_project_calls", "step", "character varying", False, ""),
+    ("hub_project_calls", "model", "character varying", False, ""),
+    ("hub_project_calls", "served_by_model", "character varying", True, ""),
+    ("hub_project_calls", "status", "character varying", False, ""),
+    ("hub_project_calls", "error_code", "character varying", True, ""),
+    ("hub_project_calls", "usage_by_model", "jsonb", True, ""),
+    ("hub_project_calls", "latency_ms", "integer", True, ""),
+    ("hub_project_calls", "created_at", "timestamp with time zone", False, "now()"),
+    ("hub_project_calls", "updated_at", "timestamp with time zone", False, "now()"),
+    ("hub_project_clocks", "id", "uuid", False, None),
+    ("hub_project_clocks", "simulation_run_id", "uuid", False, ""),
+    ("hub_project_clocks", "run_seconds", "double precision", False, "'0'::double precision"),
+    ("hub_project_clocks", "updated_at", "timestamp with time zone", False, "now()"),
+    ("hub_project_reviews", "id", "uuid", False, None),
+    ("hub_project_reviews", "project_id", "uuid", False, ""),
+    ("hub_project_reviews", "reviewer_user_id", "uuid", True, ""),
+    ("hub_project_reviews", "reviewer_name", "character varying", False, ""),
+    ("hub_project_reviews", "rating", "smallint", False, ""),
+    ("hub_project_reviews", "comment", "text", False, "''::text"),
+    ("hub_project_reviews", "fund", "boolean", False, ""),
+    ("hub_project_reviews", "created_at", "timestamp with time zone", False, "now()"),
+    ("hub_project_reviews", "updated_at", "timestamp with time zone", False, "now()"),
 )
 
 EXPECTED_TABLES = (
     "pi_dm_messages", "cohorts", "cohort_memberships", "cohort_audit_events", "rubric_documents",
     "publication_candidates", "authorship_claim_checks", "hub_declines",
-    "interview_trajectories",
+    "interview_trajectories", "hub_projects", "hub_project_calls", "hub_project_clocks",
+    "hub_project_reviews",
 )
 
 #: Revisions this script's EXPECTED_TABLES/EXPECTED_COLUMNS/EXPECTED_INDEXES below
-#: actually verify. Pinned: 0019-0023, 0056, 0062, 0065, 0068, 0069, 0070, 0071 and 0072. Not pinned (documented omission):
+#: actually verify. Pinned: 0019-0023, 0056, 0062, 0065, 0068, 0069, 0070, 0071, 0072 and 0073. Not pinned (documented omission):
 #: the 0024-0055, 0057-0061, 0063-0064 and 0066-0067 objects, which preflight's PLANNED_OBJECTS collision check and
 #: tests/integration/test_model_migration_parity.py cover. Bump this tuple (and add the
 #: corresponding EXPECTED_* entries) to extend the pins. The row-count and enum checks
 #: do not read it: they are scoped by revision span instead.
-VERIFIED_REVISIONS: tuple[str, ...] = ("0019", "0020", "0021", "0022", "0023", "0056", "0062", "0065", "0068", "0069", "0070", "0071", "0072")
+VERIFIED_REVISIONS: tuple[str, ...] = ("0019", "0020", "0021", "0022", "0023", "0056", "0062", "0065", "0068", "0069", "0070", "0071", "0072", "0073")
 
 #: index name -> the exact pg_indexes.indexdef tail, so a same-named index on the WRONG
 #: columns (or a partial index that lost its predicate) fails too.
@@ -253,6 +304,13 @@ EXPECTED_INDEXES: dict[str, str] = {
     # 0072: the unique constraint's backing index and the spend ceiling's index.
     "uq_interview_trajectories_run_thread": "USING btree (simulation_run_id, thread_id)",
     "ix_interview_trajectories_updated": "USING btree (updated_at)",
+    # 0073: the three unique constraints' backing indexes and the three plain indexes.
+    "uq_hub_projects_run_agent_slot": "USING btree (simulation_run_id, agent_id, slot)",
+    "uq_hub_project_clocks_run": "USING btree (simulation_run_id)",
+    "uq_hub_project_reviews_project_reviewer": "USING btree (project_id, reviewer_user_id)",
+    "ix_hub_projects_run_reply": "USING btree (simulation_run_id, reply_ts)",
+    "ix_hub_project_calls_updated": "USING btree (updated_at)",
+    "ix_hub_project_calls_project": "USING btree (project_id)",
 }
 
 #: constraint name -> (table, pg_get_constraintdef)
@@ -306,6 +364,32 @@ EXPECTED_CONSTRAINTS: dict[str, tuple[str, str]] = {
     "ck_interview_trajectories_status": ("interview_trajectories", "'refused'"),
     "interview_trajectories_simulation_run_id_fkey": (
         "interview_trajectories", "REFERENCES simulation_runs(id) ON DELETE CASCADE",
+    ),
+    # 0073. Each CHECK is pinned by its last allowed value (or its bound).
+    "uq_hub_projects_run_agent_slot": (
+        "hub_projects", "UNIQUE (simulation_run_id, agent_id, slot)",
+    ),
+    "ck_hub_projects_status": ("hub_projects", "'not_finished'"),
+    "ck_hub_project_calls_status": ("hub_project_calls", "'refused'"),
+    "uq_hub_project_clocks_run": ("hub_project_clocks", "UNIQUE (simulation_run_id)"),
+    "uq_hub_project_reviews_project_reviewer": (
+        "hub_project_reviews", "UNIQUE (project_id, reviewer_user_id)",
+    ),
+    "ck_hub_project_reviews_rating": ("hub_project_reviews", "<= 5"),
+    "hub_projects_simulation_run_id_fkey": (
+        "hub_projects", "REFERENCES simulation_runs(id) ON DELETE CASCADE",
+    ),
+    "hub_project_calls_project_id_fkey": (
+        "hub_project_calls", "REFERENCES hub_projects(id) ON DELETE CASCADE",
+    ),
+    "hub_project_clocks_simulation_run_id_fkey": (
+        "hub_project_clocks", "REFERENCES simulation_runs(id) ON DELETE CASCADE",
+    ),
+    "hub_project_reviews_project_id_fkey": (
+        "hub_project_reviews", "REFERENCES hub_projects(id) ON DELETE CASCADE",
+    ),
+    "hub_project_reviews_reviewer_user_id_fkey": (
+        "hub_project_reviews", "REFERENCES users(id) ON DELETE SET NULL",
     ),
 }
 

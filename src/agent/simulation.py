@@ -25,6 +25,7 @@ from src.agent.engine.memory import Memory
 from src.agent.engine.panel import Panel
 from src.agent.engine.persistence import Persistence
 from src.agent.engine.post_lane import PostLane
+from src.agent.engine.projects import Projects
 from src.agent.engine.rebuild import Rebuild
 from src.agent.engine.reply_lane import ReplyLane
 from src.agent.engine.roster import Roster
@@ -144,6 +145,7 @@ _UNIT_CLASSES: dict[str, type] = {
     "roster": Roster,
     "run_announcer": RunAnnouncer,
     "threads": Threads,
+    "projects": Projects,
     "post_lane": PostLane,
     "reply_lane": ReplyLane,
     "rebuild": Rebuild,
@@ -248,16 +250,18 @@ class SimulationEngine:
             self.ctx, headlines=self.headlines, memory=self.memory, verdicts=self.verdicts,
             persistence=self.persistence,
         )
+        self.projects = Projects(self.ctx, scheduler=self.scheduler, slack_io=self.slack_io)
         self.post_lane = PostLane(
             self.ctx, scheduler=self.scheduler, roster=self.roster, threads=self.threads,
             slack_io=self.slack_io, llm_log=self.llm_log,
             channel_directory=self.channel_directory, panel=self.panel,
-            max_proposals=max_proposals,
+            max_proposals=max_proposals, projects=self.projects,
         )
         self.reply_lane = ReplyLane(
             self.ctx, run_state=self.run_state, scheduler=self.scheduler,
             post_lane=self.post_lane, threads=self.threads, verdicts=self.verdicts,
             panel=self.panel, slack_io=self.slack_io, channel_directory=self.channel_directory,
+            projects=self.projects,
         )
         self.rebuild = Rebuild(
             self.ctx, threads=self.threads, slack_io=self.slack_io, panel=self.panel,
@@ -332,6 +336,7 @@ class SimulationEngine:
         # `_rehydrate_assessed_threads`.
         await self._rehydrate_assessed_threads()
         await self._rehydrate_proposal_count()
+        await self._rehydrate_projects()
         set_call_log_callback(self._on_llm_call)
 
         # Compute the cohort gate BEFORE the first turn. The rebuild above is
@@ -519,6 +524,7 @@ class SimulationEngine:
                 # Own cadence gate inside (_last_control_poll), same pattern
                 # as _sync_roster_from_db above.
                 await self._poll_control_plane(deps.time.time())
+                await self._projects_tick(draining=self.max_proposals > 0 and self._proposals_posted >= self.max_proposals)
 
                 # Pick up profile edits made from the web app (separate process).
                 self._sync_profiles_from_disk()

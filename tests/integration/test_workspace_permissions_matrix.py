@@ -32,6 +32,7 @@ from src.models import (
 from src.routers import admin, manager, workspace
 from tests import factories
 from tests.integration.test_manager_access import auth_headers
+from tests.integration.test_rendered_page_gate import seed_ready_project
 from tests.workspace_support import POST_SUFFIXES
 
 pytestmark = pytest.mark.integration
@@ -49,7 +50,7 @@ def _routes(router):
 async def _target(db):
     pi = await factories.make_user(db, user_role="pi")
     await factories.make_profile(db, user=pi)
-    await factories.make_agent(db, user=pi, status="active")
+    agent = await factories.make_agent(db, user=pi, status="active")
     candidate = PublicationCandidate(
         user_id=pi.id, pmid="991001", title="Candidate", reason="no_orcid_anchor", status="rejected"
     )
@@ -83,11 +84,13 @@ async def _target(db):
                                         status="open")
     db.add_all((assessment, suggestion))
     await db.flush()
+    project = await seed_ready_project(db, run=run, lab_agent_id=agent.agent_id)
     return pi, {
         "user_id": pi.id,
         "candidate_id": candidate.id, "publication_id": publication.id, "grant_id": grant.id,
         "funding_id": funding.id, "evidence_id": evidence.id, "company_id": company.id,
         "run_id": run.id, "assessment_id": assessment.id, "suggestion_id": suggestion.id,
+        "project_id": project.id,
         "agent_id": (await db.scalar(select(AgentRegistry.id).where(AgentRegistry.user_id == pi.id))),
     }
 
@@ -364,6 +367,7 @@ async def test_all_workspace_get_and_head_routes_follow_effective_role(client, d
         "/workspace/slack-bots", "/workspace/staff", "/workspace/discussions", "/workspace/interviews", "/workspace/activity",
         f"/workspace/activity/{ids['run_id']}", "/workspace/prompt-suggestions",
         f"/workspace/prompt-suggestions/{ids['suggestion_id']}",
+        "/workspace/projects", f"/workspace/projects/{ids['project_id']}",
     )
     headers = {}
     effective_role = role
@@ -379,7 +383,7 @@ async def test_all_workspace_get_and_head_routes_follow_effective_role(client, d
         elif effective_role == "pi":
             assert response.status_code == 403, path
         elif effective_role == "reviewer":
-            expected = 200 if any(part in path for part in ("/pis", "/assessments")) else 403
+            expected = 200 if any(part in path for part in ("/pis", "/assessments", "/projects")) else 403
             if path == "/workspace":
                 expected = 302
             assert response.status_code == expected, path
@@ -387,14 +391,14 @@ async def test_all_workspace_get_and_head_routes_follow_effective_role(client, d
             assert response.status_code in {200, 302}, path
         head = await client.head(path, headers=headers, follow_redirects=False)
         assert head.status_code == response.status_code, path
-        if path == "/workspace/interviews":
-            continue  # no /manager alias exists for this page
+        if path.startswith(("/workspace/interviews", "/workspace/projects")):
+            continue  # no /manager alias exists for these pages
         legacy = await client.get(path.replace("/workspace", "/manager", 1), headers=headers, follow_redirects=False)
         legacy_head = await client.head(path.replace("/workspace", "/manager", 1), headers=headers, follow_redirects=False)
         assert legacy_head.status_code == legacy.status_code, path
         if effective_role in {None, "pi"}:
             assert legacy.status_code == response.status_code, path
-        elif effective_role == "reviewer" and path != "/workspace" and not any(part in path for part in ("/pis", "/assessments")):
+        elif effective_role == "reviewer" and path != "/workspace" and not any(part in path for part in ("/pis", "/assessments", "/projects")):
             assert legacy.status_code == 403, path
         else:
             assert legacy.status_code == 302, path
