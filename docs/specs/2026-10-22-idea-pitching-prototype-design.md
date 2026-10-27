@@ -403,7 +403,8 @@ not used or changed), with a structured answer:
     or "Prof."; BlackbirdBot's own name is allowed; source titles are not checked. So "gray matter", "Wilson disease"
     or "green fluorescent protein" pass;
   - no `@` anywhere;
-  - each field within its length limit (my call: summary 600 characters, each plan field 300).
+  - each field within its length limit (my call: summary 600 characters, each plan field 300; the owner raised the
+    plan field to 500 on 2026-10-27, when 300 failed most choices in the dry-run re-checks).
   A failed check retries the call once with the failure stated; a second failure ends the project as not finished
   ("choice failed").
 - **No candidate.** If no candidate survives research, the project ends as not finished ("no idea found"), keeping

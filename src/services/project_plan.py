@@ -59,7 +59,9 @@ POSTING_MAX_MESSAGES = 2
 #: 3,500 characters per message, as when a posting had to fit one.
 POSTING_MAX_CHARS = 7000
 SUMMARY_MAX_CHARS = 600
-FIELD_MAX_CHARS = 300
+#: Each plan string and each ``lab_tools`` item (owner, 2026-10-27: raised from 300, which
+#: failed most choices; nine fields at the limit still leave a posting within two messages).
+FIELD_MAX_CHARS = 500
 TITLE_MAX_CHARS = 120
 POSTING_MAX_SOURCES = 5
 POSTING_HEADER = ":test_tube: *Blackbird project for the {surname} lab*"

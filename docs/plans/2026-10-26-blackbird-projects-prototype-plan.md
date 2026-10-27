@@ -34,6 +34,10 @@ from the text below, all now in the tree:
   `POSTING_MAX_CHARS` 7,000); `AgentSlackClient` posts the second in the first one's thread,
   and `_resolve_logged_claim` also matches the root row's `posting_head`. The 300-character
   field and 600-character summary limits are unchanged; the lab's reply still fits one message.
+- **Plan field limit 500 (owner, 2026-10-27).** The second re-check ($1.04) readied gray, hu and
+  menard; deutsch failed twice on its 300-character Design field. `FIELD_MAX_CHARS` is now 500
+  (each plan string and `lab_tools` item; `prompts/projects/choose.md` says so); nine fields at
+  the limit still leave a posting within two messages. The summary stays at 600.
 
 - **Posting text.** `assemble_posting` also removes `<`, `>` and `@` from third-party source
   titles and ids and leaves out a title that still carries a link or a bare domain (PubMed,

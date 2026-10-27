@@ -339,8 +339,10 @@ def test_check_choice_failures():
     one(_choice(summary="Write to <mailto:x.example|the office>."), "contains a link")
     one(_choice(title="t" * 121), "the title is longer than")
     one(_choice(summary="s" * 601), "the summary is longer than")
-    one(_choice(plan=_plan(readout="r" * 301)), "Readout")
-    one(_choice(plan=_plan(lab_tools=["x" * 301])), "an entry is longer than")
+    assert pr.FIELD_MAX_CHARS == 500  # owner, 2026-10-27 (was 300)
+    one(_choice(plan=_plan(readout="r" * 501)), "Readout")
+    one(_choice(plan=_plan(lab_tools=["x" * 501])), "an entry is longer than 500")
+    assert _check(_choice(plan=_plan(readout="r" * 500, design="d" * 500))) == []
     one(_choice(plan=_plan(lab_tools=[f"tool {n}" for n in range(11)])), "more than 10 lab tools")
 
 
