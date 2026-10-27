@@ -344,6 +344,42 @@ def test_check_choice_failures():
     one(_choice(plan=_plan(lab_tools=[f"tool {n}" for n in range(11)])), "more than 10 lab tools")
 
 
+def _shown(block: str, label: str) -> list[str]:
+    """The ``label`` line's entries exactly as ``_candidates_text`` shows them."""
+    line = next(line for line in block.splitlines() if line.strip().startswith(label))
+    return line.split(label, 1)[1].strip().split("; ")
+
+
+@pytest.mark.parametrize("chosen", [1, 2])
+def test_check_choice_accepts_references_copied_from_the_candidates_block(chosen):
+    """The choice prompt says to copy anchors and sources exactly, and the model copies them
+    as the candidates block shows them: ``"<section>: <item>"`` and ``"<id> — <title> (shows:
+    …)"`` (dry run 2026-10-26: every lab's choice failed on exactly these strings)."""
+    candidate = SURVIVORS[chosen - 1]
+    block = pr._candidates_text([candidate])
+    choice = _choice(
+        chosen=chosen, others=[{"index": 3 - chosen, "note": "n"}],
+        anchors=_shown(block, "Builds on:"), sources=_shown(block, "Sources:"),
+    )
+    assert _check(choice) == []
+    stored = pr.resolve_choice(choice, SURVIVORS)
+    assert stored["anchors"] == candidate["anchors"]
+    assert [s["key"] for s in stored["sources"]] == [s["key"] for s in candidate["sources"]]
+
+
+def test_shown_references_still_name_only_the_chosen_candidates():
+    def one(choice, fragment):
+        failures = _check(choice)
+        assert any(fragment in f for f in failures), failures
+
+    one(_choice(anchors=["Model Systems: Calcium imaging"]), "not one of the chosen candidate's anchors")
+    one(_choice(anchors=["Model Systems: Mouse models of cholestasis"]),
+        "not one of the chosen candidate's anchors")
+    one(_choice(sources=["US1 — A patent (shows: s)"]), "not one of the chosen candidate's sources")
+    assert _check(_choice(sources=["PMID 11 – Paper eleven"])) == []
+    assert _check(_choice(sources=["PMID 11 - Paper eleven"])) == []
+
+
 def test_check_choice_fails_a_posting_that_cannot_fit(monkeypatch):
     def too_long(**kwargs):
         raise ValueError("posting too long")

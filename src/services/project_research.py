@@ -40,6 +40,7 @@ import copy
 import hashlib
 import json
 import logging
+import re
 import time
 import uuid
 from collections.abc import Mapping, Sequence
@@ -630,29 +631,52 @@ def _valid_index(value: object, survivors: Sequence[dict]) -> bool:
     )
 
 
+#: Where a source's shown id ends in ``_candidates_text``'s ``"<id> — <title> (shows: …)"``:
+#: the first em or en dash, or a hyphen with spaces around it. No id contains one.
+_SOURCE_ID_END_RE = re.compile(r"\s*[—–]\s*|\s+-\s+")
+
+
 def _kept_anchor(text: str, candidate: Mapping[str, Any]) -> dict | None:
-    """The chosen candidate's kept anchor ``text`` names, in the profile's own words."""
+    """The chosen candidate's kept anchor ``text`` names, in the profile's own words.
+
+    ``text`` is the item alone or, as ``_candidates_text`` shows it and the choice prompt
+    says to copy it, ``"<section>: <item>"``; a section prefix matches only that section's
+    items."""
     grouped: dict[str, list[str]] = {section: [] for section in ANCHOR_SECTIONS}
     for anchor in candidate.get("anchors") or []:
         grouped.setdefault(anchor["section"], []).append(anchor["item"])
     section = match_anchor(text, grouped)
-    if section is None:
-        return None
-    target = normalize_item(text)
-    item = next(i for i in grouped[section] if normalize_item(i) == target)
-    return {"section": section, "item": item}
+    if section is not None:
+        target = normalize_item(text)
+        item = next(i for i in grouped[section] if normalize_item(i) == target)
+        return {"section": section, "item": item}
+    head, colon, rest = text.partition(":")
+    if colon:
+        target = normalize_item(rest)
+        for section, items in grouped.items():
+            if normalize_item(head) == normalize_item(section):
+                for item in items:
+                    if normalize_item(item) == target:
+                        return {"section": section, "item": item}
+    return None
 
 
 def _kept_source(raw: str, candidate: Mapping[str, Any]) -> dict | None:
     """The chosen candidate's kept source ``raw`` names: by its key, its displayed id or
-    ``resolve_source``."""
+    ``resolve_source``, tried on the whole text and then on the id before the title, since
+    ``_candidates_text`` shows a source as ``"<id> — <title> (shows: …)"`` and the choice
+    prompt says to copy it."""
     by_key = {s["key"]: s for s in candidate.get("sources") or []}
     raw = raw.strip()
-    for key, source in by_key.items():
-        if raw in (key, display_id(key)):
-            return source
-    key = resolve_source(raw, by_key)
-    return by_key.get(key) if key else None
+    shown_id = _SOURCE_ID_END_RE.split(raw, maxsplit=1)[0].strip()
+    for cited in dict.fromkeys((raw, shown_id)):
+        for key, source in by_key.items():
+            if cited in (key, display_id(key)):
+                return source
+        key = resolve_source(cited, by_key)
+        if key:
+            return by_key[key]
+    return None
 
 
 def _plan_of(choice: Mapping[str, Any]) -> dict[str, Any]:
