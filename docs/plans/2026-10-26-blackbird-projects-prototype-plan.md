@@ -13,6 +13,22 @@ pages-and-reviews and statistics-report-calls), the lead's Task 12 integration, 
 audit (plan audit, semantic review, security review). Task 13 has not been started. Differences
 from the text below, all now in the tree:
 
+- **Prompt freeze (owner, after the first release, 2026-10-26).** Task 10's prompt-set bumps are
+  withdrawn (spec §6 note): the four project-thread prompts moved to `prompts/projects/`
+  (`hub-system.md`, `hub-thread-reply.md`, `lab-posting-reply.md`, `lab-thread-reply.md`;
+  `src/agent/project_prompts.py`), out of both roles' `prompt_files`. Both `role.toml` files,
+  `scripts/verify_simulation_prompts.py`, the prompt-set docs, `test_prompt_freeze_gm.py`, its
+  `.ambr`, and the version tests in `test_prompt_set_stamp.py`, `test_lab_brief.py` and
+  `test_headline_contract.py` are back to `6053d30c`; scout_hub stays 1.12.0 (`581f0baee450`)
+  and pi_lab 1.2.0 (`d47aa8309807`). `PromptSnapshot` loads the four at start (`projects`
+  drift), `Agent._load_project_prompt` reads them, and `_compose_system_prompt` takes a
+  `base_prompt` instead of `system_file`.
+- **Choice references (the first dry run, 2026-10-26).** All four labs ended `choice_failed`
+  ($12.01): the model copied anchors as the candidates block shows them (`"<section>: <item>"`)
+  and sources as `"<id> — <title> (shows: …)"`, which `_kept_anchor` and `_kept_source` did not
+  read, so every reference failed. Both now accept those forms (a section prefix matches only
+  that section), pinned by a test built from `_candidates_text`'s own output.
+
 - **Posting text.** `assemble_posting` also removes `<`, `>` and `@` from third-party source
   titles and ids and leaves out a title that still carries a link or a bare domain (PubMed,
   ClinicalTrials.gov and USPTO titles reached Slack unchecked; `escape_for_slack` keeps
