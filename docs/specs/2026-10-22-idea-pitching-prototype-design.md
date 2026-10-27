@@ -438,7 +438,9 @@ complete when every field is filled.
   the opening plan, one line per field; up to five sources by identifier and title (never by author names); and a
   closing line asking the lab to reply with its own post. The whole must fit one Slack message as Slack receives
   it (after formatting and escaping, which can lengthen it; §3), and stays under 3,500 characters; if it would
-  not fit, sources are dropped from the end first, then titles shortened.
+  not fit, sources are dropped from the end first, then titles shortened. *Owner, 2026-10-27, after the choice
+  re-check failed two of four labs only on this limit: a posting may take two Slack messages (at most 7,000
+  characters), the second continuing in the first one's Slack thread; the same trimming applies past that.*
 - **How.** As BlackbirdBot, in `#general`, through `_post_message(..., phase="hub_project")`, from the engine's
   once-a-minute check, only while BlackbirdBot is on the roster. A claim is written before posting and resolved
   on resume, so a crash between the post and its record cannot post the project twice. A post that fails clears

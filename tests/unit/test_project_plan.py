@@ -6,10 +6,12 @@ from __future__ import annotations
 import pytest
 
 from src.agent.persona_sections import section_items
+from src.agent.slack_client import split_for_wire
 from src.models.hub_project import STATUS_NOT_AGREED, STATUS_READY
 from src.services.project_plan import (
     POSTING_HEADER,
     POSTING_MAX_CHARS,
+    POSTING_MAX_MESSAGES,
     REPLY_HEADER,
     TEMPLATE_FIELDS,
     NameEntry,
@@ -18,6 +20,7 @@ from src.services.project_plan import (
     display_id,
     field_filled,
     fits_one_message,
+    fits_posting,
     foreign_names,
     has_link,
     has_method_or_model_anchor,
@@ -25,6 +28,7 @@ from src.services.project_plan import (
     missing_fields,
     normalize_item,
     position_marker,
+    posting_head,
     project_outcome,
     resolve_source,
     source_key,
@@ -203,11 +207,27 @@ def test_assemble_posting_layout_and_limit():
     assert sum(line.startswith("• PMID ") for line in many.split("\n")) <= 5
 
     long_titles = _posting([_source(i, "T" * 2500) for i in range(5)])
-    assert fits_one_message(long_titles)
+    assert fits_posting(long_titles)
     assert len(long_titles) <= POSTING_MAX_CHARS
 
     with pytest.raises(ValueError, match="posting too long"):
-        _posting([_source(1)], summary="x" * 4000)
+        _posting([_source(1)], summary="x" * 7500)
+
+
+def test_a_posting_may_take_two_slack_messages():
+    """Owner, 2026-10-27: a posting longer than one Slack message posts as two (the second
+    in the first one's Slack thread) rather than failing the choice."""
+    assert POSTING_MAX_MESSAGES == 2
+    text = _posting([_source(i) for i in range(5)], summary="x " * 2000)
+    assert not fits_one_message(text) and fits_posting(text)
+    chunks = split_for_wire(text)
+    assert len(chunks) == 2
+    assert sum(line.startswith("• PMID ") for line in text.split("\n")) == 5
+    assert posting_head(text) == chunks[0] and chunks[0].startswith(POSTING_HEADER.format(
+        surname="Gray"))
+    short = _posting([_source(1)])
+    assert posting_head(short) == short
+    assert not fits_posting("a " * 6000)
 
 
 def test_source_titles_cannot_carry_slack_tokens_or_links():

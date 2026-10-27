@@ -17,6 +17,7 @@ from src.agent.engine.constants import PROPOSAL_DRAIN_SETTLE_TICKS
 from src.agent.message_log import PHASE_HUB_PROJECT, PHASE_PROJECT_REPLY, LogEntry
 from src.agent.role_capabilities import hub_role_names, spoke_role_names
 from src.agent.simulation import SimulationEngine
+from src.agent.slack_client import split_for_wire
 from src.agent.state import ThreadState
 from src.config import get_settings
 from src.models import AgentMessage, ThreadDecision
@@ -38,7 +39,7 @@ from src.models.hub_project import (
     HubProject,
     HubProjectClock,
 )
-from src.services.project_plan import REPLY_HEADER, TEMPLATE_FIELDS
+from src.services.project_plan import REPLY_HEADER, TEMPLATE_FIELDS, posting_head
 from tests.fakes import FakeSlackClient
 from tests.integration.test_hub_assessment_capture_gate import _delete_run, _new_run
 
@@ -785,6 +786,41 @@ async def test_pending_claim_resolves_on_resume(engine, monkeypatch, profiles):
 
         project = await _project(factory, project_id)
         assert (project.status, project.reply_ts) == (STATUS_REFINING, "1700000500.100000")
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_two_message_postings_claim_links_its_root_on_resume(engine, monkeypatch, profiles):
+    """A posting Slack carries as two messages is logged as two rows, the root holding only
+    its first message's text (``posting_head``). Its claim still links to that root on
+    resume, so the project is not posted a second time (owner, 2026-10-27)."""
+    sim, factory, run_id = await _build(engine, monkeypatch, profiles)
+    try:
+        text = POSTING.format(surname="Gray") + "\n" + "A long plan line. " * 300
+        chunks = split_for_wire(text)
+        assert len(chunks) == 2 and posting_head(text) == chunks[0] != text
+        project_id = await _seed(
+            factory, run_id, status=STATUS_READY_TO_POST, posting_text=text,
+            posting_claimed_at=datetime.now(UTC) - timedelta(minutes=1),
+        )
+        root_ts = "1700000600.100000"
+        async with factory() as db:
+            for ts, thread_ts, content in ((root_ts, None, chunks[0]),
+                                           ("1700000600.200000", root_ts, chunks[1])):
+                db.add(AgentMessage(
+                    simulation_run_id=run_id, agent_id=HUB, channel_id="local:general",
+                    channel_name="general", message_ts=ts, thread_ts=thread_ts,
+                    phase=PHASE_HUB_PROJECT, content=content, posted_at=float(ts),
+                ))
+            await db.commit()
+
+        resumed, _, _ = await _build(engine, monkeypatch, profiles, run_id=run_id)
+
+        project = await _project(factory, project_id)
+        assert (project.status, project.posting_ts) == (STATUS_POSTED, root_ts)
+        await _tick(resumed)
+        assert resumed.slack_clients[HUB].posted == []
     finally:
         await _delete_run(factory, run_id)
 

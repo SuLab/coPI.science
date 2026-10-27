@@ -28,6 +28,12 @@ from the text below, all now in the tree:
   and sources as `"<id> — <title> (shows: …)"`, which `_kept_anchor` and `_kept_source` did not
   read, so every reference failed. Both now accept those forms (a section prefix matches only
   that section), pinned by a test built from `_candidates_text`'s own output.
+- **Two-message postings (owner, 2026-10-27, option c).** The choice-only re-check on the
+  stored research ($1.25) passed one lab; two failed only because the posting did not fit one
+  Slack message. A posting may now take `POSTING_MAX_MESSAGES` = 2 (`fits_posting`,
+  `POSTING_MAX_CHARS` 7,000); `AgentSlackClient` posts the second in the first one's thread,
+  and `_resolve_logged_claim` also matches the root row's `posting_head`. The 300-character
+  field and 600-character summary limits are unchanged; the lab's reply still fits one message.
 
 - **Posting text.** `assemble_posting` also removes `<`, `>` and `@` from third-party source
   titles and ids and leaves out a title that still carries a link or a bare domain (PubMed,

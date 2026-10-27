@@ -56,6 +56,7 @@ from src.services.project_plan import (
     REPLY_HEADER,
     fits_one_message,
     position_marker,
+    posting_head,
     project_outcome,
     tool_marks,
 )
@@ -264,20 +265,23 @@ class Projects:
         """Link one claimed post to its logged root row, or clear the claim when there is none.
 
         A posting is the poster's first ``hub_project`` root at or after the claim whose text is
-        the stored ``posting_text`` (a posting always fits one message, and ``_post_message`` logs
-        the text it was given; the header alone names only a surname, which two labs can share).
-        A reply is the lab's first ``project_reply`` root at or after the claim. Continuation
-        chunks hang off their root, so ``thread_ts IS NULL`` picks it."""
+        the stored ``posting_text`` or, for a posting Slack carries as two messages, its first
+        message (``posting_head``): ``_post_message`` logs one row per Slack message, each with
+        its own text, and with Slack off one row with the whole text. The header alone names
+        only a surname, which two labs can share. A reply is the lab's first ``project_reply``
+        root at or after the claim. Continuation chunks hang off their root, so
+        ``thread_ts IS NULL`` picks it."""
         stmt = select(AgentMessage.message_ts).where(
             AgentMessage.simulation_run_id == self.simulation_run_id,
             AgentMessage.thread_ts.is_(None),
         )
         if kind == "posting":
             poster = self._project_poster()
+            text = row.posting_text or ""
             stmt = stmt.where(
                 AgentMessage.phase == PHASE_HUB_PROJECT,
                 AgentMessage.created_at >= row.posting_claimed_at,
-                AgentMessage.content == (row.posting_text or ""),
+                AgentMessage.content.in_(sorted({text, posting_head(text)})),
             )
             if poster is not None:
                 stmt = stmt.where(AgentMessage.agent_id == poster.agent_id)

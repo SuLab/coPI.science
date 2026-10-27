@@ -53,7 +53,11 @@ PLACEHOLDERS = frozenset(
     {"to settle with the lab", "tbd", "to be determined", "unknown", "n/a", "none", "-", "?"}
 )
 
-POSTING_MAX_CHARS = 3500
+#: A posting may take this many Slack messages (owner, 2026-10-27: a long project posts as
+#: two rather than failing); the second continues in the first one's Slack thread.
+POSTING_MAX_MESSAGES = 2
+#: 3,500 characters per message, as when a posting had to fit one.
+POSTING_MAX_CHARS = 7000
 SUMMARY_MAX_CHARS = 600
 FIELD_MAX_CHARS = 300
 TITLE_MAX_CHARS = 120
@@ -209,6 +213,20 @@ def fits_one_message(text: str) -> bool:
     return len(split_for_wire(text)) == 1
 
 
+def fits_posting(text: str) -> bool:
+    """At most ``POSTING_MAX_MESSAGES`` Slack messages, counted as ``fits_one_message``
+    counts one. ``AgentSlackClient.post_message`` posts the rest of a longer root post in
+    the first message's Slack thread, so a posting stays one top-level post."""
+    return len(split_for_wire(text)) <= POSTING_MAX_MESSAGES
+
+
+def posting_head(text: str) -> str:
+    """The first Slack message of a posting: what ``_post_message`` logs as its root row
+    when the posting takes two (each message's row keeps its own source text)."""
+    chunks = split_for_wire(text)
+    return chunks[0] if chunks else text
+
+
 def field_filled(value: object) -> bool:
     """A list is filled when any item is filled; a string when ``normalize_item(value)`` is
     non-empty and not in ``PLACEHOLDERS``; anything else is unfilled."""
@@ -310,11 +328,11 @@ def assemble_posting(
     ``"Opening plan:"`` then one ``"• <label>: <value>"`` line per template field (a list value
     joined by ``"; "``); ``"Sources:"`` then one ``"• " + display_id(source["key"]) + " — " +
     source["title"]`` per source; ``POSTING_CLOSING``. At most ``POSTING_MAX_SOURCES`` sources
-    are listed. While the text is longer than ``POSTING_MAX_CHARS`` or not
-    ``fits_one_message``, the last source is dropped (at least one is kept); then each title is
-    shortened to 80 characters ending ``…``; if it still does not fit, raises
-    ``ValueError("posting too long")``. With no sources the ``"Sources:"`` line is left
-    out.
+    are listed. While the text is longer than ``POSTING_MAX_CHARS`` or not ``fits_posting``
+    (at most ``POSTING_MAX_MESSAGES`` Slack messages), the last source is dropped (at least
+    one is kept); then each title is shortened to 80 characters ending ``…``; if it still
+    does not fit, raises ``ValueError("posting too long")``. With no sources the
+    ``"Sources:"`` line is left out.
 
     Source titles and ids come from PubMed, ClinicalTrials.gov and USPTO, not from the model,
     and no other check reads them: ``_plain`` removes ``<``, ``>`` and ``@`` from both, so no
@@ -338,7 +356,7 @@ def assemble_posting(
         return "\n".join(lines)
 
     def fits(text: str) -> bool:
-        return len(text) <= POSTING_MAX_CHARS and fits_one_message(text)
+        return len(text) <= POSTING_MAX_CHARS and fits_posting(text)
 
     def checked(text: str) -> str:
         if has_link(text) or "@" in text:

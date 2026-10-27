@@ -87,6 +87,7 @@ from src.services.llm_pricing import PRICES, cost_for_tokens
 from src.services.project_plan import (
     ANCHOR_SECTIONS,
     FIELD_MAX_CHARS,
+    POSTING_MAX_MESSAGES,
     SUMMARY_MAX_CHARS,
     TEMPLATE_FIELDS,
     TITLE_MAX_CHARS,
@@ -794,7 +795,8 @@ def check_choice(
             posting_for(stored, lab)
         except ValueError as exc:
             failures.append(
-                "the posting is too long for one Slack message" if "too long" in str(exc)
+                f"the posting is too long for {POSTING_MAX_MESSAGES} Slack messages; shorten "
+                "the summary or the plan" if "too long" in str(exc)
                 else "the posting would carry a link or an @"
             )
     return failures

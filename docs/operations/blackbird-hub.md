@@ -737,7 +737,10 @@ refines with it in a Slack thread. Staff and reviewers read and review the resul
 - **What the engine posts, and when.** From its once-a-minute projects tick the engine requests
   due projects and posts each `ready_to_post` one as BlackbirdBot in `#general` (phase
   `hub_project`, the stored text, no model call), only while BlackbirdBot is on the roster; a
-  claim is written first, so a crash cannot post twice. The lab's reply is offered inside the
+  claim is written first, so a crash cannot post twice. A posting may take two Slack messages
+  (owner, 2026-10-27; `POSTING_MAX_MESSAGES`, at most 7,000 characters): the second continues
+  in the first one's Slack thread, both rows are hidden from agents, and a claim resolves
+  against the root row's text (`posting_head`). The lab's reply must still fit one message. The lab's reply is offered inside the
   lab's own Phase-5 turn, before its daily-cap check: one call
   (`prompts/projects/lab-posting-reply.md`), posted with the header `:test_tube: *Blackbird project:*
   <title>` as phase `project_reply`. It does not count toward the lab's daily cap or

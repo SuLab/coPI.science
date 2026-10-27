@@ -385,7 +385,23 @@ def test_check_choice_fails_a_posting_that_cannot_fit(monkeypatch):
         raise ValueError("posting too long")
 
     monkeypatch.setattr(pr, "assemble_posting", too_long)
-    assert _check(_choice()) == ["the posting is too long for one Slack message"]
+    assert _check(_choice()) == [
+        "the posting is too long for 2 Slack messages; shorten the summary or the plan"
+    ]
+
+
+def test_check_choice_passes_a_posting_longer_than_one_slack_message():
+    """The re-check of 2026-10-27 failed two labs only on "too long for one Slack message";
+    a posting may now take two (owner's choice)."""
+    long_summary = "Block MRGPRX4 to relieve cholestatic itch. " * 13
+    plan = _plan(
+        **{key: "x " * 140 for key, _label in pr.TEMPLATE_FIELDS if key != "lab_tools"},
+        lab_tools=["y " * 140] * 4,
+    )
+    choice = _choice(summary=long_summary[:600], plan=plan)
+    stored = pr.resolve_choice(choice, SURVIVORS)
+    assert len(pr.posting_for(stored, _lab())) > 4000
+    assert _check(choice) == []
 
 
 def test_check_choice_names_a_link_or_at_in_the_posting(monkeypatch):
