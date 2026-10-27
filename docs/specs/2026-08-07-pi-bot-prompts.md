@@ -1,6 +1,6 @@
 # PI / lab bot — complete prompt set
 
-*Companion document: [BlackbirdBot (hub) — complete prompt set](2026-08-07-hub-bot-prompts.md).*
+*Companion documents: [BlackbirdBot (hub) — complete prompt set](2026-08-07-hub-bot-prompts.md) and [BlackbirdBot projects — complete prompt set](2026-10-27-projects-prompts.md).*
 
 This document reproduces the prompts that drive a **PI / lab bot**'s exchange with the hub. There is one such bot for each participating lab; it represents that lab in a Slack workspace run by **Blackbird Laboratories**, and BlackbirdBot — Blackbird's scouting hub — is the only party it ever talks to.
 

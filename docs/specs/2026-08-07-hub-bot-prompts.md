@@ -1,6 +1,6 @@
 # BlackbirdBot (hub) — complete prompt set
 
-*Companion document: [PI / lab bot — complete prompt set](2026-08-07-pi-bot-prompts.md).*
+*Companion documents: [PI / lab bot — complete prompt set](2026-08-07-pi-bot-prompts.md) and [BlackbirdBot projects — complete prompt set](2026-10-27-projects-prompts.md).*
 
 This document reproduces the prompts that drive an exchange between **BlackbirdBot** — Blackbird's scouting hub — and a lab. There is a single hub bot. It represents **Blackbird Laboratories** — not a research lab — and its job is to interview one PI at a time about their recent work, screen each idea against Blackbird's priorities, and write up the promising ones as opportunity assessments. It never brokers introductions between labs.
 

@@ -51,7 +51,8 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
 - Never run `pytest --snapshot-update` to clear a mismatch in
   `tests/characterization/__snapshots__/test_agent_turn_gm.ambr`: it pins the `pi_lab`
   guidance strings, and a change there takes an operator-directed, audited regeneration.
-- After editing anything under `prompts/` or the `_PI_LAB`/`_SCOUT_HUB` guidance, run
+- After editing anything under `prompts/`, the `_PI_LAB`/`_SCOUT_HUB` guidance, or the
+  projects' code strings (`src/agent/project_guidance.py`, `RESEARCH_ANGLES`), run
   `.venv-test/bin/python scripts/sync_prompt_set_docs.py` (`--check` reports drift).
   A prompt-set edit also bumps `version` in `prompts/roles/*/role.toml`. `prompts/projects/`
   (BlackbirdBot projects) is in no role's prompt set: no bump, and the interview sets stay frozen.

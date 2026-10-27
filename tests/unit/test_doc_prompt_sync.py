@@ -1,8 +1,9 @@
 """Docs-vs-prompts sync + retired-model phrase guard.
 
-The two prompt-set docs reproduce every prompt file verbatim inside
-*Source:*-labeled four-backtick blocks, and their §4 sections reproduce the
-thread_guidance strings. This test is the reviewed, permanent form of the
+The three prompt-set docs reproduce every prompt file verbatim inside
+*Source:*-labeled four-backtick blocks; the interview docs' §4 sections reproduce the
+thread_guidance strings, and the projects doc's ````text blocks the projects' code
+strings. This test is the reviewed, permanent form of the
 branch-1 verify script (see docs/plans/2026-08-12-pr34-pitch-only-
 reconciliation-design.md §12.5).
 """
@@ -11,13 +12,17 @@ from pathlib import Path
 
 import pytest
 
+from src.agent.project_guidance import project_turn
 from src.agent.thread_guidance import phase4_guidance
+from src.services.project_research import FINAL_ANSWER_TEXT, RESEARCH_ANGLES, RESEARCH_DOMAINS
 
 ROOT = Path(__file__).resolve().parents[2]
 DOCS = [
     ROOT / "docs/specs/2026-08-07-pi-bot-prompts.md",
     ROOT / "docs/specs/2026-08-07-hub-bot-prompts.md",
+    ROOT / "docs/specs/2026-10-27-projects-prompts.md",
 ]
+PROJECTS_DOC = DOCS[2]
 _BLOCK_RE = re.compile(
     r"\*Source: `([^`]+)`[^*]*\*.*?\n````(?:markdown|text)?\n(.*?)\n````",
     re.DOTALL,
@@ -61,6 +66,35 @@ def test_doc_section4_matches_thread_guidance(role, doc):
         for name, actual in (("guidance", guidance), ("instructions", instructions)):
             assert _NORM(actual) == _NORM(blocks[i]), f"{role} {phase}/{name} drifted"
             i += 1
+
+
+def _project_code_blocks() -> list[str]:
+    """The projects doc's ````text blocks in document order (mirrors
+    scripts/sync_prompt_set_docs.py's project_code_blocks)."""
+    blocks = [RESEARCH_ANGLES[domain] for domain in RESEARCH_DOMAINS] + [FINAL_ANSWER_TEXT]
+    for ordinal in (2, 6, 12):
+        turn = project_turn("scout_hub", ordinal, lab_agrees=False)
+        blocks += [turn.guidance, turn.instructions]
+    base = project_turn("scout_hub", 2, lab_agrees=False).guidance + "\n\n"
+    agreeing = project_turn("scout_hub", 2, lab_agrees=True).guidance
+    assert agreeing.startswith(base)
+    blocks.append(agreeing[len(base):])
+    for ordinal in (2, 6, 10):
+        turn = project_turn("pi_lab", ordinal, lab_agrees=False)
+        blocks += [turn.guidance, turn.instructions]
+    return blocks
+
+
+def test_projects_doc_code_blocks_match_the_code():
+    blocks = re.findall(r"````text\n(.*?)\n````", PROJECTS_DOC.read_text(), re.DOTALL)
+    assert blocks == _project_code_blocks()
+
+
+def test_projects_doc_embeds_every_project_prompt():
+    """Every file in prompts/projects/ is reproduced, so the doc is the whole set."""
+    embedded = {src for doc, src, _ in _doc_blocks() if doc == PROJECTS_DOC.name}
+    on_disk = {f"prompts/projects/{p.name}" for p in (ROOT / "prompts/projects").glob("*.md")}
+    assert on_disk and on_disk <= embedded, sorted(on_disk - embedded)
 
 
 # Retired-model phrases that must never reappear in any live prompt file.

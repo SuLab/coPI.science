@@ -814,7 +814,9 @@ refines with it in a Slack thread. Staff and reviewers read and review the resul
   prints the run's measures (outcomes and reasons, research and refinement cost, gaps,
   anchors, sources, review figures); it refuses an `--out` inside the
   repository.
-- **Prompts, and the freeze.** The interview prompt sets are frozen (owner, 2026-10-26):
+- **Prompts, and the freeze.** The whole projects prompt set, files and code strings, is one
+  review document, `docs/specs/2026-10-27-projects-prompts.md`, kept in step by
+  `scripts/sync_prompt_set_docs.py` like the interview sets' two. The interview prompt sets are frozen (owner, 2026-10-26):
   scout_hub stays `1.12.0` and pi_lab `1.2.0`, with their stamps, `role.toml` files and every
   golden master unchanged. The projects prototype has its own documents in `prompts/projects/`
   (`src/agent/project_prompts.py`), in no role's prompt set: the worker's `research.md` and
