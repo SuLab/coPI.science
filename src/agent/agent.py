@@ -5,7 +5,7 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
-from src.agent import prompt_snapshot
+from src.agent import project_prompts, prompt_snapshot
 from src.agent.dois import extract_dois as _extract_dois  # noqa: F401  (re-export: tests/unit/test_leaf_modules.py, tests/characterization/test_agent_turn_gm.py)
 from src.agent.dois import find_citations
 from src.agent.post_types import render_menu
@@ -364,6 +364,18 @@ class Agent:
                 return text if text is not None else default
         return self._load_file(resolve_prompt_path(self.role, filename), default)
 
+    def _load_project_prompt(self, filename: str, default: str) -> str:
+        """Load one of BlackbirdBot projects' own prompts (``prompts/projects/``,
+        ``src/agent/project_prompts.py``), which belong to no role's prompt set. Inside the
+        engine the text comes from the start-time snapshot, as in ``_load_prompt``; a
+        missing file falls back to ``default``."""
+        snapshot = prompt_snapshot.active()
+        if snapshot is not None:
+            known, text = snapshot.project_prompt_text(filename)
+            if known:
+                return text if text is not None else default
+        return self._load_file(project_prompts.prompt_path(filename), default)
+
     def _render_identity(self) -> str:
         """Render the '## Your Identity' block for this agent."""
         template = self._load_prompt("identity.md", _DEFAULT_IDENTITY)
@@ -382,9 +394,9 @@ class Agent:
         trailing_newline: bool,
         visibility: str = VISIBILITY_PUBLIC,
         channel_id: str | None = None,
-        system_file: str = "agent-system.md",
+        base_prompt: str | None = None,
     ) -> str:
-        """Assemble a system prompt: the role's ``system_file`` (rubric rendered into
+        """Assemble a system prompt: the role's ``agent-system.md`` (rubric rendered into
         a ``{rubric}`` placeholder), the identity block, for a non-hub role the lab-profile
         section (``render_lab_profile_section``: the persona fenced as ``<lab_profile>``
         data after a one-line notice, Q17) and, when the loaded records are empty,
@@ -392,9 +404,10 @@ class Agent:
         ``trailing_newline`` adds the final ``\\n`` ``build_system_prompt`` has always
         ended with (it preceded the lab directory, removed by spec 2026-10-05 D29).
         A hub role has neither section (D26): Blackbird's brief for labs is served by
-        ``retrieve_profile``. ``system_file`` is ``agent-system.md`` everywhere but a hub's
-        project thread, which passes ``agent-system-project.md`` (no ``{rubric}``)."""
-        base_prompt = self._load_prompt(system_file, _default_system_prompt())
+        ``retrieve_profile``. ``base_prompt`` replaces ``agent-system.md`` only in a hub's
+        project thread, which passes ``prompts/projects/hub-system.md`` (no ``{rubric}``)."""
+        if base_prompt is None:
+            base_prompt = self._load_prompt("agent-system.md", _default_system_prompt())
         # The scouting hub's system prompt carries the screening rubric as a
         # `{rubric}` placeholder, rendered from prompts/rubric/
         # blackbird-rubric.toml so the prompt the hub reads and the score
@@ -562,9 +575,10 @@ class Agent:
     ) -> tuple[str, list[dict]]:
         """System + messages for a reply in a project thread (spec §5.8).
 
-        A hub's system prompt is its ``agent-system-project.md`` (no rubric) with the
+        A hub's system prompt is ``prompts/projects/hub-system.md`` (no rubric) with the
         identity and working memory; a lab's is its ordinary thread-reply system prompt.
-        The template is the role's ``phase4-project-reply.md``; ``project`` is
+        The template is ``prompts/projects/hub-thread-reply.md`` for a hub and
+        ``lab-thread-reply.md`` for a lab; ``project`` is
         ``Projects._project_thread_context``'s dict, rendered as a ``project_brief``
         block. ``turn`` is the turn's ``project_turn`` band, computed by the caller for
         the ordinal ``thread.message_count + 1``. ``authorship_feedback`` is appended as
@@ -573,14 +587,18 @@ class Agent:
         if self._is_hub():
             system_prompt = self._compose_system_prompt(
                 trailing_newline=False, visibility=visibility, channel_id=channel_id,
-                system_file="agent-system-project.md",
+                base_prompt=self._load_project_prompt(
+                    project_prompts.HUB_SYSTEM_FILE, _default_system_prompt()
+                ),
             )
+            template_file = project_prompts.HUB_THREAD_REPLY_FILE
         else:
             system_prompt = self.build_thread_reply_system_prompt(
                 visibility=visibility, channel_id=channel_id,
             )
-        template = self._load_prompt(
-            "phase4-project-reply.md", "Compose a reply in this project thread."
+            template_file = project_prompts.LAB_THREAD_REPLY_FILE
+        template = self._load_project_prompt(
+            template_file, "Compose a reply in this project thread."
         )
         history_text = "\n".join(self._history_line(m) for m in thread_history)
         # str.replace, NOT str.format, as in build_phase4_prompt.
@@ -715,11 +733,14 @@ class Agent:
         authorship_feedback: str | None,
     ) -> tuple[str, list[dict]]:
         """System + messages for a lab's top-level reply to BlackbirdBot's project (the
-        Phase-5 offer, spec §5.7). ``posting_text`` is the stored posting, fenced as
-        ``project_post`` data; ``authorship_feedback`` is the claim check's notice for
-        the last blocked reply, appended as in ``build_phase5_prompt``."""
+        Phase-5 offer, spec §5.7), from ``prompts/projects/lab-posting-reply.md``.
+        ``posting_text`` is the stored posting, fenced as ``project_post`` data;
+        ``authorship_feedback`` is the claim check's notice for the last blocked reply,
+        appended as in ``build_phase5_prompt``."""
         system_prompt = self.build_system_prompt()
-        template = self._load_prompt("phase5-project-reply.md", "Reply to Blackbird's project.")
+        template = self._load_project_prompt(
+            project_prompts.LAB_POSTING_REPLY_FILE, "Reply to Blackbird's project."
+        )
         # The title first, so a "{title}" inside the post is never substituted.
         prompt_text = template.replace("{title}", title)
         prompt_text = prompt_text.replace("{project_post}", delimit(posting_text, "project_post"))

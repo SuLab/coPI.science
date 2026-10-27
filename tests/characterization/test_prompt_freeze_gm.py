@@ -75,16 +75,6 @@ seeds its stored profile with `evidence_pub_count=0`, a known zero. Under PIPE-1
 count is protected, which would keep the stored text and so change what this entry pins; with a
 known zero the fake zero-evidence synthesis is applied as before, and the snapshot is unchanged.
 PIPE-15's NULL case is pinned by `test_a_null_stored_count_is_protected`.
-
-A further owner-approved exception (§6 of
-docs/specs/2026-10-22-idea-pitching-prototype-design.md, the projects prototype: scout_hub
-1.13.0 and pi_lab 1.3.0, each adding two project-thread prompt files). It covers
-`test_run_start_marker_gm` and `test_review_bot_request_over_a_superseded_verdict_gm`,
-regenerated once. The `.ambr` diff must be exactly the two prompt-set version and hash stamps
-and, in the embedded `role.toml` texts, their sha256 headers, the version lines and the new
-comment lines (the two file lists and the two history lines), checked line by line. No
-existing prompt file changed, so no other entry moves. It licenses no other regeneration, and
-`test_agent_turn_gm.ambr` is not touched by it.
 """
 import json
 import uuid

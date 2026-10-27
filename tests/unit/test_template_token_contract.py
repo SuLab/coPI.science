@@ -48,11 +48,11 @@ BUILDER_TEMPLATES: dict[str, list[str]] = {
         "prompts/phase5-new-post.md",
     ],
     "build_project_thread_prompt": [
-        "prompts/phase4-project-reply.md",
-        "prompts/roles/scout_hub/phase4-project-reply.md",
+        "prompts/projects/lab-thread-reply.md",
+        "prompts/projects/hub-thread-reply.md",
     ],
     "build_project_reply_post_prompt": [
-        "prompts/phase5-project-reply.md",
+        "prompts/projects/lab-posting-reply.md",
     ],
 }
 

@@ -35,15 +35,9 @@ def test_load_role_results_equal_todays():
 
 def test_prompt_files_moved_verbatim():
     assert roles.ROLE_PROMPT_FILES == {
-        "pi_lab": (
-            "agent-system.md", "identity.md", "phase4-thread-reply.md", "phase5-new-post.md",
-            "phase5-project-reply.md", "phase4-project-reply.md",
-        ),
+        "pi_lab": ("agent-system.md", "identity.md", "phase4-thread-reply.md", "phase5-new-post.md"),
         # lab-brief.md: stamped and snapshotted, never composed (spec 2026-10-05 D26).
-        "scout_hub": (
-            "agent-system.md", "identity.md", "phase4-thread-reply.md", "lab-brief.md",
-            "agent-system-project.md", "phase4-project-reply.md",
-        ),
+        "scout_hub": ("agent-system.md", "identity.md", "phase4-thread-reply.md", "lab-brief.md"),
     }
 
 

@@ -739,7 +739,7 @@ refines with it in a Slack thread. Staff and reviewers read and review the resul
   `hub_project`, the stored text, no model call), only while BlackbirdBot is on the roster; a
   claim is written first, so a crash cannot post twice. The lab's reply is offered inside the
   lab's own Phase-5 turn, before its daily-cap check: one call
-  (`prompts/phase5-project-reply.md`), posted with the header `:test_tube: *Blackbird project:*
+  (`prompts/projects/lab-posting-reply.md`), posted with the header `:test_tube: *Blackbird project:*
   <title>` as phase `project_reply`. It does not count toward the lab's daily cap or
   `--max-proposals`. A thread rooted at a `project_reply` post is a project thread: both bots
   get project prompts and guidance (`src/agent/project_guidance.py`), BlackbirdBot also gets
@@ -788,12 +788,17 @@ refines with it in a Slack thread. Staff and reviewers read and review the resul
   prints the run's measures (outcomes and reasons, research and refinement cost, missed
   intervals, gaps, anchors, sources, review figures); it refuses an `--out` inside the
   repository.
-- **Freeze exception.** scout_hub `1.13.0` adds `agent-system-project.md` and
-  `phase4-project-reply.md` and a capability flag for the posting; pi_lab `1.3.0` adds
-  `phase5-project-reply.md` and `phase4-project-reply.md`. No existing prompt file, rubric,
-  `thread_guidance.py` string, `TOOL_DEFINITIONS` entry or `role.toml` `tools`/`post_types`
-  changed. Two golden-master entries were regenerated under review
-  (`test_run_start_marker_gm`, `test_review_bot_request_over_a_superseded_verdict_gm`);
-  `test_agent_turn_gm.ambr` was not.
-- **The next run starts FRESH:** both prompt sets were bumped. Project threads run on the bots'
-  existing rate allowances, which were not raised.
+- **Prompts, and the freeze.** The interview prompt sets are frozen (owner, 2026-10-26):
+  scout_hub stays `1.12.0` and pi_lab `1.2.0`, with their stamps, `role.toml` files and every
+  golden master unchanged. The projects prototype has its own documents in `prompts/projects/`
+  (`src/agent/project_prompts.py`), in no role's prompt set: the worker's `research.md` and
+  `choose.md`, and the engine's `hub-system.md` (BlackbirdBot's system prompt in a project
+  thread), `hub-thread-reply.md`, `lab-posting-reply.md` and `lab-thread-reply.md`. A lab's
+  project turns still use its unchanged interview system prompt, and BlackbirdBot's its
+  unchanged identity block. The engine loads the four with the rest of the snapshot at start,
+  logs their hash (`Project prompts: prompts/projects/ (hash …)`), and shows a mid-run edit as
+  `projects` drift on `/admin/simulation`. Editing them bumps no `role.toml` version; per-turn
+  project guidance and the `<project_json>` instructions are code strings in
+  `src/agent/project_guidance.py`. The capability flag for the posting is in
+  `role_capabilities.py`, not `role.toml`.
+- Project threads run on the bots' existing rate allowances, which were not raised.

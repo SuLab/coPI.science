@@ -46,7 +46,8 @@ class RoleCapabilities:
     #: ``roles.ROLE_PROMPT_FILES``; ``prompt_set_stamp`` hashes them in this order,
     #: ``PromptSnapshot`` loads them). The composer reads its files by name, so a file
     #: listed here is not composed unless the composer asks for it (``LAB_BRIEF_FILE``
-    #: never is).
+    #: never is). BlackbirdBot projects' prompts are never listed: they are their own set
+    #: (``src/agent/project_prompts.py``), so these sets stay frozen.
     prompt_files: tuple[str, ...]
 
 
@@ -63,12 +64,10 @@ ROLE_CAPABILITIES: dict[str, RoleCapabilities] = {
         prompt_files=(
             "agent-system.md", "identity.md",
             "phase4-thread-reply.md", "phase5-new-post.md",
-            "phase5-project-reply.md", "phase4-project-reply.md",
         ),
     ),
     # Reply-only: scout_hub omits phase5-new-post.md, so a pi-side edit to that
     # file never moves the hub's prompt-set hash, and holds the brief it serves to labs.
-    # Its project files follow the brief, so the earlier files keep their stamp order.
     "scout_hub": RoleCapabilities(
         posts_new_threads=False,
         auto_activates_on_lab_posts=True,
@@ -80,7 +79,6 @@ ROLE_CAPABILITIES: dict[str, RoleCapabilities] = {
         posts_project_ideas=True,
         prompt_files=(
             "agent-system.md", "identity.md", "phase4-thread-reply.md", LAB_BRIEF_FILE,
-            "agent-system-project.md", "phase4-project-reply.md",
         ),
     ),
 }

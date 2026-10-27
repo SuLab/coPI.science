@@ -110,8 +110,8 @@ _PI_LAB_FILES_AT_PHASE_4 = {
 }
 
 
-def test_pi_lab_prompt_set_version_is_1_3_0():
-    assert prompt_set_stamp("pi_lab").version == "1.3.0"
+def test_pi_lab_prompt_set_version_is_1_2_0():
+    assert prompt_set_stamp("pi_lab").version == "1.2.0"
 
 
 def test_pi_lab_prompt_files_are_unchanged_by_phase_5():

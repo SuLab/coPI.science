@@ -44,7 +44,7 @@ def test_the_brief_discloses_no_rubric_weights_or_thresholds():
 
 
 def test_the_brief_is_in_the_hub_prompt_set_and_never_composed():
-    assert LAB_BRIEF_FILE in ROLE_CAPABILITIES["scout_hub"].prompt_files
+    assert ROLE_CAPABILITIES["scout_hub"].prompt_files[-1] == LAB_BRIEF_FILE
     hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
     first_line = _text().splitlines()[0]
     assert first_line not in hub.build_thread_reply_system_prompt()

@@ -31,6 +31,9 @@ stopping, restarting).
   not an interview: no assessment, drop, decline, panel note or headline, and ⏸️ never closes
   it. BlackbirdBot closes it with a `<project_json>` sidecar, stripped before posting, and the
   thread is recognised from the root's phase even with `HUB_PROJECTS_ENABLED` off.
+- The interview prompt sets are frozen (owner, 2026-10-26). Project prompts live only in
+  `prompts/projects/` (`src/agent/project_prompts.py`): never add one to a role's
+  `prompt_files`, a role directory or `prompts/` itself, and never bump a `role.toml` for one.
 - The engine's `#assessments-summary` headline (`src/services/assessment_headline.py`)
   does publish sidecar data: the band/score and the first `PITCH_DISPLAY_CHARS` (600)
   characters of `elevator_pitch`, which can carry unpublished disclosures. Do not widen

@@ -40,6 +40,20 @@ def test_a_persona_edit_does_not_change_the_next_consult_and_raises_drift(prompt
     assert f"persona:{domain}" in snap.disk_drift()["prompt_drift"]
 
 
+def test_a_project_prompt_edit_does_not_change_the_next_turn_and_raises_only_projects_drift(
+    prompt_tree,
+):
+    snap = ps.PromptSnapshot.load()
+    ps.install(snap)
+    lab = Agent("l", "LBot", "L")
+    before = lab._load_project_prompt("lab-thread-reply.md", "DEFAULT")
+    assert before != "DEFAULT"
+    (prompt_tree / "projects" / "lab-thread-reply.md").write_text("EDITED", encoding="utf-8")
+    assert lab._load_project_prompt("lab-thread-reply.md", "DEFAULT") == before
+    drift = snap.disk_drift()["prompt_drift"]
+    assert set(drift) == {"projects"}, "a project prompt is in no role's prompt set"
+
+
 def test_a_manifest_edit_cannot_change_tools_or_post_types(prompt_tree):
     snap = ps.PromptSnapshot.load()
     ps.install(snap)

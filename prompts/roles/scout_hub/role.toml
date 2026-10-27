@@ -1,15 +1,13 @@
 # Version of the scout_hub PROMPT SET (this manifest + agent-system.md,
-# identity.md, phase4-thread-reply.md, lab-brief.md, agent-system-project.md and
-# phase4-project-reply.md in this directory). The brief
+# identity.md, phase4-thread-reply.md and lab-brief.md in this directory). The brief
 # is stamped but served only to labs by retrieve_profile. Bump on ANY edit to
 # those files; the run-start announcement stamps every run with this version
 # plus a content hash (src/agent/roles.py::prompt_set_stamp), and a hash
 # change without a version bump is an unrecorded edit. Read by
 # prompt_set_stamp only — load_role ignores unknown keys.
-version = "1.13.0"
+version = "1.12.0"
 # 1.12.0: the hub judges the work, not the lab agent's conduct (Core Principle 8);
 # the eight specialist personas changed with it and are not stamped separately.
-# 1.13.0: project threads — agent-system-project.md and phase4-project-reply.md (projects prototype).
 
 label = "Scout Hub"
 tools = ["retrieve_profile", "retrieve_abstract", "retrieve_full_text", "search_prior_art", "consult_specialist"]

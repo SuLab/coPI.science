@@ -637,11 +637,18 @@ deploy note. Help follows `docs/operations/help-content.md`.
 - With `HUB_PROJECTS_ENABLED` still off, run the research dry run (§8) for the live labs and give the owner the
   results to read.
 - If the owner agrees, set `HUB_PROJECTS_ENABLED=true` in `.env` and recreate the agent only when no run is live. The
-  first run after the release, started from `/admin/simulation`, is FRESH, since both prompt sets are bumped (§6).
+  first run after the release, started from `/admin/simulation`, is FRESH, since both prompt sets are bumped (§6;
+  superseded 2026-10-26: neither set is bumped).
 
 ---
 
 ## 6. The freeze exception this prototype needs (for the owner's approval)
+
+> **Owner, 2026-10-26, after the first release (verbatim):** "those should be frozen and the new system should use
+> separate prompt documents". Items 1, 2 and 7 are withdrawn: the four project-thread prompts are their own documents
+> in `prompts/projects/` (`hub-system.md`, `hub-thread-reply.md`, `lab-posting-reply.md`, `lab-thread-reply.md`), in
+> no role's prompt set; scout_hub stays 1.12.0 and pi_lab 1.2.0, and no golden master moves. The capability flag
+> (item 1) stays, in `role_capabilities.py`. Items 3–6 stand.
 
 1. **scout_hub prompt set** → next minor version: two new files, `agent-system-project.md` and
    `phase4-project-reply.md`, and their entries in `role_capabilities.py`'s prompt-file tuple; the new capability

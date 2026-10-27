@@ -616,6 +616,8 @@ async def _run_simulation_locked(
     # change the next turn; the heartbeat reports it as drift instead.
     snapshot = PromptSnapshot.load()
     install_prompt_snapshot(snapshot)
+    # The project prompts are in no role's prompt set, so no run-start stamp names them.
+    logger.info("Project prompts: prompts/projects/ (hash %s)", snapshot.project_prompts_hash)
     if heartbeat is not None:
         heartbeat.set_drift_source(snapshot.disk_drift)
 

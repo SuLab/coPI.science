@@ -1,10 +1,13 @@
 """Project-thread and project-reply prompts (spec §5.7, §5.8): `build_project_thread_prompt`,
-`build_project_reply_post_prompt`, and `_compose_system_prompt`'s default kept byte-identical."""
+`build_project_reply_post_prompt`, read from `prompts/projects/`, and `_compose_system_prompt`'s
+default kept byte-identical."""
 
 import re
+import shutil
 
 import pytest
 
+from src.agent import project_prompts, roles
 from src.agent.agent import (
     NO_PUBLICATION_RECORDS_SECTION,
     Agent,
@@ -59,7 +62,7 @@ def _lab():
 
 
 def _expected_system(agent: Agent, *, trailing_newline: bool) -> str:
-    """`_compose_system_prompt` as it was before ``system_file`` existed."""
+    """`_compose_system_prompt` as it was before ``base_prompt`` existed."""
     base = agent._load_prompt("agent-system.md", _default_system_prompt())
     if "{rubric}" in base:
         base = base.replace("{rubric}", render_rubric_markdown())
@@ -79,8 +82,9 @@ def test_default_system_prompt_is_unchanged(make):
     assert agent.build_thread_reply_system_prompt() == _expected_system(
         agent, trailing_newline=False
     )
-    assert agent._compose_system_prompt(trailing_newline=True) == agent._compose_system_prompt(
-        trailing_newline=True, system_file="agent-system.md"
+    own = agent._load_prompt("agent-system.md", _default_system_prompt())
+    assert agent._compose_system_prompt(trailing_newline=True, base_prompt=own) == (
+        agent.build_system_prompt()
     )
 
 
@@ -188,3 +192,34 @@ def test_reply_post_prompt_appends_feedback():
         posting_text="x", title="t", authorship_feedback="NOTICE",
     )
     assert messages[0]["content"].endswith("\n\nNOTICE")
+
+
+@pytest.fixture
+def project_tree(tmp_path, monkeypatch):
+    """A copy of prompts/ with a marker appended to each project prompt; prompts/ is never
+    touched."""
+    shutil.copytree("prompts", tmp_path / "prompts")
+    monkeypatch.setattr(roles, "PROMPTS_DIR", tmp_path / "prompts")
+    monkeypatch.setattr(roles, "ROLES_DIR", tmp_path / "prompts" / "roles")
+    for name in project_prompts.ENGINE_PROMPT_FILES:
+        path = tmp_path / "prompts" / "projects" / name
+        path.write_text(path.read_text(encoding="utf-8") + f"\nMARKER-{name}", encoding="utf-8")
+    return tmp_path / "prompts"
+
+
+def test_each_builder_reads_its_own_projects_file(project_tree):
+    (hub_system, hub_messages), _turn = _project_prompt(_hub())
+    assert "MARKER-hub-system.md" in hub_system
+    assert "MARKER-hub-thread-reply.md" in hub_messages[0]["content"]
+    lab = _lab()
+    (lab_system, lab_messages), _turn = _project_prompt(lab)
+    assert lab_system == lab.build_thread_reply_system_prompt()
+    assert "MARKER-lab-thread-reply.md" in lab_messages[0]["content"]
+    _system, messages = lab.build_project_reply_post_prompt(
+        posting_text="x", title="t", authorship_feedback=None,
+    )
+    assert "MARKER-lab-posting-reply.md" in messages[0]["content"]
+    # No interview prompt reads a project file.
+    for agent in (_hub(), lab):
+        assert "MARKER-" not in agent.build_system_prompt()
+        assert "MARKER-" not in agent.build_thread_reply_system_prompt()

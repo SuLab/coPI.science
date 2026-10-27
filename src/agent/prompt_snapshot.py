@@ -1,14 +1,15 @@
 """What the engine loaded at start: the prompt set (including the hub's brief for
 labs that ``retrieve_profile`` serves, spec 2026-10-05 D26), the specialist
-personas, each role's manifest and ``load_role`` result, and the rubric (spec
-§8.6, B16). Lab persona files under ``profiles/public/`` are not part of it: the
-roster reloads them on mtime.
+personas, each role's manifest and ``load_role`` result, the rubric (spec
+§8.6, B16) and, apart from every role's set, BlackbirdBot projects' prompts
+(``src/agent/project_prompts.py``). Lab persona files under ``profiles/public/``
+are not part of it: the roster reloads them on mtime.
 
 Loaded once per engine start and installed process-wide; the prompt readers
-(``Agent._load_prompt``, the consult persona read, ``tools_for_role``, the
-tool gate, the phase-5 menu and the engine's ``deps.load_role``) read from it,
-so a mid-run edit of a role prompt, the brief, a specialist persona or
-``role.toml`` cannot change the next turn — it raises the drift flag instead (the heartbeat calls
+(``Agent._load_prompt``, ``Agent._load_project_prompt``, the consult persona read,
+``tools_for_role``, the tool gate, the phase-5 menu and the engine's ``deps.load_role``)
+read from it, so a mid-run edit of a role prompt, the brief, a project prompt, a specialist
+persona or ``role.toml`` cannot change the next turn — it raises the drift flag instead (the heartbeat calls
 ``disk_drift`` every 60 s). The rubric is NOT re-read: the snapshot holds the
 import-time ``load_rubric()`` object that scoring already uses, so prompts,
 stage bars, ``weighted_score``, bands and stamps keep sharing one rubric.
@@ -20,9 +21,10 @@ disk exactly as before.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
+from src.agent import project_prompts as _project_prompts
 from src.agent import roles as _roles
 from src.agent import specialists as _specialists
 from src.agent.role_capabilities import ROLE_CAPABILITIES
@@ -46,6 +48,11 @@ class PromptSnapshot:
     rubric: Any
     stamps: dict[str, PromptSetStamp]
     persona_hashes: dict[str, str | None]
+    #: filename -> text of ``project_prompts.ENGINE_PROMPT_FILES``; None when missing. In no
+    #: role's prompt set, so never in ``prompts`` or ``stamps``.
+    project_prompts: dict[str, str | None] = field(default_factory=dict)
+    #: ``project_prompts.content_hash()`` at load; None in a snapshot built without them.
+    project_prompts_hash: str | None = None
 
     @classmethod
     def load(cls) -> PromptSnapshot:
@@ -79,6 +86,10 @@ class PromptSnapshot:
         return cls(
             prompts=prompts, manifests=manifests, role_specs=specs, personas=personas,
             rubric=_rubric.load_rubric(), stamps=stamps, persona_hashes=persona_hashes,
+            project_prompts={
+                name: _project_prompts.read(name) for name in _project_prompts.ENGINE_PROMPT_FILES
+            },
+            project_prompts_hash=_project_prompts.content_hash(),
         )
 
     def prompt_text(self, role: str, filename: str) -> tuple[bool, str | None]:
@@ -86,6 +97,10 @@ class PromptSnapshot:
         load (the caller then reads the disk, as today)."""
         key = (role, filename)
         return (key in self.prompts, self.prompts.get(key))
+
+    def project_prompt_text(self, filename: str) -> tuple[bool, str | None]:
+        """``(known, text)`` for a project prompt, as ``prompt_text`` is for a role's."""
+        return (filename in self.project_prompts, self.project_prompts.get(filename))
 
     def persona(self, domain: str) -> tuple[bool, str | None]:
         return (domain in self.personas, self.personas.get(domain))
@@ -102,7 +117,7 @@ class PromptSnapshot:
     def disk_drift(self) -> dict[str, Any]:
         """What changed on disk since load: ``{"prompt_drift": {name: {"loaded",
         "on_disk"}}, "rubric": {"loaded", "on_disk"}}``. Names are role names,
-        ``persona:<domain>`` and ``rubric``."""
+        ``persona:<domain>``, ``projects`` (the project prompts) and ``rubric``."""
         drift: dict[str, dict[str, str | None]] = {}
         for role, loaded in self.stamps.items():
             now = _roles.prompt_set_stamp(role)
@@ -113,6 +128,10 @@ class PromptSnapshot:
             now = _hash12(path.read_bytes()) if path.is_file() else None
             if now != loaded:
                 drift[f"persona:{domain}"] = {"loaded": loaded, "on_disk": now}
+        if self.project_prompts_hash is not None:
+            now = _project_prompts.content_hash()
+            if now != self.project_prompts_hash:
+                drift["projects"] = {"loaded": self.project_prompts_hash, "on_disk": now}
         try:
             on_disk = _hash12(_rubric.RUBRIC_PATH.read_bytes())
         except OSError:
