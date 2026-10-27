@@ -709,6 +709,10 @@ dict[str, Decimal]`.
   constant `tests/unit/test_repo_hygiene.py` can enumerate. An Interviews Stop now posts every owed
   headline with no cap, even when it ends the run: the main loop's per-tick drain posts them in
   the same tick, before the shutdown sweep and its cap of 25.
+- **Task 1.** `scripts/migrate/postflight.py` still expected `sim_command_enum` to be
+  `('start', 'stop')`, so it blocked the correct production migration to `0074`; it now
+  expects `system` from `0074` on (`_LABEL_REVISION`), and
+  `tests/integration/test_postflight_schema_pins.py` checks every enum at the default target.
 - **Task 4.** `_count_awaiting_replies`, `_awaiting_reply` and `_awaiting_project_reply_count` are
   removed with the drain gate that was their only reader, so there is no "awaiting replies" tick step
   or test.

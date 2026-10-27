@@ -22,7 +22,7 @@ def _load(module_name: str, filename: str):
     return module
 
 
-_load("copi_migrate_preflight", "preflight.py")
+pf = _load("copi_migrate_preflight", "preflight.py")
 po = _load("copi_migrate_postflight", "postflight.py")
 
 
@@ -32,4 +32,11 @@ po = _load("copi_migrate_postflight", "postflight.py")
 ])
 async def test_every_pinned_object_reads_back_on_the_migrated_test_database(db_session, check):
     title, status, detail, *_ = await getattr(po, check)(db_session)
+    assert status == po.PASS, f"{title}: {detail}"
+
+
+async def test_every_enum_reads_back_as_expected_at_the_default_target(db_session):
+    """A label a migration adds to an existing type (0074's ``system``) must be expected at
+    the head the chain builds, or postflight blocks a correct production migration."""
+    title, status, detail, *_ = await po.check_enums(db_session, pf.DEFAULT_TARGET)
     assert status == po.PASS, f"{title}: {detail}"

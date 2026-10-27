@@ -395,8 +395,14 @@ EXPECTED_CONSTRAINTS: dict[str, tuple[str, str]] = {
 
 EXPECTED_ENUMS: dict[str, tuple[str, ...]] = {
     "pi_dm_direction_enum": ("inbound", "outbound"),
-    "sim_command_enum": ("start", "stop"),
+    "sim_command_enum": ("start", "stop", "system"),
     "sim_command_status_enum": ("pending", "done", "failed", "stale"),
+}
+
+#: (enum type, label) -> the revision that added the label to a type an earlier revision
+#: created (``ALTER TYPE … ADD VALUE``): below that revision it is not expected yet.
+_LABEL_REVISION: dict[tuple[str, str], str] = {
+    ("sim_command_enum", "system"): "0074",
 }
 
 #: enum type name -> the revision that creates it, from preflight.PLANNED_OBJECTS.
@@ -409,17 +415,23 @@ def expected_enums_for(target: str) -> dict[str, tuple[str, ...]]:
     """The EXPECTED_ENUMS entries a database at ``target`` must already have.
 
     A type whose creating revision is after ``target`` is not expected yet: 0042's two
-    types must not fail a ``--target 0041`` run. An unknown ``target``, or a type with no
-    PLANNED_OBJECTS entry, keeps the entry, so the check errs towards expecting more.
+    types must not fail a ``--target 0041`` run. Nor is a label a later revision added
+    (``_LABEL_REVISION``): 0074's ``system`` must not fail a ``--target 0073`` run. An
+    unknown ``target``, or a type with no PLANNED_OBJECTS entry, keeps the entry, so the
+    check errs towards expecting more.
     """
     order = _pf.REVISION_ORDER
     if target not in order:
         return dict(EXPECTED_ENUMS)
     hi = order.index(target)
+
+    def reached(revision: str | None) -> bool:
+        return revision not in order or order.index(revision) <= hi
+
     return {
-        name: labels
+        name: tuple(label for label in labels if reached(_LABEL_REVISION.get((name, label))))
         for name, labels in EXPECTED_ENUMS.items()
-        if _TYPE_REVISION.get(name) not in order or order.index(_TYPE_REVISION[name]) <= hi
+        if reached(_TYPE_REVISION.get(name))
     }
 
 #: Columns whose NULLs would be a data defect even though the catalog forbids them.

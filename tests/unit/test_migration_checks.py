@@ -1366,6 +1366,14 @@ def test_enum_expectations_are_scoped_to_the_target():
     assert po.expected_enums_for("9999") == po.EXPECTED_ENUMS
 
 
+def test_an_added_enum_label_is_expected_from_its_revision():
+    """0074 adds ``system`` to the type 0042 created: postflight at 0074 expects it, and a
+    run at 0073 does not (it would BLOCK a correctly migrated database either way)."""
+    assert po.expected_enums_for("0074")["sim_command_enum"] == ("start", "stop", "system")
+    assert po.expected_enums_for("0073")["sim_command_enum"] == ("start", "stop")
+    assert po.expected_enums_for(pf.DEFAULT_TARGET) == po.EXPECTED_ENUMS
+
+
 async def test_check_enums_passes_below_0042(monkeypatch):
     async def _fetch_all(_conn, _sql, **_params):
         return [{"name": "pi_dm_direction_enum", "labels": ["inbound", "outbound"]}]
