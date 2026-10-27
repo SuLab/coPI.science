@@ -3,12 +3,14 @@
 TODAY (default Stop, SIGTERM): every owed headline, open interviews included,
 capped at 25 — exactly as before; which 25 is unspecified (the owed query has no
 ORDER BY), so parity is asserted on sets and counts. FINALIZE (natural end): the
-same, then finalized_at. HOLD: only ended interviews, then held_at."""
+same, then finalized_at. HOLD: only ended interviews, then held_at. A TODAY end of a
+resumed run whose interview hold no session took up also clears held_at."""
 import logging
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from src.agent.sessions import Sessions
 from src.models import OpportunityAssessment, SimulationRun, ThreadDecision
 from tests.integration.test_assessment_headline_delivery import (
     _headlines,
@@ -141,6 +143,44 @@ async def test_a_finalize_with_30_owed_sets_finalized_at_and_logs_5_lost(engine,
         assert (await _run_row(factory, run_id)).finalized_at is not None
         lost = [r.getMessage() for r in caplog.records if "LOST 5" in r.getMessage()]
         assert lost and "--finalize --apply" in lost[0]
+    finally:
+        await _delete_run(factory, run_id)
+
+
+async def _hold_run(factory, run_id):
+    from sqlalchemy import func, update
+
+    async with factory() as db:
+        await db.execute(
+            update(SimulationRun).where(SimulationRun.id == run_id).values(held_at=func.now())
+        )
+        await db.commit()
+
+
+async def test_a_today_end_with_a_carried_hold_announces_it_and_clears_held_at(engine):
+    """Spec §4.9: a resume that did not start Interviews keeps the hold; a plain Stop
+    then posts every owed headline, the held ones included, so the hold is over."""
+    sim, factory, run_id = await _engine(engine)
+    try:
+        await _hold_run(factory, run_id)
+        await _seed_owed(factory, run_id, ["t-ended", "t-open"], ended=["t-ended"])
+        sim.ctx.sessions = Sessions(hold_carried=True)
+        sim.request_stop("operator")
+        await sim.stop()
+        assert len(_headlines(sim.slack_clients["blackbird"])) == 2
+        run = await _run_row(factory, run_id)
+        assert run.held_at is None and run.finalized_at is None
+    finally:
+        await _delete_run(factory, run_id)
+
+
+async def test_a_today_end_without_a_carried_hold_leaves_held_at_alone(engine):
+    sim, factory, run_id = await _engine(engine)
+    try:
+        await _hold_run(factory, run_id)
+        sim.request_stop("operator")
+        await sim.stop()
+        assert (await _run_row(factory, run_id)).held_at is not None
     finally:
         await _delete_run(factory, run_id)
 

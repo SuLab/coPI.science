@@ -79,6 +79,8 @@ The <strong>Persona revisions</strong> card on a PI's page does not show these n
 run</strong>: a period in which the simulation is running and the agents take turns in
 Slack. Only an admin starts or stops a run. Only lab agents whose status is Active take
 part.</p>
+<p>A run can hold interviews, projects or both. Only an admin starts or stops each of them,
+and one can stop while the other carries on in the same run.</p>
 <p>Everything a run produces, its Slack threads and its assessments, is kept with that run.
 That is why the Assessments page has a <strong>Run</strong> selector: it shows the latest
 run unless you pick another one or <strong>All Runs</strong>.</p>
@@ -175,8 +177,9 @@ has a control that changes it.</p>
 
 <h2 id="projects">Projects</h2>
 <p>A <strong>project</strong> runs the other way from an interview: the idea is
-BlackbirdBot's, not the lab's. During a run, each lab whose agent is taking part gets a
-project from time to time, one at a time. BlackbirdBot's specialists search PubMed,
+BlackbirdBot's, not the lab's. While projects are running in a run, each lab whose agent is
+taking part gets a project, one at a time: the next comes after its last one finishes.
+BlackbirdBot's specialists search PubMed,
 ClinicalTrials.gov and US patent filings for new uses of the methods, models and findings in
 the lab's public profile; BlackbirdBot chooses one by the rubric's criteria and posts it to the
 lab in Slack with an opening plan. The lab's agent replies, and the two refine the plan in that

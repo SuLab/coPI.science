@@ -156,7 +156,7 @@ async def _sim_values(page) -> list[str]:
 async def journey_sim_start_form_survives_refresh(h) -> dict:
     ctx, page, log = await h.page("admin")
     try:
-        await page.goto(f"{h.base_url}/admin/simulation", wait_until="networkidle")
+        await page.goto(f"{h.base_url}/workspace/simulation", wait_until="networkidle")
         await page.fill("input[name='max_runtime']", "60")
         await page.fill("input[name='max_proposals']", "20")
         await page.mouse.click(5, 300)
@@ -173,7 +173,7 @@ async def journey_sim_focus_kept(h) -> dict:
     """Review focus 4: focus on a non-input control survives a refresh."""
     ctx, page, log = await h.page("admin")
     try:
-        await page.goto(f"{h.base_url}/admin/simulation", wait_until="networkidle")
+        await page.goto(f"{h.base_url}/workspace/simulation", wait_until="networkidle")
         await page.focus("nav.sim-jump-nav a[href='#sec-status']")
         await page.wait_for_timeout(33000)
         focused = await page.evaluate(
@@ -188,7 +188,7 @@ async def journey_sim_focus_kept(h) -> dict:
 async def journey_sim_notice_on_session_expiry(h) -> dict:
     ctx, page, log = await h.page("admin")
     try:
-        await page.goto(f"{h.base_url}/admin/simulation?msg=Start+requested.",
+        await page.goto(f"{h.base_url}/workspace/simulation?msg=Start+requested.",
                         wait_until="networkidle")
         cleaned = "msg=" not in page.url
         await ctx.clear_cookies()
@@ -212,7 +212,7 @@ async def journey_sim_new_sections_inserted(h) -> dict:
     survive."""
     ctx, page, log = await h.page("admin")
     try:
-        await page.goto(f"{h.base_url}/admin/simulation", wait_until="networkidle")
+        await page.goto(f"{h.base_url}/workspace/simulation", wait_until="networkidle")
         await page.fill("input[name='max_runtime']", "45")
         await page.mouse.click(5, 300)
         await page.evaluate("""() => {
@@ -242,7 +242,7 @@ async def journey_sim_template_error_kept(h) -> dict:
     """Q1-04: a rejected template and its error survive a refresh tick."""
     ctx, page, log = await h.page("admin")
     try:
-        await page.goto(f"{h.base_url}/admin/simulation", wait_until="networkidle")
+        await page.goto(f"{h.base_url}/workspace/simulation", wait_until="networkidle")
         area = page.locator("form[action='/admin/simulation/announce-template'] textarea[name=body]")
         await area.fill("Bad {nope} template")
         await page.locator("form[action='/admin/simulation/announce-template'] "

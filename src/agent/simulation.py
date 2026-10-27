@@ -5,6 +5,10 @@ the main loop, the startup sequence and the shutdown sequence. Every member that
 moved to a unit is still reachable as ``engine.<name>`` through the forwarding in
 ``__getattr__``/``__setattr__``/``__delattr__``, so callers, scripts and tests keep
 one entry point.
+
+Which systems run (interviews, projects) is ``ctx.sessions`` (``src.agent.sessions``):
+the main loop runs while any session is active, and the orchestrator applies the side
+effects of the sessions' events (a join's pitch catch-up, a Stop now's closes).
 """
 
 import asyncio
@@ -14,7 +18,7 @@ from datetime import UTC
 from typing import Any
 
 from src.agent.agent import Agent
-from src.agent.end_reasons import HOLD, TODAY, end_reason_class
+from src.agent.end_reasons import FINALIZE, HOLD, TODAY, end_reason_class
 from src.agent.engine import deps
 from src.agent.engine.channel_directory import ChannelDirectory
 from src.agent.engine.context import EngineContext, RunState, _Via
@@ -54,6 +58,7 @@ from src.agent.engine.constants import (  # re-exported: tests and scripts impor
     ROSTER_POLL_INTERVAL as ROSTER_POLL_INTERVAL,
     RUN_STATS_UPDATE_INTERVAL as RUN_STATS_UPDATE_INTERVAL,
     SEEDED_CHANNELS as SEEDED_CHANNELS,
+    STOPPED_OUTCOME as STOPPED_OUTCOME,
     TRUNCATION_NOTICE as TRUNCATION_NOTICE,
     _CALLS_PER_LOG_ROW as _CALLS_PER_LOG_ROW,
     _CHANNEL_KEYWORDS as _CHANNEL_KEYWORDS,
@@ -104,11 +109,13 @@ from src.agent.engine.sidecar import (  # re-exported
 from src.agent.message_log import MessageLog
 from src.agent.prompt_snapshot import PromptSnapshot
 from src.agent.role_capabilities import capabilities_for
+from src.agent.sessions import ENDED, INTERVIEWS, PROJECTS, STARTED, STOP_NOW, Sessions
 from src.agent.specialists import (
     domain_flatness_warning,
     signal_mix_report,
 )
 from src.models import SimulationRun
+from src.models.hub_project import REASON_STOPPED
 from src.services.llm import set_call_log_callback
 
 logger = logging.getLogger(__name__)
@@ -191,7 +198,16 @@ class SimulationEngine:
         run_state: RunState | None = None,
         heartbeat: EngineHeartbeat | None = None,
         prompt_snapshot: PromptSnapshot | None = None,
+        sessions: Sessions | None = None,
     ):
+        # Without sessions the engine runs interviews only, limited by
+        # max_proposals and max_runtime_minutes: as before the two systems were
+        # separable (tests, scripts, the characterization snapshots).
+        if sessions is None:
+            sessions = Sessions.legacy(
+                count=max_proposals, runtime_minutes=max_runtime_minutes,
+                now=deps.datetime.now(UTC),
+            )
         self.ctx = EngineContext(
             agents={a.agent_id: a for a in agents},
             slack_clients=slack_clients,
@@ -199,6 +215,7 @@ class SimulationEngine:
             session_factory=session_factory,
             simulation_run_id=simulation_run_id,
             slack_enabled=slack_enabled,
+            sessions=sessions,
         )
         self.run_state = run_state if run_state is not None else RunState()
         self.heartbeat = heartbeat
@@ -255,7 +272,7 @@ class SimulationEngine:
             self.ctx, scheduler=self.scheduler, roster=self.roster, threads=self.threads,
             slack_io=self.slack_io, llm_log=self.llm_log,
             channel_directory=self.channel_directory, panel=self.panel,
-            max_proposals=max_proposals, projects=self.projects,
+            projects=self.projects,
         )
         self.reply_lane = ReplyLane(
             self.ctx, run_state=self.run_state, scheduler=self.scheduler,
@@ -364,11 +381,17 @@ class SimulationEngine:
         await self.run_announcer.record_loaded_stamps()
         await self.run_announcer.record_loaded_rubric()
 
-        # Resume only: recover lab pitches the previous process left without a
-        # reply because it stopped in the tick they were posted. Placed AFTER the
-        # cohort gate and the star-topology validation above, so the one-shot
-        # applies the same gates Phase 3 does. A fresh start has nothing to
-        # recover, and its hub keeps subscribing at its first post-lane turn.
+        # Resume only: subscribe the hub to its channels and recover the lab
+        # posts the previous process left without a reply because it stopped in
+        # the tick they were posted. Placed AFTER the cohort gate and the
+        # star-topology validation above, so the one-shot applies the same gates
+        # Phase 3 does, including the sessions': a lab pitch is taken up only
+        # while Interviews runs and a reply to a project posting only while
+        # Projects does (_auto_activate_lab_posts). It runs whichever systems a
+        # resume starts, since a projects-only hub must be subscribed before a
+        # lab's project reply lands. A fresh start has nothing to recover, and its
+        # hub keeps subscribing at its first post-lane turn. An Interviews session
+        # started later runs it again (_apply_session_events).
         if not self._fresh_start:
             await self._recover_reply_less_pitches()
 
@@ -390,7 +413,13 @@ class SimulationEngine:
         await self._run_main_loop()
 
     async def _recover_reply_less_pitches(self) -> None:
-        """Resume-only one-shot: open interviews on lab pitches a stop orphaned.
+        """The pitch catch-up: open interviews on lab pitches a stop orphaned.
+
+        Runs on every resume and on every later Interviews start in the run
+        (``_apply_session_events``). A resume without Interviews still needs it: the
+        hub's Phase 1 subscribes it to the channels a lab's reply to a project posting
+        lands in, and ``_auto_activate_lab_posts`` takes up no pitch while Interviews
+        is not accepting.
 
         A lab can still pitch in the tick a Stop lands, and on the resume the
         hub's Phase-3 scan starts from the rebuilt ``last_seen_cursor`` — already
@@ -424,6 +453,72 @@ class SimulationEngine:
                     "[%s] Resume: recovering reply-less lab pitches failed; startup "
                     "continues", hub.agent_id,
                 )
+
+    async def _apply_session_events(self) -> None:
+        """Act on the sessions' transitions since the last tick (``pop_events``).
+
+        - An Interviews start after the engine's own (a join or a restart in the
+          run) runs the pitch catch-up, ``_recover_reply_less_pitches``; when it
+          took up the resumed run's interview hold, this run's ``held_at`` is
+          cleared first, as a resume that starts Interviews clears it.
+        - An Interviews Stop now closes every open interview thread with
+          ``STOPPED_OUTCOME``: their owed headlines are queued and post through the
+          per-tick drain, all of them (``HEADLINES_MAX_AT_SHUTDOWN`` bounds a stop's
+          grace period; here the run goes on). A pitch with no thread yet waits for
+          the next Interviews start.
+        - A Projects Stop now ends every open project of the run
+          (``Projects.end_open_projects``) and closes the project threads it returns
+          the same way.
+
+        Never raises: a failure is logged and the next event is still applied.
+        """
+        for event in self.ctx.sessions.pop_events():
+            try:
+                if event.system == INTERVIEWS and event.kind == STARTED and not event.initial:
+                    if event.cleared_hold and self.session_factory and self.simulation_run_id:
+                        await _update_run_row(
+                            self.session_factory, self.simulation_run_id, {"held_at": None},
+                        )
+                    await self._recover_reply_less_pitches()
+                elif event.kind == ENDED and event.reason == STOP_NOW:
+                    if event.system == INTERVIEWS:
+                        open_interviews = {
+                            thread_id
+                            for agent in self.agents.values()
+                            for thread_id, thread in agent.state.active_threads.items()
+                            if thread.status == "active"
+                            and not self.message_log.is_project_thread(thread_id)
+                        }
+                        await self._close_threads(open_interviews)
+                    elif event.system == PROJECTS:
+                        ended = await self.projects.end_open_projects(REASON_STOPPED)
+                        await self._close_threads(ended)
+            except Exception:
+                logger.exception(
+                    "Applying the %s session's %s event failed", event.system, event.kind,
+                )
+
+    async def _close_threads(self, thread_ids: set[str]) -> None:
+        """Close each thread some agent still holds, once, as ``STOPPED_OUTCOME``
+        (an operator's Stop now; a named constant, so tests/unit/test_repo_hygiene.py
+        can enumerate every outcome src/ writes).
+
+        Under the thread's lock (thread lock outer; ``_close_thread`` takes the
+        agent locks inside), so a reply in flight on it finishes first; a thread a
+        reply closed meanwhile is skipped. ``_close_thread`` closes both sides.
+        """
+        for thread_id in sorted(thread_ids):
+            async with self._thread_locks.acquire_all(thread_id):
+                held = next(
+                    (
+                        (agent, agent.state.active_threads[thread_id])
+                        for agent in self.agents.values()
+                        if thread_id in agent.state.active_threads
+                    ),
+                    None,
+                )
+                if held is not None:
+                    await self._close_thread(held[0], held[1], STOPPED_OUTCOME)
 
     # ------------------------------------------------------------------
     # Main loop
@@ -465,8 +560,8 @@ class SimulationEngine:
           ``_rebuild_state_from_db`` restores it across restarts, so this one
           really is permanent. It is also opt-in and deprecated (design §6).
 
-        ``max_runtime`` and SIGTERM still end the run through the loop condition;
-        this predicate is only about the selection stall.
+        The sessions' limits and SIGTERM still end the run through the loop
+        condition; this predicate is only about the selection stall.
         """
         if not self.agents:
             return "the roster is empty"
@@ -484,13 +579,18 @@ class SimulationEngine:
         Split out of ``start()`` so the scheduling contract (in particular
         ``_terminal_stall_reason``) is reachable from a unit test without
         standing up the whole startup sequence.
+
+        Runs while any session (``ctx.sessions``) is active. Each tick, right
+        after the control poll, it applies the sessions' events, runs the
+        projects tick and tells the interviews session what is still open, so a
+        session's limits and wind-down are checked once per tick.
         """
         if self.heartbeat is not None:
             self.heartbeat.mark_running()
         turn_count = 0
         stalled = False
         consecutive_idle = 0
-        while self._running and self.is_within_time_limit and not self._proposal_target_drained():
+        while self._running and self.ctx.sessions.any_active():
             # EVERY exit from this iteration runs `_drain_and_flush`, which is
             # why the whole body sits in a try/finally rather than ending with
             # the four calls. The drain and the three flushes used to be the
@@ -518,13 +618,18 @@ class SimulationEngine:
                 # before any lane builds a prompt this tick.
                 await self._sync_publication_records()
 
-                # Operator control plane: claim a pending stop command and
-                # refresh the heartbeat row, so /admin/simulation can see the
-                # run is alive and stop it without touching the container.
-                # Own cadence gate inside (_last_control_poll), same pattern
-                # as _sync_roster_from_db above.
+                # Operator control plane: claim a pending stop or per-system
+                # command and refresh the heartbeat row, so /workspace/simulation
+                # can see the run is alive and control it without touching the
+                # container. Own cadence gate inside (_last_control_poll), same
+                # pattern as _sync_roster_from_db above.
                 await self._poll_control_plane(deps.time.time())
-                await self._projects_tick(draining=self.max_proposals > 0 and self._proposals_posted >= self.max_proposals)
+                # The sessions: act on their transitions (a Stop now's closes,
+                # a join's pitch catch-up), then let each system observe its
+                # open work against its limits.
+                await self._apply_session_events()
+                await self._projects_tick()
+                self._observe_interview_session()
 
                 # Pick up profile edits made from the web app (separate process).
                 self._sync_profiles_from_disk()
@@ -646,17 +751,14 @@ class SimulationEngine:
 
         if self._running:
             # Nothing asked the loop to stop. A terminal stall is a failure end
-            # (a HOLD). Otherwise the loop condition ended the run: max runtime
-            # or a drained proposal target — a natural end, which finalizes it
-            # (spec P0-04, B19). `_proposal_target_drained()` mutates its streak,
-            # so it is not called again to tell them apart. An operator Stop that
-            # landed in the same tick as a stall keeps the operator's choice.
-            if stalled:
-                self.request_stop("stall")
-            else:
-                self.request_stop(
-                    "time_limit" if not self.is_within_time_limit else "target_drained"
-                )
+            # (a HOLD). Otherwise every session ended, and how the last one
+            # ended decides the run's end (Sessions.run_end_reason): its runtime
+            # or its count is a natural end, which finalizes the run (spec
+            # P0-04, B19); by hand or the projects failure stop announces like a
+            # Stop; a carried interview hold no session took up ends held. An
+            # operator Stop that landed in the same tick as a stall keeps the
+            # operator's choice.
+            self.request_stop("stall" if stalled else self.ctx.sessions.run_end_reason())
         logger.info(
             "Main loop exited after %d turns (end reason: %s)", turn_count, self._end_reason,
         )
@@ -755,9 +857,14 @@ class SimulationEngine:
         headline (capped at ``HEADLINES_MAX_AT_SHUTDOWN``), HOLD only those of
         ended interviews; HOLD sets ``held_at`` and FINALIZE ``finalized_at``.
         After a lost engine lock it posts nothing (the repair script owns the
-        owed headlines). When a verdict or decision was still queued at the
+        owed headlines). Every session still active ends first (the run itself is
+        stopping), and the sessions are written to the run's row after its end
+        state. When a verdict or decision was still queued at the
         final flush, the sweep runs again for those threads once it lands.
         """
+        # The run is stopping: every session still active ends (STOP_EVERYTHING),
+        # whatever the end reason.
+        self.ctx.sessions.stop_everything(deps.datetime.now(UTC))
         self._running = False
         self._stop_event.set()
         # Which shutdown sweep this is (spec P0-04, src/agent/end_reasons.py).
@@ -777,6 +884,8 @@ class SimulationEngine:
         #    command.
         await self.headlines.shutdown_sweep(self.run_state.end_reason)
         await self._record_run_end_state(end_class)
+        # The run's sessions, ended above, on its row (config["sessions"]).
+        await self.control.persist_sessions()
         # 3. Drain a BOUNDED number of queued memory updates BEFORE the log
         #    callback is cleared, so their llm_call_logs rows are captured by
         #    the final flush below. Bounded by count, never by wall clock (B24):
@@ -877,24 +986,24 @@ class SimulationEngine:
     async def _record_run_end_state(self, end_class: str) -> None:
         """Stamp how the run ended on its row (spec P0-04): HOLD sets
         ``held_at``; FINALIZE sets ``finalized_at`` and clears ``held_at`` (a
-        finalized run cannot be resumed); TODAY writes nothing. Never raises."""
-        if end_class == TODAY or not self.session_factory or not self.simulation_run_id:
+        finalized run cannot be resumed); TODAY writes nothing, except that it
+        clears ``held_at`` when the resumed run's interview hold was still carried
+        (``ctx.sessions.hold_carried``): the TODAY sweep has just announced the
+        held interviews. Never raises."""
+        if not self.session_factory or not self.simulation_run_id:
             return
         from sqlalchemy import func as sa_func
-        from sqlalchemy import update as sa_update
 
-        values = (
-            {"held_at": sa_func.now()} if end_class == HOLD
-            else {"finalized_at": sa_func.now(), "held_at": None}
-        )
+        if end_class == HOLD:
+            values = {"held_at": sa_func.now()}
+        elif end_class == FINALIZE:
+            values = {"finalized_at": sa_func.now(), "held_at": None}
+        elif self.ctx.sessions.hold_carried:
+            values = {"held_at": None}
+        else:
+            return
         try:
-            async with self.session_factory() as db:
-                await db.execute(
-                    sa_update(SimulationRun)
-                    .where(SimulationRun.id == self.simulation_run_id)
-                    .values(**values)
-                )
-                await db.commit()
+            await _update_run_row(self.session_factory, self.simulation_run_id, values)
             logger.info(
                 "Run %s ended %s (end reason %s)",
                 self.simulation_run_id, end_class, self._end_reason,
@@ -904,6 +1013,17 @@ class SimulationEngine:
                 "Could not record run %s's end state (%s, end reason %s)",
                 self.simulation_run_id, end_class, self._end_reason,
             )
+
+
+async def _update_run_row(session_factory, run_id: uuid.UUID, values: dict) -> None:
+    """Set ``values`` on the ``simulation_runs`` row ``run_id`` and commit. Raises."""
+    from sqlalchemy import update as sa_update
+
+    async with session_factory() as db:
+        await db.execute(
+            sa_update(SimulationRun).where(SimulationRun.id == run_id).values(**values)
+        )
+        await db.commit()
 
 
 def _build_forward_map() -> dict[str, tuple[str, str]]:

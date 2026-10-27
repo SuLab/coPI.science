@@ -14,7 +14,7 @@ def test_links_in_text_are_underlined_in_the_compiled_css():
 
 
 def test_the_gantt_table_states_announced_in_text():
-    text = (T / "admin/simulation.html").read_text()
+    text = (T / "workspace/simulation.html").read_text()
     assert ">Announced</th>" in text
     assert "{{ 'yes' if link.announced else 'no' }}" in text
 

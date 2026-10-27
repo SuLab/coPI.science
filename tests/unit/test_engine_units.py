@@ -8,6 +8,7 @@ import pytest
 
 import src.agent.simulation as sim
 from src.agent.agent import Agent
+from src.agent.sessions import INTERVIEWS, PROJECTS, Limits, Sessions
 from src.agent.simulation import SimulationEngine
 
 
@@ -91,7 +92,8 @@ def test_scheduler_is_a_unit():
                            max_runtime_minutes=7, budget_cap=3)
     assert sim._UNIT_CLASSES["scheduler"] is Scheduler
     assert eng.scheduler.max_runtime_minutes == 7 and eng.budget_cap == 3
-    assert eng.is_within_time_limit is eng.scheduler.is_within_time_limit
+    assert not hasattr(eng.scheduler, "is_within_time_limit"), "sessions own runtime limits"
+    assert eng.ctx.sessions.current(INTERVIEWS).limits.runtime_minutes == 7
 
 
 def test_panel_is_a_unit():
@@ -179,7 +181,7 @@ def test_post_lane_is_a_unit():
 
     eng = SimulationEngine(agents=[Agent("su", "SuBot", "PI su")], slack_clients={}, max_proposals=4)
     assert sim._UNIT_CLASSES["post_lane"] is PostLane
-    assert eng.post_lane.max_proposals == 4
+    assert not hasattr(eng.post_lane, "max_proposals"), "the interviews session holds the cap"
     assert eng.post_lane._strip_disallowed_tags.__self__ is eng.roster
 
 
@@ -245,7 +247,33 @@ async def test_projects_is_a_unit(monkeypatch):
     assert sim._UNIT_CLASSES["projects"] is Projects
     assert eng.post_lane._projects is eng.projects
     assert eng.reply_lane._projects is eng.projects
-    eng._enabled = True  # even switched on, no database means nothing to do
-    await eng._projects_tick(draining=False)
-    assert eng._last_tick is None and eng._awaiting_project_reply_count() == 0
-    assert await eng._offer_project_reply(eng.agents["su"], draining=False) is False
+    from datetime import UTC, datetime
+
+    # Even with a projects session running, no database means nothing to do.
+    eng.ctx.sessions.start(PROJECTS, Limits(), datetime.now(UTC))
+    await eng._projects_tick()
+    assert eng._last_tick is None
+    assert await eng._offer_project_reply(eng.agents["su"]) is False
+
+
+def test_an_engine_without_sessions_runs_interviews_only_with_its_legacy_limits():
+    eng = SimulationEngine(agents=[Agent("su", "SuBot", "PI su")], slack_clients={},
+                           max_runtime_minutes=30, max_proposals=4)
+    sessions = eng.ctx.sessions
+    assert sessions.accepting(INTERVIEWS) and not sessions.active(PROJECTS)
+    assert sessions.current(INTERVIEWS).limits == Limits(count=4, runtime_minutes=30)
+    assert sessions.current(INTERVIEWS).initial is True
+
+
+def test_given_sessions_reach_the_context_and_a_bare_context_runs_interviews():
+    from src.agent.engine.context import EngineContext
+    from src.agent.message_log import MessageLog
+
+    given = Sessions()
+    eng = SimulationEngine(agents=[Agent("su", "SuBot", "PI su")], slack_clients={},
+                           sessions=given)
+    assert eng.ctx.sessions is given and not given.any_active()
+    ctx = EngineContext(agents={}, slack_clients={}, message_log=MessageLog(),
+                        session_factory=None, simulation_run_id=None, slack_enabled=False)
+    assert ctx.sessions.accepting(INTERVIEWS) and not ctx.sessions.active(PROJECTS)
+    assert ctx.sessions.current(INTERVIEWS).limits == Limits()

@@ -6,7 +6,7 @@ moves a ``prompt_set_stamp``, a ``role.toml`` version or the run-start announcem
 worker reads ``research.md`` and ``choose.md`` itself (``src/services/project_research.py``);
 the four files below are the engine's. ``Agent`` reads them through the start-time
 ``PromptSnapshot``, so a mid-run edit cannot change the next turn and shows as ``projects``
-drift on /admin/simulation instead.
+drift on /workspace/simulation instead.
 """
 from __future__ import annotations
 

@@ -3,6 +3,7 @@ column where the table has one (Tasks 2A-6, 2A-7), and always the central log li
 from get_current_user (this task) naming the real admin and the worn account."""
 
 import logging
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import select
@@ -13,6 +14,7 @@ from src.models import (
     AdminAuditEvent,
     ProfileRevision,
     SimulationCommand,
+    SimulationProcessStatus,
     SlackAppProvision,
 )
 from src.services import profile_export
@@ -223,6 +225,37 @@ async def test_simulation_start_without_impersonation_has_no_note(client, db_ses
         select(AdminAuditEvent).where(AdminAuditEvent.action == "simulation_start_requested")
     )).scalar_one()
     assert "impersonation_note" not in event.payload
+
+
+async def test_a_system_stop_under_impersonation_notes_the_audit_row(client, db_session, monkeypatch):
+    import src.routers.admin.simulation as sim_routes
+
+    async def _alive(db):
+        return True
+
+    monkeypatch.setattr(sim_routes, "engine_alive", _alive)
+    real = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+    worn = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
+    run = await factories.make_simulation_run(db_session)
+    db_session.add(SimulationProcessStatus(
+        id=1, state="running", simulation_run_id=run.id, updated_at=datetime.now(UTC),
+        detail={"systems": {"interviews": {"state": "running"}}},
+    ))
+    await db_session.commit()
+    r = await client.post(
+        "/admin/simulation/system", data={"system": "interviews", "action": "wind_down"},
+        headers=impersonation_headers(real.id, worn.id), follow_redirects=False,
+    )
+    assert r.status_code == 302
+    event = (await db_session.execute(
+        select(AdminAuditEvent).where(AdminAuditEvent.action == "simulation_system_stop_requested")
+    )).scalar_one()
+    assert event.actor_user_id == worn.id
+    assert event.payload["impersonation_note"] == f"impersonated by admin {real.id}"
+    cmd = (await db_session.execute(
+        select(SimulationCommand).where(SimulationCommand.command == "system")
+    )).scalar_one()
+    assert "impersonation_note" not in cmd.payload
 
 
 async def test_announce_settings_under_impersonation_notes_the_audit_row(client, db_session):

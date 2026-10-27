@@ -124,6 +124,7 @@ PAGES: dict[str, Callable[[GateWorld], str]] = {
     "/workspace/prompt-suggestions/{suggestion_id}": lambda w: f"/workspace/prompt-suggestions/{w.suggestion.id}",
     "/workspace/slack-bots": lambda w: "/workspace/slack-bots",
     "/workspace/staff": lambda w: "/workspace/staff",
+    "/workspace/simulation": lambda w: "/workspace/simulation",
     "/onboarding": lambda w: "/onboarding",
     "/profile": lambda w: "/profile",
     "/profile/delete-account": lambda w: "/profile/delete-account",
@@ -161,7 +162,7 @@ NO_200_EXPECTED: dict[str, str] = {
 for _legacy_route in PAGES:
     if _legacy_route.startswith("/manager/") or _legacy_route in {
         "/admin/activity", "/admin/activity/{run_id}", "/admin/assessments",
-        "/admin/assessments/{assessment_id}", "/admin/discussions",
+        "/admin/assessments/{assessment_id}", "/admin/discussions", "/admin/simulation",
     }:
         NO_200_EXPECTED[_legacy_route] = "guarded compatibility endpoint redirects to workspace"
 
@@ -548,7 +549,7 @@ async def _render_structure_pages(client, db_session) -> dict[str, str]:
         (admin, "/admin/jobs"), (admin, "/workspace/activity"), (admin, f"/workspace/activity/{run.id}"),
         (admin, f"/admin/activity/{run.id}/llm-calls"), (admin, "/workspace/discussions"),
         (admin, "/admin/agents"), (admin, f"/admin/agents/{agent.id}"), (admin, "/admin/cohorts"),
-        (admin, "/admin/access-requests"), (admin, "/admin/simulation"),
+        (admin, "/admin/access-requests"), (admin, "/workspace/simulation"),
         (manager, "/workspace/pis"), (manager, f"/workspace/pis/{pi.id}"), (manager, "/workspace/discussions"),
         (manager, "/workspace/activity"), (manager, "/workspace/slack-bots"),
         (manager, "/workspace/prompt-suggestions"), (manager, "/workspace/assessments"),

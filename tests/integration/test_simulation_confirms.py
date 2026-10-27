@@ -41,7 +41,8 @@ def _form_tag(html: str, marker: str) -> str:
 
 
 def _stop_forms(html: str) -> tuple[str, str]:
-    """The opening tags of the announcing Stop form and of "Stop — hold open interviews"."""
+    """The opening tags of the announcing "Stop everything" form and of "Stop everything,
+    hold open interviews"."""
     stops = [(t, b) for t, b in _forms(html) if 'action="/admin/simulation/stop"' in t]
     announcing = [t for t, b in stops if 'name="hold_open"' not in b]
     hold = [t for t, b in stops if 'name="hold_open"' in b]
@@ -83,7 +84,7 @@ async def test_the_announcing_stop_names_the_live_runs_counts(client, db_session
                                            updated_at=now))
     await db_session.commit()
 
-    r = await client.get("/admin/simulation", headers=auth_headers(admin.id))
+    r = await client.get("/workspace/simulation", headers=auth_headers(admin.id))
     stop, hold = _stop_forms(r.text)
     assert ('data-confirm="Posts 3 of 3 owed headlines to Slack (2 from interviews '
             'still open; at most 25 per stop); cannot be undone"') in stop
@@ -95,7 +96,7 @@ async def test_the_stop_dialog_without_a_live_run_id_still_warns(client, db_sess
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
     db_session.add(SimulationProcessStatus(id=1, state="starting", updated_at=datetime.now(UTC)))
     await db_session.commit()
-    r = await client.get("/admin/simulation", headers=auth_headers(admin.id))
+    r = await client.get("/workspace/simulation", headers=auth_headers(admin.id))
     stop, _hold = _stop_forms(r.text)
     assert ('data-confirm="Posts every owed headline to Slack, including interviews still '
             'open; cannot be undone"') in stop
@@ -103,7 +104,7 @@ async def test_the_stop_dialog_without_a_live_run_id_still_warns(client, db_sess
 
 async def test_reset_to_file_default_asks_first(client, db_session):
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
-    r = await client.get("/admin/simulation", headers=auth_headers(admin.id))
+    r = await client.get("/workspace/simulation", headers=auth_headers(admin.id))
     reset = _form_tag(r.text, 'name="reset" value="true"')
     assert 'data-confirm="Reset the run-start announcement to the file default? ' in reset
 

@@ -250,8 +250,8 @@ CSP_PAGES: tuple[tuple[str, str], ...] = (
     ("admin", "/admin/cohorts"),
     ("admin", "/admin/cohorts/topology"),
     ("admin", "/admin/access-requests"),
-    ("admin", "/admin/simulation"),
-    ("admin", "/admin/simulation?run={run}"),
+    ("admin", "/workspace/simulation"),
+    ("admin", "/workspace/simulation?run={run}"),
     ("admin", "/workspace/prompt-suggestions"),
     ("manager", "/workspace/pis"),
     ("manager", "/workspace/pis/{pi}"),
@@ -509,7 +509,8 @@ async def _flash_text(page) -> str:
 
 
 async def journey_confirm_stop(h) -> dict:
-    """FN-01: the announcing Stop asks first; "Stop — hold open interviews" does not (D11).
+    """FN-01: the announcing "Stop everything" asks first; "Stop everything, hold open
+    interviews" does not (D11).
     The harness runs no engine, so both buttons render disabled; the journey enables them in
     the DOM to reach the dialog, and the server then refuses with "Nothing is running."."""
     context, page, log = await h.page("admin", answer_dialogs=False)
@@ -520,7 +521,7 @@ async def journey_confirm_stop(h) -> dict:
     announcing = page.locator('form[action="/admin/simulation/stop"]:not(:has(input[name="hold_open"])) button')
     hold = page.locator('form[action="/admin/simulation/stop"]:has(input[name="hold_open"]) button')
 
-    await page.goto(h.base_url + "/admin/simulation")
+    await page.goto(h.base_url + "/workspace/simulation")
     await page.evaluate(enable)
     await announcing.click()
     await page.wait_for_timeout(500)
@@ -554,7 +555,7 @@ async def journey_confirm_reset_template(h) -> dict:
     dialogs = _Dialogs(page)
     posts = _posts(page, "/admin/simulation/announce-template")
     reset = page.locator('form[action="/admin/simulation/announce-template"]:has(input[name="reset"][value="true"]) button')
-    await page.goto(h.base_url + "/admin/simulation")
+    await page.goto(h.base_url + "/workspace/simulation")
     await reset.click()
     await page.wait_for_timeout(500)
     dismissed_posted = len(posts)
@@ -676,7 +677,7 @@ async def journey_contrast_zero(h) -> dict:
         "/admin/users", f"/admin/users/{pi}", "/admin/jobs", "/workspace/activity",
         f"/workspace/activity/{run}", f"/admin/activity/{run}/llm-calls", "/workspace/discussions",
         "/admin/agents", "/workspace/assessments", "/admin/cohorts", "/admin/cohorts/topology",
-        "/admin/access-requests", "/admin/simulation", "/workspace/pis", f"/workspace/pis/{pi}",
+        "/admin/access-requests", "/workspace/simulation", "/workspace/pis", f"/workspace/pis/{pi}",
         "/workspace/assessments", "/workspace/discussions", "/workspace/activity",
         f"/workspace/activity/{run}", "/workspace/slack-bots", "/workspace/prompt-suggestions",
         *[f"/workspace/assessments/{a}" for a in h.ids["assessments"]],

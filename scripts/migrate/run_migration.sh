@@ -435,7 +435,7 @@ if [ "$MIG" -ne 0 ]; then
   # durable flush in main.py's finally-block needs the main loop to RETURN), and a
   # 16000-token thread_reply final call can run ~4-5 minutes uninterrupted. `docker
   # stop` returns as soon as the container exits, so a generous -t is free insurance.
-  echo "  Stop the writers: Stop on /admin/simulation, then" >&2
+  echo "  Stop the writers: Stop on /workspace/simulation, then" >&2
   echo "    ${DC[*]} --profile agent stop -t 420 agent" >&2
   echo "    docker stop -t 420 blackbird-agent-run   # ONLY if an emergency CLI run is live" >&2
   echo "  Re-run." >&2
@@ -542,7 +542,7 @@ elif [ "$POST" -eq 1 ]; then
   printf '%s\n' "$FAILED_CHECKS" | sed 's/^/    FAILED: /' >&2
   echo "  Do NOT deploy application code. The chain committed as one transaction, so this" >&2
   echo "  is a schema to investigate, not a partial state to repair. To go back to $PRE_STAMP," >&2
-  echo "  restore a backup. Stop the run from /admin/simulation (Stop drains and flushes" >&2
+  echo "  restore a backup. Stop the run from /workspace/simulation (Stop drains and flushes" >&2
   echo "  in-process), then:" >&2
   echo "    ${DC[*]} --profile agent stop -t 420 agent" >&2
   echo "    ${DC[*]} stop $SVC worker" >&2
@@ -601,8 +601,8 @@ echo "      NULL slack_ts, which the engine treats as 'not on Slack'."
 echo "   9. Serve the new code on the migrated schema:"
 echo "        ${DC[*]} up -d $SVC worker"
 if [ "$AGENT_IS_SUPERVISOR" -eq 1 ]; then
-  echo "  10. Bring the agent supervisor back, only when /admin/simulation shows no live run:"
-  echo "        ${DC[*]} --profile agent up -d agent   # supervisor returns IDLE; start a run from /admin/simulation only when intended (NOT agent-run, which is org1's)"
+  echo "  10. Bring the agent supervisor back, only when /workspace/simulation shows no live run:"
+  echo "        ${DC[*]} --profile agent up -d agent   # supervisor returns IDLE; start a run from /workspace/simulation only when intended (NOT agent-run, which is org1's)"
 else
   echo "  10. !!! DO NOT RUN \`${DC[*]} --profile agent up -d agent\` !!!"
   echo "      $COMPOSE_FILE's agent service does not run src.agent.supervisor (or its"

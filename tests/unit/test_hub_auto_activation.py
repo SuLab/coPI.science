@@ -11,8 +11,13 @@ hub auto-activates on every new top-level post from an allowed sender (cohort
 gate), no mention required, mirroring the tag loop's `_closed_thread_ids` /
 already-active / `get_thread_allowed_agents` guards exactly.
 """
+from datetime import UTC, datetime
+
+import pytest
+
 from src.agent.agent import Agent
-from src.agent.message_log import LogEntry
+from src.agent.message_log import PHASE_PROJECT_REPLY, LogEntry
+from src.agent.sessions import INTERVIEWS, PROJECTS, Limits, Sessions
 from src.agent.simulation import SimulationEngine
 from src.agent.state import ThreadState
 from src.visibility import VISIBILITY_COLLAB_PRIVATE
@@ -301,3 +306,52 @@ def test_phase3_still_auto_activates_through_the_extracted_method(monkeypatch, t
     hub.state.last_seen_cursor = 7.5
     eng._phase3_activate_threads(hub)
     assert calls == [("blackbird", 7.5)]
+
+
+# Each post activates only while its system is active in the run's sessions: a lab
+# pitch needs Interviews, a lab's reply to a project posting needs Projects.
+
+
+def _sessions(*systems):
+    sessions = Sessions()
+    for system in systems:
+        sessions.start(system, Limits(), datetime(2026, 10, 27, tzinfo=UTC), initial=True)
+    return sessions
+
+
+def _session_engine(*systems):
+    hub, lab = _hub(), _lab()
+    eng = _engine(hub, lab)
+    eng.ctx.sessions = _sessions(*systems)
+    eng.message_log.append(_post("1", "general", "gill", "GillBot", "A new pitch."))
+    eng.message_log.append(LogEntry(
+        ts="2", channel="general", sender_agent_id="gill", sender_name="GillBot",
+        content="Our answer to your posting.", thread_ts=None, posted_at=2.0,
+        is_bot=True, phase=PHASE_PROJECT_REPLY,
+    ))
+    return eng, hub
+
+
+@pytest.mark.parametrize(
+    ("systems", "activated"),
+    [
+        ((INTERVIEWS, PROJECTS), {"1", "2"}),
+        ((INTERVIEWS,), {"1"}),
+        ((PROJECTS,), {"2"}),
+        ((), set()),
+    ],
+    ids=["both", "interviews-only", "projects-only", "neither"],
+)
+def test_a_post_activates_only_while_its_system_is_active(systems, activated):
+    eng, hub = _session_engine(*systems)
+
+    assert eng._auto_activate_lab_posts(hub, since=0.0) == len(activated)
+    assert set(hub.state.active_threads) == activated
+
+
+def test_a_post_skipped_while_its_system_was_inactive_activates_once_it_starts():
+    eng, hub = _session_engine(INTERVIEWS)
+    assert eng._auto_activate_lab_posts(hub, since=0.0) == 1
+    eng.ctx.sessions.start(PROJECTS, Limits(), datetime(2026, 10, 27, tzinfo=UTC))
+    assert eng._auto_activate_lab_posts(hub, since=0.0) == 1
+    assert set(hub.state.active_threads) == {"1", "2"}

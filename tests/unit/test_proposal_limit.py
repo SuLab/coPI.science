@@ -1,9 +1,16 @@
-"""Proposal-count run limit: stop pitching at N, drain interviews, then stop.
-See docs/plans/2026-09-04-assessment-ui-and-proposal-limit-design.md, Feature 4.
+"""The interviews session's pitch count and wind-down, in the post lane.
+
+A lab pitches only while the interviews session accepts work
+(``Sessions.accepting(INTERVIEWS)``); every counted pitch counts against that
+session, which winds down at its count; the orchestrator's once-a-tick
+``_observe_interview_session`` ends a winding-down session once no interview
+has been open for ``SETTLE_CHECKS[INTERVIEWS]`` observations in a row. See
+docs/specs/2026-10-27-independent-simulation-controls-design.md.
 """
 
-import inspect
-from datetime import UTC, datetime, timedelta
+import logging
+import types
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -11,45 +18,175 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.agent.agent import Agent
 from src.agent.engine.constants import ABANDONED_OUTCOME
-from src.agent.simulation import PROPOSAL_DRAIN_SETTLE_TICKS, SimulationEngine
+from src.agent.message_log import PHASE_PROJECT_REPLY, LogEntry
+from src.agent.sessions import (
+    ENDED,
+    INTERVIEWS,
+    LIMIT_COUNT,
+    SETTLE_CHECKS,
+    STOP_NOW,
+    WIND_DOWN,
+    Limits,
+    Sessions,
+)
+from src.agent.simulation import SimulationEngine
 from src.agent.state import ThreadState
 from src.models import AgentMessage, SimulationRun
+from src.visibility import VISIBILITY_COLLAB_PRIVATE
 from tests.fakes import FakeSlackClient
 
-pytestmark = pytest.mark.asyncio
+T0 = datetime(2026, 10, 27, 12, 0, tzinfo=UTC)
+
+PITCH = (
+    '```json\n'
+    '{"action": "new_post", "channel": "general", '
+    '"post_type": "pitch", "tagged_agent": null}\n'
+    '```\n\n'
+    '<slack_message>:bulb: A thing.</slack_message>'
+)
 
 
-def _engine(max_proposals):
-    agent = Agent("wang", "WangBot", "Wang", role="pi_lab")
-    return SimulationEngine(
-        agents=[agent],
-        slack_clients={"wang": FakeSlackClient(agent_id="wang")},
-        max_proposals=max_proposals,
-    ), agent
+def _settings(**over):
+    base = dict(
+        lab_daily_post_cap=1,
+        active_thread_threshold=12,
+        phase5_skip_probability=0.0,
+        llm_agent_model_opus="test-model",
+        llm_calls_per_load_per_window=8,
+        llm_rate_window_seconds=600,
+    )
+    base.update(over)
+    return types.SimpleNamespace(**base)
 
 
-async def test_phase5_is_throttled_once_the_proposal_cap_is_reached(monkeypatch):
-    eng, agent = _engine(max_proposals=2)
-    eng._proposals_posted = 2  # cap already reached
-
-    posted = []
-    async def _post(*a, **k):
-        posted.append(a)
-        return "ts-1"
-    monkeypatch.setattr(eng, "_post_message", _post)
-
-    await eng._phase5_new_post(agent)
-    assert posted == [], "no new pitch may be posted at/over the cap"
+def _interviews(count=0):
+    sessions = Sessions()
+    sessions.start(INTERVIEWS, Limits(count=count), T0, initial=True)
+    return sessions
 
 
-async def test_zero_max_proposals_never_throttles():
-    eng, _ = _engine(max_proposals=0)
-    assert eng.max_proposals == 0
-    assert eng._proposals_posted == 0
+def _pitching_engine(monkeypatch, sessions):
+    """A hub and one lab, a stubbed project offer (no project), stubbed settings and
+    a model that answers with a pitch. Returns the engine, the lab, its Slack client
+    and a record of the model, prompt and daily-cap calls."""
+    hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
+    lab = Agent("gill", "GillBot", "GILL PI", role="pi_lab")
+    hub.allowed_sender_ids = None
+    lab.allowed_sender_ids = None
+    client = FakeSlackClient(agent_id="gill")
+    eng = SimulationEngine(
+        agents=[lab, hub],
+        slack_clients={"gill": client, "blackbird": FakeSlackClient(agent_id="blackbird")},
+    )
+    eng.ctx.sessions = sessions
+    monkeypatch.setattr("src.agent.engine.deps.get_settings", lambda: _settings())
+
+    calls = {"llm": 0, "prompt": 0, "daily_cap": 0}
+
+    async def _offer(agent):
+        return False
+
+    def _prompt(**kw):
+        calls["prompt"] += 1
+        return ("sys", [])
+
+    async def _generate(**kwargs):
+        calls["llm"] += 1
+        return PITCH
+
+    def _count(agent):
+        calls["daily_cap"] += 1
+        return 0
+
+    monkeypatch.setattr(eng.post_lane._projects, "_offer_project_reply", _offer)
+    monkeypatch.setattr(lab, "build_phase5_prompt", _prompt)
+    monkeypatch.setattr("src.agent.engine.deps.generate_agent_response", _generate)
+    monkeypatch.setattr(eng.post_lane._scheduler, "_count_today_posts", _count)
+    return eng, lab, client, calls
 
 
-async def test_rehydrates_the_proposal_count_from_new_post_rows(engine):
-    """Mirrors the fixture idiom in tests/unit/test_engine_control_poll.py."""
+def _capped():
+    sessions = _interviews(count=2)
+    sessions.add_count(INTERVIEWS, T0, 2)
+    return sessions
+
+
+def _wound_down():
+    sessions = _interviews()
+    sessions.wind_down(INTERVIEWS, WIND_DOWN, T0)
+    return sessions
+
+
+def _ended():
+    sessions = _interviews()
+    sessions.end(INTERVIEWS, STOP_NOW, T0)
+    return sessions
+
+
+@pytest.mark.parametrize(
+    "make_sessions", [_capped, _wound_down, _ended, Sessions],
+    ids=["cap-reached", "wound-down", "ended", "absent"],
+)
+async def test_no_model_call_once_interviews_stop_accepting(monkeypatch, make_sessions):
+    eng, lab, client, calls = _pitching_engine(monkeypatch, make_sessions())
+
+    await eng._phase5_new_post(lab)
+
+    assert calls == {"llm": 0, "prompt": 0, "daily_cap": 0}, (
+        "a lab whose interviews session is not accepting makes no model call, and the "
+        "session gate runs before the daily cap"
+    )
+    assert client.posted == []
+    assert lab.state.last_phase5_action_time > 0, "the turn is still consumed"
+
+
+async def test_pitches_as_today_while_accepting_and_counts_the_pitch(monkeypatch):
+    sessions = _interviews(count=2)
+    eng, lab, client, calls = _pitching_engine(monkeypatch, sessions)
+
+    await eng._phase5_new_post(lab)
+
+    assert calls == {"llm": 1, "prompt": 1, "daily_cap": 1}
+    assert len(client.posted) == 1
+    assert eng.post_lane._proposals_posted == 1
+    assert sessions.current(INTERVIEWS).count == 1
+    assert sessions.accepting(INTERVIEWS), "one of two pitches leaves the session running"
+
+
+def test_book_pitch_winds_the_session_down_at_its_count():
+    sessions = _interviews(count=2)
+    eng = SimulationEngine(agents=[Agent("gill", "GillBot", "Gill", role="pi_lab")],
+                           slack_clients={})
+    eng.ctx.sessions = sessions
+    lane = eng.post_lane
+    lane._channel_visibility["private-room"] = VISIBILITY_COLLAB_PRIVATE
+
+    lane._book_pitch("general")
+    lane._book_pitch("private-room")
+    assert sessions.current(INTERVIEWS).count == 1, "a collab_private post is not a pitch"
+    assert sessions.accepting(INTERVIEWS)
+
+    lane._book_pitch("general")
+    session = sessions.current(INTERVIEWS)
+    assert session.count == 2
+    assert sessions.winding_down(INTERVIEWS) and session.reason == LIMIT_COUNT
+    assert lane._proposals_posted == 2
+
+
+def test_a_zero_count_never_stops_pitches():
+    sessions = _interviews(count=0)
+    eng = SimulationEngine(agents=[Agent("gill", "GillBot", "Gill", role="pi_lab")],
+                           slack_clients={})
+    eng.ctx.sessions = sessions
+    for _ in range(50):
+        eng.post_lane._book_pitch("general")
+    assert sessions.current(INTERVIEWS).count == 50
+    assert sessions.accepting(INTERVIEWS)
+
+
+async def test_rehydration_counts_this_runs_pitches_but_not_against_the_session(engine):
+    """The rehydrated count is for logs and tests: it always runs, and a resumed
+    interviews session counts from its own start."""
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as db:
         run = SimulationRun(status="running", config={})
@@ -82,10 +219,13 @@ async def test_rehydrates_the_proposal_count_from_new_post_rows(engine):
             slack_clients={"wang": FakeSlackClient(agent_id="wang")},
             session_factory=factory,
             simulation_run_id=run_id,
-            max_proposals=2,  # nonzero: N3 skips the query entirely when the cap is off
         )
+        sessions = _interviews(count=2)
+        eng.ctx.sessions = sessions
         await eng._rehydrate_proposal_count()
-        assert eng._proposals_posted == 2, "only the two new_post rows count"
+        assert eng.post_lane._proposals_posted == 2, "only the two new_post rows count"
+        assert sessions.current(INTERVIEWS).count == 0
+        assert sessions.accepting(INTERVIEWS)
     finally:
         async with factory() as db:
             stale = await db.get(SimulationRun, run_id)
@@ -94,35 +234,7 @@ async def test_rehydrates_the_proposal_count_from_new_post_rows(engine):
                 await db.commit()
 
 
-def test_not_drained_before_cap_reached():
-    eng, _ = _engine(max_proposals=2)
-    eng._proposals_posted = 1
-    assert eng._proposal_target_drained() is False
-
-
-def test_not_drained_while_interviews_open(monkeypatch):
-    eng, _ = _engine(max_proposals=2)
-    eng._proposals_posted = 2
-    monkeypatch.setattr(eng, "_open_interview_count", lambda: 1)
-    # Even called enough times to exhaust the settle window, an open interview
-    # blocks the drain.
-    for _ in range(10):
-        assert eng._proposal_target_drained() is False
-
-
-def test_drains_after_settle_window_once_cap_reached_and_no_open(monkeypatch):
-    eng, _ = _engine(max_proposals=2)
-    eng._proposals_posted = 2
-    monkeypatch.setattr(eng, "_open_interview_count", lambda: 0)
-    results = [eng._proposal_target_drained() for _ in range(PROPOSAL_DRAIN_SETTLE_TICKS)]
-    assert results[-1] is True
-    assert results[0] is False  # not on the first drained tick
-
-
-def _engine_at_cap_with_one_open_interview():
-    """An engine at its pitch cap holding ONE real open interview, in both
-    participants' ``active_threads``. No monkeypatching of
-    ``_open_interview_count``: this is the real predicate over real state."""
+def _hub_and_lab_engine(**kw):
     hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
     lab = Agent("wang", "WangBot", "Wang", role="pi_lab")
     eng = SimulationEngine(
@@ -131,158 +243,76 @@ def _engine_at_cap_with_one_open_interview():
             "blackbird": FakeSlackClient(agent_id="blackbird"),
             "wang": FakeSlackClient(agent_id="wang"),
         },
-        max_proposals=2,
+        **kw,
     )
-    eng._proposals_posted = 2  # cap reached; only the drain is left
+    return eng, hub, lab
+
+
+def _open_thread(hub, lab, thread_id, *, lab_owes=False):
     for agent, other in ((hub, lab), (lab, hub)):
-        agent.state.active_threads["t-open"] = ThreadState(
-            thread_id="t-open", channel="single-cell-omics",
+        agent.state.active_threads[thread_id] = ThreadState(
+            thread_id=thread_id, channel="single-cell-omics",
             other_agent_id=other.agent_id, message_count=4,
-            has_pending_reply=agent is hub,
+            has_pending_reply=(agent is lab) if lab_owes else (agent is hub),
         )
-    return eng, hub
 
 
-async def test_an_abandoned_interview_lets_the_real_drain_gate_fire():
+def test_a_winding_down_session_ends_after_three_quiet_observations():
+    eng, _, _ = _hub_and_lab_engine()
+    sessions = _wound_down()
+    eng.ctx.sessions = sessions
+    settle = SETTLE_CHECKS[INTERVIEWS]
+    assert settle == 3
+
+    for _ in range(settle - 1):
+        eng.post_lane._observe_interview_session()
+        assert sessions.winding_down(INTERVIEWS), "not before the settle checks"
+    eng.post_lane._observe_interview_session()
+    session = sessions.current(INTERVIEWS)
+    assert session.state == ENDED and session.reason == WIND_DOWN
+
+
+def test_a_running_session_is_not_ended_by_quiet_observations():
+    eng, _, _ = _hub_and_lab_engine()
+    sessions = _interviews()
+    eng.ctx.sessions = sessions
+    for _ in range(10):
+        eng.post_lane._observe_interview_session()
+    assert sessions.accepting(INTERVIEWS)
+
+
+async def test_an_abandoned_interview_lets_the_wind_down_end():
     """Run 652a6102: 20 pitches, 19 verdicts, and a run that could never end.
 
-    THE regression pin for that hang. Every other drain test in this file
-    monkeypatches `_open_interview_count` to a literal (see
-    `test_not_drained_while_interviews_open`, which replaces it with
-    `lambda: 1`), so the gate had never once been exercised against a real
-    `ThreadState` — and the three terminal abandon branches in
-    `src/agent/engine/reply_lane.py` cleared `has_pending_reply` without ever
-    closing the thread. The interview stayed `status="active"` in BOTH
-    participants' `active_threads`, nothing could re-queue it,
-    `_open_interview_count()` never reached 0 and the `--max-proposals`
-    main-loop condition never exited.
+    The regression pin for that hang, against real ``ThreadState``: the abandon
+    branches in ``src/agent/engine/reply_lane.py`` once cleared
+    ``has_pending_reply`` without closing the thread, so it stayed open in both
+    participants' ``active_threads`` and the wind-down never finished.
     """
-    eng, hub = _engine_at_cap_with_one_open_interview()
+    eng, hub, lab = _hub_and_lab_engine()
+    sessions = _wound_down()
+    eng.ctx.sessions = sessions
+    _open_thread(hub, lab, "t-open")
 
     assert eng._open_interview_count() == 1
-    for _ in range(PROPOSAL_DRAIN_SETTLE_TICKS + 5):
-        assert eng._proposal_target_drained() is False, (
-            "an open interview blocks the drain for as long as it is open"
+    for _ in range(SETTLE_CHECKS[INTERVIEWS] + 5):
+        eng.post_lane._observe_interview_session()
+        assert sessions.winding_down(INTERVIEWS), (
+            "an open interview holds the wind-down for as long as it is open"
         )
+    assert sessions.current(INTERVIEWS).open_work == 1
+    assert sessions.current(INTERVIEWS).waiting_on == ("wang",), (
+        "waiting_on names the lab, not the hub"
+    )
 
-    # The real close path, with the outcome the abandon branches now pass.
-    thread = hub.state.active_threads["t-open"]
-    await eng._close_thread(hub, thread, ABANDONED_OUTCOME)
-
+    await eng._close_thread(hub, hub.state.active_threads["t-open"], ABANDONED_OUTCOME)
     assert eng._open_interview_count() == 0, (
         "an abandoned interview must leave NO open thread behind in either "
         "participant's active_threads — this is the 652a6102 hang"
     )
-    results = [eng._proposal_target_drained() for _ in range(PROPOSAL_DRAIN_SETTLE_TICKS)]
-    assert results[-1] is True
-    assert results[0] is False  # not on the first drained tick
-
-
-def test_engine_accepts_and_stores_max_proposals():
-    eng, _ = _engine(max_proposals=5)
-    assert eng.max_proposals == 5
-
-
-def test_run_main_loop_gates_on_proposal_target_drained():
-    """Source-contract pin (I2a): the main loop's while-condition must call
-    `_proposal_target_drained()` directly. A regression that mis-places or
-    drops the check from that condition would otherwise still pass every
-    other test in this file — they all call `_proposal_target_drained()`
-    themselves rather than driving the real loop."""
-    src = inspect.getsource(SimulationEngine._run_main_loop)
-    assert "_proposal_target_drained()" in src
-
-
-async def test_resumed_engine_gates_phase5_after_rehydrating_at_cap(engine, monkeypatch):
-    """End-to-end pin for I1: an engine built with the SAME nonzero
-    max_proposals a resume now inherits from the run's stored config
-    rehydrates its count from the durable `new_post` rows and then actually
-    refuses to open a new pitch once that count is at the cap. This is the
-    path that a regression in main.py's resume branch (silently zeroing
-    max_proposals) would break, even though the unit-level gate/drain tests
-    above would still pass."""
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with factory() as db:
-        run = SimulationRun(status="running", config={"max_proposals": 2})
-        db.add(run)
-        await db.commit()
-        run_id = run.id
-
-    try:
-        async with factory() as db:
-            for ts in ("200.1", "200.2"):
-                db.add(AgentMessage(
-                    simulation_run_id=run_id,
-                    agent_id="wang",
-                    channel_id="local:general", channel_name="general",
-                    message_ts=ts, message_length=10,
-                    thread_ts=None,
-                    phase="new_post", content="hello",
-                    sender_name="WangBot",
-                    is_bot=True, posted_at=float(ts),
-                ))
-            await db.commit()
-
-        agent = Agent("wang", "WangBot", "Wang", role="pi_lab")
-        eng = SimulationEngine(
-            agents=[agent],
-            slack_clients={"wang": FakeSlackClient(agent_id="wang")},
-            session_factory=factory,
-            simulation_run_id=run_id,
-            max_proposals=2,
-        )
-        await eng._rehydrate_proposal_count()
-        assert eng._proposals_posted == 2
-
-        posted = []
-
-        async def _post(*a, **k):
-            posted.append(a)
-            return "ts-1"
-
-        monkeypatch.setattr(eng, "_post_message", _post)
-        # Isolate the proposal-cap gate from the unrelated daily post cap,
-        # which reads from the in-memory message_log (never populated here).
-        monkeypatch.setattr(eng, "_count_today_posts", lambda a: 0)
-
-        await eng._phase5_new_post(agent)
-        assert posted == [], "resume must not silently re-enable pitching past the cap"
-    finally:
-        async with factory() as db:
-            stale = await db.get(SimulationRun, run_id)
-            if stale is not None:
-                await db.delete(stale)  # cascades agent_messages
-                await db.commit()
-
-
-def test_max_runtime_and_proposal_cap_are_independent_stop_conditions():
-    """I2c: the main loop's while-condition ANDs three independent things —
-    `_running`, `is_within_time_limit`, and `not _proposal_target_drained()`.
-    Pin that each stop mechanism works on its own, without the other being
-    configured at all, without driving the real async loop."""
-    # max_proposals off (0): the drain never fires, so an elapsed max_runtime
-    # is the only thing that can stop the loop — and it still does.
-    eng, _ = _engine(max_proposals=0)
-    eng._running = True
-    eng.max_runtime_minutes = 1
-    eng._start_time = datetime.now(UTC) - timedelta(minutes=5)
-    assert eng.is_within_time_limit is False
-    assert eng._proposal_target_drained() is False
-
-    # max_proposals cap reached and drained, with no max_runtime configured
-    # at all: the drain alone satisfies the loop-exit condition regardless
-    # of the time check (True here: the engine was never started, so
-    # `_start_time` is None).
-    eng2, _ = _engine(max_proposals=2)
-    eng2._running = True
-    eng2._proposals_posted = 2
-    drained = False
-    for _ in range(PROPOSAL_DRAIN_SETTLE_TICKS):
-        drained = eng2._proposal_target_drained()
-    assert drained is True
-    assert eng2.is_within_time_limit is True
-    loop_would_continue = eng2._running and eng2.is_within_time_limit and not drained
-    assert loop_would_continue is False
+    for _ in range(SETTLE_CHECKS[INTERVIEWS]):
+        eng.post_lane._observe_interview_session()
+    assert sessions.current(INTERVIEWS).state == ENDED
 
 
 class _RosterResult:
@@ -317,7 +347,7 @@ def _registry_row(agent_id, role):
     )
 
 
-async def test_a_roster_removal_orphan_does_not_block_the_drain(monkeypatch):
+async def test_a_roster_removal_orphan_does_not_block_the_wind_down(monkeypatch):
     """The same hang by a different route: the partner leaves the roster.
 
     `_sync_roster_from_db` pops a deactivated agent and never touches the
@@ -327,29 +357,15 @@ async def test_a_roster_removal_orphan_does_not_block_the_drain(monkeypatch):
     `_open_interview_count` drops a thread whose partner is not on the live
     roster for exactly that reason.
     """
-    hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
-    lab = Agent("wang", "WangBot", "Wang", role="pi_lab")
     rows = [_registry_row("blackbird", "scout_hub")]  # wang deactivated
-    eng = SimulationEngine(
-        agents=[hub, lab],
-        slack_clients={
-            "blackbird": FakeSlackClient(agent_id="blackbird"),
-            "wang": FakeSlackClient(agent_id="wang"),
-        },
+    eng, hub, lab = _hub_and_lab_engine(
         session_factory=lambda: _RosterSession(rows),
         simulation_run_id=None,
         slack_enabled=False,
-        max_proposals=2,
     )
-    eng._proposals_posted = 2
-    for agent, other in ((hub, lab), (lab, hub)):
-        # The lab owes the reply, so the hub's surviving copy can never
-        # progress once the lab is gone.
-        agent.state.active_threads["t-orphan"] = ThreadState(
-            thread_id="t-orphan", channel="single-cell-omics",
-            other_agent_id=other.agent_id, message_count=3,
-            has_pending_reply=agent is lab,
-        )
+    sessions = _wound_down()
+    eng.ctx.sessions = sessions
+    _open_thread(hub, lab, "t-orphan", lab_owes=True)
     assert eng._open_interview_count() == 1
 
     async def _noop():
@@ -364,12 +380,71 @@ async def test_a_roster_removal_orphan_does_not_block_the_drain(monkeypatch):
         "the roster path deliberately leaves the survivor's ThreadState alone — "
         "this is a read-side rule, not a durable close"
     )
-    assert eng._open_interview_count() == 0, (
+    assert eng._open_interview_count() == 0
+    for _ in range(SETTLE_CHECKS[INTERVIEWS]):
+        eng.post_lane._observe_interview_session()
+    assert sessions.current(INTERVIEWS).state == ENDED, (
         "a thread whose partner left the roster can never progress; counting it "
-        "blocks _proposal_target_drained forever"
+        "would hold the wind-down forever"
     )
 
     # The predicate is "the partner is on the LIVE roster", so a reactivated
     # partner makes the same thread count again.
     eng.agents["wang"] = lab
     assert eng._open_interview_count() == 1
+
+
+def test_a_project_thread_is_not_an_open_interview():
+    eng, hub, lab = _hub_and_lab_engine()
+    eng.message_log.append(LogEntry(
+        ts="300.1", channel="general", sender_agent_id="wang", sender_name="WangBot",
+        content="our answer to the posting", thread_ts=None, posted_at=300.1,
+        is_bot=True, phase=PHASE_PROJECT_REPLY,
+    ))
+    _open_thread(hub, lab, "300.1")
+    assert eng._open_interview_count() == 0
+    assert eng.post_lane._open_interview_ids() == set()
+
+    _open_thread(hub, lab, "t-interview")
+    assert eng.post_lane._open_interview_ids() == {"t-interview"}
+
+
+async def test_a_blocked_wind_down_names_its_threads_once(caplog):
+    eng, hub, lab = _hub_and_lab_engine()
+    sessions = _wound_down()
+    eng.ctx.sessions = sessions
+    _open_thread(hub, lab, "t-one")
+
+    def _warnings():
+        return [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING and "wind-down cannot finish" in r.getMessage()
+        ]
+
+    with caplog.at_level(logging.WARNING, logger="src.agent.simulation"):
+        for _ in range(5):
+            eng.post_lane._observe_interview_session()
+        first = _warnings()
+        assert len(first) == 1, "one WARNING per blocked episode, not one per tick"
+        assert "t-one" in first[0] and "Stop now ends them" in first[0]
+
+        await eng._close_thread(hub, hub.state.active_threads["t-one"], ABANDONED_OUTCOME)
+        eng.post_lane._observe_interview_session()  # clears the episode
+        assert sessions.winding_down(INTERVIEWS), "one quiet tick does not end it"
+        assert len(_warnings()) == 1
+
+        _open_thread(hub, lab, "t-two")
+        for _ in range(3):
+            eng.post_lane._observe_interview_session()
+        second = _warnings()
+        assert len(second) == 2, "a new blocked episode warns again"
+        assert "t-two" in second[1] and "t-one" not in second[1]
+
+
+def test_a_running_session_with_open_interviews_does_not_warn(caplog):
+    eng, hub, lab = _hub_and_lab_engine()
+    eng.ctx.sessions = _interviews()
+    _open_thread(hub, lab, "t-one")
+    with caplog.at_level(logging.WARNING, logger="src.agent.simulation"):
+        eng.post_lane._observe_interview_session()
+    assert not [r for r in caplog.records if "wind-down cannot finish" in r.getMessage()]

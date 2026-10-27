@@ -279,9 +279,9 @@ def test_supported_start_revisions_are_exactly_the_documented_set():
         "0039", "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048",
         "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058",
         "0059", "0060", "0061", "0062", "0063", "0064", "0065", "0066", "0067", "0068",
-        "0069", "0070", "0071", "0072",
+        "0069", "0070", "0071", "0072", "0073",
     )
-    assert pf.DEFAULT_TARGET == "0073"
+    assert pf.DEFAULT_TARGET == "0074"
 
 
 def test_every_post_branch_revision_is_a_supported_start():
@@ -2072,6 +2072,11 @@ def test_0073_plans_its_new_objects():
         ("index", "ix_hub_project_calls_updated"),
         ("index", "ix_hub_project_calls_project"),
     }
+
+
+def test_0074_plans_no_objects():
+    """0074 only adds enum values, which create no object to collide with."""
+    assert pf.planned_objects_between("0073", "0074") == ()
 
 
 def test_postflight_pins_the_0071_objects():

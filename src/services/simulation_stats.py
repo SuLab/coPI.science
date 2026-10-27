@@ -2,7 +2,7 @@
 
 Every function here is a plain async query (or a handful of them) scoped to
 ONE ``simulation_run_id`` and returning a frozen dataclass defined in this
-module — the control panel route (src/routers/admin/simulation.py) renders these, this module
+module (``spend_by_system``: a plain ``{system: Decimal}``) — the control panel page (src/routers/workspace/simulation.py) renders these, this module
 never touches ``Request``/Jinja/HTTP. Nothing here is dependency-heavy: the
 rubric stamp, the prompt-set stamp and the build info are all read the same
 way ``src/agent/main.py``'s startup banner reads them, so the Live tab's
@@ -53,6 +53,8 @@ from src.models import (
     AgentMessage,
     AgentRegistry,
     AssessmentDrop,
+    HubProject,
+    HubProjectCall,
     LlmCallLog,
     OpportunityAssessment,
     SimulationRun,
@@ -63,6 +65,7 @@ from src.services.assessment_detail import unvetted_panel_filter
 from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH, RUBRIC_VERSION
 from src.services.build_info import BuildInfo, get_build_info
 from src.services.llm_pricing import cost_for_tokens
+from src.services.project_research import ledger_row_cost
 from src.services.projects_view import project_thread_roots
 
 #: Cap on how many `llm_call_logs` ROWS (not exploded calls) `stop_reason_taxonomy`
@@ -1205,3 +1208,58 @@ async def cost_per_interview(db: AsyncSession, run_id: uuid.UUID) -> list[Interv
         cost=unattributed["cost"], is_floor=unattributed["floor"],
     ))
     return results
+
+
+# ---------------------------------------------------------------------------
+# spend_by_system
+# ---------------------------------------------------------------------------
+
+#: ``llm_call_logs.phase`` of the calls a project makes outside its research: the lab's
+#: reply step to a posting, and a turn inside a project thread.
+PROJECT_CALL_PHASES = ("project_reply", "project_thread")
+
+
+async def spend_by_system(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Decimal]:
+    """The run's dollars per system, for the panel's Interviews and Projects cards.
+
+    ``projects``: the run's ``hub_project_calls`` ledger rows priced with
+    ``ledger_row_cost`` (a call that never finished counts its reserve), plus its
+    ``llm_call_logs`` rows with a project phase (``PROJECT_CALL_PHASES``) or a
+    ``thread_ts`` among the run's project threads (``hub_projects.reply_ts``, which
+    takes in a specialist consulted inside one). ``interviews``: every other call of
+    the run. An unpriced model counts zero.
+    """
+    ledger = (
+        await db.execute(
+            select(HubProjectCall.usage_by_model, HubProjectCall.model, HubProjectCall.step)
+            .join(HubProject, HubProject.id == HubProjectCall.project_id)
+            .where(HubProject.simulation_run_id == run_id)
+        )
+    ).all()
+    projects = sum(
+        (ledger_row_cost(usage, model, step) for usage, model, step in ledger), Decimal(0)
+    )
+
+    project_threads = select(HubProject.reply_ts).where(
+        HubProject.simulation_run_id == run_id, HubProject.reply_ts.is_not(None),
+    )
+    # CASE, not the bare OR: a NULL thread_ts makes ``IN`` NULL, and CASE reads NULL as false.
+    is_project = case(
+        (or_(LlmCallLog.phase.in_(PROJECT_CALL_PHASES),
+             LlmCallLog.thread_ts.in_(project_threads)), True),
+        else_=False,
+    ).label("is_project")
+    rows = (await db.execute(_token_sums_stmt(run_id, is_project))).all()
+    interviews = Decimal(0)
+    for project_call, model, _n, inp, out, cread, ccreate in rows:
+        cost = cost_for_tokens(
+            model, input_tokens=int(inp), output_tokens=int(out),
+            cache_read=int(cread), cache_creation=int(ccreate),
+        )
+        if cost is None:
+            continue
+        if project_call:
+            projects += cost
+        else:
+            interviews += cost
+    return {"interviews": interviews, "projects": projects}

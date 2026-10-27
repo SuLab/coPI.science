@@ -142,6 +142,11 @@ PROPOSAL_DRAIN_SETTLE_TICKS = 3
 #: docs/plans/2026-10-09-sim-drain-hang-rca-and-remediation.md.
 ABANDONED_OUTCOME = "abandoned"
 
+#: The ``thread_decisions.outcome`` of a thread an operator's "Stop now" ended (migration
+#: 0074): an interview or a project thread whose system was stopped by hand mid-run. Like
+#: ``abandoned`` it is neither a conclusion nor a ``timeout``.
+STOPPED_OUTCOME = "stopped"
+
 # Distinguishes "role has no cached rate yet" from "role's cached rate is None
 # (no override)". A plain dict.get() default cannot tell those apart, so the
 # cache would re-read role.toml from disk on every tick for every default role.
@@ -203,6 +208,6 @@ __all__ = [
     "PERSIST_UPSERT_CHUNK_ROWS", "PER_ROW_RECOVERY_DEADLINE_S", "POLL_ERROR_LOG_INTERVAL",
     "PRIOR_THREADS_KEPT_PER_PAIR", "PROFILES_DIR", "PROPOSAL_DRAIN_SETTLE_TICKS",
     "PUBLICATION_RECORDS_POLL_INTERVAL", "REBUILD_WINDOW_S", "ROSTER_POLL_INTERVAL", "RUN_STATS_UPDATE_INTERVAL",
-    "SEEDED_CHANNELS", "TRUNCATION_NOTICE", "_CALLS_PER_LOG_ROW", "_CHANNEL_KEYWORDS",
+    "SEEDED_CHANNELS", "STOPPED_OUTCOME", "TRUNCATION_NOTICE", "_CALLS_PER_LOG_ROW", "_CHANNEL_KEYWORDS",
     "_ROW_LEVEL_DB_ERRORS", "_UNIVERSAL_CHANNELS", "_UNSET",
 ]

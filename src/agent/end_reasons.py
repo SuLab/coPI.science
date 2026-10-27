@@ -1,17 +1,20 @@
 """Why a simulation run ended, and what that decides (spec P0-04; B15, B19, B24).
 
-- TODAY: the operator's default Stop (``operator``) and SIGTERM/SIGINT
-  (``signal``, including ``docker stop``) — the normal end of a production run
-  (C28). The shutdown sweep announces every owed headline, open interviews
-  included, exactly as before this vocabulary existed.
-- FINALIZE: a natural end (``time_limit``, ``target_drained``) — unreachable with
-  the production defaults. Same sweep, then ``simulation_runs.finalized_at`` is
-  set and a resume is refused.
+- TODAY: the operator's default Stop (``operator``, also a run whose last session
+  ended by hand), SIGTERM/SIGINT (``signal``, including ``docker stop``) — the
+  normal end of a production run (C28) — and ``failure_stop``, a run whose last
+  session was projects stopped by failures in a row (``src/agent/sessions.py``).
+  The shutdown sweep announces every owed headline, open interviews included,
+  exactly as before this vocabulary existed.
+- FINALIZE: a natural end: the last running session reached its runtime
+  (``time_limit``) or its count (``target_drained``). Same sweep, then
+  ``simulation_runs.finalized_at`` is set and a resume is refused.
 - HOLD: "Stop — hold open interviews" (``operator_hold``), a terminal stall
   (``stall``), an exception escaping the loop (``exception``), a ``start()``
-  failure (``start_failed``) and, from Phase 2, a lost engine lock
-  (``lock_lost``). Only ended interviews are announced; the rest wait for a
-  resume or a finalize, and ``simulation_runs.held_at`` is set.
+  failure (``start_failed``), a lost engine lock (``lock_lost``) and
+  ``held_over``: a resumed run whose interview hold no interviews session took up.
+  Only ended interviews are announced; the rest wait for a resume or a finalize,
+  and ``simulation_runs.held_at`` is set.
 
 A later reason can only RAISE the class (HOLD > FINALIZE > TODAY); within a
 class the first reason recorded stays.
@@ -24,6 +27,7 @@ HOLD = "HOLD"
 END_REASON_CLASS: dict[str, str] = {
     "operator": TODAY,
     "signal": TODAY,
+    "failure_stop": TODAY,
     "time_limit": FINALIZE,
     "target_drained": FINALIZE,
     "operator_hold": HOLD,
@@ -31,6 +35,7 @@ END_REASON_CLASS: dict[str, str] = {
     "exception": HOLD,
     "start_failed": HOLD,
     "lock_lost": HOLD,
+    "held_over": HOLD,
 }
 
 _RANK = {TODAY: 0, FINALIZE: 1, HOLD: 2}

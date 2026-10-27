@@ -67,6 +67,7 @@ REASON_LABELS = {
     "thread_abandoned": "The thread was abandoned",
     "close_unreadable": "BlackbirdBot's close could not be recorded",
     "run_finalized": "The run was finalized first",
+    "stopped": "Projects were stopped",
 }
 
 #: The list's outcome filter: ``""`` (the default) is ready and not agreed; ``paused``

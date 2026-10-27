@@ -36,10 +36,11 @@ ENGINE_SOURCES = [SIMULATION, *sorted((ROOT / "src/agent/engine").glob("*.py"))]
 THREADS = ROOT / "src/agent/engine/threads.py"
 
 # The outcomes live code paths produce. Not a wish-list: the interview outcomes
-# are driven for real by tests/integration/test_proposal_review.py, and
+# are driven for real by tests/integration/test_proposal_review.py,
 # "project_closed" (a project thread's close) by
-# tests/integration/test_project_threads.py.
-LIVE_OUTCOMES = {"timeout", "no_proposal", "abandoned", "project_closed"}
+# tests/integration/test_project_threads.py, and "stopped" (an operator's Stop now)
+# by tests/integration/test_engine_sessions.py.
+LIVE_OUTCOMES = {"timeout", "no_proposal", "abandoned", "project_closed", "stopped"}
 #: Module-level outcome constants `src/` may pass instead of a bare literal, and
 #: the literal each one holds. Resolved by `_outcome_arg` so this test keeps
 #: enumerating what `src/` can actually write; anything NOT in here is still
@@ -47,6 +48,7 @@ LIVE_OUTCOMES = {"timeout", "no_proposal", "abandoned", "project_closed"}
 NAMED_OUTCOMES = {
     "ABANDONED_OUTCOME": "abandoned",
     "THREAD_OUTCOME_PROJECT_CLOSED": "project_closed",
+    "STOPPED_OUTCOME": "stopped",
 }
 
 

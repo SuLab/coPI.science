@@ -305,7 +305,7 @@ def test_postflight_failure_prints_prod_restore_commands(run_script):
     assert len(dumps) == 1
     assert dumps[0].name in run.stderr
     assert "docker-compose.prod.yml" in run.stderr
-    assert "/admin/simulation" in run.stderr
+    assert "/workspace/simulation" in run.stderr
     assert "--profile agent stop -t 420 agent" in run.stderr
     assert "--exit-on-error" in run.stderr
     assert not _FOREIGN_CONTAINER.search(run.output)

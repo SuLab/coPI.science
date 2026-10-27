@@ -1,10 +1,15 @@
 """Agent simulation engine entry point.
 
 Usage:
-    python -m src.agent.main                        # resume, run until stopped
-    python -m src.agent.main --max-runtime 60       # resume, stop after 60 min
+    python -m src.agent.main                        # resume, interviews until stopped
+    python -m src.agent.main --max-runtime 60       # resume, interviews for 60 min
     python -m src.agent.main --fresh                 # start a NEW run (deletes nothing)
     python -m src.agent.main --fresh --max-runtime 60
+    python -m src.agent.main --fresh --systems interviews,projects --max-projects 5
+
+The emergency CLI path; production starts runs from /workspace/simulation through
+``src.agent.supervisor``. ``--systems`` names the systems the run starts with
+(``src/agent/sessions.py``); with none named it runs interviews only.
 """
 
 import asyncio
@@ -12,7 +17,8 @@ import logging
 import signal
 import sys
 import uuid
-from datetime import datetime, timezone
+from collections.abc import Mapping
+from datetime import UTC, datetime
 
 import typer
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -29,6 +35,7 @@ from src.agent.ids import WRITER_ENGINE_AUX, set_default_writer_id
 from src.agent.prompt_snapshot import PromptSnapshot
 from src.agent.prompt_snapshot import install as install_prompt_snapshot
 from src.agent.roles import role_problem
+from src.agent.sessions import INTERVIEWS, PROJECTS, SYSTEMS, Limits, Sessions
 from src.agent.simulation import SimulationEngine
 from src.config import get_settings
 from src.database import make_engine
@@ -54,7 +61,10 @@ class RunFinalized(RuntimeError):
 
 @app.command()
 def main(
-    max_runtime: int = typer.Option(0, "--max-runtime", help="Max runtime in minutes (0 = run until stopped)"),
+    max_runtime: int = typer.Option(
+        0, "--max-runtime",
+        help="Interviews: runtime in minutes, counted from the start (0 = no limit)",
+    ),
     budget: int = typer.Option(
         0, "--budget",
         help=(
@@ -79,15 +89,70 @@ def main(
     ),
     reset_cursors: bool = typer.Option(False, "--reset-cursors", help="Reset scan cursors so agents re-read all posts"),
     all_agents: bool = typer.Option(False, "--all-agents", help="Run every AgentRegistry row regardless of status (default is status='active' only)"),
-    max_proposals: int = typer.Option(0, "--max-proposals", help="Stop opening new pitches after this many top-level posts, then drain interviews (0 = no limit)"),
+    max_proposals: int = typer.Option(
+        0, "--max-proposals",
+        help=(
+            "Interviews: stop opening new pitches after this many top-level posts, "
+            "then wind down (0 = no limit)"
+        ),
+    ),
+    systems: str = typer.Option(
+        INTERVIEWS, "--systems",
+        help="Comma-separated systems to start: interviews, projects or both",
+    ),
+    max_projects: int = typer.Option(
+        0, "--max-projects",
+        help="Projects: wind down after this many finished projects (0 = no limit)",
+    ),
+    projects_runtime: int = typer.Option(
+        0, "--projects-runtime",
+        help="Projects: runtime in minutes, counted from the start (0 = no limit)",
+    ),
 ):
     """Run the turn-based agent simulation."""
+    chosen = _systems_from_cli(
+        systems, max_runtime=max_runtime, max_proposals=max_proposals,
+        max_projects=max_projects, projects_runtime=projects_runtime,
+    )
     # Claim this process's canonical-id writer slot before anything mints. The
     # engine's own minter owns WRITER_ENGINE; nothing in this process mints on
     # the module default since PI DM rows were removed, but it still takes the
     # aux slot rather than the web app's (R1).
     set_default_writer_id(WRITER_ENGINE_AUX)
-    asyncio.run(_run_simulation(max_runtime, budget, mock, no_db, fresh, reset_cursors, all_agents, max_proposals))
+    asyncio.run(_run_simulation(
+        max_runtime, budget, mock, no_db, fresh, reset_cursors, all_agents, max_proposals,
+        systems=chosen,
+    ))
+
+
+def _systems_from_cli(
+    names: str, *, max_runtime: int, max_proposals: int, max_projects: int,
+    projects_runtime: int,
+) -> dict[str, Limits]:
+    """``--systems`` and the four limit options as ``{system: Limits}``. An unknown or
+    missing system name is a usage error (``typer.BadParameter``)."""
+    chosen = [name.strip() for name in names.split(",") if name.strip()]
+    unknown = [name for name in chosen if name not in SYSTEMS]
+    if unknown or not chosen:
+        raise typer.BadParameter(
+            f"expected a comma-separated subset of {', '.join(SYSTEMS)}; got {names!r}",
+            param_hint="--systems",
+        )
+    limits = {
+        INTERVIEWS: Limits(count=max(0, max_proposals), runtime_minutes=max(0, max_runtime)),
+        PROJECTS: Limits(count=max(0, max_projects), runtime_minutes=max(0, projects_runtime)),
+    }
+    return {name: limits[name] for name in chosen}
+
+
+def _planned_duration(systems: Mapping[str, Limits]) -> int:
+    """The run's planned duration in minutes: 0 (until stopped) when any started system has
+    no runtime, else the longest runtime. Stored as ``config["max_runtime"]`` and passed to the
+    engine as ``max_runtime_minutes``, which the run-start announcement reads."""
+    runtimes = [limits.runtime_minutes for limits in systems.values()]
+    if not runtimes or 0 in runtimes:
+        return 0
+    return max(runtimes)
 
 
 def _log_api_call_units() -> None:
@@ -153,15 +218,17 @@ async def _open_fresh_run(session_factory, config: dict) -> uuid.UUID:
         return run.id
 
 
-def _reopen_run_for_resume(run, max_proposals: int) -> int:
-    """Reopen ``run`` (the latest `SimulationRun`) for a resume and return the
-    ``max_proposals`` the resumed engine enforces.
+def _reopen_run_for_resume(run, *, starts_interviews: bool) -> bool:
+    """Reopen ``run`` (the latest `SimulationRun`) for a resume and return whether
+    its interview hold is carried: the run was held and this start does not
+    start interviews (spec §4.9).
 
-    Raises `RunFinalized` for a finalized run. Clears ``held_at``: a resume hands
-    a held run's open interviews back to the engine. Everything else is the
-    resume bookkeeping as it always was: the mixed-rubric warning,
-    ``status``/``ended_at``, and ``max_proposals`` inherited from the stored
-    config and restamped into it.
+    Raises `RunFinalized` for a finalized run. Logs the mixed-rubric warning and
+    sets ``status``/``ended_at`` as a resume always has. ``held_at`` is cleared
+    only when interviews start, which hands the held interviews back to the
+    engine; otherwise it stays set, its headlines keep waiting, and the engine's
+    ``Sessions`` carries the hold until an interviews start takes it up. Limits
+    are not inherited from the stored config: each start sets its own.
     """
     if run.finalized_at is not None:
         raise RunFinalized(
@@ -180,23 +247,12 @@ def _reopen_run_for_resume(run, max_proposals: int) -> int:
             RUBRIC_VERSION,
             RUBRIC_CONTENT_HASH,
         )
+    hold_carried = run.held_at is not None and not starts_interviews
     run.status = "running"
     run.ended_at = None
-    run.held_at = None
-    if max_proposals == 0:
-        inherited_max_proposals = int((run.config or {}).get("max_proposals", 0))
-        if inherited_max_proposals:
-            logger.info(
-                "Resume did not pass --max-proposals; inheriting %d from run %s's stored config",
-                inherited_max_proposals,
-                run.id,
-            )
-        max_proposals = inherited_max_proposals
-    # Restamp so the persisted config matches what will actually be enforced
-    # (the Live tab reads this column) — reassign rather than mutate in place so
-    # SQLAlchemy's JSON change-tracking picks it up.
-    run.config = {**(run.config or {}), "max_proposals": max_proposals}
-    return max_proposals
+    if starts_interviews:
+        run.held_at = None
+    return hold_carried
 
 
 class _EarlySignal:
@@ -233,6 +289,18 @@ def _supervisor_shutdown_requested() -> bool:
     return bool(getattr(supervisor, "_shutdown", False))
 
 
+def _starting_detail(fresh: bool, systems: Mapping[str, Limits]) -> dict:
+    """The heartbeat detail of a run that is starting: each chosen system in state
+    ``starting`` with its limits, until the engine's first tick reports its sessions."""
+    return {
+        "fresh": fresh,
+        "systems": {
+            name: {"state": "starting", "limits": limits.as_dict()}
+            for name, limits in systems.items()
+        },
+    }
+
+
 async def _run_simulation(
     max_runtime: int,
     budget: int,
@@ -242,8 +310,16 @@ async def _run_simulation(
     reset_cursors: bool = False,
     all_agents: bool = False,
     max_proposals: int = 0,
+    *,
+    systems: Mapping[str, Limits] | None = None,
 ) -> None:
     """Run one simulation under the engine lock (spec §8.3, B4).
+
+    ``systems`` maps each system the run starts with to its limits
+    (``src/agent/sessions.py``). None is interviews only, with ``max_proposals``
+    and ``max_runtime`` as its limits (the shape before the two systems were
+    separable); an empty mapping, or an unknown system, raises ``ValueError``
+    before anything else runs.
 
     Order (SA4-17): engine-start setting checks (synchronous), then the signal
     handlers (synchronous, AG-3), then — as the FIRST await — the engine lock on
@@ -260,6 +336,14 @@ async def _run_simulation(
     heartbeat stop, its engine's dispose and the lock release each run even
     when an earlier one raises.
     """
+    if systems is None:
+        systems = {INTERVIEWS: Limits(count=max_proposals, runtime_minutes=max_runtime)}
+    systems = dict(systems)
+    if not systems:
+        raise ValueError("no system to start")
+    unknown = sorted(set(systems) - set(SYSTEMS))
+    if unknown:
+        raise ValueError(f"unknown system(s) {unknown}; expected a subset of {SYSTEMS}")
     settings = get_settings()
     validate_engine_settings(settings)
     early = _EarlySignal()
@@ -293,13 +377,11 @@ async def _run_simulation(
                 lock=lock, run_state=run_state,
                 session_factory=async_sessionmaker(hb_engine, expire_on_commit=False),
             )
-            heartbeat.tick_detail = {
-                "fresh": fresh, "max_runtime": max_runtime, "max_proposals": max_proposals,
-            }
+            heartbeat.tick_detail = _starting_detail(fresh, systems)
             heartbeat.start()
         await _run_simulation_locked(
             max_runtime, budget, mock, no_db, fresh, reset_cursors, all_agents, max_proposals,
-            run_state=run_state, heartbeat=heartbeat,
+            systems=systems, run_state=run_state, heartbeat=heartbeat,
         )
     finally:
         try:
@@ -329,6 +411,7 @@ async def _load_roster(all_agents: bool, no_db: bool) -> tuple[list[Agent], dict
     """
     from sqlalchemy import select as _select
     from sqlalchemy.ext.asyncio import async_sessionmaker as _asm
+
     from src.models import AgentRegistry as _AR
 
     roster_tokens: dict[str, str | None] = {}
@@ -459,33 +542,41 @@ async def _open_or_resume_run(
     snapshot: PromptSnapshot,
     heartbeat: EngineHeartbeat | None,
     *,
-    max_runtime: int,
     budget: int,
     mock: bool,
     fresh: bool,
-    max_proposals: int,
+    systems: Mapping[str, Limits],
 ):
     """Build the DB session factory and open (fresh) or reopen (resume) the run row.
 
-    Returns ``(session_factory, simulation_run_id, max_proposals)``; a resume
-    inherits ``max_proposals`` from the run's stored config.
+    Returns ``(session_factory, simulation_run_id, hold_carried, prior_records)``.
+    A new run's config records ``max_runtime`` (the planned duration,
+    `_planned_duration`), ``max_proposals`` (the interviews count, or 0) and each
+    started system's limits. A resume leaves the stored config as it was and
+    returns the run's earlier session records (``config["sessions"]``) and
+    whether its interview hold is carried (`_reopen_run_for_resume`).
     """
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
     from src.models import SimulationRun
     engine = make_engine("agent")
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
+    interviews = systems.get(INTERVIEWS)
     run_config = {
-        "max_runtime": max_runtime,
+        "max_runtime": _planned_duration(systems),
         "budget_cap": budget,
         "mock": mock,
         "agent_count": len(agents),
         "active_thread_threshold": settings.active_thread_threshold,
         "max_thread_messages": settings.max_thread_messages,
-        "max_proposals": max_proposals,
+        "max_proposals": interviews.count if interviews is not None else 0,
+        "systems": {name: limits.as_dict() for name, limits in systems.items()},
         "prompt_stamps": snapshot.stamps_json(),
     }
+    hold_carried = False
+    prior_records: list = []
 
     if fresh:
         simulation_run_id = await _open_fresh_run(session_factory, run_config)
@@ -501,7 +592,10 @@ async def _open_or_resume_run(
 
             if existing_run:
                 simulation_run_id = existing_run.id
-                max_proposals = _reopen_run_for_resume(existing_run, max_proposals)
+                hold_carried = _reopen_run_for_resume(
+                    existing_run, starts_interviews=INTERVIEWS in systems,
+                )
+                prior_records = list((existing_run.config or {}).get("sessions") or [])
                 await db.commit()
                 logger.info("Resuming simulation run %s", simulation_run_id)
             else:
@@ -513,7 +607,20 @@ async def _open_or_resume_run(
                 logger.info("Created new simulation run %s", simulation_run_id)
     if heartbeat is not None:
         heartbeat.set_run_id(simulation_run_id)
-    return session_factory, simulation_run_id, max_proposals
+    return session_factory, simulation_run_id, hold_carried, prior_records
+
+
+def _runtime_label(systems: Mapping[str, Limits]) -> str:
+    """Each started system's limits for the start line, e.g.
+    ``interviews: 240m, 20 proposals; projects: indefinite, 5 finished projects``."""
+    parts = []
+    for name, limits in systems.items():
+        label = f"{limits.runtime_minutes}m" if limits.runtime_minutes > 0 else "indefinite"
+        if limits.count > 0:
+            unit = "finished projects" if name == PROJECTS else "proposals"
+            label += f", {limits.count} {unit}"
+        parts.append(f"{name}: {label}")
+    return "; ".join(parts)
 
 
 def _log_start_banner(agents: list[Agent], runtime_label: str, budget: int, fresh: bool) -> None:
@@ -530,7 +637,7 @@ def _log_start_banner(agents: list[Agent], runtime_label: str, budget: int, fres
             budget,
         )
     logger.info(
-        "Starting simulation: %d agents, %s max runtime, %d budget/agent%s",
+        "Starting simulation: %d agents, %s, %d budget/agent%s",
         len(agents), runtime_label, budget,
         " (fresh start)" if fresh else " (resuming)",
     )
@@ -567,6 +674,7 @@ async def _finalize_run(sim_engine, agents: list[Agent], session_factory, simula
     if session_factory and simulation_run_id:
         async with session_factory() as db:
             from sqlalchemy import select
+
             from src.models import SimulationRun
             result = await db.execute(
                 select(SimulationRun).where(SimulationRun.id == simulation_run_id)
@@ -574,7 +682,7 @@ async def _finalize_run(sim_engine, agents: list[Agent], session_factory, simula
             run = result.scalar_one_or_none()
             if run:
                 run.status = "stopped"
-                run.ended_at = datetime.now(timezone.utc)
+                run.ended_at = datetime.now(UTC)
                 # Totals are written by stop()'s final flush
                 # (COUNT(agent_messages) and the live api_call_count sum);
                 # overwriting them here from process-local counters
@@ -602,9 +710,14 @@ async def _run_simulation_locked(
     all_agents: bool = False,
     max_proposals: int = 0,
     *,
+    systems: Mapping[str, Limits],
     run_state: RunState,
     heartbeat: EngineHeartbeat | None,
 ) -> None:
+    """Load the roster and prompts, open or resume the run, and run the engine with a
+    ``Sessions`` that starts every system in ``systems`` (``initial=True``, one ``now``).
+    ``max_runtime`` and ``max_proposals`` are already folded into ``systems`` by
+    `_run_simulation`."""
     settings = get_settings()
 
     agents, roster_tokens = await _load_roster(all_agents, no_db)
@@ -627,22 +740,28 @@ async def _run_simulation_locked(
     # Set up database session factory
     session_factory = None
     simulation_run_id = None
+    # --no-db: no earlier sessions to keep and no hold to carry.
+    hold_carried = False
+    prior_records: list = []
 
     if not no_db:
-        session_factory, simulation_run_id, max_proposals = await _open_or_resume_run(
+        (session_factory, simulation_run_id,
+         hold_carried, prior_records) = await _open_or_resume_run(
             settings, agents, snapshot, heartbeat,
-            max_runtime=max_runtime, budget=budget, mock=mock, fresh=fresh,
-            max_proposals=max_proposals,
+            budget=budget, mock=mock, fresh=fresh, systems=systems,
         )
 
+    sessions = Sessions(prior_records=prior_records, hold_carried=hold_carried)
+    now = datetime.now(UTC)
+    for name, limits in systems.items():
+        sessions.start(name, limits, now, initial=True)
+
     # Create simulation engine
-    runtime_label = f"{max_runtime}m" if max_runtime > 0 else "indefinite"
-    if max_proposals > 0:
-        runtime_label += f", {max_proposals} proposals"
+    runtime_label = _runtime_label(systems)
     sim_engine = SimulationEngine(
         agents=agents,
         slack_clients=slack_clients,
-        max_runtime_minutes=max_runtime,
+        max_runtime_minutes=_planned_duration(systems),
         budget_cap=budget,
         session_factory=session_factory,
         simulation_run_id=simulation_run_id,
@@ -654,7 +773,7 @@ async def _run_simulation_locked(
         # conversations straight back off the transport and attribute them to
         # this run — see SimulationEngine._restore_slack_state.
         fresh_start=fresh,
-        max_proposals=max_proposals,
+        sessions=sessions,
         run_state=run_state,
         heartbeat=heartbeat,
         prompt_snapshot=snapshot,

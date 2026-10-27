@@ -2,9 +2,10 @@
 
 Four tables back the projects prototype (docs/specs/2026-10-22-idea-pitching-prototype-design.md):
 
-- ``hub_projects``: one row per project. The engine requests one for each live lab once per
-  ``PROJECT_INTERVAL_HOURS`` of run time (``uq_hub_projects_run_agent_slot``: one row per run,
-  lab and slot, so a restart cannot request twice), the worker researches it and stores the
+- ``hub_projects``: one row per project. While a Projects session runs, the engine requests
+  one for a live lab when its last one finished, labs taking turns
+  (``uq_hub_projects_run_agent_slot``: one row per run, lab and slot, so a restart cannot
+  request twice), the worker researches it and stores the
   choice and the posting text, the engine posts it and offers the lab its reply, and the close
   of the project thread records the outcome. Every status change is a compare-and-set
   (``UPDATE … WHERE status = <expected>``), so the engine and the worker never overwrite each
@@ -72,6 +73,8 @@ REASON_REPLY_FAILED = "reply_failed"
 REASON_THREAD_TIMEOUT = "thread_timeout"
 REASON_THREAD_ABANDONED = "thread_abandoned"
 REASON_CLOSE_UNREADABLE = "close_unreadable"
+#: An admin stopped projects ("Stop now") while the project was open (independent controls).
+REASON_STOPPED = "stopped"
 REASONS = (
     REASON_NO_IDEA,
     REASON_RESEARCH_FAILED,
@@ -82,6 +85,7 @@ REASONS = (
     REASON_THREAD_TIMEOUT,
     REASON_THREAD_ABANDONED,
     REASON_CLOSE_UNREADABLE,
+    REASON_STOPPED,
 )
 
 #: ``hub_project_calls.status`` values.

@@ -84,7 +84,7 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
   then migrate from a one-off container off the NEW image
   (`./scripts/migrate/run_migration.sh`; rehearse without `--apply` first), then
   `$DC up -d blackbird-app worker`, and last `$DC up -d agent`, ONLY when
-  `/admin/simulation` shows no live run: recreating the supervisor ends a live run.
+  `/workspace/simulation` shows no live run: recreating the supervisor ends a live run.
   Never `up -d --build`, and never `exec` alembic into the old container, which cannot
   see a new revision.
 - Commit before building. The builder stage's `git clean -ffdx` drops untracked files
@@ -95,13 +95,13 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
   rebuilt, and the startup banner confirms which code is running.
 - The engine loads the prompt set, the specialist personas, each `role.toml` and the
   rubric ONCE per start (`src/agent/prompt_snapshot.py`). An edit under `prompts/` does
-  not reach a running agent: `/admin/simulation` shows "Prompt set changed on disk —
+  not reach a running agent: `/workspace/simulation` shows "Prompt set changed on disk —
   restart to apply", and the edit applies at the next start (a restart needs no live
   run, but start FRESH after a version bump). The web app still reads prompts per
   request.
 - `.env` changes need a container recreate, not a restart, of every service that reads
   it: `$DC up -d --force-recreate blackbird-app worker`, and `agent` only with no live run.
-- `0056` (head is `0073` since the projects prototype): run `scripts/migrate/remediate_0056.py --jobs --provisions --publications --emails`
+- `0056` (head is `0074` since the independent simulation controls): run `scripts/migrate/remediate_0056.py --jobs --provisions --publications --emails`
   as a dry run first, and apply the publications dedupe only with the owner's go-ahead
   (the "Deploy order for `0056`" box in `docs/operations/migration-deploy-notes.md`).
 - A migration that alters `jobs` (`0053`) needs the worker idle (no `processing` row) or
@@ -112,18 +112,26 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
 
 ## The simulation
 
-- Never start a run as part of a deploy. Runs start only from `/admin/simulation`. The
-  `agent` service runs `src.agent.supervisor`, which marks any pending start stale on
-  boot and comes back idle. A one-off `$DC --profile agent run --name blackbird-agent-run …`
+- Never start a run as part of a deploy. Runs start only from `/workspace/simulation`
+  (Workspace → Simulation, admins only for now; `/admin/simulation` redirects there). The
+  `agent` service runs `src.agent.supervisor`, which marks any pending start or `system`
+  command stale on boot and comes back idle. A one-off `$DC --profile agent run --name blackbird-agent-run …`
   is the emergency CLI path only.
-- Stop gracefully: the admin page's Stop, or `docker stop -t 420 copi-blackbird-agent-1`
+- A run holds interviews, projects or both, and each starts and stops separately from
+  `/workspace/simulation`, with its own count and runtime limit ("Start both" only when nothing
+  is live). A start, Wind down or Stop now for one system while a run is live is a `system`
+  command the live engine claims; the supervisor finishes one stale when no engine is alive
+  and never starts an engine for it. A limit or Wind down lets work under way finish; Stop
+  now ends that system's open interviews (with their headlines) or projects at once.
+- Stop gracefully: the panel's Stop everything, or `docker stop -t 420 copi-blackbird-agent-1`
   (an emergency CLI run lives in `blackbird-agent-run` instead). Never `docker rm -f`,
-  which skips the shutdown flush. Save logs after the stop. Stop and SIGTERM announce
-  every owed headline, open interviews included (capped at 25); "Stop — hold open
+  which skips the shutdown flush. Save logs after the stop. Stop everything and SIGTERM announce
+  every owed headline, open interviews included (capped at 25); "Stop everything, hold open
   interviews" announces only ended interviews and marks the run held. A stall, an escaped
-  exception or a failed start also holds. A natural end (max runtime, a drained
-  `--max-proposals`) announces everything and FINALIZES the run, which can never be
-  resumed. Detail: `docs/operations/host-and-simulation.md`.
+  exception or a failed start also holds. A natural end (the last running system reaching
+  its count or runtime limit) announces everything and FINALIZES the run, which can never be
+  resumed, unless the run carried an interview hold that no Interviews start took up: it
+  then ends held (`held_over`). Detail: `docs/operations/host-and-simulation.md`.
 - One engine at a time: the engine holds a Postgres advisory lock on a dedicated
   connection (`src/services/advisory_locks.py`). A second engine, CLI or supervisor,
   raises `EngineAlreadyRunning` before writing anything. The panel's liveness comes from
@@ -134,8 +142,9 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
   resumed and the Start form forces Fresh. The supervisor runs it under the engine lock
   when no engine is alive.
 - A resume (the CLI default, or the Start form with its default-checked "Fresh run" box
-  cleared) restores from the database only (nothing is re-read from Slack), clears a held
-  run's hold, and has the hub interview lab pitches the stop left unanswered. It
+  cleared) restores from the database only (nothing is re-read from Slack), runs only the
+  systems started, and clears a held run's hold only when Interviews starts (then the hub
+  interviews lab pitches the stop left unanswered). It
   announces, at shutdown, every verdict of that run whose `summary_posted_at` is NULL, and
   a Slack headline cannot be retracted. Before resuming a run with rows written before
   migration `0041`, stamp or repair them with `scripts/backfill_assessment_headlines.py`

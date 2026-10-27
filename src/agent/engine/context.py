@@ -1,7 +1,8 @@
 """Shared state, run state and wiring primitives for the engine units.
 
-``EngineContext`` is what every unit may read. ``RunState`` is whether the run is
-going and why it is ending. ``via`` lets a unit keep a moved method body verbatim
+``EngineContext`` is what every unit may read, including ``sessions``: which
+systems (interviews, projects) the run is running (``src.agent.sessions``).
+``RunState`` is whether the run is going and why it is ending. ``via`` lets a unit keep a moved method body verbatim
 while the attribute it names lives on another unit. The Protocol and callable
 types are the five upward calls that become ports instead of a unit reaching back
 into the unit above it.
@@ -17,13 +18,15 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
 from src.agent.claim_check import RejectionFeedback
 from src.agent.end_reasons import stronger_reason
+from src.agent.engine import deps
 from src.agent.locks import LockRegistry
 from src.agent.message_log import MessageLog
+from src.agent.sessions import Sessions
 
 if TYPE_CHECKING:
     from src.agent.agent import Agent
@@ -111,6 +114,10 @@ class EngineContext:
     ``channel_id_resolver`` answers a channel's Slack id by name (``None`` when
     unknown); the orchestrator points it at the channel directory so
     ``Persistence`` never reads the directory's map itself.
+
+    ``sessions`` is the run's ``Sessions``: every lane asks it before acting. Without
+    one, the context runs interviews only, with no limits (a bare context behaves as
+    before the two systems were separable: interviews on, projects off).
     """
 
     def __init__(
@@ -122,6 +129,7 @@ class EngineContext:
         session_factory: Any,
         simulation_run_id: uuid.UUID | None,
         slack_enabled: bool,
+        sessions: Sessions | None = None,
     ) -> None:
         self.agents = agents
         self.slack_clients = slack_clients
@@ -165,6 +173,10 @@ class EngineContext:
         # read into that agent's next phase-4/phase-5 prompt (src/agent/claim_check.py).
         # Written only by an enforce-mode block; in memory and LRU-capped.
         self.claim_feedback = RejectionFeedback()
+        self.sessions = (
+            sessions if sessions is not None
+            else Sessions.legacy(count=0, runtime_minutes=0, now=deps.datetime.now(UTC))
+        )
 
 
 class RunState:

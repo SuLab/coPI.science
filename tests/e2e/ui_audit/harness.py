@@ -31,7 +31,7 @@ def expected_http_error(url, status, method, role, base_url, ids):
         return False
     if role == 'pending':
         return path not in {'/', '/login', '/access-pending'}
-    if path.startswith('/admin/'):
+    if path.startswith(('/admin/', '/workspace/simulation')):
         return role != 'admin'
     if path.startswith(('/workspace/pis', '/workspace/assessments', '/assessment-chat/')):
         return role not in {'admin', 'manager', 'reviewer'}

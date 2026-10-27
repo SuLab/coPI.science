@@ -1,6 +1,7 @@
 """Project research end to end (src/services/project_research.py): one model call per slot,
-the stored research state, the ledger and its ceiling, the choice and the posting, and the
-dry-run script (scripts/projects_dry_run.py)."""
+the stored research state, the ledger (no dollar ceiling), the gate on the live run's
+Projects session, the choice and the posting, and the dry-run script
+(scripts/projects_dry_run.py)."""
 
 import json
 import uuid
@@ -18,7 +19,7 @@ from sqlalchemy import func, select, update
 from scripts import projects_dry_run as dry
 from src.agent.role_capabilities import hub_role_names
 from src.config import get_settings
-from src.models import AssessmentReview
+from src.models import AssessmentReview, SimulationProcessStatus
 from src.models.hub_project import HubProject, HubProjectCall, HubProjectClock
 from src.services import llm, profile_export, project_search
 from src.services import project_research as pr
@@ -89,16 +90,33 @@ def switches(monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "project_research_enabled", True)
     monkeypatch.setattr(settings, "llm_project_research_model", MODEL)
-    monkeypatch.setattr(settings, "project_research_daily_usd_limit", 25.0)
     monkeypatch.setattr(settings, "project_research_max_tool_rounds", 8)
     pr._WARNED.clear()
     return settings
 
 
+async def _heartbeat(db, run_id, *, detail, state="running"):
+    """The engine's status row (id 1), fresh, naming ``run_id`` with ``detail``."""
+    row = await db.get(SimulationProcessStatus, 1)
+    if row is None:
+        row = SimulationProcessStatus(id=1)
+        db.add(row)
+    row.state = state
+    row.simulation_run_id = run_id
+    row.detail = detail
+    row.updated_at = datetime.now(UTC)
+    await db.flush()
+
+
+def _projects(state):
+    return {"systems": {"projects": {"system": "projects", "state": state}}}
+
+
 @pytest.fixture
 async def world(db_session, monkeypatch, tmp_path):
     """A lab with a public persona and a private profile, a hub and another lab, a live run
-    with a clock at 7,200 s, and one ``requested`` project for the lab."""
+    whose Projects session is running (a fresh heartbeat) with a clock at 7,200 s, and one
+    ``requested`` project for the lab."""
     n = uuid.uuid4().hex[:8]
     lab_id, hub_id, other_id = f"gray{n}", f"hub{n}", f"wilson{n}"
     personas = tmp_path / "personas"
@@ -126,11 +144,7 @@ async def world(db_session, monkeypatch, tmp_path):
     )
     db_session.add(project)
     await db_session.flush()
-
-    async def live(db, **kw):
-        return run.id
-
-    monkeypatch.setattr(pr, "live_run_id", live)
+    await _heartbeat(db_session, run.id, detail=_projects("running"))
     return SimpleNamespace(lab_id=lab_id, hub_id=hub_id, run=run, project_id=project.id)
 
 
@@ -483,7 +497,9 @@ async def test_pubmed_unavailable_waits_without_counting(db_session, factory, wo
 # ---------------------------------------------------------------------------
 
 
-async def test_ceiling_stops_new_calls(db_session, factory, world, install, tools):
+async def test_research_runs_past_25_dollars_of_spend_in_24_hours(
+    db_session, factory, world, install, tools
+):
     db_session.add(HubProjectCall(
         project_id=world.project_id, step="research:clinical", model=MODEL, status="done",
         usage_by_model=[{"model": MODEL, "billed": True, "input_tokens": 50_000_000,
@@ -491,12 +507,15 @@ async def test_ceiling_stops_new_calls(db_session, factory, world, install, tool
                          "cache_creation_input_tokens": 0}],
     ))
     await db_session.flush()
-    assert await pr.spend_24h(db_session) >= Decimal("25")
-    fake = install()
+    spent = pr.ledger_row_cost(
+        (await _calls(db_session, world.project_id))[0].usage_by_model, MODEL, "research:clinical"
+    )
+    assert spent >= Decimal("25")
+    fake = install(_tool_reply("search_pubmed"))
 
-    assert await pr.research_projects(factory) is False
-    assert fake.calls == []
-    assert (await _project(db_session, world.project_id)).status == "requested"
+    assert await pr.research_projects(factory) is True
+    assert len(fake.calls) == 1
+    assert (await _project(db_session, world.project_id)).status == "researching"
 
 
 async def test_a_claimed_call_that_never_finished_counts_and_the_step_reruns(
@@ -514,7 +533,6 @@ async def test_a_claimed_call_that_never_finished_counts_and_the_step_reruns(
         status="in_progress", usage_by_model=[_in_flight_entry(MODEL, 20_000)],
     ))
     await db_session.flush()
-    assert await pr.spend_24h(db_session) == pr._call_reserve(MODEL, "research:clinical", 20_000)
 
     fake = install(_tool_reply("search_pubmed"))
     assert await pr.research_projects(factory) is True
@@ -528,24 +546,44 @@ async def test_a_claimed_call_that_never_finished_counts_and_the_step_reruns(
 
 
 async def test_only_the_live_runs_projects_are_researched(
-    db_session, factory, world, install, tools, monkeypatch
+    db_session, factory, world, install, tools
 ):
     other = await factories.make_simulation_run(db_session)
-
-    async def live(db, **kw):
-        return other.id
-
-    monkeypatch.setattr(pr, "live_run_id", live)
+    await _heartbeat(db_session, other.id, detail=_projects("running"))
     fake = install(_tool_reply("search_pubmed"))
     assert await pr.research_projects(factory) is False
 
-    async def none(db, **kw):
-        return None
-
-    monkeypatch.setattr(pr, "live_run_id", none)
+    await _heartbeat(db_session, world.run.id, detail=_projects("running"), state="idle")
     assert await pr.research_projects(factory) is False
     assert fake.calls == []
     assert (await _project(db_session, world.project_id)).status == "requested"
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [None, {}, {"systems": {}}, {"systems": {"interviews": {"state": "running"}}},
+     _projects("ended"), _projects("starting")],
+)
+async def test_nothing_is_claimed_while_the_live_runs_projects_are_not_running(
+    db_session, factory, world, install, tools, detail
+):
+    await _heartbeat(db_session, world.run.id, detail=detail)
+    fake = install(_tool_reply("search_pubmed"))
+
+    assert await pr.research_projects(factory) is False
+    assert fake.calls == []
+    assert await _calls(db_session, world.project_id) == []
+    assert (await _project(db_session, world.project_id)).status == "requested"
+
+
+async def test_a_winding_down_projects_session_still_researches(
+    db_session, factory, world, install, tools
+):
+    await _heartbeat(db_session, world.run.id, detail=_projects("winding_down"))
+    fake = install(_tool_reply("search_pubmed"))
+
+    assert await pr.research_projects(factory) is True
+    assert len(fake.calls) == 1
 
 
 async def test_a_project_the_engine_ended_is_not_overwritten(

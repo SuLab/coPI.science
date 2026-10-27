@@ -1,4 +1,5 @@
-"""T7 — /admin/simulation: the control-plane page (routes + refusal semantics).
+"""T7 — the control-plane page, /workspace/simulation, and its /admin/simulation/* writes
+(routes + refusal semantics).
 
 Covers the brief's test list (a)-(f):
   (a) not-deployed / unresponsive rendering from panel_state,
@@ -26,6 +27,15 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
+from src.agent.sessions import (
+    ENDED,
+    INTERVIEWS,
+    PROJECTS,
+    STOP_NOW,
+    WINDING_DOWN,
+    Limits,
+    Session,
+)
 from src.config import get_settings
 from src.models import (
     USER_ROLE_ADMIN,
@@ -36,10 +46,12 @@ from src.models import (
     OpportunityAssessment,
     SimulationCommand,
     SimulationProcessStatus,
+    SimulationRun,
     ThreadDecision,
 )
 from src.services import simulation_view
 from tests import factories
+from tests.flash_support import session_flashes
 from tests.integration.test_manager_access import auth_headers
 
 pytestmark = pytest.mark.integration
@@ -57,13 +69,13 @@ async def _admin(db_session, email):
 async def test_get_renders_not_deployed_with_no_status_row(client, db_session):
     admin = await _admin(db_session, "sim-admin-a1@example.org")
 
-    resp = await client.get("/admin/simulation", headers=auth_headers(admin.id))
+    resp = await client.get("/workspace/simulation", headers=auth_headers(admin.id))
 
     assert resp.status_code == 200
     assert "not deployed" in resp.text.lower()
-    # Nav tab is wired and marked active on this page.
-    assert '/admin/simulation' in resp.text
-    assert "text-indigo-600 font-semibold" in resp.text
+    # The workspace nav's Simulation tab is wired and marked active on this page.
+    assert '<a href="/workspace/simulation" class="text-indigo-600 font-semibold">Simulation</a>' in resp.text
+    assert "<title>Workspace — Simulation — Blackbird</title>" in resp.text
 
 
 def _engine_alive(monkeypatch, value=True):
@@ -87,7 +99,7 @@ async def test_get_renders_unresponsive_when_the_heartbeat_is_ten_minutes_old(
     db_session.add(SimulationProcessStatus(id=1, state="running", updated_at=old))
     await db_session.commit()
 
-    resp = await client.get("/admin/simulation", headers=auth_headers(admin.id))
+    resp = await client.get("/workspace/simulation", headers=auth_headers(admin.id))
 
     assert resp.status_code == 200
     assert "Unresponsive" in resp.text
@@ -113,11 +125,13 @@ async def test_post_start_creates_pending_command_with_payload_and_audit_row(
     cmd = (await db_session.execute(select(SimulationCommand))).scalar_one()
     assert cmd.command == "start"
     assert cmd.status == "pending"
-    assert cmd.payload == {"fresh": True, "max_runtime": 30, "max_proposals": 4}
+    assert cmd.payload == {
+        "fresh": True, "systems": {"interviews": {"count": 4, "runtime_minutes": 30}},
+    }
     assert cmd.requested_by_user_id == admin.id
 
     audit = (await db_session.execute(select(AdminAuditEvent))).scalar_one()
-    assert "start" in audit.action
+    assert audit.action == "simulation_start_requested"
 
     # Second POST while the first is still pending is refused; no 2nd row.
     resp2 = await client.post(
@@ -183,7 +197,7 @@ async def test_announce_settings_roundtrip(client, db_session):
     ).scalar_one()
     assert row.value == "general,drug-repurposing"
 
-    html = (await client.get("/admin/simulation", headers=auth_headers(admin.id))).text
+    html = (await client.get("/workspace/simulation", headers=auth_headers(admin.id))).text
     assert "general,drug-repurposing" in html
 
     # Disable: an explicit `disable` checkbox writes the override as "" —
@@ -204,7 +218,7 @@ async def test_announce_settings_roundtrip(client, db_session):
     await db_session.refresh(row)
     assert row.value == ""
 
-    html_disabled = (await client.get("/admin/simulation", headers=auth_headers(admin.id))).text
+    html_disabled = (await client.get("/workspace/simulation", headers=auth_headers(admin.id))).text
     assert "Override: disabled" in html_disabled
 
     # Clear: an empty field with "disable" unchecked deletes the override
@@ -222,7 +236,7 @@ async def test_announce_settings_roundtrip(client, db_session):
     ).scalar_one_or_none()
     assert row2 is None
 
-    html_default = (await client.get("/admin/simulation", headers=auth_headers(admin.id))).text
+    html_default = (await client.get("/workspace/simulation", headers=auth_headers(admin.id))).text
     assert "No override" in html_default
     assert get_settings().run_start_announce_channels in html_default
 
@@ -320,6 +334,7 @@ async def test_non_admin_manager_is_refused_on_every_route(client, db_session):
     )
     headers = auth_headers(manager.id)
 
+    assert (await client.get("/workspace/simulation", headers=headers)).status_code == 403
     assert (await client.get("/admin/simulation", headers=headers)).status_code == 403
     assert (
         await client.post(
@@ -343,9 +358,58 @@ async def test_non_admin_manager_is_refused_on_every_route(client, db_session):
     ).status_code == 403
 
 
+@pytest.mark.parametrize("role,as_role,expected", [
+    (None, None, 302), ("pi", None, 403), ("reviewer", None, 403), ("manager", None, 403),
+    ("admin", None, 200), ("admin", "admin", 200), ("admin", "manager", 403),
+    ("admin", "reviewer", 403), ("admin", "pi", 403),
+], ids=["anonymous", "pi", "reviewer", "manager", "admin", "admin-as-admin",
+        "admin-as-manager", "admin-as-reviewer", "admin-as-pi"])
+async def test_the_workspace_page_is_admin_only_by_effective_role(
+    client, db_session, role, as_role, expected,
+):
+    """/workspace/simulation is admins only for now (managers later, owner 2026-10-27),
+    decided by the effective role like every workspace page."""
+    headers = {}
+    if role:
+        actor = await factories.make_user(db_session, user_role=role)
+        effective = await factories.make_user(db_session, user_role=as_role) if as_role else None
+        headers = auth_headers(actor.id, impersonate=effective.id if effective else None)
+    get = await client.get("/workspace/simulation", headers=headers, follow_redirects=False)
+    head = await client.head("/workspace/simulation", headers=headers, follow_redirects=False)
+    assert get.status_code == head.status_code == expected
+
+
+async def test_only_an_effective_admin_sees_the_simulation_tab(client, db_session):
+    admin = await _admin(db_session, "sim-nav-admin@example.org")
+    manager = await factories.make_user(
+        db_session, user_role=USER_ROLE_MANAGER, email="sim-nav-manager@example.org"
+    )
+    tab = 'href="/workspace/simulation"'
+    for headers, shown in (
+        (auth_headers(admin.id), True),
+        (auth_headers(manager.id), False),
+        (auth_headers(admin.id, impersonate=manager.id), False),
+    ):
+        html = (await client.get("/workspace/activity", headers=headers)).text
+        assert (tab in html) is shown
+
+
+async def test_the_old_admin_address_redirects_to_the_workspace_page(client, db_session):
+    """The admin bar's Simulation link and old bookmarks land on the workspace page,
+    keeping the run selection and nothing else."""
+    admin = await _admin(db_session, "sim-legacy@example.org")
+    run = await factories.make_simulation_run(db_session)
+    resp = await client.get(
+        f"/admin/simulation?run={run.id}&msg=hello", headers=auth_headers(admin.id),
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    assert resp.headers["location"] == f"/workspace/simulation?run={run.id}"
+
+
 # ---------------------------------------------------------------------------
 # Task 11 of docs/plans/2026-08-30-simulation-control-panel.md — the Live tab:
-# stats wired into /admin/simulation.
+# stats wired into the panel page.
 #
 #   (a) a seeded run renders the cost hero with the hand-computed figure
 #       (that plan's Task 9/8 canonical case: 1M input + 100k output + 500k cache-read
@@ -372,7 +436,7 @@ async def test_live_tab_cost_hero_and_cache_hit_rate_hand_computed(client, db_se
     )
     await db_session.commit()
 
-    resp = await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
+    resp = await client.get(f"/workspace/simulation?run={run.id}", headers=auth_headers(admin.id))
 
     assert resp.status_code == 200
     assert "$9.00" in resp.text
@@ -390,7 +454,7 @@ async def test_live_tab_surfaces_unpriced_model_in_a_visible_warning(client, db_
     )
     await db_session.commit()
 
-    resp = await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
+    resp = await client.get(f"/workspace/simulation?run={run.id}", headers=auth_headers(admin.id))
 
     assert resp.status_code == 200
     assert "claude-unknown-42" in resp.text
@@ -411,7 +475,7 @@ async def test_live_tab_headlines_owed_from_a_terminal_unannounced_assessment(cl
     ))
     await db_session.commit()
 
-    resp = await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
+    resp = await client.get(f"/workspace/simulation?run={run.id}", headers=auth_headers(admin.id))
 
     assert resp.status_code == 200
     assert "Headlines owed" in resp.text
@@ -443,7 +507,7 @@ async def test_live_tab_run_selector_switches_between_runs(client, db_session):
     )  # 25_000 * 2 / 1e6 = 0.05
     await db_session.commit()
 
-    default_resp = await client.get("/admin/simulation", headers=auth_headers(admin.id))
+    default_resp = await client.get("/workspace/simulation", headers=auth_headers(admin.id))
     assert default_resp.status_code == 200
     assert "$0.05" in default_resp.text
     assert "$9.00" not in default_resp.text
@@ -453,7 +517,7 @@ async def test_live_tab_run_selector_switches_between_runs(client, db_session):
     assert "v9.9.9 (deadbeefcafe)" in default_resp.text
 
     older_resp = await client.get(
-        f"/admin/simulation?run={older.id}", headers=auth_headers(admin.id)
+        f"/workspace/simulation?run={older.id}", headers=auth_headers(admin.id)
     )
     assert older_resp.status_code == 200
     assert "$9.00" in older_resp.text
@@ -464,7 +528,7 @@ async def test_live_tab_empty_run_renders_every_section_without_a_500(client, db
     run = await factories.make_simulation_run(db_session)
     await db_session.commit()
 
-    resp = await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
+    resp = await client.get(f"/workspace/simulation?run={run.id}", headers=auth_headers(admin.id))
 
     assert resp.status_code == 200
     assert "Interview timeline" in resp.text
@@ -478,7 +542,7 @@ async def test_live_tab_api_call_units_caveat_is_present(client, db_session):
     run = await factories.make_simulation_run(db_session, total_api_calls=42)
     await db_session.commit()
 
-    resp = await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
+    resp = await client.get(f"/workspace/simulation?run={run.id}", headers=auth_headers(admin.id))
 
     assert resp.status_code == 200
     assert "REAL API CALLS" in resp.text
@@ -510,7 +574,7 @@ async def test_live_tab_per_agent_table_uses_the_real_heartbeat_snapshot(client,
     ))
     await db_session.commit()
 
-    fresh_resp = await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
+    fresh_resp = await client.get(f"/workspace/simulation?run={run.id}", headers=auth_headers(admin.id))
     assert fresh_resp.status_code == 200
     assert "Active threads" in fresh_resp.text
     assert "Calls in window" in fresh_resp.text
@@ -521,7 +585,7 @@ async def test_live_tab_per_agent_table_uses_the_real_heartbeat_snapshot(client,
     row.updated_at = datetime.now(UTC) - timedelta(minutes=10)
     await db_session.commit()
 
-    stale_resp = await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
+    stale_resp = await client.get(f"/workspace/simulation?run={run.id}", headers=auth_headers(admin.id))
     assert stale_resp.status_code == 200
     assert 'data-sc-live="threads">3</td>' not in stale_resp.text
     assert 'data-sc-live="calls">5</td>' not in stale_resp.text
@@ -562,7 +626,7 @@ async def test_live_tab_hub_lab_burn_none_ratio_plots_as_a_spike_not_a_floor(cli
     )
     await db_session.commit()
 
-    resp = await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
+    resp = await client.get(f"/workspace/simulation?run={run.id}", headers=auth_headers(admin.id))
     assert resp.status_code == 200
 
     section = resp.text[resp.text.index("Hub : lab token burn ratio"):]
@@ -608,7 +672,7 @@ async def test_live_tab_unattributed_cost_footnote_gated_on_positive_cost(client
     # No unattributed LLM calls yet — the footnote must not appear even
     # though the gantt has a row (the old, presence-only condition would
     # have shown "$0.00 ... could not be attributed" here).
-    zero_resp = await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
+    zero_resp = await client.get(f"/workspace/simulation?run={run.id}", headers=auth_headers(admin.id))
     assert zero_resp.status_code == 200
     assert "could not be attributed to a" not in zero_resp.text
 
@@ -625,7 +689,7 @@ async def test_live_tab_unattributed_cost_footnote_gated_on_positive_cost(client
     simulation_view._LIVE_RUN_STATS.clear()
 
     positive_resp = await client.get(
-        f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id)
+        f"/workspace/simulation?run={run.id}", headers=auth_headers(admin.id)
     )
     assert positive_resp.status_code == 200
     assert "could not be attributed to a" in positive_resp.text
@@ -674,7 +738,7 @@ async def test_live_tab_renders_the_three_f1_cost_panels(client, db_session):
     )  # $2.00 — unmatched consult; NULL call_stats makes the call-kind panel a floor
     await db_session.commit()
 
-    resp = await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
+    resp = await client.get(f"/workspace/simulation?run={run.id}", headers=auth_headers(admin.id))
 
     assert resp.status_code == 200
     assert "Cost by interview stage" in resp.text
@@ -691,7 +755,7 @@ async def test_live_tab_f1_panels_show_the_empty_state_on_a_run_with_no_calls(cl
     run = await factories.make_simulation_run(db_session)
     await db_session.commit()
 
-    resp = await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
+    resp = await client.get(f"/workspace/simulation?run={run.id}", headers=auth_headers(admin.id))
 
     assert resp.status_code == 200
     assert "Cost by interview stage" in resp.text
@@ -718,7 +782,7 @@ async def test_live_tab_every_chart_card_has_a_heading_and_a_caption(client, db_
     admin = await _admin(db_session, "sim-admin-cap@example.org")
     run = await factories.make_simulation_run(db_session)
     await db_session.commit()
-    html = (await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))).text
+    html = (await client.get(f"/workspace/simulation?run={run.id}", headers=auth_headers(admin.id))).text
     for title in _CAPTIONED_CARDS:
         assert html.count(f">{title}</h2>") == 1, title
         i = html.index(f">{title}</h2>")
@@ -729,7 +793,7 @@ async def test_the_page_uses_the_readability_scale_throughout(client, db_session
     admin = await _admin(db_session, "sim-admin-type@example.org")
     run = await factories.make_simulation_run(db_session)
     await db_session.commit()
-    html = (await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))).text
+    html = (await client.get(f"/workspace/simulation?run={run.id}", headers=auth_headers(admin.id))).text
     # Bounded to the #sim-body content itself: base.html's site-wide footer
     # (outside this div) carries its own muted text class and is not part
     # of the chart panel's readability contract.
@@ -749,7 +813,7 @@ async def test_live_tab_bars_carry_visible_labels_values_and_a_numeric_axis(clie
     await factories.make_llm_call_log(db_session, run=run, agent_id="blackbird", phase="thread_reply", input_tokens=1_000_000, **common)
     await factories.make_llm_call_log(db_session, run=run, agent_id="labbot", phase="new_post", input_tokens=500_000, **common)
     await db_session.commit()
-    html = (await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))).text
+    html = (await client.get(f"/workspace/simulation?run={run.id}", headers=auth_headers(admin.id))).text
     card = html[html.index(">Cost by agent</h2>"):html.index(">Cost by model</h2>")]
     assert card.index("blackbird") < card.index("labbot")                       # sorted by cost, desc
     assert '<span class="sc-hbar-value">$5.00 (1 call)</span>' in card
@@ -769,7 +833,7 @@ async def test_live_tab_funnel_is_in_pipeline_order_and_drops_are_visible(client
     db_session.add(AssessmentDrop(simulation_run_id=run.id, agent_id="blackbird", thread_id="T2",
                                   reason="empty_reply", detail="x"))
     await db_session.commit()
-    html = (await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))).text
+    html = (await client.get(f"/workspace/simulation?run={run.id}", headers=auth_headers(admin.id))).text
     # Bounded to the chart itself (from its sc-chart wrapper), not the card's
     # caption paragraph — the caption's own prose ("Headlines owed should
     # read 0 on a healthy run.") names "Headlines owed" ahead of the bars.
@@ -785,13 +849,13 @@ async def test_live_tab_timestamps_are_minute_precision_utc(client, db_session):
     admin = await _admin(db_session, "sim-admin-ts@example.org")
     run = await factories.make_simulation_run(db_session, started_at=datetime(2026, 9, 9, 18, 48, 1, 880209, tzinfo=UTC))
     await db_session.commit()
-    html = (await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))).text
+    html = (await client.get(f"/workspace/simulation?run={run.id}", headers=auth_headers(admin.id))).text
     assert "2026-09-09 18:48 UTC" in html and "18:48:01.880209" not in html
 
 
 async def test_live_tab_refresh_script_preserves_open_details_by_key(client, db_session):
     admin = await _admin(db_session, "sim-admin-js@example.org")
-    html = (await client.get("/admin/simulation?msg=hello", headers=auth_headers(admin.id))).text
+    html = (await client.get("/workspace/simulation?msg=hello", headers=auth_headers(admin.id))).text
     assert "details[open][data-sc-key]" in html and "el.dataset.scKey" in html
     # Never replaces a unit holding focus or an edited form (C-01, C-09).
     assert "contains(document.activeElement)" in html
@@ -800,7 +864,7 @@ async def test_live_tab_refresh_script_preserves_open_details_by_key(client, db_
     assert ":scope > nav.sim-jump-nav, :scope > section[id]" in html
     assert "cur.innerHTML = next.innerHTML" not in html
     # Fetches the canonical URL and refuses redirected/non-HTML/failed responses (C-08).
-    assert "new URL('/admin/simulation', location.origin)" in html
+    assert "new URL('/workspace/simulation', location.origin)" in html
     assert "fetch(location.href)" not in html
     assert "r.redirected" in html and "r.ok" in html
     assert 'id="sim-refresh-notice"' in html and 'role="status"' in html
@@ -824,8 +888,8 @@ async def test_a_rejected_template_marks_its_form_to_be_kept(client, db_session)
 
 async def test_run_selector_submits_to_the_page_route(client, db_session):
     admin = await _admin(db_session, "sim-admin-sel@example.org")
-    html = (await client.get("/admin/simulation", headers=auth_headers(admin.id))).text
-    assert '<form method="get" action="/admin/simulation"' in html
+    html = (await client.get("/workspace/simulation", headers=auth_headers(admin.id))).text
+    assert '<form method="get" action="/workspace/simulation"' in html
 
 
 async def test_live_tab_latency_and_progress_render_with_real_data(client, db_session):
@@ -839,7 +903,7 @@ async def test_live_tab_latency_and_progress_render_with_real_data(client, db_se
         call_stats=[{"seq": 0, "kind": "final", "latency_ms": 133820, "stop_reason": "end_turn"},
                     {"seq": 1, "kind": "retry", "latency_ms": 500, "stop_reason": "end_turn"}])
     await db_session.commit()
-    html = (await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))).text
+    html = (await client.get(f"/workspace/simulation?run={run.id}", headers=auth_headers(admin.id))).text
     assert "Internal Server Error" not in html
     assert "P50 (ms)" in html and '<td class="sc-num">2</td>' in html   # n, thousands-separated cells elsewhere
     assert '<div class="sc-tile-value">107%</div>' in html and "overran the limit" in html
@@ -871,6 +935,482 @@ async def test_the_page_offers_both_stop_buttons(client, db_session):
     admin = await _admin(db_session, "sim-admin-c4@example.org")
     db_session.add(SimulationProcessStatus(id=1, state="running"))
     await db_session.commit()
-    resp = await client.get("/admin/simulation", headers=auth_headers(admin.id))
-    assert "Stop — hold open interviews" in resp.text
+    resp = await client.get("/workspace/simulation", headers=auth_headers(admin.id))
+    assert "Stop everything, hold open interviews" in resp.text
+    assert "Stop everything\n" in resp.text
     assert 'name="hold_open" value="1"' in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Independent simulation controls (docs/plans/2026-10-27-independent-simulation-controls-plan.md,
+# Task 7): the Interviews and Projects cards, per-system starts and stops.
+# ---------------------------------------------------------------------------
+
+_PENDING_SYSTEM = "Another interviews or projects request is pending; try again in a moment."
+_LEGACY = "This engine predates per-system controls; use Stop everything."
+
+
+def _controls(html: str) -> str:
+    return html[html.index('<section id="sec-controls">'):html.index('<section id="sec-announce">')]
+
+
+def _button_disabled(html: str, marker: str) -> bool:
+    """Whether the ``<button>`` whose tag holds ``marker`` renders ``disabled``."""
+    at = html.index(marker)
+    tag = html[html.rindex("<button", 0, at):html.index(">", at) + 1]
+    return re.search(r"\sdisabled\s*>$", tag) is not None
+
+
+def _research(monkeypatch, reason=None):
+    """Stand in for ``project_research.research_unavailable_reason``, read by the page
+    (the workspace module) and by the start routes (the admin module)."""
+    import src.routers.admin.simulation as sim_routes
+    import src.routers.workspace.simulation as sim_page
+
+    monkeypatch.setattr(sim_routes, "research_unavailable_reason", lambda: reason)
+    monkeypatch.setattr(sim_page, "research_unavailable_reason", lambda: reason)
+
+
+def _record(system, state="running", *, count=0, runtime=0, reason=None, waiting_on=()):
+    """A heartbeat ``detail["systems"]`` entry, as ``Session.record()`` writes it."""
+    session = Session(
+        system=system, limits=Limits(count=count, runtime_minutes=runtime),
+        started_at=datetime.now(UTC) - timedelta(minutes=5), state=state, reason=reason,
+        waiting_on=tuple(waiting_on),
+    )
+    if state == ENDED:
+        session.ended_at = datetime.now(UTC)
+    return session.record()
+
+
+async def _live(db_session, monkeypatch, systems, *, state="running") -> SimulationRun:
+    """An engine holding the lock, its heartbeat naming a live run with ``systems``."""
+    _engine_alive(monkeypatch)
+    run = await factories.make_simulation_run(db_session)
+    detail = {} if systems is None else {"systems": systems}
+    db_session.add(SimulationProcessStatus(
+        id=1, state=state, simulation_run_id=run.id, updated_at=datetime.now(UTC), detail=detail,
+    ))
+    await db_session.commit()
+    return run
+
+
+async def _commands(db_session, kind):
+    return (await db_session.execute(
+        select(SimulationCommand).where(SimulationCommand.command == kind)
+    )).scalars().all()
+
+
+async def _audit_actions(db_session):
+    return [e.action for e in (await db_session.execute(select(AdminAuditEvent))).scalars()]
+
+
+_ALL_LIMITS = {"max_runtime": "30", "max_proposals": "4", "max_projects": "5",
+               "projects_runtime": "90"}
+
+
+async def test_the_idle_page_shows_both_cards_start_both_and_fresh(client, db_session, monkeypatch):
+    _research(monkeypatch)
+    admin = await _admin(db_session, "sim-sys-idle@example.org")
+    html = (await client.get("/workspace/simulation", headers=auth_headers(admin.id))).text
+    controls = html[html.index('<section id="sec-controls">'):html.index('<section id="sec-announce">')]
+    assert ">Interviews</h2>" in controls and ">Projects</h2>" in controls
+    assert "No run is live." in controls and 'name="fresh"' in controls
+    for value in ("interviews", "projects", "both"):
+        assert f'name="system" value="{value}"' in controls, value
+    assert "Start interviews" in controls and "Start projects" in controls
+    assert "Start both" in controls
+    # The browser journeys read exactly these two inputs, in this order.
+    assert html.count('name="max_runtime"') == 1 and html.count('name="max_proposals"') == 1
+    assert html.index('name="max_runtime"') < html.index('name="max_proposals"')
+    assert controls.index('name="projects_runtime"') < controls.index('name="max_projects"')
+    assert "Finished projects (0 = no limit)" in controls
+    # Both Stop everything forms are always rendered, disabled with no engine.
+    assert controls.count('action="/admin/simulation/stop"') == 2
+    assert "/admin/simulation/system" not in controls
+
+
+@pytest.mark.parametrize(("system", "expected"), [
+    ("interviews", {"interviews": {"count": 4, "runtime_minutes": 30}}),
+    ("projects", {"projects": {"count": 5, "runtime_minutes": 90}}),
+    ("both", {"interviews": {"count": 4, "runtime_minutes": 30},
+              "projects": {"count": 5, "runtime_minutes": 90}}),
+])
+async def test_an_idle_start_enqueues_the_chosen_systems(
+    client, db_session, monkeypatch, system, expected,
+):
+    _research(monkeypatch)
+    admin = await _admin(db_session, f"sim-sys-idle-{system}@example.org")
+    resp = await client.post(
+        "/admin/simulation/start", data={"system": system, "fresh": "true", **_ALL_LIMITS},
+        headers=auth_headers(admin.id), follow_redirects=False,
+    )
+    assert session_flashes(resp) == [{"text": "Start requested.", "kind": "success"}]
+    (cmd,) = await _commands(db_session, "start")
+    assert cmd.payload == {"fresh": True, "systems": expected}
+    assert await _audit_actions(db_session) == ["simulation_start_requested"]
+
+
+async def test_an_idle_projects_start_is_refused_while_research_is_unavailable(
+    client, db_session, monkeypatch,
+):
+    _research(monkeypatch, "Project research is switched off.")
+    admin = await _admin(db_session, "sim-sys-idle-noresearch@example.org")
+    for system in ("projects", "both"):
+        resp = await client.post(
+            "/admin/simulation/start", data={"system": system, **_ALL_LIMITS},
+            headers=auth_headers(admin.id), follow_redirects=False,
+        )
+        assert session_flashes(resp) == [
+            {"text": "Project research is switched off.", "kind": "error"}
+        ], system
+    assert await _commands(db_session, "start") == []
+
+
+async def test_a_live_start_of_an_inactive_system_enqueues_a_system_command(
+    client, db_session, monkeypatch,
+):
+    _research(monkeypatch)
+    admin = await _admin(db_session, "sim-sys-live-start@example.org")
+    run = await _live(db_session, monkeypatch, {INTERVIEWS: _record(INTERVIEWS)})
+    resp = await client.post(
+        "/admin/simulation/start", data={"system": "projects", **_ALL_LIMITS},
+        headers=auth_headers(admin.id), follow_redirects=False,
+    )
+    assert session_flashes(resp) == [{"text": "Start projects requested.", "kind": "success"}]
+    (cmd,) = await _commands(db_session, "system")
+    assert cmd.payload == {"action": "start", "system": "projects", "run_id": str(run.id),
+                           "limits": {"count": 5, "runtime_minutes": 90}}
+    assert await _commands(db_session, "start") == []
+    assert await _audit_actions(db_session) == ["simulation_system_start_requested"]
+
+
+async def test_a_live_start_of_a_stopped_system_joins_the_run(client, db_session, monkeypatch):
+    admin = await _admin(db_session, "sim-sys-live-restart@example.org")
+    run = await _live(db_session, monkeypatch, {
+        INTERVIEWS: _record(INTERVIEWS, ENDED, reason=STOP_NOW), PROJECTS: _record(PROJECTS),
+    })
+    resp = await client.post(
+        "/admin/simulation/start", data={"system": "interviews", **_ALL_LIMITS},
+        headers=auth_headers(admin.id), follow_redirects=False,
+    )
+    assert session_flashes(resp) == [{"text": "Start interviews requested.", "kind": "success"}]
+    (cmd,) = await _commands(db_session, "system")
+    assert cmd.payload == {"action": "start", "system": "interviews", "run_id": str(run.id),
+                           "limits": {"count": 4, "runtime_minutes": 30}}
+
+
+@pytest.mark.parametrize(("case", "system", "message"), [
+    ("both", "both", "Start both applies only when no run is live."),
+    ("running", "interviews", "Interviews are already running."),
+    ("winding_down", "projects", "Projects are already running."),
+    ("stopping", "projects", "The run is stopping."),
+    ("pending", "projects", _PENDING_SYSTEM),
+    ("no_research", "projects", "Project research is switched off."),
+    ("unknown", "grants", "Unknown system."),
+])
+async def test_a_live_start_is_refused(client, db_session, monkeypatch, case, system, message):
+    _research(monkeypatch, "Project research is switched off." if case == "no_research" else None)
+    admin = await _admin(db_session, f"sim-sys-refuse-{case}@example.org")
+    systems = {INTERVIEWS: _record(INTERVIEWS)}
+    if case == "winding_down":
+        systems[PROJECTS] = _record(PROJECTS, WINDING_DOWN)
+    run = await _live(db_session, monkeypatch, systems,
+                      state="stopping" if case == "stopping" else "running")
+    if case == "pending":
+        db_session.add(SimulationCommand(command="system", payload={
+            "action": "wind_down", "system": "interviews", "run_id": str(run.id),
+        }))
+        await db_session.commit()
+    before = len(await _commands(db_session, "system"))
+    resp = await client.post(
+        "/admin/simulation/start", data={"system": system, **_ALL_LIMITS},
+        headers=auth_headers(admin.id), follow_redirects=False,
+    )
+    assert session_flashes(resp) == [{"text": message, "kind": "error"}]
+    assert len(await _commands(db_session, "system")) == before
+    assert await _commands(db_session, "start") == []
+    assert await _audit_actions(db_session) == []
+
+
+@pytest.mark.parametrize(("action", "message"), [
+    ("wind_down", "Wind down projects requested."),
+    ("stop_now", "Stop projects now requested."),
+])
+async def test_the_system_route_enqueues_a_stop_for_an_active_system(
+    client, db_session, monkeypatch, action, message,
+):
+    admin = await _admin(db_session, f"sim-sys-stop-{action}@example.org")
+    run = await _live(db_session, monkeypatch, {
+        INTERVIEWS: _record(INTERVIEWS), PROJECTS: _record(PROJECTS),
+    })
+    resp = await client.post(
+        "/admin/simulation/system", data={"system": "projects", "action": action},
+        headers=auth_headers(admin.id), follow_redirects=False,
+    )
+    assert resp.headers["location"] == "/workspace/simulation"
+    assert session_flashes(resp) == [{"text": message, "kind": "success"}]
+    (cmd,) = await _commands(db_session, "system")
+    assert cmd.payload == {"action": action, "system": "projects", "run_id": str(run.id)}
+    assert await _audit_actions(db_session) == ["simulation_system_stop_requested"]
+
+
+async def test_interviews_stop_now_names_interviews(client, db_session, monkeypatch):
+    admin = await _admin(db_session, "sim-sys-stop-iv@example.org")
+    await _live(db_session, monkeypatch, {INTERVIEWS: _record(INTERVIEWS, WINDING_DOWN)})
+    resp = await client.post(
+        "/admin/simulation/system", data={"system": "interviews", "action": "stop_now"},
+        headers=auth_headers(admin.id), follow_redirects=False,
+    )
+    assert session_flashes(resp) == [{"text": "Stop interviews now requested.", "kind": "success"}]
+
+
+@pytest.mark.parametrize(("case", "system", "action", "message"), [
+    ("nothing", "projects", "stop_now", "Nothing is running."),
+    ("inactive", "projects", "wind_down", "Projects are not running."),
+    ("stopped", "interviews", "stop_now", "Interviews are not running."),
+    ("winding", "projects", "wind_down", "Projects are already winding down."),
+    ("action", "projects", "pause", "Unknown action."),
+    ("system", "grants", "stop_now", "Unknown system."),
+    ("pending", "interviews", "wind_down", _PENDING_SYSTEM),
+])
+async def test_the_system_route_refuses(
+    client, db_session, monkeypatch, case, system, action, message,
+):
+    admin = await _admin(db_session, f"sim-sys-stop-refuse-{case}@example.org")
+    if case == "nothing":
+        _engine_alive(monkeypatch, False)
+    else:
+        systems = {INTERVIEWS: _record(INTERVIEWS)}
+        if case == "stopped":
+            systems = {INTERVIEWS: _record(INTERVIEWS, ENDED, reason=STOP_NOW),
+                       PROJECTS: _record(PROJECTS)}
+        if case == "winding":
+            systems[PROJECTS] = _record(PROJECTS, WINDING_DOWN)
+        run = await _live(db_session, monkeypatch, systems)
+        if case == "pending":
+            db_session.add(SimulationCommand(command="system", payload={
+                "action": "start", "system": "projects", "run_id": str(run.id),
+                "limits": {"count": 0, "runtime_minutes": 0},
+            }))
+            await db_session.commit()
+    before = len(await _commands(db_session, "system"))
+    resp = await client.post(
+        "/admin/simulation/system", data={"system": system, "action": action},
+        headers=auth_headers(admin.id), follow_redirects=False,
+    )
+    assert session_flashes(resp) == [{"text": message, "kind": "error"}]
+    assert len(await _commands(db_session, "system")) == before
+    assert await _audit_actions(db_session) == []
+
+
+async def test_stop_everything_is_not_blocked_by_a_pending_system_command(
+    client, db_session, monkeypatch,
+):
+    admin = await _admin(db_session, "sim-sys-stop-all@example.org")
+    run = await _live(db_session, monkeypatch, {INTERVIEWS: _record(INTERVIEWS)})
+    db_session.add(SimulationCommand(command="system", payload={
+        "action": "wind_down", "system": "interviews", "run_id": str(run.id),
+    }))
+    await db_session.commit()
+    resp = await client.post(
+        "/admin/simulation/stop", headers=auth_headers(admin.id), follow_redirects=False,
+    )
+    assert session_flashes(resp) == [{"text": "Stop requested.", "kind": "success"}]
+    (stop,) = await _commands(db_session, "stop")
+    assert stop.status == "pending" and stop.payload is None
+    assert len(await _commands(db_session, "system")) == 1
+
+
+async def test_the_live_page_shows_each_cards_state_and_its_own_controls(
+    client, db_session, monkeypatch,
+):
+    _research(monkeypatch)
+    admin = await _admin(db_session, "sim-sys-live-page@example.org")
+    run = await _live(db_session, monkeypatch, {
+        INTERVIEWS: _record(INTERVIEWS, WINDING_DOWN, count=2, reason="wind_down",
+                            waiting_on=("labbot-a", "labbot-b")),
+        PROJECTS: _record(PROJECTS, count=1, runtime=60),
+    })
+    html = (await client.get("/workspace/simulation", headers=auth_headers(admin.id))).text
+    controls = html[html.index('<section id="sec-controls">'):html.index('<section id="sec-announce">')]
+    assert str(run.id)[:8] in controls and "is live" in controls
+    assert "Start both" not in controls and 'name="fresh"' not in controls
+    assert "Winding down: wound down by hand" in controls
+    assert "Waiting on: labbot-a, labbot-b" in controls
+    assert "Running since" in controls and "(stops at 3)" in controls
+    assert "Spent in this run: $0.00" in controls
+    # A running system offers Wind down and Stop now; a winding-down one only Stop now.
+    assert controls.count('name="action" value="wind_down"') == 1
+    assert controls.count('name="action" value="stop_now"') == 2
+    assert 'data-confirm="Stop interviews now: ' in controls
+    assert "all of their owed headlines post to Slack, with no cap" in controls
+    assert 'data-confirm="Stop projects now: ' in controls
+    # Nothing to start: both systems are active, so no limit inputs.
+    assert 'name="max_runtime"' not in controls and 'name="max_projects"' not in controls
+    # The status card has one line per system.
+    status = html[html.index('<section id="sec-status">'):html.index('<section id="sec-controls">')]
+    assert "Interviews</dt>" in status and "Projects</dt>" in status
+    assert "1 finished project, 60 minutes" in status
+
+
+async def test_an_engine_without_per_system_sessions_gets_no_system_command(
+    client, db_session, monkeypatch,
+):
+    """An engine built before the systems were separable writes no ``systems`` and never
+    claims a ``system`` command: the routes refuse one and the page offers none."""
+    _research(monkeypatch)
+    admin = await _admin(db_session, "sim-sys-legacy@example.org")
+    await _live(db_session, monkeypatch, None)
+    for url, data in (
+        ("/admin/simulation/system", {"system": "interviews", "action": "wind_down"}),
+        ("/admin/simulation/start", {"system": "projects", **_ALL_LIMITS}),
+    ):
+        resp = await client.post(
+            url, data=data, headers=auth_headers(admin.id), follow_redirects=False,
+        )
+        assert session_flashes(resp) == [{"text": _LEGACY, "kind": "error"}], url
+    assert await _commands(db_session, "system") == []
+    controls = _controls(
+        (await client.get("/workspace/simulation", headers=auth_headers(admin.id))).text
+    )
+    assert _LEGACY in controls
+    assert _button_disabled(controls, 'aria-label="Wind down interviews"')
+    assert _button_disabled(controls, 'aria-label="Stop interviews now"')
+    assert _button_disabled(controls, 'name="system" value="projects"')
+
+
+async def test_a_stop_the_engine_has_not_claimed_disables_the_system_buttons(
+    client, db_session, monkeypatch,
+):
+    _research(monkeypatch)
+    admin = await _admin(db_session, "sim-sys-stop-queued@example.org")
+    await _live(db_session, monkeypatch, {INTERVIEWS: _record(INTERVIEWS)})
+    db_session.add(SimulationCommand(command="stop", payload=None))
+    await db_session.commit()
+    controls = _controls(
+        (await client.get("/workspace/simulation", headers=auth_headers(admin.id))).text
+    )
+    assert _button_disabled(controls, 'aria-label="Wind down interviews"')
+    assert _button_disabled(controls, 'aria-label="Stop interviews now"')
+    assert _button_disabled(controls, 'name="system" value="projects"')
+
+
+async def test_a_pending_finalize_run_does_not_read_as_a_stopping_engine(
+    client, db_session, monkeypatch,
+):
+    """A live engine fails a Finalize run and the run goes on, so a queued one blocks
+    nothing the run can still do."""
+    admin = await _admin(db_session, "sim-sys-finalize-live@example.org")
+    run = await _live(db_session, monkeypatch, {INTERVIEWS: _record(INTERVIEWS)})
+    db_session.add(SimulationCommand(
+        command="stop", payload={"finalize": True, "run_id": str(run.id)},
+    ))
+    await db_session.commit()
+    controls = _controls(
+        (await client.get("/workspace/simulation", headers=auth_headers(admin.id))).text
+    )
+    assert not _button_disabled(controls, 'aria-label="Wind down interviews"')
+    resp = await client.post(
+        "/admin/simulation/system", data={"system": "interviews", "action": "wind_down"},
+        headers=auth_headers(admin.id), follow_redirects=False,
+    )
+    assert session_flashes(resp) == [
+        {"text": "Wind down interviews requested.", "kind": "success"}
+    ]
+
+
+async def test_a_pending_finalize_run_disables_the_idle_starts(client, db_session, monkeypatch):
+    _research(monkeypatch)
+    _engine_alive(monkeypatch, False)
+    admin = await _admin(db_session, "sim-sys-finalize-idle@example.org")
+    run = await factories.make_simulation_run(db_session, status="stopped")
+    db_session.add(SimulationCommand(
+        command="stop", payload={"finalize": True, "run_id": str(run.id)},
+    ))
+    await db_session.commit()
+    controls = _controls(
+        (await client.get("/workspace/simulation", headers=auth_headers(admin.id))).text
+    )
+    assert "A Finalize run is pending; start after it finishes." in controls
+    for value in ("both", "interviews", "projects"):
+        assert _button_disabled(controls, f'name="system" value="{value}"'), value
+
+
+async def test_a_start_the_supervisor_has_claimed_refuses_another(
+    client, db_session, monkeypatch,
+):
+    """The fresh ``starting`` heartbeat alone refuses a second start, so the refusal does not
+    rest on the claimed start row staying pending until its run ends (the supervisor's way
+    today)."""
+    _research(monkeypatch)
+    _engine_alive(monkeypatch, False)
+    admin = await _admin(db_session, "sim-sys-claimed@example.org")
+    db_session.add(SimulationProcessStatus(
+        id=1, state="starting", updated_at=datetime.now(UTC),
+        detail={"systems": {INTERVIEWS: {"state": "starting",
+                                         "limits": {"count": 0, "runtime_minutes": 0}}}},
+    ))
+    await db_session.commit()
+    resp = await client.post(
+        "/admin/simulation/start", data={"system": "both", "fresh": "true", **_ALL_LIMITS},
+        headers=auth_headers(admin.id), follow_redirects=False,
+    )
+    assert session_flashes(resp) == [
+        {"text": "A run is already starting or in progress.", "kind": "error"}
+    ]
+    assert await _commands(db_session, "start") == []
+    html = (await client.get("/workspace/simulation", headers=auth_headers(admin.id))).text
+    assert _button_disabled(_controls(html), 'name="system" value="both"')
+    status = html[html.index('<section id="sec-status">'):html.index('<section id="sec-controls">')]
+    assert "Interviews</dt>" in status
+
+
+async def test_a_dead_engines_last_heartbeat_lists_no_systems(client, db_session, monkeypatch):
+    _engine_alive(monkeypatch, False)
+    admin = await _admin(db_session, "sim-sys-dead@example.org")
+    run = await factories.make_simulation_run(db_session)
+    db_session.add(SimulationProcessStatus(
+        id=1, state="running", simulation_run_id=run.id,
+        updated_at=datetime.now(UTC) - timedelta(minutes=10),
+        detail={"systems": {INTERVIEWS: _record(INTERVIEWS)}},
+    ))
+    await db_session.commit()
+    html = (await client.get("/workspace/simulation", headers=auth_headers(admin.id))).text
+    status = html[html.index('<section id="sec-status">'):html.index('<section id="sec-controls">')]
+    assert "Interviews</dt>" not in status
+
+
+async def test_a_limit_above_the_maximum_is_refused(client, db_session, monkeypatch):
+    """A runtime past ``timedelta``'s range would raise in the engine's limit check."""
+    _research(monkeypatch)
+    _engine_alive(monkeypatch, False)
+    admin = await _admin(db_session, "sim-sys-huge@example.org")
+    for field in ("max_runtime", "max_proposals", "max_projects", "projects_runtime"):
+        resp = await client.post(
+            "/admin/simulation/start",
+            data={"system": "both", **_ALL_LIMITS, field: str(10**7)},
+            headers=auth_headers(admin.id), follow_redirects=False,
+        )
+        assert resp.status_code == 422, field
+    assert await _commands(db_session, "start") == []
+
+
+async def test_the_start_a_live_run_was_launched_by_does_not_block_a_system_start(
+    client, db_session, monkeypatch,
+):
+    """The supervisor leaves the start it runs pending until the run ends: the page must
+    still offer a per-system start beside it, as the route accepts one."""
+    _research(monkeypatch)
+    admin = await _admin(db_session, "sim-sys-own-start@example.org")
+    await _live(db_session, monkeypatch, {INTERVIEWS: _record(INTERVIEWS)})
+    db_session.add(SimulationCommand(command="start", payload={
+        "fresh": True, "systems": {INTERVIEWS: {"count": 0, "runtime_minutes": 0}},
+    }))
+    await db_session.commit()
+    controls = _controls(
+        (await client.get("/workspace/simulation", headers=auth_headers(admin.id))).text
+    )
+    assert not _button_disabled(controls, 'name="system" value="projects"')
+    assert "A start request is already pending" not in controls
+

@@ -1,4 +1,4 @@
-"""The post lane: channel discovery, thread activation, the Phase-5 pitch and its post-type rules, and the proposal target (spec §7.1)."""
+"""The post lane: channel discovery, thread activation, the Phase-5 pitch and its post-type rules, and the interviews session's count and wind-down (spec §7.1)."""
 
 from __future__ import annotations
 
@@ -7,18 +7,19 @@ import logging
 import random
 import re
 import uuid
+from datetime import UTC
 from typing import TYPE_CHECKING
 
 from src.agent.agent import Agent
 from src.agent.claim_check import PHASE5_THREAD_KEY, feedback_text
 from src.agent.engine import constants, deps
-from src.agent.engine.constants import PROPOSAL_DRAIN_SETTLE_TICKS
 from src.agent.engine.context import EngineContext, via
 from src.agent.engine.helpers import _was_truncated
 from src.agent.engine.sidecar import _strip_assessment_sidecar
 from src.agent.persona_sections import match_channels
 from src.agent.post_types import PostTypeSpec, available_for, eligible_targets, render_menu
-from src.agent.role_capabilities import capabilities_for, hub_role_names
+from src.agent.role_capabilities import capabilities_for, hub_role_names, spoke_role_names
+from src.agent.sessions import INTERVIEWS, PROJECTS
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE
 
 if TYPE_CHECKING:
@@ -69,7 +70,7 @@ class PostLane:
     _closed_thread_ids = via("_threads")
     _get_prior_threads_for_agent = via("_threads")
 
-    OWNED_STATE: tuple[str, ...] = ("max_proposals", "_proposals_posted", "_proposal_drain_streak", "_drain_block_warned", "_role_post_types_cache", "_post_type_rejections")
+    OWNED_STATE: tuple[str, ...] = ("_proposals_posted", "_wind_down_warned", "_role_post_types_cache", "_post_type_rejections")
 
     def __init__(
         self,
@@ -82,7 +83,6 @@ class PostLane:
         llm_log: LlmLog,
         channel_directory: ChannelDirectory,
         panel: Panel,
-        max_proposals: int,
         projects: Projects,
     ) -> None:
         self.ctx = ctx
@@ -94,21 +94,12 @@ class PostLane:
         self._channel_directory = channel_directory
         self._panel = panel
         self._projects = projects
-        # 0 = off. When >0, the engine stops opening NEW pitches once this many
-        # top-level posts exist this run, then ends the run when every opened
-        # interview has drained (see _proposal_target_drained). Rehydrated on
-        # resume from agent_messages (phase='new_post', see
-        # _rehydrate_proposal_count) — but rehydration only restores the
-        # COUNT; the cap itself is whatever the caller passes in here. main.py's
-        # _run_simulation inherits max_proposals from the resumed run's stored
-        # config when the CLI value is 0, which is what actually keeps a resume
-        # from silently disabling the gate. The gate only enforces when
-        # max_proposals > 0.
-        self.max_proposals = max_proposals
+        # This run's pitches, for logs and tests: the cap lives on the interviews
+        # session (`ctx.sessions`), which `_book_pitch` counts against and which
+        # counts from its own start, not from the run's.
         self._proposals_posted = 0
-        self._proposal_drain_streak = 0
-        # One WARNING per blocked-drain episode, reset when the drain clears.
-        self._drain_block_warned = False
+        # One WARNING per blocked interviews wind-down, reset when it clears.
+        self._wind_down_warned = False
 
         # role name -> declared post_types. Same reason as the scheduler's
         # _role_rate_cache: load_role() hits the disk on every call.
@@ -334,6 +325,10 @@ class PostLane:
         channels, closed threads, already-active threads and
         `get_thread_allowed_agents`. Returns how many threads it activated.
         The caller decides which agents are hubs.
+
+        A post whose system is not active in the run's sessions is skipped: a
+        project-reply post while Projects is not running, a lab pitch while
+        Interviews is not. No model call is made for a skipped post.
         """
         activated = 0
         new_posts = self.message_log.get_new_top_level_posts(
@@ -352,6 +347,9 @@ class PostLane:
             if thread_id in agent.state.active_threads:
                 continue
             if thread_id in self._closed_thread_ids:
+                continue
+            project = self.message_log.is_project_thread(thread_id)
+            if not self.ctx.sessions.active(PROJECTS if project else INTERVIEWS):
                 continue
             # Check thread participation rules
             allowed = self.message_log.get_thread_allowed_agents(thread_id)
@@ -418,14 +416,20 @@ class PostLane:
             agent.state.last_phase5_action_time = deps.time.time()
 
             # A lab with a posted project answers it before anything below can
-            # skip the turn: the reply is not a pitch, so neither the daily cap
-            # nor the proposal cap applies to it. True means the turn was spent
-            # on the reply; False (no project, or an uncounted failure) leaves
-            # the turn to the lab's own pitch.
-            if await self._projects._offer_project_reply(
-                agent,
-                draining=self.max_proposals > 0 and self._proposals_posted >= self.max_proposals,
-            ):
+            # skip the turn: the reply is not a pitch, so neither the interviews
+            # session nor the daily cap applies to it. True means the turn was
+            # spent on the reply; False (no project, or an uncounted failure)
+            # leaves the turn to the lab's own pitch.
+            if await self._projects._offer_project_reply(agent):
+                return
+
+            # A pitch opens an interview, so it needs Interviews running and not
+            # winding down (its count reached, wound down, ended, or never
+            # started). Checked before the daily cap, so it costs no LLM call.
+            if not self.ctx.sessions.accepting(INTERVIEWS):
+                logger.debug(
+                    "[%s] Phase 5: Skipped (interviews not accepting pitches)", agent.agent_id,
+                )
                 return
 
             # Daily post cap — pi_lab is capped to one pitch per day (design §9).
@@ -437,16 +441,6 @@ class PostLane:
             cap = settings.lab_daily_post_cap
             if today_posts >= cap:
                 logger.debug("[%s] Phase 5: Skipped (daily cap %d/%d)", agent.agent_id, today_posts, cap)
-                return
-
-            # Proposal-count limit: once the run has posted its target number of
-            # pitches, stop opening new ones and let interviews drain. Checked
-            # here, beside the daily cap, so it costs no LLM call.
-            if self.max_proposals > 0 and self._proposals_posted >= self.max_proposals:
-                logger.info(
-                    "[%s] Phase 5: Skipped (proposal cap %d/%d reached)",
-                    agent.agent_id, self._proposals_posted, self.max_proposals,
-                )
                 return
 
             # Backpressure against STARTING more work than the agent can finish:
@@ -810,16 +804,12 @@ class PostLane:
         same way ``_count_today_posts`` excludes them (they are flat
         refinement replies/handovers, not spam-prevention-relevant pitches).
 
-        This restores the COUNT only. Whether that count can still gate
-        anything depends on ``self.max_proposals`` being the same nonzero
-        target the run opened under — main.py's ``_run_simulation`` is what
-        keeps that true across a resume, by inheriting ``max_proposals`` from
-        the run's stored config when the CLI value is 0. If ``max_proposals``
-        is 0 here, the query is skipped entirely: there is nothing to gate.
+        The count is for logs and tests only: it gates nothing. The pitch cap
+        is the interviews session's ``count`` limit, counted from that
+        session's own start (``_book_pitch``), so a resume does not carry the
+        run's earlier pitches into it.
         """
         if not self.session_factory or self.simulation_run_id is None:
-            return
-        if self.max_proposals <= 0:
             return
         from sqlalchemy import func, select
 
@@ -840,17 +830,17 @@ class PostLane:
         logger.info("Rehydrated proposal count: %d pitch(es) this run", self._proposals_posted)
 
     def _book_pitch(self, channel: str) -> None:
-        """Count one successful top-level post against the proposal cap.
+        """Count one successful top-level post against the interviews session.
 
-        Counts the SAME posts `_rehydrate_proposal_count` counts. That query
-        excludes collab_private rows; this counter used to include them, so a
-        lab that pitched into a private channel rehydrated BELOW its true count
-        and could pitch past the cap after a resume. The channel is
+        Counts the SAME posts `_rehydrate_proposal_count` counts: collab_private
+        rows are excluded (flat refinement replies, not pitches). The channel is
         model-chosen and nothing upstream gates on visibility, so the two sides
-        have to agree here.
+        have to agree here. Reaching the session's count winds it down at once
+        (``Sessions.add_count``), so no pitch slips past the cap.
         """
         if self._channel_visibility.get(channel) != VISIBILITY_COLLAB_PRIVATE:
             self._proposals_posted += 1
+            self.ctx.sessions.add_count(INTERVIEWS, deps.datetime.now(UTC))
 
     def _open_interview_count(self) -> int:
         """Distinct interview threads still open across all agents. The hub is
@@ -863,8 +853,9 @@ class PostLane:
         `ThreadState`, so if the removed side was the one that owed the reply,
         the survivor's copy keeps `has_pending_reply=False` and its `has_new`
         can never become True again — nobody is left to post. Counting it would
-        block `_proposal_target_drained` forever, which is the same hang the
-        0063 abandon closes fix, reached by a different route (predicted in
+        block the interviews wind-down (`_observe_interview_session`) forever,
+        which is the same hang the 0063 abandon closes fix, reached by a
+        different route (predicted in
         docs/audits/2026-09-29-modularity-dry-bigo-races/raw/findings/S1.md:162).
 
         Deliberately a READ-SIDE rule, not a durable close. Closing the
@@ -879,52 +870,63 @@ class PostLane:
         return len(self._open_interview_ids())
 
     def _open_interview_ids(self) -> set[str]:
-        """The ids `_open_interview_count` counts. Split out so the drain-block
-        WARNING can name the threads holding the run open."""
-        open_ids: set[str] = set()
+        """The ids `_open_interview_count` counts. Split out so the wind-down
+        WARNING can name the threads holding the interviews session open. A
+        project thread is not an interview and is never counted here."""
+        return set(self._open_interview_participants())
+
+    def _open_interview_participants(self) -> dict[str, set[str]]:
+        """Open interview thread id -> the agent ids holding it open (both
+        sides, as seen from every live agent's active threads)."""
+        open_threads: dict[str, set[str]] = {}
         for agent in self.agents.values():
             for tid, t in agent.state.active_threads.items():
                 if t.status != "active":
                     continue
                 if t.other_agent_id not in self.agents:
                     continue
-                open_ids.add(tid)
-        return open_ids
+                if self.message_log.is_project_thread(tid):
+                    continue
+                open_threads.setdefault(tid, set()).update((agent.agent_id, t.other_agent_id))
+        return open_threads
 
-    def _proposal_target_drained(self) -> bool:
-        """True once the pitch cap is reached and no interview has been open
-        and no posted project has awaited its lab's reply (the ``Projects``
-        unit's count) for PROPOSAL_DRAIN_SETTLE_TICKS consecutive checks. A METHOD, not a
-        property, because it MUTATES ``_proposal_drain_streak`` — call it
-        exactly once per loop iteration (the main-loop condition does)."""
-        if self.max_proposals <= 0 or self._proposals_posted < self.max_proposals:
-            self._proposal_drain_streak = 0
-            return False
-        open_interviews = self._open_interview_count()
-        awaiting_replies = self._projects._awaiting_project_reply_count()
-        open_now = open_interviews + awaiting_replies
-        if open_now > 0:
-            # Loud ONCE per blocked run, not per tick. Run 652a6102 sat here for
-            # 13.5 h emitting nothing at any level: the cap was reached, one
-            # leaked interview kept this above 0, and the only visible symptom
-            # was the admin panel's per-agent active_threads. Anything that
-            # blocks a drain indefinitely is an operator problem, so say so.
-            if not self._drain_block_warned:
-                self._drain_block_warned = True
-                logger.warning(
-                    "Proposal cap %d/%d reached but %d interview(s) are still "
-                    "open and %d posted project(s) await their lab's reply — "
-                    "the run cannot reach its natural end until they finish. "
-                    "Open: %s",
-                    self._proposals_posted, self.max_proposals, open_interviews,
-                    awaiting_replies,
-                    ", ".join(sorted(self._open_interview_ids())) or "?",
-                )
-            self._proposal_drain_streak = 0
-            return False
-        self._drain_block_warned = False
-        self._proposal_drain_streak += 1
-        return self._proposal_drain_streak >= PROPOSAL_DRAIN_SETTLE_TICKS
+    def _observe_interview_session(self) -> None:
+        """Tell the interviews session what is open: the open interview threads
+        (``open_work``) and the labs in them (``waiting_on``, spoke-role agents
+        only). Call once per main-loop tick: a winding-down session ends after
+        ``SETTLE_CHECKS`` quiet observations in a row (``Sessions.observe``).
+
+        A wind-down held open says so ONCE per episode, not per tick. Run
+        652a6102 sat at its proposal cap for 13.5 h emitting nothing at any
+        level: one leaked interview kept the drain open, and the only visible
+        symptom was the admin panel's per-agent active_threads. Anything that
+        blocks a wind-down indefinitely is an operator problem, so say so."""
+        sessions = self.ctx.sessions
+        open_work = self._open_interview_count()
+        spokes = set(spoke_role_names())
+        waiting_on = {
+            aid
+            for participants in self._open_interview_participants().values()
+            for aid in participants
+            if aid in self.agents and self.agents[aid].role in spokes
+        }
+        sessions.observe(
+            INTERVIEWS,
+            open_work=open_work,
+            now=deps.datetime.now(UTC),
+            waiting_on=sorted(waiting_on),
+        )
+        if not (sessions.winding_down(INTERVIEWS) and open_work):
+            self._wind_down_warned = False
+            return
+        if not self._wind_down_warned:
+            self._wind_down_warned = True
+            logger.warning(
+                "Interviews are winding down but %d interview(s) are still open — "
+                "the interviews wind-down cannot finish until they do; Stop now ends "
+                "them. Open: %s",
+                open_work, ", ".join(sorted(self._open_interview_ids())),
+            )
 
     def _roles_by_agent(self) -> dict[str, str]:
         """Live roster agent_id -> role. Agents absent from this map (e.g.

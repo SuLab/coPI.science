@@ -28,8 +28,16 @@ def test_status_and_reason_vocabularies():
 
     assert hp.OPEN_STATUSES == ("requested", "researching", "ready_to_post", "posted", "refining")
     assert hp.FINISHED_STATUSES == ("ready", "not_agreed", "not_finished")
-    assert all(len(r) <= 40 for r in hp.REASONS) and len(hp.REASONS) == 9
+    assert all(len(r) <= 40 for r in hp.REASONS) and len(hp.REASONS) == 10
     assert hp.THREAD_OUTCOME_PROJECT_CLOSED == "project_closed"
+
+
+def test_every_reason_has_a_label():
+    from src.models import hub_project as hp
+    from src.services.projects_view import REASON_LABELS
+
+    assert [r for r in hp.REASONS if r not in REASON_LABELS] == []
+    assert REASON_LABELS[hp.REASON_STOPPED] == "Projects were stopped"
 
 
 def test_thread_outcome_enum_has_project_closed():

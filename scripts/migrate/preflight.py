@@ -75,7 +75,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0073"
+DEFAULT_TARGET = "0074"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -114,7 +114,8 @@ DEFAULT_TARGET = "0073"
 #: index (its CHECK swap recreates an existing constraint, which the collision check must
 #: not list), 0066's table, 0067's table, 0068's column and CHECK, 0069's column, foreign key and index, 0070's table, 0071's table, 0072's table, unique, CHECK and index, and 0073's four tables with their
 #: uniques, CHECKs and indexes. 0063's and 0073's ADD VALUE on
-#: thread_outcome_enum enumerate nothing: adding a value to an existing type creates
+#: thread_outcome_enum, and 0074's two ADD VALUEs (thread_outcome_enum and
+#: sim_command_enum), enumerate nothing: adding a value to an existing type creates
 #: no object to collide with — the same reason 0058's job_type_enum ADD VALUE has no
 #: entry either.
 SUPPORTED_START_REVISIONS = (
@@ -123,7 +124,7 @@ SUPPORTED_START_REVISIONS = (
     "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
     "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060",
     "0061", "0062", "0063", "0064", "0065", "0066", "0067", "0068", "0069", "0070", "0071",
-    "0072",
+    "0072", "0073",
 )
 
 #: Tables whose row counts are snapshotted for postflight. Empty = every user table.
@@ -660,7 +661,7 @@ REVISION_ORDER = (
     "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
     "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060",
     "0061", "0062", "0063", "0064", "0065", "0066", "0067", "0068", "0069", "0070", "0071", "0072",
-    "0073",
+    "0073", "0074",
 )
 
 
@@ -2100,8 +2101,8 @@ async def check_blocking_sessions(conn, max_xact_age_s: float = DEFAULT_MAX_TOLE
         rem = [
             "Stop the writers first — the agent simulation is the main one, and it must be "
             "stopped GRACEFULLY or the in-flight turn's messages are lost:",
-            # Stop order: the supervisor first (/admin/simulation Stop drains and flushes in-process), then the agent service with the 420 s grace period docs/operations/host-and-simulation.md sizes. An emergency CLI run's container is blackbird-agent-run, never the unprefixed agent-run, which is org1's.
-            "Stop the run from /admin/simulation (Stop drains and flushes in-process), then:",
+            # Stop order: the supervisor first (/workspace/simulation Stop drains and flushes in-process), then the agent service with the 420 s grace period docs/operations/host-and-simulation.md sizes. An emergency CLI run's container is blackbird-agent-run, never the unprefixed agent-run, which is org1's.
+            "Stop the run from /workspace/simulation (Stop drains and flushes in-process), then:",
             "  docker compose -f docker-compose.prod.yml --profile agent stop -t 420 agent",
             "  docker stop -t 420 blackbird-agent-run   # ONLY if an emergency CLI run is live",
             "  docker compose -f docker-compose.prod.yml stop blackbird-app worker",
@@ -2278,8 +2279,8 @@ async def _check_agent_messages_sizing(conn, rev: str | None, target: str):
     if status != PASS:
         rem = [
             "Announce the window and stop the writers for its duration:",
-            # Stop order: the supervisor first (/admin/simulation Stop drains and flushes in-process), then the agent service with the 420 s grace period docs/operations/host-and-simulation.md sizes. An emergency CLI run's container is blackbird-agent-run, never the unprefixed agent-run, which is org1's.
-            "Stop the run from /admin/simulation (Stop drains and flushes in-process), then:",
+            # Stop order: the supervisor first (/workspace/simulation Stop drains and flushes in-process), then the agent service with the 420 s grace period docs/operations/host-and-simulation.md sizes. An emergency CLI run's container is blackbird-agent-run, never the unprefixed agent-run, which is org1's.
+            "Stop the run from /workspace/simulation (Stop drains and flushes in-process), then:",
             "  docker compose -f docker-compose.prod.yml --profile agent stop -t 420 agent",
             "  docker stop -t 420 blackbird-agent-run   # ONLY if an emergency CLI run is live",
             "  docker compose -f docker-compose.prod.yml stop blackbird-app worker",

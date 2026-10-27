@@ -1,19 +1,30 @@
 """_poll_control_plane: the engine's own half of the operator control plane.
 
 Each main-loop tick, the engine claims at most one pending `stop` command
-(requesting a graceful stop and marking the command done) and otherwise
-upserts a running heartbeat carrying a per-agent detail snapshot — so
-/admin/simulation can see the run is alive and stop it without touching the
+(requesting a graceful stop and marking the command done) or, with no stop, at
+most one pending `system` command (a per-system start, wind down or stop now,
+applied to the run's sessions), writes changed sessions to the run's config, and
+upserts a heartbeat carrying a per-agent and per-system detail snapshot — so
+/workspace/simulation can see the run is alive and control it without touching the
 container. The whole body is wrapped in try/except: a control-plane hiccup
 must never take down a running simulation, only cost one missed heartbeat.
 """
 import logging
+import uuid
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.agent.agent import Agent
+from src.agent.sessions import (
+    INTERVIEWS,
+    PROJECTS,
+    STOP_NOW,
+    WIND_DOWN,
+    WINDING_DOWN,
+    Limits,
+)
 from src.agent.simulation import CONTROL_POLL_INTERVAL, SimulationEngine
 from src.models import SimulationCommand, SimulationProcessStatus, SimulationRun
 from tests.fakes import FakeSlackClient
@@ -127,6 +138,8 @@ async def test_no_command_upserts_a_running_heartbeat_with_agent_detail(
                 "messages": 5,
             }
             assert "tick_at" in detail
+            assert detail["systems"][INTERVIEWS]["state"] == "running"
+            assert PROJECTS not in detail["systems"]
     finally:
         await _cleanup(factory, run_id)
 
@@ -250,3 +263,171 @@ async def test_engine_fails_a_finalize_stop_and_keeps_running(monkeypatch, tmp_p
                 await db.delete(row)
                 await db.commit()
         await _cleanup(factory, run_id)
+
+
+async def _system_command(factory, payload):
+    async with factory() as db:
+        cmd = SimulationCommand(command="system", payload=payload)
+        db.add(cmd)
+        await db.commit()
+        return cmd.id
+
+
+async def _command_row(factory, cmd_id):
+    async with factory() as db:
+        return await db.get(SimulationCommand, cmd_id)
+
+
+async def _delete_commands(factory, ids):
+    async with factory() as db:
+        for cmd_id in ids:
+            row = await db.get(SimulationCommand, cmd_id)
+            if row is not None:
+                await db.delete(row)
+        await db.commit()
+
+
+async def _wired(monkeypatch, tmp_path, engine):
+    eng = _engine(monkeypatch, tmp_path)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    run_id = await _seed_run(factory)
+    eng.session_factory = factory
+    eng.simulation_run_id = run_id
+    return eng, factory, run_id
+
+
+async def test_system_commands_for_this_run_start_wind_down_and_stop_now(
+    monkeypatch, tmp_path, engine,
+):
+    eng, factory, run_id = await _wired(monkeypatch, tmp_path, engine)
+    sessions = eng.ctx.sessions
+    ids = []
+    try:
+        ids.append(await _system_command(factory, {
+            "action": "start", "system": PROJECTS, "run_id": str(run_id),
+            "limits": {"count": 2, "runtime_minutes": 0},
+        }))
+        await eng._poll_control_plane(now=1e9)
+        row = await _command_row(factory, ids[-1])
+        assert row.status == "done" and row.consumed_at is not None
+        assert sessions.accepting(PROJECTS)
+        assert sessions.current(PROJECTS).limits == Limits(count=2)
+        assert sessions.current(PROJECTS).initial is False
+
+        ids.append(await _system_command(factory, {
+            "action": "wind_down", "system": PROJECTS, "run_id": str(run_id),
+        }))
+        await eng._poll_control_plane(now=2e9)
+        assert (await _command_row(factory, ids[-1])).status == "done"
+        assert sessions.current(PROJECTS).state == WINDING_DOWN
+        assert sessions.current(PROJECTS).reason == WIND_DOWN
+
+        ids.append(await _system_command(factory, {
+            "action": "stop_now", "system": INTERVIEWS, "run_id": str(run_id),
+        }))
+        await eng._poll_control_plane(now=3e9)
+        assert (await _command_row(factory, ids[-1])).status == "done"
+        assert not sessions.active(INTERVIEWS)
+        assert sessions.current(INTERVIEWS).reason == STOP_NOW
+        assert eng._end_reason is None, "a system's stop is not the run's stop"
+    finally:
+        await _delete_commands(factory, ids)
+        await _cleanup(factory, run_id)
+
+
+async def test_a_system_command_for_another_run_is_finished_stale(monkeypatch, tmp_path, engine):
+    eng, factory, run_id = await _wired(monkeypatch, tmp_path, engine)
+    other = uuid.uuid4()
+    cmd_id = await _system_command(factory, {
+        "action": "start", "system": PROJECTS, "run_id": str(other), "limits": {},
+    })
+    try:
+        await eng._poll_control_plane(now=1e9)
+        row = await _command_row(factory, cmd_id)
+        assert row.status == "stale"
+        assert row.result == f"for run {other}, not this one"
+        assert not eng.ctx.sessions.active(PROJECTS)
+    finally:
+        await _delete_commands(factory, [cmd_id])
+        await _cleanup(factory, run_id)
+
+
+@pytest.mark.parametrize("payload_fields,result", [
+    ({"action": "start", "system": INTERVIEWS, "limits": {}}, "Interviews is already running"),
+    ({"action": "stop_now", "system": PROJECTS}, "Projects is not running"),
+    ({"action": "wind_down", "system": PROJECTS}, "Projects is not running"),
+    ({"action": "start", "system": "grants", "limits": {}}, "unknown system 'grants'"),
+    ({"action": "pause", "system": INTERVIEWS}, "unknown action 'pause'"),
+])
+async def test_an_impossible_system_command_is_finished_failed_with_the_reason(
+    monkeypatch, tmp_path, engine, payload_fields, result,
+):
+    eng, factory, run_id = await _wired(monkeypatch, tmp_path, engine)
+    cmd_id = await _system_command(factory, {**payload_fields, "run_id": str(run_id)})
+    try:
+        await eng._poll_control_plane(now=1e9)
+        row = await _command_row(factory, cmd_id)
+        assert row.status == "failed" and row.result == result
+        assert eng.ctx.sessions.accepting(INTERVIEWS), "the running session is untouched"
+    finally:
+        await _delete_commands(factory, [cmd_id])
+        await _cleanup(factory, run_id)
+
+
+async def test_a_pending_stop_wins_and_the_system_command_waits(monkeypatch, tmp_path, engine):
+    eng, factory, run_id = await _wired(monkeypatch, tmp_path, engine)
+    monkeypatch.setattr(eng, "request_stop", lambda reason="operator": None)
+    async with factory() as db:
+        stop = SimulationCommand(command="stop", payload=None)
+        db.add(stop)
+        await db.commit()
+        stop_id = stop.id
+    cmd_id = await _system_command(factory, {
+        "action": "start", "system": PROJECTS, "run_id": str(run_id), "limits": {},
+    })
+    try:
+        await eng._poll_control_plane(now=1e9)
+        assert (await _command_row(factory, stop_id)).status == "done"
+        assert (await _command_row(factory, cmd_id)).status == "pending"
+        assert not eng.ctx.sessions.active(PROJECTS)
+    finally:
+        await _delete_commands(factory, [stop_id, cmd_id])
+        await _cleanup(factory, run_id)
+
+
+async def test_dirty_sessions_are_written_to_the_run_config_and_marked_clean(
+    monkeypatch, tmp_path, engine,
+):
+    eng, factory, run_id = await _wired(monkeypatch, tmp_path, engine)
+    async with factory() as db:
+        run = await db.get(SimulationRun, run_id)
+        run.config = {"max_runtime": 60}
+        await db.commit()
+    assert eng.ctx.sessions.dirty, "the engine's own interviews start is a change"
+    try:
+        await eng._poll_control_plane(now=1e9)
+        assert eng.ctx.sessions.dirty is False
+        async with factory() as db:
+            config = (await db.get(SimulationRun, run_id)).config
+        assert config["max_runtime"] == 60, "the rest of config is kept"
+        assert config["sessions"] == eng.ctx.sessions.records()
+        assert [r["system"] for r in config["sessions"]] == [INTERVIEWS]
+    finally:
+        await _cleanup(factory, run_id)
+
+
+async def test_a_failed_sessions_write_warns_and_stays_dirty(monkeypatch, tmp_path, caplog):
+    eng = _engine(monkeypatch, tmp_path)
+    eng.simulation_run_id = uuid.uuid4()
+
+    class _Db:
+        async def get(self, *a, **k):
+            raise RuntimeError("db exploded")
+
+        async def rollback(self):
+            return None
+
+    caplog.set_level(logging.WARNING, logger="src.agent.simulation")
+    await eng.control._persist_sessions(_Db())  # must not raise
+    assert eng.ctx.sessions.dirty is True
+    assert any("sessions" in r.getMessage() for r in caplog.records)

@@ -599,7 +599,7 @@ Who may do what (owner decisions D1–D8, 2026-10-13):
 `staff_account_create`, `staff_account_convert`, `reviewer_revoke`, `reviewer_restore`,
 `reviewer_delete`; payload `user_id`, `orcid`, `name`, `role`; the actor is the session
 user) and a log line. The rows feed the page's "Recent changes" list and, as action and time
-only, `/admin/simulation`'s 20-row "Recent admin actions", where they can push
+only, `/workspace/simulation`'s 20-row "Recent admin actions", where they can push
 simulation-control rows out of the window (accepted).
 
 Consequences recorded with the owner:

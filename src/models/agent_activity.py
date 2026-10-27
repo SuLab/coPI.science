@@ -366,9 +366,12 @@ class ThreadDecision(Base):
     #: It carries no verdict and is NOT a ``timeout`` — see ``closed_by_role``.
     #: ``project_closed`` (migration 0073) ends a BlackbirdBot project thread
     #: (``src/models/hub_project.py``); it carries no verdict either.
+    #: ``stopped`` (migration 0074) is a thread an operator's "Stop now" ended mid-run
+    #: (interviews or projects, ``src/agent/sessions.py``); an interview's held verdict is
+    #: still announced, as at any close.
     outcome: Mapped[str] = mapped_column(
         Enum(
-            "proposal", "no_proposal", "timeout", "abandoned", "project_closed",
+            "proposal", "no_proposal", "timeout", "abandoned", "project_closed", "stopped",
             name="thread_outcome_enum",
         ),
         nullable=False,

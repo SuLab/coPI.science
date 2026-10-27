@@ -53,7 +53,8 @@ filters in this run."</p>
     <li><strong>Not finished</strong>: the project ended before a close could be recorded.</li>
     <li><strong>Paused</strong>: the project is still open, and its run is stopped or held. It
     carries on if the run is resumed.</li>
-    <li><strong>In progress</strong>: the project is still open in the live run.</li>
+    <li><strong>In progress</strong>: the project is still open in the live run. While projects
+    are not running in that run, it waits, and it carries on when projects start again.</li>
 </ul>
 <p>A <strong>Not finished</strong> project names its reason:</p>
 <ul>
@@ -61,8 +62,8 @@ filters in this run."</p>
     <li><strong>Research failed</strong>: the research could not be completed.</li>
     <li><strong>The choice did not pass its checks</strong>: BlackbirdBot's choice and opening
     plan failed the checks made before posting.</li>
-    <li><strong>The run ended before posting</strong>: the run was already winding down when
-    the project was ready to post.</li>
+    <li><strong>The run ended before posting</strong>: projects were winding down before its
+    research began.</li>
     <li><strong>The lab was not live</strong>: the lab's agent was no longer taking part.</li>
     <li><strong>The lab's reply could not be posted</strong>.</li>
     <li><strong>The thread ended without a close</strong>: the thread ran out before
@@ -71,6 +72,7 @@ filters in this run."</p>
     <li><strong>BlackbirdBot's close could not be recorded</strong>.</li>
     <li><strong>The run was finalized first</strong>: the project was still open when its run
     was finalized.</li>
+    <li><strong>Projects were stopped</strong>: an admin stopped projects while it was open.</li>
 </ul>
 
 <h2 id="detail">The details page</h2>

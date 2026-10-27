@@ -5,7 +5,10 @@ every session needs. Dated statements hold as of the date they give; re-measure 
 count or a line number before relying on it.
 
 Normal operation now uses the supervisor service described under "Simulation
-control plane" below: runs start and stop from `/admin/simulation`. The one-off
+control plane" below: runs start and stop from `/workspace/simulation` (Workspace →
+Simulation; admins only for now, managers later; it moved from `/admin/simulation` on
+2026-10-27, and that address redirects there, `?run=` kept). The panel's forms still post
+to `/admin/simulation/*`. The one-off
 `run -d --name blackbird-agent-run` commands in the first half of this file are
 the CLI emergency path.
 
@@ -79,7 +82,18 @@ $DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.
 
 # With a time limit (minutes):
 $DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main --max-runtime 60
+
+# Projects only, ending at 10 finished projects:
+$DC --profile agent run -d --name blackbird-agent-run agent python -m src.agent.main --fresh --systems projects --max-projects 10
 ```
+
+**Which systems run** (2026-10-27): `--systems` takes a comma-separated subset of
+`interviews,projects` (default `interviews`, the production behaviour before the panel
+could start projects); an unknown name exits with an error. `--max-runtime` (minutes) and
+`--max-proposals` are the interviews limits; `--projects-runtime` (minutes) and
+`--max-projects` (finished projects) are the projects limits; 0 means no limit for each.
+The planned duration the run-start announcement shows is 0 when any started system has no
+runtime limit, otherwise the largest.
 
 **`--fresh` deletes nothing.** It used to: three UNFILTERED deletes
 (`AgentMessage`, `AgentChannel`, `PiDmMessage`, no `simulation_run_id`
@@ -136,26 +150,87 @@ start re-ingesting; see `src/agent/run_marker.py`). What
 was announced is recorded under `run_start_announcement` in
 `simulation_runs.config`.
 
+### Interviews and projects: starting and stopping each (2026-10-27)
+
+A run holds interviews (labs pitch; BlackbirdBot interviews and assesses), projects
+(BlackbirdBot develops a project with each lab; `docs/operations/blackbird-hub.md`) or both.
+Each span of one system inside a run is a *session* (`src/agent/sessions.py`), with limits
+counted from its own start: "Start projects: 10" means 10 more, even in a resumed run.
+
+- **The panel.** `/workspace/simulation`'s start/stop section has a run strip, an Interviews card
+  and a Projects card. With nothing live the strip offers the Fresh run checkbox (forced
+  after a finalized run, as before), and each card offers its limits and its Start;
+  "Start both" starts both systems in one run with both cards' limits. Interviews: max
+  runtime and max proposals. Projects: max runtime and finished projects (a project counts
+  when it closes Ready or Not agreed). 0 means no limit. With a run live the strip shows
+  its short id and start time, "Start both" is gone, and a card's Start joins the live run.
+- **A card while its system runs** shows its state, its progress (Interviews: proposals
+  this session of N, open interviews, time used; Projects: finished of N, open, failures in
+  a row), what the system has spent in this run, and two buttons. *Wind down* acts as if
+  the limit were reached. *Stop now* (it asks first) ends the system at once: every open
+  interview closes with outcome `stopped` and its owed headline posts through the usual
+  claims, all of them with no cap, even when this ends the run (the main loop posts them
+  in the same tick, before any shutdown sweep); every open project ends not finished with reason `stopped` and its thread, if it
+  has one, closes with outcome `stopped`, with nothing posted to Slack. The other system carries on. While winding down a card names the labs it waits on;
+  an interview wind-down held open by a leaked thread logs one WARNING naming the threads,
+  and Stop now is the way out.
+- **Stop everything** and **Stop everything, hold open interviews** are the run-wide Stop
+  buttons, unchanged in behaviour (the table below). Open projects stay open and show
+  Paused.
+- **Refusals.** Start projects is refused while research cannot run
+  (`PROJECT_RESEARCH_ENABLED` off, an unpriced `LLM_PROJECT_RESEARCH_MODEL`, a missing
+  prompt), and the card says why. A start is refused for a system already running or
+  winding down, while the engine is stopping, or while another per-system command is
+  pending. Stop everything is never blocked by a pending per-system command.
+- **How a per-system command travels.** With no engine alive, a Start (one system or both)
+  is a `start` command for the supervisor, as before. With a run live, a start, Wind down
+  or Stop now is a `system` command carrying the live run's id; the engine's control poll
+  claims at most one per tick (`CONTROL_POLL_INTERVAL`, 30 s), finishes it `done`, or
+  `failed` with the reason (already running, not running), or `stale` when it names
+  another run. The supervisor leaves a `system` command pending while an engine holds the
+  lock, and finishes it `stale` ("no run is live — start it again") when none does: a start
+  that raced the run's end never starts an engine. Every request writes an admin audit
+  event.
+- **While a system is not running** it gets no turns and no model calls: without
+  Interviews, labs do not pitch and only answer project postings and talk in project
+  threads, and open interview threads wait; without Projects, nothing is requested,
+  researched, posted or replied to, and open projects wait (the Projects page shows them
+  In progress while the run is live, Paused once it stops).
+- **What the run records.** The engine writes the run's sessions (system, start, limits,
+  end, why it ended) to `simulation_runs.config["sessions"]`; the run's Activity page shows
+  them in a Sessions card, and the heartbeat's `detail["systems"]` feeds the cards.
+
 ### How a run ends, and what a resume restores (audit remediation, 2026-09-29)
 
 Why a run ended decides what its shutdown sweep announces (`src/agent/end_reasons.py`):
 
 | End | How | Shutdown sweep | Run row |
 |---|---|---|---|
-| Stop, SIGTERM | admin Stop; `docker stop -t 420` | every owed headline, open interviews included, capped at 25 | resumable |
-| Stop — hold open interviews | the second admin button | only interviews with a `thread_decisions` row | `held_at` set |
+| Stop, SIGTERM (`operator`, `signal`) | admin Stop everything; `docker stop -t 420`; the last running system wound down or stopped by hand | every owed headline, open interviews included, capped at 25 | resumable |
+| failure stop (`failure_stop`) | the last running system was projects, wound down after 3 failed projects in a row | as Stop | resumable |
+| Stop everything, hold open interviews (`operator_hold`) | the second Stop everything button | only interviews with a `thread_decisions` row | `held_at` set |
 | stall, escaped exception, failed start | automatic | as the hold | `held_at` set |
 | lost engine lock | automatic | none: the owed headlines are left for the repair script | `held_at` set |
-| natural end | `--max-runtime` reached, `--max-proposals` drained | every owed headline | `finalized_at` set; a resume is refused (`RunFinalized`), start fresh |
+| held over (`held_over`) | a resumed held run ended while its hold was still carried (no Interviews start took it up) | as the hold | `held_at` stays set |
+| natural end (`time_limit`, `target_drained`) | the last running system reached its runtime or its count | every owed headline | `finalized_at` set; a resume is refused (`RunFinalized`), start fresh |
 
-The production defaults (`max_runtime = 0`, `max_proposals = 0`) never reach a natural end.
+Only the system that ended last decides: an earlier Interviews Stop now leaves nothing
+owed, so a later natural end still finalizes. A limit winds a system down rather than
+stopping it at once: nothing new starts, open interviews run to their verdict and projects
+under way to their close, then the system ends, so a timed session can run past its
+runtime (Stop now is the hard stop). A system with neither limit never ends on its own,
+except projects after the failure stop. A plain Stop everything of a run that still carries
+its hold announces the held interviews too and clears `held_at`.
 
 - **A resume restores from the database only.** The Slack reconcile is gone; the
   engine's own posts are written to `agent_messages` before they count; the poll cursors
   are parked past the history already on Slack. Slack-native messages posted while the
-  engine was down are not recovered. On a resume the hub subscribes to its channels and
-  interviews any lab pitch from the last 14 days that has no thread yet. A resume clears
-  `held_at`.
+  engine was down are not recovered. On a resume the hub subscribes to its channels. A
+  resume runs only the systems started. When it starts Interviews, and whenever Interviews
+  joins a live run, the hub interviews any lab pitch of the run from the last 14 days that
+  has no thread yet, and a resume that starts Interviews clears `held_at`. A resume
+  without Interviews leaves the hold and its headlines waiting: start Interviews later in
+  the same run, or Finalize run.
 - **Headline claims.** Every headline (engine or
   `scripts/backfill_assessment_headlines.py`) claims its interview
   (`opportunity_assessments.summary_claimed_at`) immediately before posting. A post that
@@ -196,7 +271,9 @@ The production defaults (`max_runtime = 0`, `max_proposals = 0`) never reach a n
   command. A stop still pending after a run, and a Finalize run stop pending at boot, is
   settled by the supervisor (`_settle_pending_stops`): a Finalize run runs
   `HeadlineAnnouncer.finalize` under the engine lock, any other stop finishes "run already
-  stopped" if no engine holds the lock.
+  stopped" if no engine holds the lock. Per-system `system` commands are claimed the same
+  way; the supervisor stales one no engine is alive to claim (see "Interviews and
+  projects" above).
 - **Finalize run** is the button on a stopped run's `/admin/activity/<id>` page
   (`POST /admin/simulation/finalize-run`). It asks for the run's short id (the first 8
   characters, posted as `confirm_run`) and refuses on a mismatch. It announces the owed
@@ -213,7 +290,7 @@ The production defaults (`max_runtime = 0`, `max_proposals = 0`) never reach a n
   `0055`), since every threaded verdict write would fail there. The supervisor records the
   start `failed` with the message; apply the migrations and start again.
 - **Circuit breaker.** Repeated model-call failures across interviews open an engine-wide
-  breaker; `/admin/simulation` shows "LLM calls paused" and calls resume after ten minutes.
+  breaker; `/workspace/simulation` shows "LLM calls paused" and calls resume after ten minutes.
   A single interview whose replies keep failing with non-transient errors while other calls
   succeed is abandoned with an `assessment_drops` row of reason `reply_failed`.
 - **`MAX_THREAD_MESSAGES` other than 12** makes the engine refuse to start
@@ -343,7 +420,7 @@ $DC run --rm blackbird-app alembic current   # confirm it matches `alembic heads
 $DC up -d blackbird-app worker
 
 # 6. Start the new run. Check the three-line startup banner:
-#      Starting simulation: N agents, ... max runtime, 0 budget/agent (resuming)
+#      Starting simulation: N agents, interviews: …, 0 budget/agent (resuming)
 #      Screening rubric: version X (content hash Y)
 #      API-call accounting: ... counts REAL API CALLS ... not turns, as of 2026-08-22
 #    All three come from src/agent/main.py; the third is `_log_api_call_units`
@@ -424,7 +501,7 @@ edited `.env`. For the web tier the equivalent is `$DC up -d --force-recreate
 blackbird-app` — and one `.env` key now fails the site closed if it is wrong,
 see "The Origin guard" in `docs/operations/pis-and-access.md`.
 
-**The NCBI API key.** Blackbird uses a key from its own NCBI account, never one shared with another deployment. Every NCBI request goes through `src/services/pubmed.py`. `src/services/secret_redaction.py` rewrites `api_key=<value>` to `api_key=REDACTED` in three places: every log record of a process that imported `pubmed` (the app, the worker and the agent), every NCBI exception (its message, request and response), and `jobs.last_error` before it is written. After a key change, recreate `blackbird-app` and `worker` (`$DC up -d --force-recreate blackbird-app worker`). Recreate `agent` only when `/admin/simulation` shows no live run. Then run the zero-leak check in each container, with the exec prefix `$DC exec -T blackbird-app`, `$DC exec -T worker` or `docker exec -i copi-blackbird-agent-1`:
+**The NCBI API key.** Blackbird uses a key from its own NCBI account, never one shared with another deployment. Every NCBI request goes through `src/services/pubmed.py`. `src/services/secret_redaction.py` rewrites `api_key=<value>` to `api_key=REDACTED` in three places: every log record of a process that imported `pubmed` (the app, the worker and the agent), every NCBI exception (its message, request and response), and `jobs.last_error` before it is written. After a key change, recreate `blackbird-app` and `worker` (`$DC up -d --force-recreate blackbird-app worker`). Recreate `agent` only when `/workspace/simulation` shows no live run. Then run the zero-leak check in each container, with the exec prefix `$DC exec -T blackbird-app`, `$DC exec -T worker` or `docker exec -i copi-blackbird-agent-1`:
 
 ```bash
 out=$(<exec prefix> python - <<'PY' 2>&1
@@ -473,28 +550,28 @@ started like any other long-lived service, `$DC --profile agent up -d agent`,
 and stays up across host reboots and crashes rather than living and dying
 with a single `docker run`.
 
-- **Starts happen ONLY from `/admin/simulation`**, or the CLI emergency path
+- **Starts happen ONLY from `/workspace/simulation`**, or the CLI emergency path
   documented above (`docker compose run` with an explicit `python -m
   src.agent.main ...` command) — compose v2 clears the restart policy on a
   `run` one-off, so that emergency path can never be auto-resurrected by
   `restart: unless-stopped`. The supervisor process itself never starts a
   simulation run on its own.
-- **`stop` issued from the admin page is gentler than `docker stop`**: it
+- **`stop` issued from the panel is gentler than `docker stop`**: it
   asks the already-running engine to stop in-process, which drains and
   flushes exactly like `SimulationEngine.stop()` always has, with no
   container-level SIGTERM/grace-period dance needed at all.
-- **On boot the supervisor stales any pending start command** rather than
+- **On boot the supervisor stales any pending start or `system` command** rather than
   acting on it — it never auto-starts a run on container (re)start, which is
   the same never-auto-start-the-simulation policy these docs have always
   followed, now enforced by the supervisor itself rather than by operator
   discipline alone. A host reboot or a plain `$DC up -d agent` brings the
   supervisor back IDLE, waiting for an operator to start a run from
-  `/admin/simulation`.
+  `/workspace/simulation`.
 - **A code deploy is now**: `$DC --profile agent build agent` then `$DC up -d
   agent` — there is no `run -d --name blackbird-agent-run` step anymore. Per
   the previous bullet, the supervisor container comes back up IDLE; starting
   a run after a deploy is a separate, explicit operator action from
-  `/admin/simulation`.
+  `/workspace/simulation`.
 - **`docker stop -t 420` semantics are unchanged.** Everything the "Before
   restarting" section above says about the 420s grace period still applies
   verbatim to the supervisor container. `stop_grace_period: 420s` in the
@@ -504,7 +581,7 @@ with a single `docker run`.
   `docker stop -t 420 copi-blackbird-agent-1` by hand remains correct and
   loses nothing.
 
-**`/admin/simulation`'s Live tab renders dollar cost from a versioned,
+**`/workspace/simulation`'s Live tab renders dollar cost from a versioned,
 hand-maintained price table, not from anything Anthropic returns at call
 time.** `PRICES`/`AS_OF` in `src/services/llm_pricing.py` are the whole
 table — repricing is an edit to that one file plus a **web-tier rebuild
@@ -569,7 +646,7 @@ publication-handling design, §11. Code: `src/agent/authorship_rules.py` (the ru
 
   The report holds message text: keep it under `data/` (gitignored), never commit it.
 - **Switching to enforce** is the owner's decision, after the replay report. With no live
-  run on `/admin/simulation`: add `AUTHORSHIP_CLAIM_CHECK_MODE=enforce` to `.env`, run
+  run on `/workspace/simulation`: add `AUTHORSHIP_CLAIM_CHECK_MODE=enforce` to `.env`, run
   `$DC up -d --force-recreate agent`, and start the next run **Fresh**: working memory
   written under log mode is then archived instead of carried (a resume carries it until
   each agent's next memory update sweeps it). **Rollback:** remove the line and recreate

@@ -1,11 +1,13 @@
 """On a RESUME, the hub recovers lab pitches that got no reply because the
 previous process stopped in the tick they were posted."""
 import time
+from datetime import UTC, datetime
 
 import pytest
 
 from src.agent.agent import Agent
 from src.agent.message_log import LogEntry
+from src.agent.sessions import PROJECTS, Limits, Sessions
 from src.agent.simulation import SimulationEngine, set_call_log_callback
 from src.agent.state import ThreadState
 from src.agent.transport import NullTransport
@@ -14,14 +16,14 @@ from tests.fakes import FakeSlackClient
 pytestmark = pytest.mark.asyncio
 
 
-def _engine(monkeypatch, tmp_path, *, fresh_start=False, slack_off=False):
+def _engine(monkeypatch, tmp_path, *, fresh_start=False, slack_off=False, sessions=None):
     monkeypatch.setattr("src.agent.agent.PROFILES_DIR", tmp_path)
     hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
     lab = Agent("wang", "WangBot", "Wang", role="pi_lab")
     make = (lambda aid: NullTransport(aid)) if slack_off else (lambda aid: FakeSlackClient(agent_id=aid))
     eng = SimulationEngine(
         agents=[hub, lab], slack_clients={"blackbird": make("blackbird"), "wang": make("wang")},
-        fresh_start=fresh_start, slack_enabled=not slack_off,
+        fresh_start=fresh_start, slack_enabled=not slack_off, sessions=sessions,
     )
     eng._channel_id_map["general"] = "local:general" if slack_off else "C_general"
     return eng, hub, lab
@@ -148,3 +150,25 @@ async def test_slack_off_start_completes_with_the_one_shot(monkeypatch, tmp_path
         set_call_log_callback(None)
     assert "_run_main_loop" in calls
     assert len(hub.state.active_threads) == 1
+
+
+async def test_a_projects_only_resume_subscribes_the_hub_but_takes_up_no_pitch(
+    monkeypatch, tmp_path,
+):
+    """A projects-only resume still runs the one-shot, so the hub is subscribed before a lab's
+    reply to a project posting can land (a project thread starts from that top-level post),
+    but no lab pitch is taken up: Interviews is not running, and `_auto_activate_lab_posts`
+    gates each post by its system (spec §4.8)."""
+    sessions = Sessions()
+    sessions.start(PROJECTS, Limits(), datetime.now(UTC), initial=True)
+    eng, hub, _lab = _engine(monkeypatch, tmp_path, slack_off=True, sessions=sessions)
+    calls: list[str] = []
+    _record_start(monkeypatch, eng, calls)
+    _pitch(eng, f"{time.time() - 30:.6f}")
+    try:
+        await eng.start()
+    finally:
+        set_call_log_callback(None)
+    assert "general" in hub.state.subscribed_channels
+    assert hub.state.active_threads == {}, "a pitch waits for an Interviews start"
+    assert "_run_main_loop" in calls

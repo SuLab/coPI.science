@@ -1,10 +1,10 @@
 """Print the projects prototype's measures for one simulation run (read-only).
 
-Renders ``src.services.projects_report.build_report``: projects requested per lab and
-the intervals each lab missed, outcomes and not-finished reasons, research and
-refinement cost, the most common gaps and disagreements, anchors per profile section,
-sources by kind, project reviews beside the run's assessment reviews, and the run time
-from request to finish. Writes nothing to the database.
+Renders ``src.services.projects_report.build_report``: projects requested per lab,
+outcomes and not-finished reasons, research and refinement cost, the most common gaps
+and disagreements, anchors per profile section, sources by kind, project reviews beside
+the run's assessment reviews, and the run time from request to finish. Writes nothing to
+the database.
 
 Usage:
     python scripts/projects_report.py --run <run id>                   # Markdown to stdout
@@ -61,20 +61,17 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines = [
         f"# Projects report — run {report['run_id']}",
         "",
-        f"Run time {_num(report['run_hours'])} h; interval {_num(report['interval_hours'])} h; "
+        f"Run time {_num(report['run_hours'])} h; "
         f"{'finalized' if report['run_finalized'] else 'live' if report['run_live'] else 'not live'}; "
         f"{report['project_count']} projects.",
         "",
         "## Projects per lab",
         "",
-        "| Lab | Requested | Per run day | Missed intervals |",
-        "|---|---|---|---|",
+        "| Lab | Requested | Per run day |",
+        "|---|---|---|",
     ]
     for lab in report["labs"]:
-        missed = ", ".join(f"{n} {reason}" for reason, n in lab["missed_by_reason"].items()) or "0"
-        lines.append(
-            f"| {lab['agent_id']} | {lab['requested']} | {_num(lab['per_run_day'], 2)} | {missed} |"
-        )
+        lines.append(f"| {lab['agent_id']} | {lab['requested']} | {_num(lab['per_run_day'], 2)} |")
     lines += ["", *(f"- {note}" for note in report["notes"]), "", "## Outcomes", ""]
     for kind, n in sorted(report["outcome_counts"].items()):
         share = report["outcome_shares"].get(kind)

@@ -1,4 +1,4 @@
-"""The /admin/simulation Live tab's view model and SVG composition, for ONE run (spec §7.3; moved from the admin router)."""
+"""The /workspace/simulation Live tab's view model and SVG composition, for ONE run (spec §7.3; moved from the admin router)."""
 
 import time
 import uuid

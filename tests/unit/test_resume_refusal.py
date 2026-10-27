@@ -1,4 +1,6 @@
-"""Spec P0-04: resuming a finalized run is refused, and a resume clears held_at."""
+"""Spec P0-04: resuming a finalized run is refused. A resume that starts interviews clears
+held_at; one that does not keeps the hold and reports it carried (independent-controls
+spec §4.9)."""
 import asyncio
 import uuid
 from datetime import UTC, datetime
@@ -11,25 +13,46 @@ from src.agent.supervisor import run_supervisor
 from src.models import SimulationCommand, SimulationRun
 from tests.unit.test_supervisor import _cleanup, _clear_status, _poll_until
 
+HELD_AT = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
+ENDED_AT = datetime(2026, 9, 29, 12, 1, tzinfo=UTC)
+
 
 def _run(**kw):
     return SimulationRun(id=uuid.uuid4(), status="stopped", config={"max_proposals": 4}, **kw)
 
 
-def test_a_finalized_run_is_refused():
+@pytest.mark.parametrize("starts_interviews", [True, False])
+def test_a_finalized_run_is_refused(starts_interviews):
     run = _run(finalized_at=datetime(2026, 9, 29, 12, 0, tzinfo=UTC))
     with pytest.raises(RunFinalized, match="finalized"):
-        _reopen_run_for_resume(run, 0)
+        _reopen_run_for_resume(run, starts_interviews=starts_interviews)
     assert run.status == "stopped", "nothing was reopened"
 
 
-def test_a_resume_clears_held_at_and_keeps_todays_bookkeeping():
-    run = _run(held_at=datetime(2026, 9, 29, 12, 0, tzinfo=UTC),
-               ended_at=datetime(2026, 9, 29, 12, 1, tzinfo=UTC))
-    assert _reopen_run_for_resume(run, 0) == 4, "max_proposals inherited as before"
+def test_a_resume_that_starts_interviews_clears_held_at():
+    run = _run(held_at=HELD_AT, ended_at=ENDED_AT)
+    assert _reopen_run_for_resume(run, starts_interviews=True) is False
     assert run.held_at is None
     assert run.status == "running" and run.ended_at is None
-    assert run.config["max_proposals"] == 4
+
+
+def test_a_resume_without_interviews_keeps_the_hold_and_carries_it():
+    run = _run(held_at=HELD_AT, ended_at=ENDED_AT)
+    assert _reopen_run_for_resume(run, starts_interviews=False) is True
+    assert run.held_at == HELD_AT
+    assert run.status == "running" and run.ended_at is None
+
+
+def test_a_run_that_was_not_held_carries_no_hold():
+    run = _run(ended_at=ENDED_AT)
+    assert _reopen_run_for_resume(run, starts_interviews=False) is False
+    assert run.held_at is None
+
+
+def test_a_resume_no_longer_inherits_or_restamps_max_proposals():
+    run = _run(ended_at=ENDED_AT)
+    _reopen_run_for_resume(run, starts_interviews=True)
+    assert run.config == {"max_proposals": 4}, "the stored config is left as it was"
 
 
 @pytest.mark.asyncio
@@ -37,7 +60,7 @@ async def test_the_supervisor_records_the_refused_start_as_failed(engine):
     factory = async_sessionmaker(engine, expire_on_commit=False)
     await _clear_status(factory)
 
-    async def refuse(*args):
+    async def refuse(*args, **kwargs):
         raise RunFinalized("run x was finalized at 2026-09-29; start a fresh run")
 
     task = asyncio.create_task(

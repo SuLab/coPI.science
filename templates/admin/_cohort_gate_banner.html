@@ -41,7 +41,7 @@
     applied — the roster is all-vs-all. Topology edits are kept and take effect the
     moment isolation is turned on; turning it on means setting
     <code>COHORT_ISOLATION_ENABLED=true</code> in <code>.env</code> and <em>recreating</em>
-    the <code>agent</code> container once <a href="/admin/simulation">/admin/simulation</a>
+    the <code>agent</code> container once <a href="/workspace/simulation">/workspace/simulation</a>
     shows no live run; a restart keeps the old environment.
 </div>
 {% endif %}
@@ -57,7 +57,7 @@
         <li>Membership edits are picked up by a running simulation within ~30&nbsp;seconds. No restart.</li>
         <li><strong>But the settings are cached per process:</strong> changing
             <code>cohort_isolation_enabled</code> or <code>cohort_default_policy</code>
-            means editing <code>.env</code>, then, once /admin/simulation shows no live run,
+            means editing <code>.env</code>, then, once /workspace/simulation shows no live run,
             <code>docker compose -f docker-compose.prod.yml --profile agent up -d --no-deps --force-recreate agent</code>,
             and <code>docker compose -f docker-compose.prod.yml up -d --no-deps --force-recreate blackbird-app</code>
             for this banner to show the new value. Only the topology is live.</li>

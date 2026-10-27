@@ -18,6 +18,7 @@ from . import (
     pi_profile,
     projects,
     prompt_suggestions,
+    simulation,
     staff,
 )
 
@@ -46,6 +47,7 @@ for feature in (
     interviews,
     projects,
     prompt_suggestions,
+    simulation,
     staff,
 ):
     router.include_router(feature.router)

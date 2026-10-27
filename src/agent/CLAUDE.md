@@ -30,7 +30,12 @@ stopping, restarting).
 - A project thread (its root's phase is `project_reply`; `src/agent/engine/projects.py`) is
   not an interview: no assessment, drop, decline, panel note or headline, and ⏸️ never closes
   it. BlackbirdBot closes it with a `<project_json>` sidecar, stripped before posting, and the
-  thread is recognised from the root's phase even with `HUB_PROJECTS_ENABLED` off.
+  thread is recognised from the root's phase whether or not Projects is running.
+- Interviews and projects run as sessions (`src/agent/sessions.py`, one `Sessions` on
+  `ctx.sessions`): every lane asks it before acting (pitching, auto-activation, reply turns,
+  project requests, postings and replies), so a system that is not running gets no turns and
+  no model calls. An operator's Stop now closes that system's threads with outcome `stopped`
+  (`STOPPED_OUTCOME`), which queues the owed headline but no working-memory event.
 - The interview prompt sets are frozen (owner, 2026-10-26). Project prompts live only in
   `prompts/projects/` (`src/agent/project_prompts.py`): never add one to a role's
   `prompt_files`, a role directory or `prompts/` itself, and never bump a `role.toml` for one.

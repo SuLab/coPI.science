@@ -17,6 +17,7 @@ from sqlalchemy import true as sa_true
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, load_only, selectinload
 
+from src.agent.sessions import describe_records
 from src.agent.specialists import SPECIALIST_DOMAINS
 from src.models import (
     AgentChannel,
@@ -1448,7 +1449,10 @@ async def build_run_detail(
     The per-agent and per-channel stats are SQL aggregates over the whole run;
     ``messages`` is one page (``RUN_MESSAGES_PAGE_SIZE``) of column rows, with
     no ``content``, ordered by time. ``page`` is clamped to
-    ``1..page_count``.
+    ``1..page_count``. ``sessions`` is one display row per session the run's
+    ``config["sessions"]`` records (``describe_records``), empty for a run with none; a
+    session its process never ended reads as running only while the run is live
+    (``live_run_id``), so a killed engine's sessions do not stay running.
     """
     run_result = await db.execute(
         select(SimulationRun).where(SimulationRun.id == run_id)
@@ -1534,4 +1538,7 @@ async def build_run_detail(
         "message_total": message_total,
         "page": page,
         "page_count": page_count,
+        "sessions": describe_records(
+            (run.config or {}).get("sessions") or [], run_running=await live_run_id(db) == run.id,
+        ),
     }

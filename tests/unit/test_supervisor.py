@@ -28,12 +28,17 @@ Two test shapes are used, deliberately:
   `poll_seconds`) instead of 1, since the defect under test (the idle
   branch's own upsert clobbering a live foreign heartbeat) is specifically
   about repeated idle ticks, not a single one.
+- The per-system tests (a projects-only start, a start naming no system, a
+  `system` command with and without a live engine) use the same
+  `_hook_before_nth_session(n=2)` injection with `max_loops=1`.
 """
 import asyncio
+import uuid
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from src.agent.sessions import INTERVIEWS, PROJECTS, Limits
 from src.agent.supervisor import run_supervisor
 from src.models import SimulationCommand
 from src.services.advisory_locks import ENGINE_LOCK_KEY, SessionAdvisoryLock
@@ -117,7 +122,7 @@ async def test_boot_stales_a_pre_seeded_pending_start_and_never_calls_run_fn(eng
 
     calls = []
 
-    async def stub(*args):
+    async def stub(*args, **kwargs):
         calls.append(args)
 
     try:
@@ -142,7 +147,7 @@ async def test_start_enqueued_after_boot_runs_positionally_and_the_loop_exits(en
 
     calls = []
 
-    async def stub(*args):
+    async def stub(*args, **kwargs):
         calls.append(args)
 
     task = asyncio.create_task(
@@ -178,14 +183,17 @@ async def test_start_enqueued_with_max_proposals_passes_it_positionally(engine):
     """Same shape as (b), but the seeded start payload also carries a nonzero
     `max_proposals` — this is the field a resumed run's proposal cap now
     flows through when the supervisor (not the CLI) is what starts the run,
-    so it must reach run_fn as the 8th positional arg unchanged."""
+    so it must reach run_fn as the 8th positional arg unchanged. The payload is the
+    legacy shape (no `systems`), so `systems=` carries interviews with those limits."""
     factory = async_sessionmaker(engine, expire_on_commit=False)
     await _clear_status(factory)
 
     calls = []
+    kwarg_calls = []
 
-    async def stub(*args):
+    async def stub(*args, **kwargs):
         calls.append(args)
+        kwarg_calls.append(kwargs)
 
     task = asyncio.create_task(
         run_supervisor(session_factory=factory, run_fn=stub, poll_seconds=0.05)
@@ -204,6 +212,9 @@ async def test_start_enqueued_with_max_proposals_passes_it_positionally(engine):
         await asyncio.wait_for(task, timeout=10)
 
         assert calls == [(60, 0, False, False, True, False, False, 5)]
+        assert kwarg_calls == [
+            {"systems": {INTERVIEWS: Limits(count=5, runtime_minutes=60)}},
+        ]
         async with factory() as db:
             row = await db.get(SimulationCommand, cmd_id)
             assert row.status == "done"
@@ -225,7 +236,7 @@ async def test_a_raising_run_fn_ends_the_command_failed_but_the_loop_still_exits
 
     calls = []
 
-    async def stub(*args):
+    async def stub(*args, **kwargs):
         calls.append(args)
         raise RuntimeError("boom")
 
@@ -277,7 +288,7 @@ async def test_pending_stop_with_nothing_running_finishes_done(engine):
 
     hooked_factory = _hook_before_nth_session(factory, n=2, hook=seed_stop)
 
-    async def stub(*args):
+    async def stub(*args, **kwargs):
         raise AssertionError("run_fn must not be called for a stop-only scenario")
 
     try:
@@ -312,7 +323,7 @@ async def test_pending_stop_beside_a_live_engine_is_left_pending(engine, pg_url)
 
     hooked_factory = _hook_before_nth_session(factory, n=2, hook=seed_live_engine_and_stop)
 
-    async def stub(*args):
+    async def stub(*args, **kwargs):
         raise AssertionError("run_fn must not be called here")
 
     try:
@@ -360,7 +371,7 @@ async def test_a_start_enqueued_while_a_run_is_live_is_staled_at_run_end(engine,
 
     hooked_factory = _hook_before_nth_session(factory, n=2, hook=seed_first_start)
 
-    async def stub(*args):
+    async def stub(*args, **kwargs):
         calls.append(args)
 
     import src.agent.supervisor as supervisor_module
@@ -426,7 +437,7 @@ async def test_idle_branch_never_clobbers_a_fresh_foreign_running_heartbeat(engi
 
     hooked_factory = _hook_before_nth_session(factory, n=2, hook=seed_fresh_running_heartbeat)
 
-    async def stub(*args):
+    async def stub(*args, **kwargs):
         raise AssertionError("run_fn must not be called — no start command is ever pending")
 
     try:
@@ -441,3 +452,182 @@ async def test_idle_branch_never_clobbers_a_fresh_foreign_running_heartbeat(engi
     finally:
         await holder.release()
         await _cleanup(factory)
+
+
+@pytest.mark.asyncio
+async def test_a_projects_only_start_passes_no_interview_limits(engine):
+    """A start naming only projects reaches run_fn with the positional interview limits
+    at 0 and `systems=` holding projects with its limits."""
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    await _clear_status(factory)
+    seeded = {"cmd_id": None}
+
+    async def seed_start():
+        async with factory() as db:
+            cmd = SimulationCommand(
+                command="start",
+                payload={"fresh": True, "systems": {"projects": {"count": 5}}},
+            )
+            db.add(cmd)
+            await db.commit()
+            seeded["cmd_id"] = cmd.id
+
+    hooked_factory = _hook_before_nth_session(factory, n=2, hook=seed_start)
+    calls = []
+
+    async def stub(*args, **kwargs):
+        calls.append((args, kwargs))
+
+    try:
+        await run_supervisor(session_factory=hooked_factory, run_fn=stub, max_loops=1)
+
+        assert calls == [(
+            (0, 0, False, False, True, False, False, 0),
+            {"systems": {PROJECTS: Limits(count=5, runtime_minutes=0)}},
+        )]
+        async with factory() as db:
+            row = await db.get(SimulationCommand, seeded["cmd_id"])
+            assert row.status == "done"
+    finally:
+        await _cleanup(factory, command_ids=[seeded["cmd_id"]])
+
+
+@pytest.mark.asyncio
+async def test_a_start_naming_no_system_is_finished_failed(engine):
+    """A start whose payload yields no system never runs: it is finished failed and the
+    supervisor stays idle."""
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    await _clear_status(factory)
+    seeded = {"cmd_id": None}
+
+    async def seed_start():
+        async with factory() as db:
+            cmd = SimulationCommand(
+                command="start", payload={"fresh": True, "systems": {"bogus": {"count": 1}}},
+            )
+            db.add(cmd)
+            await db.commit()
+            seeded["cmd_id"] = cmd.id
+
+    hooked_factory = _hook_before_nth_session(factory, n=2, hook=seed_start)
+
+    async def stub(*args, **kwargs):
+        raise AssertionError("run_fn must not be called for a start with no system")
+
+    try:
+        await run_supervisor(session_factory=hooked_factory, run_fn=stub, max_loops=1,
+                             poll_seconds=0.01)
+
+        async with factory() as db:
+            row = await db.get(SimulationCommand, seeded["cmd_id"])
+            assert row.status == "failed"
+            assert row.result == "no system to start"
+            status = await read_status(db)
+            assert status.state == "idle"
+    finally:
+        await _cleanup(factory, command_ids=[seeded["cmd_id"]])
+
+
+def _system_command():
+    return SimulationCommand(
+        command="system",
+        payload={
+            "action": "start", "system": "projects", "run_id": str(uuid.uuid4()),
+            "limits": {"count": 2, "runtime_minutes": 0},
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_system_command_with_no_live_engine_is_finished_stale(engine):
+    """Review focus 1 (spec §4.3): a per-system command that reaches the supervisor after
+    its run ended is finished stale and never starts an engine."""
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    await _clear_status(factory)
+    seeded = {"cmd_id": None}
+
+    async def seed_system():
+        async with factory() as db:
+            cmd = _system_command()
+            db.add(cmd)
+            await db.commit()
+            seeded["cmd_id"] = cmd.id
+
+    hooked_factory = _hook_before_nth_session(factory, n=2, hook=seed_system)
+
+    async def stub(*args, **kwargs):
+        raise AssertionError("a system command must never start an engine")
+
+    try:
+        await run_supervisor(session_factory=hooked_factory, run_fn=stub, max_loops=1,
+                             poll_seconds=0.01)
+
+        async with factory() as db:
+            row = await db.get(SimulationCommand, seeded["cmd_id"])
+            assert row.status == "stale"
+            assert row.result == "no run is live — start it again"
+    finally:
+        await _cleanup(factory, command_ids=[seeded["cmd_id"]])
+
+
+@pytest.mark.asyncio
+async def test_a_system_command_beside_a_live_engine_is_left_pending(engine, pg_url):
+    """A system command alongside an engine holding the engine lock is left pending for
+    that engine's control poll."""
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    await _clear_status(factory)
+    holder = SessionAdvisoryLock(pg_url, ENGINE_LOCK_KEY)
+    seeded = {"cmd_id": None}
+
+    async def seed_live_engine_and_system():
+        assert await holder.acquire()
+        async with factory() as db:
+            await upsert_status(db, state="running")
+            cmd = _system_command()
+            db.add(cmd)
+            await db.commit()
+            seeded["cmd_id"] = cmd.id
+
+    hooked_factory = _hook_before_nth_session(factory, n=2, hook=seed_live_engine_and_system)
+
+    async def stub(*args, **kwargs):
+        raise AssertionError("run_fn must not be called here")
+
+    try:
+        await run_supervisor(session_factory=hooked_factory, run_fn=stub, max_loops=1,
+                             database_url=pg_url)
+
+        async with factory() as db:
+            row = await db.get(SimulationCommand, seeded["cmd_id"])
+            assert row.status == "pending"
+    finally:
+        await holder.release()
+        await _cleanup(factory, command_ids=[seeded["cmd_id"]])
+
+
+@pytest.mark.asyncio
+async def test_boot_stales_a_pending_system_command(engine):
+    """The never-auto-start pin covers the `system` kind: one pending before boot is
+    staled by boot."""
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    await _clear_status(factory)
+
+    async with factory() as db:
+        cmd = _system_command()
+        db.add(cmd)
+        await db.commit()
+        cmd_id = cmd.id
+
+    async def stub(*args, **kwargs):
+        raise AssertionError("run_fn must not be called at boot")
+
+    try:
+        await run_supervisor(session_factory=factory, run_fn=stub, max_loops=1,
+                             poll_seconds=0.01)
+
+        async with factory() as db:
+            row = await db.get(SimulationCommand, cmd_id)
+            assert row.status == "stale"
+            assert row.result == "supervisor boot — request again"
+    finally:
+        await _cleanup(factory, command_ids=[cmd_id])

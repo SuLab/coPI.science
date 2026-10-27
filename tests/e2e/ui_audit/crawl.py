@@ -26,6 +26,7 @@ AXE_ROLES = ("anon", "admin", "manager", "reviewer", "pi")
 #: (path prefix, roles that may get a 200 there). First matching prefix wins.
 EXPECTED: tuple[tuple[str, frozenset[str]], ...] = (
     ("/admin/", frozenset({"admin"})),
+    ("/workspace/simulation", frozenset({"admin"})),
     ("/workspace/pis", frozenset({"admin", "manager", "reviewer"})),
     ("/workspace/assessments", frozenset({"admin", "manager", "reviewer"})),
     ("/workspace/", frozenset({"admin", "manager"})),
@@ -47,7 +48,7 @@ def routes(ids: dict) -> list[str]:
         "/admin/agents", f"/admin/agents/{ids['agent_obrien']}", "/workspace/assessments",
         f"/workspace/assessments/{a1}", f"/workspace/assessments/{a2}", f"/workspace/assessments/{a3}",
         f"/workspace/assessments/{bad}", "/admin/cohorts", "/admin/cohorts/topology",
-        "/admin/access-requests", "/admin/simulation", "/workspace/pis",
+        "/admin/access-requests", "/workspace/simulation", "/workspace/pis",
         f"/workspace/pis/{ids['pi']}", "/workspace/assessments", f"/workspace/assessments/{a2}",
         "/workspace/discussions", "/workspace/activity", f"/workspace/activity/{run}",
         "/workspace/slack-bots", "/workspace/staff", "/workspace/prompt-suggestions",

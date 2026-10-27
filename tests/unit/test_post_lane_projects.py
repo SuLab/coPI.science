@@ -1,18 +1,20 @@
 """The post lane's half of a BlackbirdBot project (spec §5.7): a lab answers its
-posted project inside its own Phase-5 turn, before the daily and proposal caps,
-and a run at its pitch cap does not drain while a posted project awaits its
-lab's reply."""
+posted project inside its own Phase-5 turn, before the interviews session's gate
+and the daily cap, so a reply is offered even when Interviews is not accepting
+pitches."""
 
 import ast
 import pathlib
 import subprocess
 import sys
 import types
+from datetime import UTC, datetime
 
 import pytest
 
 from src.agent.agent import Agent
-from src.agent.simulation import PROPOSAL_DRAIN_SETTLE_TICKS, SimulationEngine
+from src.agent.sessions import INTERVIEWS, WIND_DOWN, Limits, Sessions
+from src.agent.simulation import SimulationEngine
 from tests.fakes import FakeSlackClient
 
 pytestmark = pytest.mark.asyncio
@@ -34,7 +36,7 @@ def _settings(**over):
     return types.SimpleNamespace(**base)
 
 
-def _engine(max_proposals=0):
+def _engine():
     hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
     lab = Agent("gill", "GillBot", "GILL PI", role="pi_lab")
     hub.allowed_sender_ids = None
@@ -43,17 +45,18 @@ def _engine(max_proposals=0):
     eng = SimulationEngine(
         agents=[lab, hub],
         slack_clients={"gill": client, "blackbird": FakeSlackClient(agent_id="blackbird")},
-        max_proposals=max_proposals,
     )
+    eng.ctx.sessions = Sessions()
+    eng.ctx.sessions.start(INTERVIEWS, Limits(), datetime(2026, 10, 27, tzinfo=UTC))
     return eng, lab, client
 
 
 def _stub_offer(monkeypatch, eng, result):
-    """Replace the Projects unit's offer; returns the list of ``draining`` values it saw."""
-    seen: list[bool] = []
+    """Replace the Projects unit's offer; returns the agent ids it was offered for."""
+    seen: list[str] = []
 
-    async def _offer(agent, *, draining):
-        seen.append(draining)
+    async def _offer(agent):
+        seen.append(agent.agent_id)
         return result
 
     monkeypatch.setattr(eng.post_lane._projects, "_offer_project_reply", _offer)
@@ -78,7 +81,7 @@ def _observe_llm(monkeypatch, agent, response=None):
 
 
 async def test_offer_runs_before_the_daily_cap_and_ends_the_turn(monkeypatch):
-    eng, lab, client = _engine(max_proposals=2)
+    eng, lab, client = _engine()
     monkeypatch.setattr("src.agent.engine.deps.get_settings", lambda: _settings())
     seen = _stub_offer(monkeypatch, eng, True)
     called = _observe_llm(monkeypatch, lab)
@@ -91,17 +94,24 @@ async def test_offer_runs_before_the_daily_cap_and_ends_the_turn(monkeypatch):
     monkeypatch.setattr(eng.post_lane._scheduler, "_count_today_posts", _count)
 
     await eng._phase5_new_post(lab)
-    assert seen == [False], "below the proposal cap the run is not draining"
+    assert seen == ["gill"]
     assert called == {"llm": 0, "prompt": 0}, "a turn spent on the reply makes no Phase-5 call"
     assert counted == [], "the offer runs before the daily-cap check"
     assert client.posted == []
     assert lab.state.last_phase5_action_time > 0, "the timer is stamped before the offer"
 
-    eng._proposals_posted = 2
+
+async def test_offer_runs_while_interviews_are_not_accepting(monkeypatch):
+    eng, lab, client = _engine()
+    eng.ctx.sessions.wind_down(INTERVIEWS, WIND_DOWN, datetime(2026, 10, 27, tzinfo=UTC))
+    monkeypatch.setattr("src.agent.engine.deps.get_settings", lambda: _settings())
+    seen = _stub_offer(monkeypatch, eng, False)
+    called = _observe_llm(monkeypatch, lab)
+
     await eng._phase5_new_post(lab)
-    assert seen == [False, True], "at the proposal cap the offer is told the run drains"
-    assert called == {"llm": 0, "prompt": 0}
-    assert counted == []
+    assert seen == ["gill"], "the project reply is offered before the interviews gate"
+    assert called == {"llm": 0, "prompt": 0}, "no reply, and no pitch while winding down"
+    assert client.posted == []
 
 
 async def test_no_offer_continues_to_the_own_pitch(monkeypatch):
@@ -119,29 +129,9 @@ async def test_no_offer_continues_to_the_own_pitch(monkeypatch):
 
     await eng._phase5_new_post(lab)
 
-    assert seen == [False]
+    assert seen == ["gill"]
     assert called["llm"] == 1, "no project reply leaves the turn to the lab's own pitch"
     assert len(client.posted) == 1
-
-
-def test_drain_waits_for_awaiting_replies(monkeypatch):
-    eng, _, _ = _engine(max_proposals=2)
-    eng._proposals_posted = 2
-    monkeypatch.setattr(eng.post_lane, "_open_interview_count", lambda: 0)
-    awaiting = {"n": 1}
-    monkeypatch.setattr(
-        eng.post_lane._projects, "_awaiting_project_reply_count", lambda: awaiting["n"]
-    )
-
-    for _ in range(PROPOSAL_DRAIN_SETTLE_TICKS + 2):
-        assert eng._proposal_target_drained() is False, (
-            "a posted project awaiting its lab's reply holds the drain"
-        )
-
-    awaiting["n"] = 0
-    results = [eng._proposal_target_drained() for _ in range(PROPOSAL_DRAIN_SETTLE_TICKS)]
-    assert results[0] is False, "the drain still waits out the settle ticks"
-    assert results[-1] is True
 
 
 def test_phase5_new_post_stays_within_the_size_gate():

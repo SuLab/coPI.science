@@ -1,10 +1,10 @@
-"""Post-lane pacing: time limit, budget, rate allowance, load and the weighted agent draw (spec §7.1)."""
+"""Post-lane pacing: budget, rate allowance, load and the weighted agent draw (spec §7.1)."""
 
 from __future__ import annotations
 
 import logging
 import random
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from src.agent.agent import Agent
@@ -12,6 +12,7 @@ from src.agent.engine import deps
 from src.agent.engine.constants import _UNSET
 from src.agent.engine.context import EngineContext, via
 from src.agent.role_capabilities import capabilities_for
+from src.agent.sessions import PROJECTS
 from src.models.agent_activity import VISIBILITY_COLLAB_PRIVATE
 
 if TYPE_CHECKING:
@@ -50,16 +51,9 @@ class Scheduler:
         # role name -> calls_per_load_per_window override (or None). See _calls_per_load.
         self._role_rate_cache: dict[str, int | None] = {}
 
+        # The run's planned runtime and start time are read by the run-start
+        # announcement; the sessions (ctx.sessions) own every runtime limit.
         self._start_time: datetime | None = None
-
-    @property
-    def is_within_time_limit(self) -> bool:
-        if self.max_runtime_minutes <= 0:
-            return True  # run forever (until SIGTERM)
-        if not self._start_time:
-            return True
-        elapsed = (deps.datetime.now(UTC) - self._start_time).total_seconds()
-        return elapsed < self.max_runtime_minutes * 60
 
     def _agent_within_budget(self, agent: Agent) -> bool:
         if self.budget_cap <= 0:
@@ -158,8 +152,14 @@ class Scheduler:
         return ok
 
     def _active_thread_count(self, agent: Agent) -> int:
-        """Count this agent's active threads."""
-        return len(agent.state.active_threads)
+        """Count this agent's active threads, leaving out project threads while Projects is
+        not active: they get no turns then, so they cannot hold back a lab's pitch."""
+        if self.ctx.sessions.active(PROJECTS):
+            return len(agent.state.active_threads)
+        return sum(
+            1 for thread_id in agent.state.active_threads
+            if not self.message_log.is_project_thread(thread_id)
+        )
 
     def _count_today_posts(self, agent: Agent) -> int:
         """Count top-level posts by this agent in public channels, in the current Pacific time day.

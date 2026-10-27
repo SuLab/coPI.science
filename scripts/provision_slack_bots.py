@@ -588,7 +588,7 @@ def main():
             "agent's token into its approval form on /admin/agents/<id> (that makes it "
             "authoritative in AgentRegistry.slack_bot_token). A legacy agent's .env token "
             "is a fallback once the agent service is recreated: $DC up -d --force-recreate "
-            "agent (only with no live run on /admin/simulation)."
+            "agent (only with no live run on /workspace/simulation)."
         )
 
 

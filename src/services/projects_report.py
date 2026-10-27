@@ -1,10 +1,10 @@
 """The projects prototype's measures for one run, and one project's refinement cost.
 
 The measures are those of the projects design's §2 ("reported, no targets"): projects
-requested per lab and the intervals each lab missed, the outcomes and the reasons a
-project did not finish, research and refinement cost, the most common gaps and
-disagreements, which profile sections anchor ideas, sources by kind, project reviews
-beside the run's assessment reviews, and the run time from request to finish.
+requested per lab, the outcomes and the reasons a project did not finish, research and
+refinement cost, the most common gaps and disagreements, which profile sections anchor
+ideas, sources by kind, project reviews beside the run's assessment reviews, and the run
+time from request to finish.
 ``scripts/projects_report.py`` renders ``build_report``; the admin's project details page
 shows ``refinement_cost``.
 
@@ -24,7 +24,6 @@ from typing import Any
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.config import get_settings
 from src.models import (
     AssessmentReview,
     HubProject,
@@ -44,11 +43,6 @@ from src.services.runs import live_run_id
 #: The phase the lab's reply step logs. That call is made before the project thread
 #: exists, so it carries no thread id and is attributed by run, lab, phase and time.
 REPLY_STEP_PHASE = "project_reply"
-
-#: Why a lab missed an interval. The engine stores no roster history, so the second
-#: reason is a proxy: "no open project, yet nothing was requested".
-MISSED_PREVIOUS_OPEN = "previous project still open"
-MISSED_NOT_LIVE = "lab not live or not active"
 
 #: The reason code of an open project in a finalized run (``REASON_LABELS`` has it).
 REASON_RUN_FINALIZED = "run_finalized"
@@ -113,38 +107,6 @@ async def refinement_cost(db: AsyncSession, project: HubProject) -> Decimal:
     return (await _refinement(db, project))[0]
 
 
-def _missed_intervals(
-    requests: list[tuple[float, float | None]], clock: float, interval: float
-) -> list[dict[str, Any]]:
-    """Each whole ``interval`` of run time (seconds) in which a lab had no request.
-
-    ``requests`` is the lab's ``(requested_run_seconds, finished_run_seconds)`` in request
-    order; ``clock`` is the run's ``run_seconds``. A lab is due at 0 and again ``interval``
-    after each request, so the intervals counted are ``[k·I, (k+1)·I)`` before the first
-    request, and ``[r + k·I, r + (k+1)·I)`` for k ≥ 1 after each request ``r`` that end at
-    or before the next request (or the clock). One counts as "previous project still
-    open" when that project had not finished (or never did) by the interval's start."""
-    out: list[dict[str, Any]] = []
-
-    def add(start: float, reason: str) -> None:
-        out.append(
-            {"from_hours": start / 3600, "to_hours": (start + interval) / 3600, "reason": reason}
-        )
-
-    first = requests[0][0] if requests else clock
-    for k in range(int(first // interval)):
-        add(k * interval, MISSED_NOT_LIVE)
-    for i, (requested, finished) in enumerate(requests):
-        end = requests[i + 1][0] if i + 1 < len(requests) else clock
-        k = 1
-        while requested + (k + 1) * interval <= end:
-            start = requested + k * interval
-            still_open = finished is None or finished > start
-            add(start, MISSED_PREVIOUS_OPEN if still_open else MISSED_NOT_LIVE)
-            k += 1
-    return out
-
-
 def _texts(final: object, key: str) -> list[str]:
     values = final.get(key) if isinstance(final, dict) else None
     return [v for v in values if isinstance(v, str) and v] if isinstance(values, list) else []
@@ -161,7 +123,7 @@ def _mean(values: list[float]) -> float | None:
 
 async def _research_costs(db: AsyncSession, run_id: uuid.UUID) -> dict[uuid.UUID, Decimal]:
     """Each project's research dollars: its ledger rows priced with ``ledger_row_cost``
-    (a call that never finished counts its reserve, as the spend ceiling does)."""
+    (a call that never finished counts its reserve)."""
     rows = (
         await db.execute(
             select(
@@ -206,31 +168,19 @@ async def _review_figures(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Any]
     }
 
 
-def _lab_rows(
-    projects: list[HubProject], clock: float, interval: float
-) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """Per lab with at least one project in the run: requests and missed intervals."""
-    by_lab: dict[str, list[HubProject]] = defaultdict(list)
-    for p in projects:
-        by_lab[p.agent_id].append(p)
+def _lab_rows(projects: list[HubProject], clock: float) -> list[dict[str, Any]]:
+    """Per lab with at least one project in the run: its requests, in all and per day of
+    run time (``clock`` seconds)."""
+    by_lab: Counter[str] = Counter(p.agent_id for p in projects)
     run_days = clock / 86400
-    labs = []
-    missed_total: Counter[str] = Counter()
-    for agent_id in sorted(by_lab):
-        rows = sorted(by_lab[agent_id], key=lambda p: (p.requested_run_seconds, p.slot))
-        missed = _missed_intervals(
-            [(p.requested_run_seconds, p.finished_run_seconds) for p in rows], clock, interval
-        )
-        by_reason = Counter(m["reason"] for m in missed)
-        missed_total.update(by_reason)
-        labs.append({
+    return [
+        {
             "agent_id": agent_id,
-            "requested": len(rows),
-            "per_run_day": (len(rows) / run_days) if run_days else None,
-            "missed_intervals": missed,
-            "missed_by_reason": dict(by_reason),
-        })
-    return labs, dict(missed_total)
+            "requested": by_lab[agent_id],
+            "per_run_day": (by_lab[agent_id] / run_days) if run_days else None,
+        }
+        for agent_id in sorted(by_lab)
+    ]
 
 
 async def build_report(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Any]:
@@ -251,7 +201,6 @@ async def build_report(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Any]:
             select(HubProjectClock.run_seconds).where(HubProjectClock.simulation_run_id == run_id)
         )
     ).scalar_one_or_none() or 0.0
-    interval = float(get_settings().project_interval_hours) * 3600
     projects = list(
         (
             await db.execute(
@@ -261,7 +210,7 @@ async def build_report(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Any]:
             )
         ).scalars().all()
     )
-    labs, missed_by_reason = _lab_rows(projects, clock, interval)
+    labs = _lab_rows(projects, clock)
     research = await _research_costs(db, run_id)
 
     outcome_counts: Counter[str] = Counter()
@@ -317,10 +266,8 @@ async def build_report(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Any]:
         "run_finalized": run_finalized,
         "run_live": run_live,
         "run_hours": clock / 3600,
-        "interval_hours": interval / 3600,
         "project_count": len(projects),
         "labs": labs,
-        "missed_by_reason": missed_by_reason,
         "outcome_counts": dict(outcome_counts),
         "outcome_shares": {
             k: (outcome_counts[k] / finished) if finished else None for k in _FINISHED_KINDS
@@ -352,9 +299,6 @@ async def build_report(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Any]:
             "median": statistics.median(hours) if hours else None,
         },
         "notes": [
-            "Missed intervals: no roster history is stored, so "
-            f'"{MISSED_NOT_LIVE}" is a proxy for an interval with no open project and no '
-            "request.",
             "Only labs with at least one project in this run are listed.",
         ],
     }

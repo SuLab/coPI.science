@@ -40,7 +40,7 @@ async def test_every_inline_script_carries_this_responses_nonce(client, db_sessi
     await db_session.flush()
     seen = 0
     pages = (("/login", {}), ("/admin/users", auth_headers(admin.id)),
-             ("/admin/simulation", auth_headers(admin.id)))
+             ("/workspace/simulation", auth_headers(admin.id)))
     for path, headers in pages:
         r = await client.get(path, headers=headers)
         assert r.status_code == 200, path

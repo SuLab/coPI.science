@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from src.agent.agent import Agent
 from src.agent.engine import reply_lane
 from src.agent.message_log import LogEntry
+from src.agent.sessions import PROJECTS
 from src.agent.simulation import SimulationEngine
 from src.agent.state import ThreadState
 from src.models import SpecialistConsult
@@ -504,21 +505,21 @@ async def test_unreadable_project_skips_the_turn(engine, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_project_thread_recognised_with_the_switch_off(engine, monkeypatch):
+async def test_project_thread_recognised_with_projects_not_running(engine, monkeypatch):
     raw = (
         "<slack_message>⏸️ Not a fit.</slack_message>\n"
         f"<assessment_json>{json.dumps(_verdict())}</assessment_json>"
     )
-    switched: list[bool] = []
+    running: list[bool] = []
 
     def configure(sim):
-        switched.append(sim.projects._enabled)
+        running.append(sim.ctx.sessions.active(PROJECTS))
 
     sim, _agent, _thread, calls, factory, run_id = await _drive_project(
         engine, monkeypatch, raw, history=_history(7), configure=configure,
     )
     try:
-        assert switched == [False], "the engine's projects switch is off for this turn"
+        assert running == [False], "no Projects session runs in this engine"
         [call] = calls
         assert "BlackbirdBot in a project thread" in call["system_prompt"]
         assert call["log_meta"]["phase"] == "project_thread"

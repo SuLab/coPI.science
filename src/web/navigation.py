@@ -11,6 +11,7 @@ class NavigationItem:
     label: str
     route_name: str
     staff_only: bool = False
+    admin_only: bool = False
 
 
 WORKSPACE_NAVIGATION = (
@@ -22,6 +23,8 @@ WORKSPACE_NAVIGATION = (
     NavigationItem("discussions", "Discussions", "workspace_discussions", True),
     NavigationItem("interviews", "Interviews", "workspace_interviews", True),
     NavigationItem("activity", "Activity", "workspace_activity", True),
+    # Admins only for now; managers later (owner, 2026-10-27).
+    NavigationItem("simulation", "Simulation", "workspace_simulation", True, admin_only=True),
     NavigationItem(
         "prompt-suggestions", "Prompt Suggestions", "workspace_prompt_suggestions", True
     ),
@@ -34,5 +37,6 @@ def navigation_for(request, permissions):
     return tuple(
         {"section": item.section, "label": item.label, "url": page_url(request, item.route_name)}
         for item in WORKSPACE_NAVIGATION
-        if permissions.staff or not item.staff_only
+        if (permissions.staff or not item.staff_only)
+        and (permissions.admin or not item.admin_only)
     )

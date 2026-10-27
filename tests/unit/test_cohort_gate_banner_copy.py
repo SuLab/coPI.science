@@ -4,7 +4,7 @@ The partial is rendered on its own, with a bare Jinja environment, for both
 isolation states. It must never name the other deployment's unprefixed
 simulation container (stopping that container stops org1's production run), and
 it must say that a settings change needs a container RECREATE once
-/admin/simulation shows no live run: ``.env`` is resolved at container creation,
+/workspace/simulation shows no live run: ``.env`` is resolved at container creation,
 so a restart keeps the old environment.
 """
 
@@ -42,7 +42,7 @@ def test_banner_never_names_the_other_deployments_container(isolation_enabled):
 def test_banner_says_recreate_not_restart(isolation_enabled):
     html = _render(isolation_enabled)
     assert "--force-recreate" in html
-    assert "/admin/simulation" in html
+    assert "/workspace/simulation" in html
 
 
 def test_the_isolation_off_notice_itself_says_recreate():
@@ -53,5 +53,5 @@ def test_the_isolation_off_notice_itself_says_recreate():
     start = html.index("Cohort isolation is OFF")
     notice = html[start : html.index("</div>", start)]
     assert "<em>recreating</em>" in notice
-    assert "/admin/simulation" in notice
+    assert "/workspace/simulation" in notice
     assert "a restart keeps the old environment" in notice

@@ -31,6 +31,7 @@ from src.agent.project_guidance import (
     project_turn,
 )
 from src.agent.role_capabilities import capabilities_for, hub_role_names
+from src.agent.sessions import INTERVIEWS, PROJECTS
 from src.agent.state import ThreadState
 from src.agent.thread_guidance import phase4_guidance
 from src.agent.tools import execute_tool, live_profile_ids, tools_for_role, tools_for_thread
@@ -177,16 +178,29 @@ class ReplyLane:
         A genuine new reply resets ``empty_response_count`` so the thread's
         2-strike empty-response backoff gets a fresh attempt at the new
         content, mirroring the old `_phase4_reply_threads` selection half.
+
+        A thread whose system is not active in the run's sessions (a project
+        thread while Projects is not running, any other thread while Interviews
+        is not) gets no turn: it stays open and untouched while its system is
+        not active.
         """
         now = deps.time.time()
         if self.ctx.circuit.is_open(now):
             return []
+        sessions = self.ctx.sessions
+        interviews_active = sessions.active(INTERVIEWS)
+        projects_active = sessions.active(PROJECTS)
         pairs: list[tuple[Agent, ThreadState]] = []
         for agent in self.agents.values():
             for thread in list(agent.state.active_threads.values()):
                 if thread.status != "active":
                     continue
                 if self._channel_visibility.get(thread.channel) == VISIBILITY_COLLAB_PRIVATE:
+                    continue
+                if self.message_log.is_project_thread(thread.thread_id):
+                    if not projects_active:
+                        continue
+                elif not interviews_active:
                     continue
                 has_new = self.message_log.has_new_reply_from_other(
                     thread.thread_id, agent.agent_id, agent.state.last_seen_cursor,
@@ -1194,7 +1208,7 @@ class ReplyLane:
         just now is skipped with a warning and the reply stays owed. A thread whose project is
         missing or no longer ``refining`` (ended by the tick, or reopened by a resume after it
         ended) is closed as abandoned without a model call: nothing it wrote could be recorded,
-        and an open thread would hold a ``--max-proposals`` drain."""
+        and the thread would otherwise stay open with nothing left to do."""
         project = await self._projects._project_thread_context(thread.thread_id)
         if project is None:
             logger.warning(

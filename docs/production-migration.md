@@ -212,7 +212,7 @@ Verified behaviour with a real blocker holding `AccessShareLock`: the migration 
 after ~12 s with `LockNotAvailableError`, the transaction rolled back cleanly, and
 `alembic_version` was still `0018`. **A lock timeout costs you nothing but the attempt.**
 
-If you hit it: stop the writers and re-run. Stop the run from `/admin/simulation` first
+If you hit it: stop the writers and re-run. Stop the run from `/workspace/simulation` first
 (Stop drains and flushes in-process), then:
 
 ```bash
@@ -494,8 +494,8 @@ costs you one marker.
 
 ### Step 10 — bring the agent supervisor back last (it never starts a run)
 
-Bring the supervisor back only when `/admin/simulation` shows no live run. It returns
-IDLE; runs start from `/admin/simulation` only.
+Bring the supervisor back only when `/workspace/simulation` shows no live run. It returns
+IDLE; runs start from `/workspace/simulation` only.
 
 > ⚠️ **Only if the agent service runs the supervisor.** The *committed*
 > `docker-compose.prod.yml` runs `python -m src.agent.main` for the agent service, which
@@ -589,7 +589,7 @@ partial state to repair.
    `--backup-verified-elsewhere`, it took **no** dump and prints no such commands: restore
    from the backup you asserted, with that backup's own procedure — a `pg_restore` of a
    `/tmp/restore.dump` that was never copied in leaves you on an empty database. Stop the run from
-   `/admin/simulation` first (Stop drains and flushes in-process), then:
+   `/workspace/simulation` first (Stop drains and flushes in-process), then:
    ```bash
    docker compose -f docker-compose.prod.yml --profile agent stop -t 420 agent
    docker compose -f docker-compose.prod.yml stop blackbird-app worker

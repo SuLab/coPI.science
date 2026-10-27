@@ -1758,3 +1758,38 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > upgrade's `IF NOT EXISTS` keeps a later upgrade clean). **Never downgrade first.** Never reuse
 > revision id `0073`. Never start a run as part of this deploy; runs start only from
 > `/admin/simulation`.
+
+> **Deploy order for `0074_independent_controls` — migrate BEFORE the new images serve; rebuild
+> all three images (`blackbird-app`, `worker` and `agent`).** `0074` belongs to the independent
+> simulation controls (the interviews and the projects of a run start, wind down and stop on
+> their own; `src/agent/sessions.py`). It adds two enum values and nothing else: `stopped` to
+> `thread_outcome_enum` (the outcome of a thread an operator's Stop ended) and `system` to
+> `sim_command_enum` (the command the panel writes to start, wind down or stop one system
+> of the live run). The same release moves the panel to `/workspace/simulation` (admins only;
+> `/admin/simulation` redirects there); a rollback brings it back to `/admin/simulation`.
+>
+> *Old code on the new schema* is safe: only new code writes either value. The exception is a
+> rollback after a `stopped` decision or a `system` command was written (see the hazard below).
+> *New code on the old schema* fails: a `stopped` decision raises `InvalidTextRepresentation`,
+> which `Threads._record_decision` re-queues, and the panel's per-system routes 500. So migrate
+> before `$DC up -d blackbird-app worker`. **Images:** the agent image imports `src.models`, so
+> rebuild it with this migration; recreate `agent` only when `/workspace/simulation` shows no
+> live run.
+>
+> Before: `SELECT version_num FROM alembic_version;` reads `0073`. Tag the rollback images
+> `rollback-pre-0074` first. After: `SELECT version_num FROM alembic_version;` reads `0074`,
+> `SELECT enum_range(NULL::sim_command_enum);` lists `system`, and
+> `SELECT enum_range(NULL::thread_outcome_enum);` lists `stopped`. The migration writes no row;
+> there is no back-fill.
+>
+> **Rollback hazard once either value was written.** A pre-0074 ORM cannot map a `stopped`
+> decision or a `system` command. The old engine's `Rebuild` swallows the error into an empty
+> closed set, so a resumed old engine would reopen the run's stopped threads: start such an
+> image FRESH, never resume that run. The old panel's command list 500s while a `system`
+> command row exists.
+>
+> **Rollback:** first run the `rollback-pre-0074` images (subject to the hazard above); only
+> then, if wanted, `alembic downgrade 0073` from a one-off container off the NEW image, which
+> changes nothing: both enum values stay (Postgres cannot drop one; the upgrade's
+> `IF NOT EXISTS` keeps a later upgrade clean). Never reuse revision id `0074`. Never start a
+> run as part of this deploy; runs start only from `/workspace/simulation`.

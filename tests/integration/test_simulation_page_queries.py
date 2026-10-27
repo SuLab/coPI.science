@@ -32,10 +32,10 @@ async def test_one_call_stats_fetch_per_render(client, db_session, engine):
     simulation_view._ENDED_RUN_STATS.clear()
     seen, stop = _count_call_stats_selects(engine)
     try:
-        r = await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
+        r = await client.get(f"/workspace/simulation?run={run.id}", headers=auth_headers(admin.id))
         assert r.status_code == 200
         first = len(seen)
-        await client.get(f"/admin/simulation?run={run.id}", headers=auth_headers(admin.id))
+        await client.get(f"/workspace/simulation?run={run.id}", headers=auth_headers(admin.id))
     finally:
         stop()
         simulation_view._ENDED_RUN_STATS.clear()
@@ -44,7 +44,7 @@ async def test_one_call_stats_fetch_per_render(client, db_session, engine):
 
 
 def test_refresh_script_is_polite():
-    html = (Path(__file__).resolve().parents[2] / "templates/admin/simulation.html").read_text()
+    html = (Path(__file__).resolve().parents[2] / "templates/workspace/simulation.html").read_text()
     assert "document.hidden" in html and "inFlight" in html
 
 
@@ -56,7 +56,7 @@ async def test_a_running_runs_stats_are_cached_for_the_ttl(client, db_session, e
     monkeypatch.setattr(simulation_view, "_clock", lambda: clock[0])
     simulation_view._LIVE_RUN_STATS.clear()
     seen, stop = _count_call_stats_selects(engine)
-    url = f"/admin/simulation?run={run.id}"
+    url = f"/workspace/simulation?run={run.id}"
     try:
         assert (await client.get(url, headers=auth_headers(admin.id))).status_code == 200
         clock[0] += simulation_view.LIVE_RUN_STATS_TTL_SECONDS - 1
@@ -79,7 +79,7 @@ async def test_a_status_change_is_a_new_cache_key(client, db_session, engine, mo
     simulation_view._LIVE_RUN_STATS.clear()
     simulation_view._ENDED_RUN_STATS.clear()
     seen, stop = _count_call_stats_selects(engine)
-    url = f"/admin/simulation?run={run.id}"
+    url = f"/workspace/simulation?run={run.id}"
     try:
         await client.get(url, headers=auth_headers(admin.id))
         run.status = "stopped"

@@ -161,11 +161,11 @@ async def test_stop_flashes_and_a_msg_query_flag_renders_nothing(client, db_sess
     r = await client.post(
         "/admin/simulation/stop", headers=auth_headers(admin.id), follow_redirects=False,
     )
-    assert r.headers["location"] == "/admin/simulation"
+    assert r.headers["location"] == "/workspace/simulation"
     page = await follow(client, r)
     assert "Stop requested." in page.text
     spoof = await client.get(
-        "/admin/simulation?msg=Spoofed-banner-text", headers=auth_headers(admin.id)
+        "/workspace/simulation?msg=Spoofed-banner-text", headers=auth_headers(admin.id)
     )
     assert "Spoofed-banner-text" not in spoof.text
 

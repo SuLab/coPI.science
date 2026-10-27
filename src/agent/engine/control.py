@@ -1,4 +1,6 @@
-"""The operator control plane poll and the engine liveness heartbeat task (spec §7.1, §8.3): claim a pending stop, refresh the heartbeat row."""
+"""The operator control plane poll and the engine liveness heartbeat task (spec §7.1, §8.3):
+claim a pending stop or a per-system command, persist the run's sessions, refresh the
+heartbeat row."""
 
 from __future__ import annotations
 
@@ -12,6 +14,7 @@ from typing import Any
 from src.agent.engine import deps
 from src.agent.engine.constants import CONTROL_POLL_INTERVAL, REQUIRED_MAX_THREAD_MESSAGES
 from src.agent.engine.context import EngineContext, RunState, via
+from src.agent.sessions import STOP_NOW, SYSTEM_LABELS, SYSTEMS, WIND_DOWN, Limits
 from src.services.simulation_control import upsert_status
 
 logger = logging.getLogger("src.agent.simulation")
@@ -192,7 +195,7 @@ class Control:
         self._last_control_poll: float = 0.0
 
     async def _poll_control_plane(self, now: float) -> None:
-        """Claim a pending operator `stop` command and refresh the heartbeat.
+        """Claim a pending operator command, persist the sessions and refresh the heartbeat.
 
         Gated on its own `_last_control_poll`/`CONTROL_POLL_INTERVAL`, the same
         way `_sync_roster_from_db` gates on `_last_roster_poll`/
@@ -200,17 +203,24 @@ class Control:
         every tick and the cadence lives here, not at the call site.
 
         The whole body sits in one try/except: this is a support surface for
-        `/admin/simulation`, not the simulation itself, so a DB hiccup here
+        `/workspace/simulation`, not the simulation itself, so a DB hiccup here
         must cost at most one missed heartbeat, never the run.
 
-        With no pending `stop`, upserts state "running" with a `detail` snapshot
-        (`tick_at`, per-agent `active_threads`/`calls_in_window`/`api_calls`/
-        `messages`, and `roster_size`) so a human watching `/admin/simulation`
-        can see the engine is alive and how loaded it is. A pending `stop` is
-        claimed, marked done, and turned into a real `request_stop()` — then the
-        heartbeat is upserted as "stopping" instead, so the state row reflects
-        the shutdown that is now underway rather than lagging a tick behind it.
-        A `stop` carrying `finalize` is finished `failed` and the run continues.
+        A pending `stop` is claimed, marked done, and turned into a real
+        `request_stop()` — then the heartbeat is upserted as "stopping", so the
+        state row reflects the shutdown that is now underway rather than lagging
+        a tick behind it. A `stop` carrying `finalize` is finished `failed` and
+        the run continues. With no stop claimed, at most one pending `system`
+        command (an operator's per-system start, wind down or stop now) is
+        claimed and finished by `_apply_system_command`; the orchestrator applies
+        the session events it causes right after this poll.
+
+        Then the sessions are written to the run's row when they changed
+        (`_persist_sessions`), and state "running" (or "stopping") is upserted
+        with a `detail` snapshot (`tick_at`, per-agent `active_threads`/
+        `calls_in_window`/`api_calls`/`messages`, `roster_size`, and `systems`:
+        each system's latest session) so a human watching `/workspace/simulation`
+        can see the engine is alive, how loaded it is and which systems run.
         """
         if not self.session_factory:
             return
@@ -225,27 +235,8 @@ class Control:
                 is_finalize_stop,
             )
 
-            detail = {
-                "tick_at": deps.datetime.now(UTC).isoformat(),
-                "agents": {
-                    aid: {
-                        "active_threads": len(a.state.active_threads),
-                        "calls_in_window": len(a.state.call_times),
-                        "api_calls": a.api_call_count,
-                        "messages": a.message_count,
-                    }
-                    for aid, a in self.agents.items()
-                },
-                "roster_size": len(self.agents),
-            }
-
-            if self._heartbeat is not None:
-                # One detail for both writers, so the page never flickers
-                # between the tick snapshot and the heartbeat's flags.
-                self._heartbeat.tick_detail = detail
-                detail = {**detail, **self._heartbeat.extra_detail()}
-
             async with self.session_factory() as db:
+                stopping = False
                 cmd = await claim_pending(db, command="stop")
                 if cmd is not None and is_finalize_stop(cmd):
                     # Finalize run applies to a STOPPED run (spec §8.2): a live
@@ -265,14 +256,119 @@ class Control:
                         ),
                     )
                     self.request_stop("operator_hold" if hold else "operator")
-                    await upsert_status(
-                        db, state="stopping",
-                        simulation_run_id=self.simulation_run_id, detail=detail,
-                    )
+                    stopping = True
                 else:
-                    await upsert_status(
-                        db, state="running",
-                        simulation_run_id=self.simulation_run_id, detail=detail,
-                    )
+                    system_cmd = await claim_pending(db, command="system")
+                    if system_cmd is not None:
+                        status, result = self._apply_system_command(system_cmd)
+                        await finish_command(db, system_cmd.id, status=status, result=result)
+
+                if self.ctx.sessions.dirty:
+                    await self._persist_sessions(db)
+
+                detail = self._tick_detail()
+                if self._heartbeat is not None:
+                    # One detail for both writers, so the page never flickers
+                    # between the tick snapshot and the heartbeat's flags.
+                    self._heartbeat.tick_detail = detail
+                    detail = {**detail, **self._heartbeat.extra_detail()}
+                await upsert_status(
+                    db, state="stopping" if stopping else "running",
+                    simulation_run_id=self.simulation_run_id, detail=detail,
+                )
         except Exception as exc:
             logger.warning("[control] poll failed: %s", exc)
+
+    def _tick_detail(self) -> dict[str, Any]:
+        """The control poll's heartbeat snapshot (see `_poll_control_plane`)."""
+        return {
+            "tick_at": deps.datetime.now(UTC).isoformat(),
+            "agents": {
+                aid: {
+                    "active_threads": len(a.state.active_threads),
+                    "calls_in_window": len(a.state.call_times),
+                    "api_calls": a.api_call_count,
+                    "messages": a.message_count,
+                }
+                for aid, a in self.agents.items()
+            },
+            "roster_size": len(self.agents),
+            "systems": self.ctx.sessions.detail(),
+        }
+
+    def _apply_system_command(self, cmd) -> tuple[str, str]:
+        """Apply one claimed `system` command to the sessions; return the command's
+        `(status, result)`.
+
+        The payload is ``{"action": "start"|"wind_down"|"stop_now", "system": …,
+        "run_id": …, "limits": {…}}``. A command for another run is `stale` (the
+        operator asked about a run that has since ended). A start of a running
+        system, or a wind down or stop now of one that is not running, is
+        `failed` with the reason the panel shows; so is a malformed payload.
+        """
+        payload = cmd.payload if isinstance(cmd.payload, dict) else {}
+        run_id = payload.get("run_id")
+        if str(run_id) != str(self.simulation_run_id):
+            return "stale", f"for run {run_id}, not this one"
+        system = payload.get("system")
+        action = payload.get("action")
+        if system not in SYSTEMS:
+            return "failed", f"unknown system {system!r}"
+        label = SYSTEM_LABELS[system]
+        now = deps.datetime.now(UTC)
+        if action == "start":
+            try:
+                self.ctx.sessions.start(system, Limits.from_mapping(payload.get("limits")), now)
+            except ValueError:
+                return "failed", f"{label} is already running"
+            return "done", f"{label} started in run {self.simulation_run_id}"
+        if action == "wind_down":
+            if not self.ctx.sessions.wind_down(system, WIND_DOWN, now):
+                return "failed", f"{label} is not running"
+            return "done", f"{label} winding down in run {self.simulation_run_id}"
+        if action == "stop_now":
+            if not self.ctx.sessions.end(system, STOP_NOW, now):
+                return "failed", f"{label} is not running"
+            return "done", f"{label} stopped in run {self.simulation_run_id}"
+        return "failed", f"unknown action {action!r}"
+
+    async def _persist_sessions(self, db) -> None:
+        """Write the session records to this run's ``simulation_runs.config["sessions"]``
+        and mark the sessions clean. ``config`` is a plain JSON column, so it is
+        reassigned, never changed in place (an in-place change is not flushed). The
+        sessions are marked clean before the write, so a change made while it is in
+        flight is written next time; a failed write marks them dirty again. Never
+        raises: one warning."""
+        if not self.simulation_run_id:
+            return
+        from src.models import SimulationRun
+
+        sessions = self.ctx.sessions
+        records = sessions.records()
+        sessions.mark_clean()
+        try:
+            run = await db.get(SimulationRun, self.simulation_run_id)
+            if run is None:
+                raise LookupError(f"no simulation_runs row {self.simulation_run_id}")
+            run.config = {**(run.config or {}), "sessions": records}
+            await db.commit()
+        except Exception as exc:  # noqa: BLE001 — a missed write, never the run
+            sessions.dirty = True
+            with contextlib.suppress(Exception):
+                await db.rollback()
+            logger.warning(
+                "[control] could not record run %s's sessions: %s", self.simulation_run_id, exc,
+            )
+
+    async def persist_sessions(self) -> None:
+        """``_persist_sessions`` in a session of its own, when the sessions changed:
+        ``stop()`` calls it after the sessions were ended. Never raises."""
+        if not self.session_factory or not self.simulation_run_id or not self.ctx.sessions.dirty:
+            return
+        try:
+            async with self.session_factory() as db:
+                await self._persist_sessions(db)
+        except Exception as exc:  # noqa: BLE001 — opening the session failed
+            logger.warning(
+                "[control] could not record run %s's sessions: %s", self.simulation_run_id, exc,
+            )

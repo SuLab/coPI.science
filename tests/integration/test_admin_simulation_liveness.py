@@ -29,10 +29,10 @@ async def test_stop_works_when_unresponsive(client, db_session, monkeypatch):
     db_session.add(SimulationProcessStatus(id=1, state="running",
                                            updated_at=datetime.now(UTC) - timedelta(minutes=10)))
     await db_session.commit()
-    page = await client.get("/admin/simulation", headers=auth_headers(admin.id))
+    page = await client.get("/workspace/simulation", headers=auth_headers(admin.id))
     assert "Unresponsive" in page.text and "Run in progress" in page.text
     resp = await client.post("/admin/simulation/stop", headers=auth_headers(admin.id), follow_redirects=False)
-    assert resp.headers["location"] == "/admin/simulation"
+    assert resp.headers["location"] == "/workspace/simulation"
     cmd = (await db_session.execute(select(SimulationCommand))).scalar_one()
     assert cmd.command == "stop"
 
@@ -44,7 +44,7 @@ async def test_stop_refused_when_no_engine_holds_the_lock(client, db_session, mo
     db_session.add(SimulationProcessStatus(id=1, state="running", updated_at=datetime.now(UTC)))
     await db_session.commit()
     resp = await client.post("/admin/simulation/stop", headers=auth_headers(admin.id), follow_redirects=False)
-    assert resp.headers["location"] == "/admin/simulation"
+    assert resp.headers["location"] == "/workspace/simulation"
     assert session_flashes(resp) == [{"text": "Nothing is running.", "kind": "error"}]
     assert (await db_session.execute(select(SimulationCommand))).scalars().all() == []
 
@@ -65,5 +65,5 @@ async def test_circuit_open_is_shown(client, db_session, monkeypatch):
     db_session.add(SimulationProcessStatus(id=1, state="running", updated_at=datetime.now(UTC),
                                            detail={"circuit_open": True}))
     await db_session.commit()
-    page = await client.get("/admin/simulation", headers=auth_headers(admin.id))
+    page = await client.get("/workspace/simulation", headers=auth_headers(admin.id))
     assert "LLM calls paused" in page.text

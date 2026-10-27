@@ -1,4 +1,4 @@
-"""Render /admin/simulation for given run ids to stdout, as the first allowed
+"""Render /workspace/simulation for given run ids to stdout, as the first allowed
 admin, without a browser session. Run INSIDE a one-off app container off the
 current image with the working tree's src/ and templates/ mounted read-only:
 
@@ -41,7 +41,7 @@ async def main(run_ids: list[str]) -> None:
     app.dependency_overrides[get_current_user] = _admin
     async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as c:
         for rid in run_ids:
-            r = await c.get(f"/admin/simulation?run={rid}")
+            r = await c.get(f"/workspace/simulation?run={rid}")
             sys.stdout.write(f"=====RUN {rid} STATUS {r.status_code}=====\n{r.text}\n")
 
 

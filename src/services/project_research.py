@@ -2,7 +2,8 @@
 
 Spec: docs/specs/2026-10-22-idea-pitching-prototype-design.md §5.3 (research) and §5.4
 (choice). The engine requests a project per lab (``hub_projects``, status ``requested``);
-this module takes the oldest due project of the live run and advances it by ONE model call:
+this module takes the oldest due project of the live run, while that run's Projects session is
+active (``live_projects_run_id``), and advances it by ONE model call:
 
 - five research sessions (``RESEARCH_DOMAINS``), one after another. Each session's system
   prompt is ``prompts/projects/research.md`` plus that specialist's "What you own" and "What
@@ -21,14 +22,15 @@ this module takes the oldest due project of the live run and advances it by ONE 
   model's indices) with the posting code assembled (``project_plan.assemble_posting``), and the
   project becomes ``ready_to_post``.
 
-Every call is claimed first in its own ``hub_project_calls`` row at the call's worst case and
-updated with its real usage after, so a call the worker died in still counts against the
-rolling 24-hour ceiling (``project_research_daily_usd_limit``) and the same step simply runs
-again. A rate limit or 5xx answer (never billed) waits ``TRANSIENT_RETRY_AFTER`` without
-counting; PubMed being unreachable waits ``RETRY_AFTER`` without counting; any other failure
-counts, ``MAX_SESSION_FAILURES`` end a session, and a refusal ends its session at once. Every
-project write is a compare-and-set on the status this step read, so a project the engine moved
-meanwhile (ended, say) is left as the engine wrote it.
+There is no dollar ceiling (removed by the owner, 2026-10-27). Every call is still claimed
+first in its own ``hub_project_calls`` row at the call's worst case and updated with its real
+usage after, so a call the worker died in is still on the ledger at its reserve and the same
+step simply runs again. A rate limit or 5xx answer (never billed) waits
+``TRANSIENT_RETRY_AFTER`` without counting; PubMed being unreachable waits ``RETRY_AFTER``
+without counting; any other failure counts, ``MAX_SESSION_FAILURES`` end a session, and a
+refusal ends its session at once. Every project write is a compare-and-set on the status
+this step read, so a project the engine moved meanwhile (ended, say) is left as the engine
+wrote it.
 
 The inputs are the lab's public persona file only: no private profile, staff review or
 interview transcript. Nothing here logs candidate, plan or posting text.
@@ -100,7 +102,7 @@ from src.services.project_plan import (
     normalize_item,
     resolve_source,
 )
-from src.services.runs import live_run_id
+from src.services.runs import live_projects_run_id
 from src.services.trajectory_generation import _api_error_code, _in_flight_entry, _is_transient
 
 logger = logging.getLogger(__name__)
@@ -166,7 +168,6 @@ MAX_LAB_TOOLS = 10
 
 FINAL_ANSWER_TEXT = "You have used your searches. Answer now."
 _EPHEMERAL = {"type": "ephemeral"}
-_WINDOW = timedelta(hours=24)
 
 #: Research session statuses kept in the research state.
 SESSION_RUNNING = "running"
@@ -919,7 +920,7 @@ async def call_model(request: dict) -> tuple[Any, Exception | None]:
     Any exception is returned, not only an SDK error: one escaping here (a ``TypeError`` from
     an SDK that rejects a parameter, ``llm``'s own pre-send guard) would leave the claimed
     ledger row ``in_progress`` at its reserve and the project due again at the next sweep, so
-    every sweep would book another reserve until the daily ceiling stopped all research. As
+    every sweep would book another reserve, with no end (there is no dollar ceiling). As
     an error it is a counted failure, reserved at the request's worst case like a timeout."""
     try:
         message = await llm.abeta_create(
@@ -1128,7 +1129,7 @@ async def apply_result(
 
 
 # ---------------------------------------------------------------------------
-# The ledger and the ceiling
+# The ledger
 # ---------------------------------------------------------------------------
 
 
@@ -1144,9 +1145,9 @@ def _call_reserve(model: str, step: str, reserve_input_tokens: int = 0) -> Decim
 
 
 def ledger_row_cost(usage_by_model: object, model: str, step: str) -> Decimal:
-    """One ledger row's dollars for the ceiling: each ``partial`` entry (in flight, timed
-    out) at its reserve, each other entry at its priced cost (an unpriced one at a
-    reserve), and NULL usage at one reserve. ``[]`` (an unbilled error status) is free."""
+    """One ledger row's dollars: each ``partial`` entry (in flight, timed out) at its
+    reserve, each other entry at its priced cost (an unpriced one at a reserve), and NULL
+    usage at one reserve. ``[]`` (an unbilled error status) is free."""
     if not isinstance(usage_by_model, list):
         return _call_reserve(model, step)
     total = Decimal(0)
@@ -1162,18 +1163,6 @@ def ledger_row_cost(usage_by_model: object, model: str, step: str) -> Decimal:
             cost = entries_cost([entry])
             total += _call_reserve(model, step) if cost is None else cost
     return total
-
-
-async def spend_24h(db: AsyncSession) -> Decimal:
-    """Dollars of the ledger rows touched in the rolling 24 hours (``ledger_row_cost``)."""
-    rows = (
-        await db.execute(
-            select(
-                HubProjectCall.usage_by_model, HubProjectCall.model, HubProjectCall.step
-            ).where(HubProjectCall.updated_at >= func.clock_timestamp() - _WINDOW)
-        )
-    ).all()
-    return sum((ledger_row_cost(usage, model, step) for usage, model, step in rows), Decimal(0))
 
 
 # ---------------------------------------------------------------------------
@@ -1236,26 +1225,51 @@ def _warn_once(problem: str) -> None:
 class _Config:
     model: str
     prompts: Prompts
-    limit: Decimal
     max_rounds: int
 
 
-def _config() -> _Config | None:
+def _check() -> tuple[Prompts | None, str | None, str | None]:
+    """``(prompts, None, None)`` when research can run; else ``(None, the admin's sentence,
+    the log's problem)``, the problem None when the switch is simply off."""
     settings = get_settings()
     if not settings.project_research_enabled:
-        return None
+        return None, "Project research is switched off (PROJECT_RESEARCH_ENABLED=false).", None
     model = settings.llm_project_research_model
     if model not in PRICES:
-        _warn_once(f"model {model!r} is not priced in src/services/llm_pricing.py")
-        return None
+        return (
+            None,
+            f"The research model {model} is not priced in src/services/llm_pricing.py.",
+            f"model {model!r} is not priced in src/services/llm_pricing.py",
+        )
     prompts = load_prompts()
     if prompts is None:
-        _warn_once(f"{RESEARCH_PROMPT_PATH} or {CHOOSE_PROMPT_PATH} is missing or empty")
+        return (
+            None,
+            f"The research or choice prompt ({RESEARCH_PROMPT_PATH} or {CHOOSE_PROMPT_PATH}) "
+            "is missing or empty.",
+            f"{RESEARCH_PROMPT_PATH} or {CHOOSE_PROMPT_PATH} is missing or empty",
+        )
+    return prompts, None, None
+
+
+def research_unavailable_reason() -> str | None:
+    """Why the worker cannot research projects, as one sentence for an admin, or None when
+    it can: research switched off (``PROJECT_RESEARCH_ENABLED``), the research model not
+    priced in ``src/services/llm_pricing.py``, or the research or choice prompt missing or
+    empty. Reads the settings and the prompt files on each call."""
+    return _check()[1]
+
+
+def _config() -> _Config | None:
+    prompts, _reason, problem = _check()
+    if prompts is None:
+        if problem is not None:
+            _warn_once(problem)
         return None
+    settings = get_settings()
     return _Config(
-        model=model,
+        model=settings.llm_project_research_model,
         prompts=prompts,
-        limit=Decimal(str(settings.project_research_daily_usd_limit)),
         max_rounds=int(settings.project_research_max_tool_rounds),
     )
 
@@ -1325,8 +1339,8 @@ async def _claim(db: AsyncSession, config: _Config) -> _Claim | None:
     """Take the next step of the live run's oldest due project and claim its call in the
     ledger (committed before the call). None when no call is due; a project that ends
     without a call (no lab persona, no surviving candidate) is ended and committed here."""
-    run_id = await live_run_id(db)
-    if run_id is None or await spend_24h(db) >= config.limit:
+    run_id = await live_projects_run_id(db)
+    if run_id is None:
         return None
     project = await _due_project(db, run_id)
     if project is None:
@@ -1423,7 +1437,7 @@ async def _research_once(session_factory: async_sessionmaker) -> bool:
             claim.project_id, claim.step.step, type(error).__name__,
         )
         # Counted, so a deterministic bug ends the session (or the choice) after the usual
-        # limit instead of paying for the same step every RETRY_AFTER until the ceiling.
+        # limit instead of paying for the same step every RETRY_AFTER.
         state = copy.deepcopy(claim.state)
         entries = usage_entries(message) if message is not None else []
         served = served_by(message) if message is not None else None
@@ -1458,8 +1472,8 @@ async def _research_once(session_factory: async_sessionmaker) -> bool:
 async def research_projects(session_factory: async_sessionmaker) -> bool:
     """Take at most one model call's step of the live run's oldest due project; True when
     a call was made (so the worker polls for a job before sleeping). Every refusal to
-    spend — the switch, an unpriced model, a missing prompt, no live run, the daily
-    ceiling, nothing due — returns False. Never raises: the worker loop's ``try`` also
+    spend — the switch, an unpriced model, a missing prompt, no live run or its Projects
+    session not active, nothing due — returns False. Never raises: the worker loop's ``try`` also
     holds the stale-processing sweep, so any error is one WARNING and False."""
     try:
         return await _research_once(session_factory)

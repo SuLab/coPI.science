@@ -1,4 +1,4 @@
-"""Run-selection queries shared by the web routes."""
+"""Run-selection queries shared by the web routes and the worker."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.agent.sessions import PROJECTS, RUNNING, WINDING_DOWN
 from src.models import SimulationProcessStatus, SimulationRun
 from src.services.simulation_control import HEARTBEAT_STALE_SECONDS
 
@@ -51,17 +52,47 @@ async def live_run_id(db: AsyncSession, *, now: datetime | None = None) -> uuid.
     The ``simulation_process_status`` row (id 1) names the engine's run; it counts as
     live while its ``state`` is ``running`` or ``stopping`` and its heartbeat
     (``updated_at``) is no older than ``HEARTBEAT_STALE_SECONDS`` — the heartbeat half of
-    ``/admin/simulation``'s rule, without its engine-lock probe, so an engine that died
+    ``/workspace/simulation``'s rule, without its engine-lock probe, so an engine that died
     keeps **Live** until its heartbeat goes stale. A stored ``status == "running"`` alone is not enough:
     three July-August rows kept it after their engines died.
     """
+    row = await _live_status(db, now)
+    return None if row is None else row.simulation_run_id
+
+
+async def live_projects_run_id(
+    db: AsyncSession, *, now: datetime | None = None
+) -> uuid.UUID | None:
+    """The live run (``live_run_id``'s rule) while its Projects session is active and the
+    engine is not stopping, or None.
+
+    Active means the heartbeat's ``detail["systems"]["projects"]["state"]`` is ``running``
+    or ``winding_down``; a heartbeat without ``systems`` or ``projects``, or with projects in
+    any other state, gives None, so the worker researches only while Projects runs. A
+    ``stopping`` heartbeat gives None too: a stop has ended every session, though the
+    heartbeat may still carry the last control poll's ``systems`` until the engine exits.
+    """
+    row = await _live_status(db, now)
+    if row is None or row.state != "running":
+        return None
+    detail = row.detail if isinstance(row.detail, Mapping) else {}
+    systems = detail.get("systems")
+    projects = systems.get(PROJECTS) if isinstance(systems, Mapping) else None
+    state = projects.get("state") if isinstance(projects, Mapping) else None
+    return row.simulation_run_id if state in (RUNNING, WINDING_DOWN) else None
+
+
+async def _live_status(
+    db: AsyncSession, now: datetime | None
+) -> SimulationProcessStatus | None:
+    """The status row when ``live_run_id``'s rule counts it live, else None."""
     row = await db.get(SimulationProcessStatus, 1)
     if row is None or row.state not in ("running", "stopping"):
         return None
     moment = now or datetime.now(UTC)
     if (moment - row.updated_at).total_seconds() > HEARTBEAT_STALE_SECONDS:
         return None
-    return row.simulation_run_id
+    return row
 
 
 def run_bar_entries(

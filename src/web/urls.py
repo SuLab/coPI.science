@@ -14,6 +14,7 @@ QUERY_FIELDS = {
     "activity_detail": ("page",),
     "prompt_suggestions": ("status",),
     "prompt_suggestion_detail": (),
+    "simulation": ("run",),
     "slack_bots": (),
     "staff": (),
     "home": (),

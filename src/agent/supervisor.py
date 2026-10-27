@@ -2,14 +2,21 @@
 
 Replaces the operator's `docker compose run ... python -m src.agent.main` with
 an idle loop: the container stays up, and a run starts ONLY when an explicit
-`simulation_commands` row (written by /admin/simulation) is claimed. Boot
+`simulation_commands` row (written by the /workspace/simulation panel) is claimed. Boot
 marks every pending command stale — the never-auto-start invariant: a reboot,
 redeploy, or crash-restart must never replay a pre-boot request.
 
-The running engine handles `stop` itself (`_poll_control_plane`). Liveness is
-the engine advisory lock (`engine_alive`, spec §8.3): while an engine holds it,
-this loop leaves stops for it, refuses a start ("engine already running") and
-never writes `idle` or `starting` over its heartbeat. Boot stales every pending
+A `start` names the systems the run starts with and their limits
+(`systems_from_start_payload`; a payload with no `systems` key is the older
+interviews-only shape) and is finished `failed` when it names none. The running
+engine handles `stop` and `system` (a per-system start, wind-down or stop now in
+the live run) itself (`_poll_control_plane`). Liveness is the engine advisory
+lock (`engine_alive`, spec §8.3): while an engine holds it, this loop leaves
+stops and `system` commands for it, refuses a start ("engine already running")
+and never writes `idle` or `starting` over its heartbeat. With no engine alive a
+`system` command is finished `stale` ("no run is live — start it again"): the
+run it was meant for has ended, and it never starts an engine (spec §4.3). Boot
+stales every pending
 command except a Finalize run `stop`, which — like every stop still pending
 after a run — is settled by `_settle_pending_stops`: a finalize stop runs
 `HeadlineAnnouncer.finalize` under the engine lock, any other finishes "run
@@ -30,7 +37,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.agent.engine.headlines import build_finalize_announcer
 from src.agent.ids import WRITER_ENGINE_AUX, set_default_writer_id
-from src.agent.main import _run_simulation
+from src.agent.main import _run_simulation, _starting_detail
+from src.agent.sessions import INTERVIEWS, Limits, systems_from_start_payload
 from src.config import get_settings
 from src.database import make_engine
 from src.services.advisory_locks import ENGINE_LOCK_KEY, SessionAdvisoryLock
@@ -62,6 +70,61 @@ def _install_signal_handlers(loop) -> None:
 
 
 _LOCK_HELD = "engine lock held — use Finalize run when no engine is alive"
+_NO_LIVE_RUN = "no run is live — start it again"
+_NO_SYSTEM = "no system to start"
+
+
+async def _settle_system_command(db, *, alive: bool) -> None:
+    """Claim a pending ``system`` command. A live engine owns it (its control poll
+    applies it), so the claim is released; with none alive the run it was meant for
+    has ended, and it is finished ``stale`` rather than starting an engine."""
+    cmd = await claim_pending(db, command="system")
+    if cmd is None:
+        return
+    cmd_id = cmd.id  # read before the rollback expires the row
+    if alive:
+        await db.rollback()  # release the claim; the live engine applies it
+        logger.info("Leaving system command %s for the live engine", cmd_id)
+    else:
+        await finish_command(db, cmd_id, status="stale", result=_NO_LIVE_RUN)
+        logger.info("System command %s finished stale: no run is live", cmd_id)
+
+
+async def _claim_start(db, *, alive: bool) -> tuple[uuid.UUID, bool, dict[str, Limits]] | None:
+    """Claim a pending ``start`` and return ``(command id, fresh, systems)`` to run, after
+    writing the ``starting`` heartbeat; None when there is nothing to run. With no start
+    pending, an idle loop writes ``idle`` (never over a live engine's heartbeat). A start
+    beside a live engine is finished ``failed`` ("engine already running"), and so is one
+    whose payload names no system."""
+    cmd = await claim_pending(db, command="start")
+    if cmd is None:
+        if not alive:
+            await upsert_status(db, state="idle")
+            await db.commit()
+        return None
+    if alive:
+        await finish_command(db, cmd.id, status="failed", result="engine already running")
+        return None
+    payload = cmd.payload or {}
+    systems = systems_from_start_payload(payload)
+    if not systems:
+        await finish_command(db, cmd.id, status="failed", result=_NO_SYSTEM)
+        await upsert_status(db, state="idle")
+        await db.commit()
+        return None
+    fresh = bool(payload.get("fresh", False))
+    await upsert_status(db, state="starting", detail=_starting_detail(fresh, systems))
+    await db.commit()
+    return cmd.id, fresh, systems
+
+
+def _run_args(systems: dict[str, Limits]) -> tuple[int, int]:
+    """``(max_runtime, max_proposals)`` for ``run_fn``'s positional interview limits:
+    the interviews session's runtime and count, or 0 when interviews do not start."""
+    interviews = systems.get(INTERVIEWS)
+    if interviews is None:
+        return 0, 0
+    return interviews.runtime_minutes, interviews.count
 
 
 async def _run_finalize(db, cmd, database_url: str, session_factory) -> None:
@@ -155,7 +218,7 @@ async def run_supervisor(session_factory=None, run_fn=None, poll_seconds=POLL_SE
             async with session_factory() as db:
                 # The engine lock is the liveness signal (spec §8.3): a live
                 # engine — this process's own run or a CLI emergency run — owns
-                # its stops and its heartbeat row.
+                # its stops, its `system` commands and its heartbeat row.
                 alive = await engine_alive(db)
                 stop_cmd = await claim_pending(db, command="stop")
                 if stop_cmd is not None:
@@ -166,26 +229,11 @@ async def run_supervisor(session_factory=None, run_fn=None, poll_seconds=POLL_SE
                     else:
                         await finish_command(db, stop_cmd.id, status="done",
                                              result="nothing running")
-                cmd = await claim_pending(db, command="start")
-                if cmd is None:
-                    if not alive:
-                        await upsert_status(db, state="idle")
-                        await db.commit()
-                elif alive:
-                    await finish_command(db, cmd.id, status="failed",
-                                         result="engine already running")
-                    cmd = None
-                else:
-                    payload = cmd.payload or {}
-                    fresh = bool(payload.get("fresh", False))
-                    max_runtime = int(payload.get("max_runtime", 0))
-                    max_proposals = int(payload.get("max_proposals", 0))
-                    await upsert_status(db, state="starting",
-                                        detail={"fresh": fresh, "max_runtime": max_runtime,
-                                                "max_proposals": max_proposals})
-                    await db.commit()
-                    cmd_id = cmd.id
-            if cmd is not None and _shutdown:
+                await _settle_system_command(db, alive=alive)
+                start = await _claim_start(db, alive=alive)
+            if start is not None:
+                cmd_id, fresh, systems = start
+            if start is not None and _shutdown:
                 # Claimed a `start` (and even upserted "starting") in the
                 # window above, but a shutdown signal landed before we got
                 # here to actually run it — never launch a run into a
@@ -201,9 +249,11 @@ async def run_supervisor(session_factory=None, run_fn=None, poll_seconds=POLL_SE
                         result="supervisor shutting down — request again",
                     )
                 logger.info("Shutdown mid-claim — start %s finished stale", cmd_id)
-            elif cmd is not None:
+            elif start is not None:
                 try:
-                    await run_fn(max_runtime, 0, False, False, fresh, False, False, max_proposals)
+                    max_runtime, max_proposals = _run_args(systems)
+                    await run_fn(max_runtime, 0, False, False, fresh, False, False,
+                                 max_proposals, systems=systems)
                     outcome, result = "done", "run completed"
                 except Exception as exc:  # noqa: BLE001 — the loop must survive a run
                     logger.exception("Simulation run raised")

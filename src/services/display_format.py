@@ -1,6 +1,6 @@
 """Human-facing number and time formatting for the admin pages.
 
-Every rule the /admin/simulation charts and tables apply to a figure lives
+Every rule the /workspace/simulation charts and tables apply to a figure lives
 here. Pure functions, no I/O, no locale dependence (month names are a
 tuple, not strftime('%b')). All times render in UTC — the simulation, the DB
 and the Slack markers all speak UTC; a mixed-zone page is worse than a single

@@ -1,10 +1,8 @@
 """The projects measures report (``src.services.projects_report``) against a hand-built run.
 
-One lab with three projects at a 24-hour interval: ready (requested at 0 h, finished
-at 60 h), not agreed (84 h → 96 h) and not finished on a time-out (144 h → 156 h), with
-the run clock at 168 h. Between the first two requests two whole intervals pass while
-the first project is still open; between the second and the third one passes after the
-second finished. Every figure below is computed by hand from those numbers.
+One lab with three projects: ready (requested at 0 h, finished at 60 h), not agreed
+(84 h → 96 h) and not finished on a time-out (144 h → 156 h), with the run clock at
+168 h. Every figure below is computed by hand from those numbers.
 """
 
 import uuid
@@ -32,12 +30,7 @@ from src.models.hub_project import (
     STATUS_POSTED,
     STATUS_READY,
 )
-from src.services.projects_report import (
-    MISSED_NOT_LIVE,
-    MISSED_PREVIOUS_OPEN,
-    build_report,
-    refinement_cost,
-)
+from src.services.projects_report import build_report, refinement_cost
 from src.services.projects_view import build_projects_list
 from tests import factories
 
@@ -192,12 +185,9 @@ async def test_the_report_matches_hand_computed_figures(db_session):
 
     (lab,) = report["labs"]
     assert lab["agent_id"] == LAB and lab["requested"] == 3
-    assert lab["missed_by_reason"] == {MISSED_PREVIOUS_OPEN: 2, MISSED_NOT_LIVE: 1}
-    assert [(m["from_hours"], m["reason"]) for m in lab["missed_intervals"]] == [
-        (24.0, MISSED_PREVIOUS_OPEN), (48.0, MISSED_PREVIOUS_OPEN), (108.0, MISSED_NOT_LIVE),
-    ]
     assert lab["per_run_day"] == pytest.approx(3 / 7)
-    assert report["missed_by_reason"] == {MISSED_PREVIOUS_OPEN: 2, MISSED_NOT_LIVE: 1}
+    assert set(lab) == {"agent_id", "requested", "per_run_day"}
+    assert not {"interval_hours", "missed_by_reason"} & set(report)
 
     reviews = report["reviews"]
     assert reviews["project_review_count"] == 2
@@ -211,7 +201,8 @@ async def test_the_report_matches_hand_computed_figures(db_session):
     }
 
     markdown = script.render_markdown(report)
-    assert MISSED_PREVIOUS_OPEN in markdown and "$0.32" in markdown
+    assert f"| {LAB} | 3 | 0.43 |" in markdown and "$0.32" in markdown
+    assert "interval" not in markdown.lower()
 
 
 async def test_the_list_summary_agrees_with_the_report(db_session):
@@ -243,7 +234,7 @@ async def test_an_open_project_of_a_finalized_run_counts_as_not_finished(db_sess
     assert [(r["code"], r["count"]) for r in report["not_finished_reasons"]] == [
         ("run_finalized", 1)
     ]
-    assert report["labs"][0]["missed_intervals"] == []
+    assert report["labs"][0]["requested"] == 1
 
 
 async def test_an_unknown_run_raises_lookup_error(db_session):

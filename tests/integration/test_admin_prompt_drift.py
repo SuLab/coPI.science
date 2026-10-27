@@ -17,7 +17,7 @@ async def test_drift_banner_shows_three_rubric_hashes(client, db_session):
         "rubric": {"loaded": "cccccccccccc", "on_disk": "dddddddddddd"},
     }))
     await db_session.commit()
-    resp = await client.get("/admin/simulation", headers=auth_headers(admin.id))
+    resp = await client.get("/workspace/simulation", headers=auth_headers(admin.id))
     assert "Prompt set changed on disk — restart to apply" in resp.text
     for h in (RUBRIC_CONTENT_HASH, "cccccccccccc", "dddddddddddd", "scout_hub"):
         assert h in resp.text
@@ -28,5 +28,5 @@ async def test_no_banner_without_drift(client, db_session):
     db_session.add(SimulationProcessStatus(id=1, state="running", updated_at=datetime.now(UTC),
                                            detail={"prompt_drift": {}}))
     await db_session.commit()
-    resp = await client.get("/admin/simulation", headers=auth_headers(admin.id))
+    resp = await client.get("/workspace/simulation", headers=auth_headers(admin.id))
     assert "restart to apply" not in resp.text

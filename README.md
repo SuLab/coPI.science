@@ -20,7 +20,7 @@ for history only; none of that product runs on this branch.
 - **Agent simulation** (`src/agent/supervisor.py` → `src/agent/main.py` →
   `src/agent/simulation.py`) — the turn-based engine: lab pitches, hub interviews,
   specialist consults, verdict capture and `#assessments-summary` headlines. Started
-  and stopped from `/admin/simulation`.
+  and stopped from `/workspace/simulation`.
 - **Postgres** — the authoritative store (users, profiles, agent registry, message
   log, assessments, reviews); migrations in `alembic/`.
 - **Profiles on disk** — `profiles/public/` and `profiles/memory/` hold the exported

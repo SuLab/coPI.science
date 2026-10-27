@@ -3,16 +3,19 @@ prototype design, §8).
 
 Seeds a SCRATCH database with BlackbirdBot, one lab, a run, its clock and one
 ``ready_to_post`` project taken from a ``scripts/projects_dry_run.py`` output file, then runs
-the real engine with Slack off until the project finishes or ``--max-minutes`` pass, and
-prints the posting, the thread and the outcome. Nothing reaches Slack, but the model calls
-are real and billed: the owner approves each use.
+the real engine with Slack off until the project finishes, and prints the posting, the
+thread and the outcome. ``--max-minutes`` winds the Projects session down: nothing new is
+requested, but a project already researched runs to its end, so the engine may run past it.
+Nothing reaches Slack, but the model calls are real and billed: the owner approves each use.
 
 The lab's persona comes from the mounted ``profiles/`` (refused when the lab's public file is
 missing). The hub has none by design and runs on ``Agent.public_profile``'s fallback, as in
-production. Every engine read of the settings sees ``replay_settings_overrides()``: the switch
-on, cohort isolation off (only the hub and one lab run), no second project, and
-``lab_daily_post_cap=0`` so the lab never pitches its own idea, no interview starts and no
-working-memory file is written under the live ``profiles/``.
+production. The engine runs one Projects session (no Interviews session, so the lab never
+pitches its own idea, no interview starts and no working-memory file is written under the live
+``profiles/``) limited to ``--max-minutes``, and every engine read of the settings sees
+``replay_settings_overrides()``: cohort isolation off (only the hub and one lab run) and
+``lab_daily_post_cap=0``. The lab may be requested a second project once the first finishes;
+nothing researches it, and the replay reports only the seeded one.
 
 Refused: a ``--db-url`` whose database is ``copi``; a process ``DATABASE_URL`` that names a
 different database (so nothing in the process can reach another one); a ``--lab`` that is
@@ -27,7 +30,7 @@ deployment's containers), migrated to head first, with
       python scripts/projects_thread_replay.py --db-url $R \\
       --dry-run-json /out/<date>.json --lab <agent_id>
 
-Exit 0 when the project finished, 1 when time ran out first, 2 on a refusal.
+Exit 0 when the project finished, 1 when the engine stopped before it did, 2 on a refusal.
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ import os
 import sys
 import uuid
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -55,6 +59,7 @@ from src.agent.role_capabilities import (  # noqa: E402
     roles_requiring_user,
     spoke_role_names,
 )
+from src.agent.sessions import PROJECTS, Limits, Sessions  # noqa: E402
 from src.agent.simulation import SimulationEngine  # noqa: E402
 from src.agent.transport import NullTransport  # noqa: E402
 from src.config import get_settings  # noqa: E402
@@ -80,9 +85,7 @@ class ReplayRefused(Exception):
 def replay_settings_overrides() -> dict:
     """What every engine read of the settings sees during a replay (module docstring)."""
     return {
-        "hub_projects_enabled": True,
         "cohort_isolation_enabled": False,
-        "project_interval_hours": 100_000.0,
         "lab_daily_post_cap": 0,
     }
 
@@ -171,13 +174,19 @@ async def replay_agents(session_factory, hub_id: str, lab_id: str) -> list[Agent
 def build_replay_engine(
     session_factory, agents: list[Agent], run_id: uuid.UUID, *, max_minutes: int,
 ) -> SimulationEngine:
-    """The engine with Slack off: a ``NullTransport`` per agent (a hub subscribes to a channel
-    only through its transport's join, so an empty client map would leave it deaf to the
-    lab's reply) and ``fresh_start=False``, so ``start()`` runs the hub's channel discovery
-    before the first turn, which the lab's reply could otherwise precede."""
+    """The engine with Slack off and one Projects session limited to ``max_minutes``: a
+    ``NullTransport`` per agent (a hub subscribes to a channel only through its transport's
+    join, so an empty client map would leave it deaf to the lab's reply) and
+    ``fresh_start=False``, so ``start()`` runs the hub's channel discovery before the first
+    turn, which the lab's reply could otherwise precede."""
+    sessions = Sessions()
+    sessions.start(
+        PROJECTS, Limits(runtime_minutes=max_minutes), datetime.now(UTC), initial=True,
+    )
     return SimulationEngine(
         agents=agents,
         slack_clients={a.agent_id: NullTransport(agent_id=a.agent_id) for a in agents},
+        sessions=sessions,
         max_runtime_minutes=max_minutes,
         session_factory=session_factory,
         simulation_run_id=run_id,
@@ -187,9 +196,10 @@ def build_replay_engine(
 
 
 async def _project_row(session_factory, run_id: uuid.UUID):
+    """The seeded project (slot 1)."""
     async with session_factory() as db:
         return (await db.execute(
-            select(HubProject).where(HubProject.simulation_run_id == run_id)
+            select(HubProject).where(HubProject.simulation_run_id == run_id, HubProject.slot == 1)
         )).scalar_one()
 
 

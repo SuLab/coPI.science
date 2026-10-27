@@ -11,19 +11,31 @@ command gets None while the first session's transaction is still open). The
 0042 partial unique index (`uq_simulation_commands_one_pending`) enforces at
 most one pending row per command kind at the database — `enqueue_command`
 lets that `IntegrityError` propagate at flush/commit; callers (the admin
-router's `admin_simulation_start` / `admin_simulation_stop`) catch it and
-render a refusal, which IS the double-click guard.
+router's `admin_simulation_start` / `admin_simulation_system` /
+`admin_simulation_stop`) catch it and render a refusal, which IS the double-click guard.
 
 `derive_panel_state` maps the heartbeat row to a panel state; given an
 `engine_alive` answer (the engine lock in `pg_locks`, `engine_alive` below) it
 applies the liveness table in its docstring, and `panel_state` fetches both.
+`systems_view` reads the heartbeat's per-system sessions (``detail["systems"]``) into
+what the panel's Interviews and Projects cards show.
 """
+from collections.abc import Mapping
 from datetime import UTC, datetime
 
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.agent.sessions import (
+    ENDED,
+    INTERVIEWS,
+    REASON_LABELS,
+    RUNNING,
+    SYSTEMS,
+    WINDING_DOWN,
+    Limits,
+)
 from src.models import AdminAuditEvent, SimulationCommand, SimulationProcessStatus
 from src.services.advisory_locks import ENGINE_LOCK_KEY, advisory_lock_held
 
@@ -240,3 +252,94 @@ def is_finalize_stop(cmd) -> bool:
         and bool(payload.get("finalize"))
         and bool(payload.get("run_id"))
     )
+
+
+#: ``systems_view`` states: a ``Session.record()`` state, or the supervisor's ``starting``.
+SYSTEM_NOT_RUNNING = "not_running"
+SYSTEM_STARTING = "starting"
+SYSTEM_STOPPED = "stopped"
+_RECORD_STATES = {
+    "starting": SYSTEM_STARTING,
+    RUNNING: RUNNING,
+    WINDING_DOWN: WINDING_DOWN,
+    ENDED: SYSTEM_STOPPED,
+}
+
+
+def _iso(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _count(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _system_entry(record: object) -> dict:
+    """One card's values from one heartbeat record (``Session.record()`` or the
+    supervisor's ``{"state": "starting", "limits": …}``); anything unreadable is
+    ``not_running``."""
+    if not isinstance(record, Mapping):
+        record = {}
+    state = _RECORD_STATES.get(str(record.get("state")), SYSTEM_NOT_RUNNING)
+    started_at = _iso(record.get("started_at"))
+    since = {
+        RUNNING: started_at,
+        WINDING_DOWN: _iso(record.get("wound_down_at")) or started_at,
+        SYSTEM_STOPPED: _iso(record.get("ended_at")),
+    }.get(state)
+    reason = record.get("reason")
+    waiting_on = record.get("waiting_on")
+    return {
+        "state": state,
+        "since": since,
+        "started_at": started_at,
+        "limits": Limits.from_mapping(record.get("limits")).as_dict(),
+        "count": _count(record.get("count")),
+        "open_work": _count(record.get("open_work")),
+        "failures_in_a_row": _count(record.get("failures_in_a_row")),
+        "waiting_on": [str(w) for w in waiting_on] if isinstance(waiting_on, list) else [],
+        "reason_label": REASON_LABELS.get(reason) if isinstance(reason, str) else None,
+    }
+
+
+def systems_view(
+    status_row: SimulationProcessStatus | None, *, engine_is_alive: bool,
+) -> dict[str, dict]:
+    """``{system: card values}`` for every system in ``SYSTEMS``.
+
+    Each entry has ``state`` (``not_running``, ``starting``, ``running``,
+    ``winding_down``, or ``stopped`` for a session of the live run that ended),
+    ``since`` (when it entered that state, None when not known), ``started_at``,
+    ``limits`` (``Limits.as_dict()``), ``count``, ``open_work``,
+    ``failures_in_a_row``, ``waiting_on`` (lab agent ids) and ``reason_label``
+    (``REASON_LABELS`` of the session's reason, or None).
+
+    With no engine holding the engine lock every system is ``not_running``,
+    whatever the heartbeat last said. A live heartbeat without ``"systems"`` comes
+    from an engine built before the two systems were separable: interviews
+    ``running``, projects ``not_running``.
+    """
+    view = {system: _system_entry(None) for system in SYSTEMS}
+    if not engine_is_alive or status_row is None:
+        return view
+    systems = (status_row.detail or {}).get("systems")
+    if not isinstance(systems, Mapping):
+        view[INTERVIEWS] = {**view[INTERVIEWS], "state": RUNNING}
+        return view
+    for system in SYSTEMS:
+        if system in systems:
+            view[system] = _system_entry(systems[system])
+    return view
+
+
+def takes_system_commands(status_row: SimulationProcessStatus | None) -> bool:
+    """The heartbeat carries per-system sessions (``detail["systems"]``), so its engine
+    claims ``system`` commands. An engine built before the two systems were separable
+    writes none and never claims one (``systems_view`` shows its interviews running)."""
+    detail = status_row.detail if status_row is not None else None
+    return isinstance(detail, Mapping) and isinstance(detail.get("systems"), Mapping)

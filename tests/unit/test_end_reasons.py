@@ -14,15 +14,16 @@ from src.agent.end_reasons import (
     end_reason_class,
     stronger_reason,
 )
+from src.agent.sessions import INTERVIEWS, PROJECTS, Limits, Sessions
 from src.agent.simulation import SimulationEngine
 
 
 def test_the_vocabulary_is_closed_and_classed():
     assert END_REASON_CLASS == {
-        "operator": TODAY, "signal": TODAY,
+        "operator": TODAY, "signal": TODAY, "failure_stop": TODAY,
         "time_limit": FINALIZE, "target_drained": FINALIZE,
         "operator_hold": HOLD, "stall": HOLD, "exception": HOLD,
-        "start_failed": HOLD, "lock_lost": HOLD,
+        "start_failed": HOLD, "lock_lost": HOLD, "held_over": HOLD,
     }
     with pytest.raises(ValueError):
         end_reason_class("bogus")
@@ -39,6 +40,9 @@ def test_the_vocabulary_is_closed_and_classed():
     ("signal", "stall", "stall"),                # HOLD beats TODAY
     ("stall", "exception", "stall"),
     ("target_drained", "exception", "exception"),
+    ("failure_stop", "time_limit", "time_limit"),
+    ("failure_stop", "operator", "failure_stop"),
+    ("target_drained", "held_over", "held_over"),
 ])
 def test_a_later_reason_can_only_raise_the_class(current, new, expected):
     assert stronger_reason(current, new) == expected
@@ -101,21 +105,36 @@ async def test_an_exception_escaping_the_loop_records_exception(monkeypatch, tmp
     assert eng._end_reason == "exception"
 
 
-async def test_max_runtime_records_time_limit(monkeypatch, tmp_path):
+async def test_a_session_runtime_records_time_limit(monkeypatch, tmp_path):
+    """The interviews session reached its runtime, wound down with nothing open, and was the
+    last session to end: a natural end."""
     eng = _engine(monkeypatch, tmp_path, [Agent("wang", "WangBot", "Wang")])
-    eng.max_runtime_minutes = 1
-    eng._start_time = datetime.now(UTC) - timedelta(minutes=5)
+    eng.ctx.sessions = Sessions.legacy(
+        count=0, runtime_minutes=1, now=datetime.now(UTC) - timedelta(minutes=5),
+    )
+    monkeypatch.setattr(eng, "_select_agent", lambda: None)
     await eng._run_main_loop()
     assert eng._end_reason == "time_limit" and eng._running is False
 
 
-async def test_a_drained_proposal_target_records_target_drained(monkeypatch, tmp_path):
+async def test_a_reached_session_count_records_target_drained(monkeypatch, tmp_path):
     eng = _engine(monkeypatch, tmp_path, [Agent("wang", "WangBot", "Wang")])
-    eng.max_proposals = 1
-    eng._proposals_posted = 1
+    eng.ctx.sessions = Sessions.legacy(count=1, runtime_minutes=0, now=datetime.now(UTC))
+    eng.ctx.sessions.add_count(INTERVIEWS, datetime.now(UTC))
     monkeypatch.setattr(eng, "_select_agent", lambda: None)
     await eng._run_main_loop()
     assert eng._end_reason == "target_drained"
+
+
+async def test_a_carried_hold_records_held_over(monkeypatch, tmp_path):
+    eng = _engine(monkeypatch, tmp_path, [Agent("wang", "WangBot", "Wang")])
+    sessions = Sessions(hold_carried=True)
+    sessions.start(PROJECTS, Limits(count=1), datetime.now(UTC), initial=True)
+    sessions.observe(PROJECTS, open_work=0, now=datetime.now(UTC), count=1)
+    eng.ctx.sessions = sessions
+    monkeypatch.setattr(eng, "_select_agent", lambda: None)
+    await eng._run_main_loop()
+    assert eng._end_reason == "held_over"
 
 
 def test_the_signal_and_start_failure_paths_pass_their_reasons():

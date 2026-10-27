@@ -23,10 +23,16 @@ class SimulationCommand(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     command: Mapped[str] = mapped_column(
-        Enum("start", "stop", name="sim_command_enum"), nullable=False
+        Enum("start", "stop", "system", name="sim_command_enum"), nullable=False
     )
-    #: start: {"fresh": bool, "max_runtime": int, "max_proposals": int}. stop: None for the default Stop, or {"hold_open": true}
-    #: for "Stop — hold open interviews".
+    #: start (claimed by the supervisor, no engine alive): {"fresh": bool, "systems":
+    #: {"interviews"|"projects": {"count": int, "runtime_minutes": int}}}; the older
+    #: {"fresh", "max_runtime", "max_proposals"} is still read as interviews
+    #: (src.agent.sessions.systems_from_start_payload). stop: None for the default Stop
+    #: ("Stop everything"), {"hold_open": true} for its hold variant, or the Finalize run
+    #: shape. system (migration 0074; claimed by the live engine, staled by the supervisor
+    #: when none is alive): {"action": "start"|"wind_down"|"stop_now", "system":
+    #: "interviews"|"projects", "run_id": "<uuid>", "limits": {...}}, ``limits`` on a start only.
     payload: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     status: Mapped[str] = mapped_column(
         Enum("pending", "done", "failed", "stale", name="sim_command_status_enum"),

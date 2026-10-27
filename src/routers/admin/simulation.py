@@ -1,4 +1,7 @@
-"""Admin /admin/simulation control panel routes."""
+"""The simulation control panel's writes, /admin/simulation/*: start, a system's wind-down
+or stop, Stop everything, Finalize run and the announcement settings. The page itself is
+/workspace/simulation (src/routers/workspace/simulation.py); GET /admin/simulation
+redirects there."""
 
 import hashlib
 import re
@@ -13,32 +16,48 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.agent.run_marker import parse_announce_channels, template_body, validate_template
-from src.config import get_settings
+from src.agent.run_marker import parse_announce_channels, validate_template
+from src.agent.sessions import (
+    INTERVIEWS,
+    PROJECTS,
+    RUNNING,
+    SYSTEM_LABELS,
+    SYSTEMS,
+    WINDING_DOWN,
+    Limits,
+)
 from src.dependencies import impersonation_note
-from src.models import AdminAuditEvent, AppSetting, SimulationCommand, SimulationRun, User
-from src.routers.admin._common import _ADMIN, _DB, _template_context, router, templates
-from src.services import display_format as fmt
-from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH
-from src.services.headline_claims import held_headline_counts
+from src.models import AppSetting, SimulationCommand, SimulationRun, User
+from src.routers.admin._common import _ADMIN, _DB, router
+from src.routers.workspace.compatibility import redirect
+from src.routers.workspace.simulation import (
+    ANNOUNCE_CHANNELS_KEY,
+    ANNOUNCE_TEMPLATE_KEY,
+    kv_get,
+    render_simulation_page,
+    simulation_page_context,
+)
+from src.services.project_research import research_unavailable_reason
 from src.services.runs import latest_run_id
 from src.services.simulation_control import (
+    SYSTEM_STARTING,
+    derive_panel_state,
     engine_alive,
     enqueue_command,
     is_finalize_stop,
+    read_status,
     record_audit,
+    systems_view,
+    takes_system_commands,
 )
-from src.services.simulation_control import panel_state as read_panel_state
-from src.services.simulation_stats import funnel
-from src.services.simulation_view import live_tab_context
 from src.web.flash import flash
 from src.web.urls import page_url
 
 # ---------------------------------------------------------------------------
-# /admin/simulation — the control-plane panel (Task 7 of
+# /admin/simulation/* — the control-plane panel's writes (Task 7 of
 # docs/plans/2026-08-30-simulation-control-panel.md). Command/heartbeat/audit primitives live in
-# src.services.simulation_control; this module stays thin — read the panel
-# state, shape a form, ask the service a question, render or redirect. The
+# src.services.simulation_control; this module stays thin — shape a form, ask the
+# service a question, redirect to the panel (/workspace/simulation). The
 # supervisor (src/agent/supervisor.py) and the running engine's own
 # `_poll_control_plane` are the only consumers of the rows written here.
 # ---------------------------------------------------------------------------
@@ -49,12 +68,6 @@ from src.web.urls import page_url
 #: so an admin typo is caught here rather than surfacing later as a silent
 #: channel_not_found from Slack at run-start time.
 _ANNOUNCE_CHANNEL_RE = re.compile(r"^[a-z0-9_-]{1,80}$")
-
-
-_KEY_ANNOUNCE_CHANNELS = "run_start_announce_channels"
-
-_KEY_ANNOUNCE_TEMPLATE = "run_start_announcement_template"
-
 
 
 def _hash12(text: str | None) -> str | None:
@@ -81,11 +94,6 @@ def _audit_payload(payload: dict | None, current_user: User) -> dict | None:
 
 
 
-async def _kv_get(db: AsyncSession, key: str) -> str | None:
-    return (await db.execute(select(AppSetting.value).where(AppSetting.key == key))).scalar_one_or_none()
-
-
-
 async def _kv_upsert(db: AsyncSession, key: str, value: str) -> None:
     stmt = pg_insert(AppSetting).values(key=key, value=value)
     stmt = stmt.on_conflict_do_update(index_elements=[AppSetting.key], set_={"value": value})
@@ -98,243 +106,295 @@ async def _kv_delete(db: AsyncSession, key: str) -> None:
 
 
 
-#: The engine posts at most this many owed headlines on a Stop
-#: (src/agent/engine/constants.py HEADLINES_MAX_AT_SHUTDOWN). Duplicated, not
-#: imported: that module imports src.agent.agent; the equality is pinned by
-#: tests/unit/test_stop_announce_cap.py.
-STOP_ANNOUNCE_CAP = 25
-
-
-async def _stop_counts(
-    db: AsyncSession, status_row, engine_is_alive: bool
-) -> dict[str, int] | None:
-    """The announcing Stop's dialog numbers, from the LIVE run's funnel (FN-01).
-
-    The page's Live tab shows the ``?run=`` selection, which defaults to the newest run
-    by ``started_at`` and need not be the one the engine is executing; the heartbeat
-    row names the live run. A Stop announces every owed headline of that run, open
-    interviews included: ``owed`` is the terminal ones owed plus the provisional
-    (still open) ones not yet announced, ``open`` those provisional ones, ``posts``
-    what one Stop posts (at most ``cap``). An open interview an earlier Stop already
-    announced (the run was resumed) is not owed again. None when no engine holds the lock or the heartbeat has not
-    named a run yet; the dialog then words it without numbers.
-    """
-    if not engine_is_alive or status_row is None or status_row.simulation_run_id is None:
-        return None
-    live = await funnel(db, status_row.simulation_run_id)
-    owed = live.headlines_owed + live.provisional_unannounced
-    return {"owed": owed, "open": live.provisional_unannounced, "cap": STOP_ANNOUNCE_CAP,
-            "posts": min(owed, STOP_ANNOUNCE_CAP)}
-
-
-async def _simulation_context(
-    db: AsyncSession,
-    request: Request,
-    current_user: User,
-    *,
-    template_error: str | None = None,
-    template_value_override: str | None = None,
-) -> dict:
-    """Assemble every value templates/admin/simulation.html renders.
-
-    Shared by the GET route and by the announce-template POST's inline-error
-    re-render (the one POST here that renders the page directly instead of
-    redirecting — see that handler's docstring for why).
-    """
-    now = datetime.now(UTC)
-    panel_state, status_row, engine_is_alive = await read_panel_state(db, now)
-
-    pending_result = await db.execute(
-        select(SimulationCommand)
-        .where(SimulationCommand.status == "pending")
-        .order_by(SimulationCommand.created_at)
-    )
-    pending_commands = pending_result.scalars().all()
-    pending_start = next((c for c in pending_commands if c.command == "start"), None)
-
-    recent_result = await db.execute(
-        select(SimulationCommand).order_by(SimulationCommand.created_at.desc()).limit(20)
-    )
-    recent_commands = recent_result.scalars().all()
-
-    latest_id = await latest_run_id(db)
-    latest_run = await db.get(SimulationRun, latest_id) if latest_id is not None else None
-    # Held headlines of a stopped run (spec §8.2): owed, never claimed.
-    held_counts = None
-    if latest_run is not None and latest_run.status == "stopped":
-        held_counts = await held_headline_counts(db, latest_run.id)
-    latest_finalized = latest_run is not None and latest_run.finalized_at is not None
-
-    channels_kv = await _kv_get(db, _KEY_ANNOUNCE_CHANNELS)
-    channels_default = get_settings().run_start_announce_channels
-    channels_value = channels_kv if channels_kv is not None else channels_default
-
-    if template_value_override is not None:
-        template_value = template_value_override
-    else:
-        template_kv = await _kv_get(db, _KEY_ANNOUNCE_TEMPLATE)
-        template_value = template_kv if template_kv is not None else template_body()
-
-    audit_result = await db.execute(
-        select(AdminAuditEvent).order_by(AdminAuditEvent.created_at.desc()).limit(20)
-    )
-    audit_events = audit_result.scalars().all()
-
-    live_tab = await live_tab_context(db, request, status_row, now)
-    stop_counts = await _stop_counts(db, status_row, engine_is_alive)
-
-    # The heartbeat's `tick_at` is an ISO string with microseconds; every other
-    # time on this page is minute-precision UTC. An unparseable value is shown
-    # verbatim rather than hidden — it is then the only clue it is malformed.
-    raw_tick_at = (status_row.detail or {}).get("tick_at") if status_row is not None else None
-    if isinstance(raw_tick_at, str):
-        try:
-            tick_at_display = fmt.timestamp(datetime.fromisoformat(raw_tick_at))
-        except ValueError:
-            tick_at_display = raw_tick_at
-    else:
-        tick_at_display = "—"
-
-    return _template_context(
-        request,
-        current_user,
-        active_admin="simulation",
-        panel_state=panel_state,
-        engine_is_alive=engine_is_alive,
-        status_row=status_row,
-        latest_run=latest_run,
-        held_counts=held_counts,
-        stop_counts=stop_counts,
-        latest_finalized=latest_finalized,
-        pending_commands=pending_commands,
-        pending_start=pending_start,
-        recent_commands=recent_commands,
-        channels_value=channels_value,
-        channels_kv=channels_kv,
-        channels_default=channels_default,
-        template_value=template_value,
-        audit_events=audit_events,
-        template_error=template_error,
-        tick_at_display=tick_at_display,
-        web_rubric_hash=RUBRIC_CONTENT_HASH,
-        **live_tab,
-    )
-
-
-
 def _refuse_to(request: Request, url: str, message: str) -> RedirectResponse:
     """Flash ``message`` as an error and redirect to ``url`` (A-14: never in the query)."""
     flash(request, message, "error")
     return RedirectResponse(url=url, status_code=302)
 
 
-@router.get("/simulation", response_class=HTMLResponse)
-async def admin_simulation(
-    request: Request,
-    db: AsyncSession = _DB,
-    current_user: User = _ADMIN,
-):
-    """The simulation control panel: status card, start/stop forms, the
-    announce-channels + announce-template editors, and recent command/audit
-    history, then the Live tab's stats sections — see the Live-tab comment
-    block inside the template."""
-    ctx = await _simulation_context(db, request, current_user)
-    return templates.TemplateResponse(request, "admin/simulation.html", ctx)
+def _panel_url(request: Request) -> str:
+    return page_url(request, "workspace_simulation")
+
+
+@router.get("/simulation", response_class=HTMLResponse, name="legacy_admin_simulation")
+async def admin_simulation(request: Request, current_user: User = _ADMIN):
+    """The panel moved to /workspace/simulation (owner, 2026-10-27); this keeps the admin
+    bar's Simulation link and old bookmarks working, ``?run=`` included."""
+    return redirect(request, current_user, "simulation", "workspace_simulation")
 
 
 _RUN_ID_FORM = Form(...)
-#: C-20: a run limit is a count of seconds or proposals; 0 means "no limit". One
-#: object per parameter: FastAPI names a form field after the first parameter a shared
-#: ``Form()`` is bound to, so a shared one would read max_runtime into both.
-_MAX_RUNTIME_FORM = Form(0, ge=0)
-_MAX_PROPOSALS_FORM = Form(0, ge=0)
+#: The largest limit a start takes, count or minutes: far above any real run, and it keeps
+#: the engine's ``timedelta(minutes=…)`` in range.
+_LIMIT_MAX = 1_000_000
+#: C-20: a session limit is a count (proposals for interviews, finished projects for
+#: projects) or a runtime in minutes; 0 means "no limit". One object per parameter:
+#: FastAPI names a form field after the first parameter a shared ``Form()`` is bound to,
+#: so a shared one would read max_runtime into every limit.
+_MAX_RUNTIME_FORM = Form(0, ge=0, le=_LIMIT_MAX)
+_MAX_PROPOSALS_FORM = Form(0, ge=0, le=_LIMIT_MAX)
+_MAX_PROJECTS_FORM = Form(0, ge=0, le=_LIMIT_MAX)
+_PROJECTS_RUNTIME_FORM = Form(0, ge=0, le=_LIMIT_MAX)
+_FRESH_FORM = Form(False)
+_START_SYSTEM_FORM = Form(INTERVIEWS)
+_SYSTEM_FORM = Form(...)
+_ACTION_FORM = Form(...)
+
+#: The start form's ``system`` value that starts both systems in a run that is not live.
+_BOTH = "both"
+#: ``POST /admin/simulation/system`` actions, as the engine's ``system`` command reads them.
+_WIND_DOWN = "wind_down"
+_STOP_NOW = "stop_now"
+_PENDING_SYSTEM = "Another interviews or projects request is pending; try again in a moment."
+_STARTING_OR_LIVE = "A run is already starting or in progress."
+_LEGACY_ENGINE = "This engine predates per-system controls; use Stop everything."
+
+
+async def _pending(db: AsyncSession, command: str) -> SimulationCommand | None:
+    """The pending command of kind ``command`` (the 0042 index allows at most one)."""
+    return (
+        await db.execute(
+            select(SimulationCommand).where(
+                SimulationCommand.status == "pending", SimulationCommand.command == command,
+            )
+        )
+    ).scalar_one_or_none()
+
+
+async def _lock_latest_run(db: AsyncSession) -> SimulationRun | None:
+    """The latest run row, locked ``FOR NO KEY UPDATE`` (C-24; see ``admin_simulation_start``)."""
+    latest_id = await latest_run_id(db)
+    if latest_id is None:
+        return None
+    return (
+        await db.execute(
+            select(SimulationRun)
+            .where(SimulationRun.id == latest_id)
+            .with_for_update(key_share=True)
+        )
+    ).scalar_one_or_none()
+
+
+async def _stopping(db: AsyncSession, status_row) -> bool:
+    """The live engine is stopping, or a stop is queued for it. A queued Finalize run is not
+    one: a live engine fails it and the run goes on."""
+    if status_row is not None and status_row.state == "stopping":
+        return True
+    pending_stop = await _pending(db, "stop")
+    return pending_stop is not None and not is_finalize_stop(pending_stop)
+
+
+async def _idle_start_refusal(
+    db: AsyncSession, chosen: tuple[str, ...], status_row,
+) -> str | None:
+    """Why a start with no engine alive is refused, or None."""
+    if await _pending(db, "start") is not None:
+        return _STARTING_OR_LIVE
+    if derive_panel_state(status_row, datetime.now(UTC), engine_alive=False) == "starting":
+        # The supervisor has claimed a start and its engine has not taken the lock yet.
+        return _STARTING_OR_LIVE
+    pending_stop = await _pending(db, "stop")
+    if pending_stop is not None and is_finalize_stop(pending_stop):
+        # The finalize would stamp the run a start is about to resume or replace.
+        return "A Finalize run is pending; start after it finishes."
+    if PROJECTS in chosen:
+        return research_unavailable_reason()
+    return None
+
+
+async def _live_start_refusal(db: AsyncSession, status_row, system: str) -> str | None:
+    """Why starting ``system`` (one system, never ``both``) in the live run is refused,
+    or None."""
+    if await _stopping(db, status_row):
+        return "The run is stopping."
+    if status_row is None or status_row.simulation_run_id is None:
+        return _STARTING_OR_LIVE
+    if not takes_system_commands(status_row):
+        return _LEGACY_ENGINE
+    state = systems_view(status_row, engine_is_alive=True)[system]["state"]
+    if state == SYSTEM_STARTING:
+        return _STARTING_OR_LIVE
+    if state in (RUNNING, WINDING_DOWN):
+        return f"{SYSTEM_LABELS[system]} are already running."
+    if await _pending(db, "system") is not None:
+        return _PENDING_SYSTEM
+    if system == PROJECTS:
+        return research_unavailable_reason()
+    return None
+
+
+async def _enqueue_system_command(
+    request: Request, db: AsyncSession, current_user: User, *,
+    payload: dict, audit_action: str, message: str,
+) -> RedirectResponse:
+    """Enqueue a ``system`` command for the live engine, audit it and flash ``message``.
+    The 0042 index's one-pending-per-kind ``IntegrityError`` is the race-proof layer
+    behind the pending check."""
+    try:
+        await enqueue_command(
+            db, command="system", payload=payload, requested_by_user_id=current_user.id,
+        )
+    except IntegrityError:
+        await db.rollback()
+        return _refuse_to(request, _panel_url(request), _PENDING_SYSTEM)
+    await record_audit(
+        db, action=audit_action, actor_user_id=current_user.id,
+        payload=_audit_payload(payload, current_user),
+    )
+    flash(request, message, "success")
+    return RedirectResponse(url=_panel_url(request), status_code=302)
+
+
+async def _start_in_live_run(
+    request: Request, db: AsyncSession, current_user: User, system: str, limits: Limits,
+) -> RedirectResponse:
+    """Ask the live engine to start ``system`` in its run (spec §4.3): a ``system``
+    command ``{"action": "start", "system", "run_id", "limits"}``. The engine claims it
+    at its next control poll; the supervisor finishes it stale if the run ended first."""
+    status_row = await read_status(db)
+    refusal = await _live_start_refusal(db, status_row, system)
+    if refusal is not None:
+        return _refuse_to(request, _panel_url(request), refusal)
+    payload = {
+        "action": "start", "system": system,
+        "run_id": str(status_row.simulation_run_id), "limits": limits.as_dict(),
+    }
+    return await _enqueue_system_command(
+        request, db, current_user, payload=payload,
+        audit_action="simulation_system_start_requested",
+        message=f"Start {system} requested.",
+    )
 
 
 @router.post("/simulation/start")
 async def admin_simulation_start(
     request: Request,
-    fresh: bool = Form(False),
+    system: str = _START_SYSTEM_FORM,
+    fresh: bool = _FRESH_FORM,
     max_runtime: int = _MAX_RUNTIME_FORM,
     max_proposals: int = _MAX_PROPOSALS_FORM,
+    max_projects: int = _MAX_PROJECTS_FORM,
+    projects_runtime: int = _PROJECTS_RUNTIME_FORM,
     db: AsyncSession = _DB,
     current_user: User = _ADMIN,
 ):
-    """Enqueue a `start` command for the supervisor to claim.
+    """Start interviews, projects, or both (``system``: ``interviews``, ``projects``
+    or ``both``). Interviews take ``max_proposals``/``max_runtime``, projects
+    ``max_projects``/``projects_runtime`` (minutes; 0 = no limit).
 
-    Refused (no row written) while an engine holds the engine lock
-    (`engine_alive`, spec §8.3) — CLI-launched or panel-launched alike — or
-    while a `start` is already pending (the common double-click case, caught here before
-    ever reaching the database). The 0042 partial unique index
-    (`uq_simulation_commands_one_pending`) is the second, race-proof layer:
-    an `IntegrityError` from `enqueue_command` is caught and rendered as the
-    same refusal. DECLARED v1 decision: this two-field form plus these
-    refusals ARE the confirmation step — no JS confirm dialog — and the
-    sharp CLI-only flags (`--all-agents`/`--reset-cursors`) are deliberately
-    not exposed here; the page links no substitute.
+    With no engine holding the engine lock (`engine_alive`, spec §8.3): a `start`
+    command ``{"fresh", "systems": {name: Limits.as_dict()}}`` for the supervisor to
+    claim. Refused while a `start` is already pending (the common double-click case,
+    caught here before ever reaching the database) or a Finalize run is pending. The
+    0042 partial unique index (`uq_simulation_commands_one_pending`) is the second,
+    race-proof layer: an `IntegrityError` from `enqueue_command` is caught and
+    rendered as a refusal. DECLARED v1 decision: this form plus these refusals ARE
+    the confirmation step — no JS confirm dialog — and the sharp CLI-only flags
+    (`--all-agents`/`--reset-cursors`) are deliberately not exposed here.
+
+    With an engine alive: one system joins the live run as a `system` command
+    (`_start_in_live_run`); ``both`` is refused, as is a system already starting,
+    running or winding down, a stopping engine, or a pending `system` command.
+
+    Projects are refused while ``research_unavailable_reason()`` names a reason.
 
     Takes ``SELECT … FOR NO KEY UPDATE`` on the run row(s) before its checks (C-24):
     it serializes start and finalize against each other without conflicting with
     the FOR KEY SHARE locks the engine's inserts take on the referenced run row
     (plan audit Q2-06).
     """
+    if system not in (*SYSTEMS, _BOTH):
+        return _refuse_to(request, _panel_url(request), "Unknown system.")
+    limits = {
+        INTERVIEWS: Limits(count=max_proposals, runtime_minutes=max_runtime),
+        PROJECTS: Limits(count=max_projects, runtime_minutes=projects_runtime),
+    }
     # C-24: lock the latest run row before any check. Finalize takes the same
     # lock first (admin_simulation_finalize_run), so a start that would resume
     # this run and a finalize of it serialize: the second waits for the first's
     # commit, then sees its pending command and refuses.
-    latest_id = await latest_run_id(db)
-    latest = None
-    if latest_id is not None:
-        latest = (
-            await db.execute(
-                select(SimulationRun)
-                .where(SimulationRun.id == latest_id)
-                .with_for_update(key_share=True)
+    latest = await _lock_latest_run(db)
+    if await engine_alive(db):
+        if system == _BOTH:
+            return _refuse_to(
+                request, _panel_url(request), "Start both applies only when no run is live."
             )
-        ).scalar_one_or_none()
-    alive = await engine_alive(db)
-    pending_start = (
-        await db.execute(
-            select(SimulationCommand).where(
-                SimulationCommand.status == "pending",
-                SimulationCommand.command == "start",
-            )
-        )
-    ).scalar_one_or_none()
-    if alive or pending_start is not None:
-        return _refuse_to(
-            request, "/admin/simulation", "A run is already starting or in progress."
-        )
-    pending_stop = (
-        await db.execute(
-            select(SimulationCommand).where(
-                SimulationCommand.status == "pending",
-                SimulationCommand.command == "stop",
-            )
-        )
-    ).scalar_one_or_none()
-    if pending_stop is not None and is_finalize_stop(pending_stop):
-        # The finalize would stamp the run a start is about to resume or replace.
-        return _refuse_to(
-            request, "/admin/simulation", "A Finalize run is pending; start after it finishes."
-        )
+        return await _start_in_live_run(request, db, current_user, system, limits[system])
+    chosen = SYSTEMS if system == _BOTH else (system,)
+    refusal = await _idle_start_refusal(db, chosen, await read_status(db))
+    if refusal is not None:
+        return _refuse_to(request, _panel_url(request), refusal)
     if latest is not None and latest.finalized_at is not None:
         # A finalized run refuses a resume (RunFinalized); the form forces Fresh
         # and so does the route, so the operator never queues a doomed start.
         fresh = True
-    payload = {"fresh": fresh, "max_runtime": max_runtime, "max_proposals": max_proposals}
+    payload = {"fresh": fresh, "systems": {name: limits[name].as_dict() for name in chosen}}
     try:
         await enqueue_command(
             db, command="start", payload=payload, requested_by_user_id=current_user.id
         )
     except IntegrityError:
         await db.rollback()
-        return _refuse_to(request, "/admin/simulation", "A start is already pending.")
+        return _refuse_to(request, _panel_url(request), "A start is already pending.")
     await record_audit(
         db, action="simulation_start_requested", actor_user_id=current_user.id,
         payload=_audit_payload(payload, current_user),
     )
     flash(request, "Start requested.", "success")
-    return RedirectResponse(url="/admin/simulation", status_code=302)
+    return RedirectResponse(url=_panel_url(request), status_code=302)
+
+
+def _system_stop_refusal(status_row, system: str, action: str) -> str | None:
+    """Why ``action`` on ``system`` in the live run is refused, before the pending checks."""
+    if status_row is None or status_row.simulation_run_id is None:
+        return "Nothing is running."
+    if not takes_system_commands(status_row):
+        return _LEGACY_ENGINE
+    state = systems_view(status_row, engine_is_alive=True)[system]["state"]
+    if state not in (RUNNING, WINDING_DOWN):
+        return f"{SYSTEM_LABELS[system]} are not running."
+    if action == _WIND_DOWN and state == WINDING_DOWN:
+        return f"{SYSTEM_LABELS[system]} are already winding down."
+    return None
+
+
+@router.post("/simulation/system")
+async def admin_simulation_system(
+    request: Request,
+    system: str = _SYSTEM_FORM,
+    action: str = _ACTION_FORM,
+    db: AsyncSession = _DB,
+    current_user: User = _ADMIN,
+):
+    """Wind down (``wind_down``: nothing new starts, work under way finishes) or stop
+    now (``stop_now``: its open work ends at once) one system of the live run (spec
+    §4.5–§4.6): a `system` command ``{"action", "system", "run_id"}`` the live engine
+    claims at its next control poll. Refused with no engine alive, for a system that
+    is not running or winding down, a wind-down of one already winding down, a
+    stopping engine, or while another `system` command is pending. Stop everything
+    (`admin_simulation_stop`) is a separate command kind, so a pending `system`
+    command never blocks it."""
+    if action not in (_WIND_DOWN, _STOP_NOW):
+        return _refuse_to(request, _panel_url(request), "Unknown action.")
+    if system not in SYSTEMS:
+        return _refuse_to(request, _panel_url(request), "Unknown system.")
+    if not await engine_alive(db):
+        return _refuse_to(request, _panel_url(request), "Nothing is running.")
+    status_row = await read_status(db)
+    refusal = _system_stop_refusal(status_row, system, action)
+    if refusal is None and await _stopping(db, status_row):
+        refusal = "The run is stopping."
+    if refusal is None and await _pending(db, "system") is not None:
+        refusal = _PENDING_SYSTEM
+    if refusal is not None:
+        return _refuse_to(request, _panel_url(request), refusal)
+    payload = {"action": action, "system": system, "run_id": str(status_row.simulation_run_id)}
+    message = (f"Wind down {system} requested." if action == _WIND_DOWN
+               else f"Stop {system} now requested.")
+    return await _enqueue_system_command(
+        request, db, current_user, payload=payload,
+        audit_action="simulation_system_stop_requested", message=message,
+    )
 
 
 @router.post("/simulation/finalize-run")
@@ -435,7 +495,7 @@ async def admin_simulation_stop(
     double-click/race guard as the start route.
     """
     if not await engine_alive(db):
-        return _refuse_to(request, "/admin/simulation", "Nothing is running.")
+        return _refuse_to(request, _panel_url(request), "Nothing is running.")
     payload = {"hold_open": True} if hold_open == "1" else None
     try:
         await enqueue_command(
@@ -443,14 +503,14 @@ async def admin_simulation_stop(
         )
     except IntegrityError:
         await db.rollback()
-        return _refuse_to(request, "/admin/simulation", "A stop is already pending.")
+        return _refuse_to(request, _panel_url(request), "A stop is already pending.")
     await record_audit(
         db, action="simulation_stop_requested", actor_user_id=current_user.id,
         payload=_audit_payload(payload, current_user),
     )
     message = "Stop (hold open interviews) requested." if payload else "Stop requested."
     flash(request, message, "success")
-    return RedirectResponse(url="/admin/simulation", status_code=302)
+    return RedirectResponse(url=_panel_url(request), status_code=302)
 
 
 
@@ -466,7 +526,7 @@ async def admin_simulation_announce_settings(
     announcement's channel list.
 
     Three distinct outcomes, matching the three states the page shows
-    (`_simulation_context`'s `channels_kv`): an explicit `disable` writes the
+    (`simulation_page_context`'s `channels_kv`): an explicit `disable` writes the
     override as `""` regardless of whatever is in `channels` — the engine
     already treats an empty-string override as "skip the announcement"
     (`parse_announce_channels("") == []`), so this is not new engine
@@ -482,24 +542,24 @@ async def admin_simulation_announce_settings(
     the `new` payload value (`""`, `None`, or a channel list) is what
     distinguishes them after the fact.
     """
-    old_value = await _kv_get(db, _KEY_ANNOUNCE_CHANNELS)
+    old_value = await kv_get(db, ANNOUNCE_CHANNELS_KEY)
 
     if disable:
         new_value = ""
-        await _kv_upsert(db, _KEY_ANNOUNCE_CHANNELS, new_value)
+        await _kv_upsert(db, ANNOUNCE_CHANNELS_KEY, new_value)
         msg = "Announcements disabled."
     else:
         names = parse_announce_channels(channels)
         bad = [n for n in names if not _ANNOUNCE_CHANNEL_RE.match(n)]
         if bad:
             return _refuse_to(
-                request, "/admin/simulation", "Invalid channel name(s): " + ", ".join(bad)
+                request, _panel_url(request), "Invalid channel name(s): " + ", ".join(bad)
             )
         new_value = ",".join(names) or None
         if new_value is None:
-            await _kv_delete(db, _KEY_ANNOUNCE_CHANNELS)
+            await _kv_delete(db, ANNOUNCE_CHANNELS_KEY)
         else:
-            await _kv_upsert(db, _KEY_ANNOUNCE_CHANNELS, new_value)
+            await _kv_upsert(db, ANNOUNCE_CHANNELS_KEY, new_value)
         msg = "Announce channels updated."
 
     await record_audit(
@@ -509,7 +569,7 @@ async def admin_simulation_announce_settings(
         payload=_audit_payload({"old": old_value, "new": new_value}, current_user),
     )
     flash(request, msg, "success")
-    return RedirectResponse(url="/admin/simulation", status_code=302)
+    return RedirectResponse(url=_panel_url(request), status_code=302)
 
 
 
@@ -535,11 +595,11 @@ async def admin_simulation_announce_template(
     the template text itself, only a sha256[:12] fingerprint of the old and
     new bodies.
     """
-    old_value = await _kv_get(db, _KEY_ANNOUNCE_TEMPLATE)
+    old_value = await kv_get(db, ANNOUNCE_TEMPLATE_KEY)
 
     if reset:
         if old_value is not None:
-            await _kv_delete(db, _KEY_ANNOUNCE_TEMPLATE)
+            await _kv_delete(db, ANNOUNCE_TEMPLATE_KEY)
             await record_audit(
                 db,
                 action="simulation_announce_template_reset",
@@ -549,16 +609,16 @@ async def admin_simulation_announce_template(
                 ),
             )
         flash(request, "Template reset to file default.", "success")
-        return RedirectResponse(url="/admin/simulation", status_code=302)
+        return RedirectResponse(url=_panel_url(request), status_code=302)
 
     error = validate_template(body)
     if error:
-        ctx = await _simulation_context(
+        ctx = await simulation_page_context(
             db, request, current_user, template_error=error, template_value_override=body
         )
-        return templates.TemplateResponse(request, "admin/simulation.html", ctx)
+        return render_simulation_page(request, ctx)
 
-    await _kv_upsert(db, _KEY_ANNOUNCE_TEMPLATE, body)
+    await _kv_upsert(db, ANNOUNCE_TEMPLATE_KEY, body)
     await record_audit(
         db,
         action="simulation_announce_template_updated",
@@ -568,4 +628,4 @@ async def admin_simulation_announce_template(
         ),
     )
     flash(request, "Template saved.", "success")
-    return RedirectResponse(url="/admin/simulation", status_code=302)
+    return RedirectResponse(url=_panel_url(request), status_code=302)

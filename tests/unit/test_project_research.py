@@ -1,10 +1,11 @@
 """The research worker's pure parts (src/services/project_research.py): requests, parsing,
-screening, the choice schema and the choice checks."""
+screening, the choice schema and the choice checks, and whether research can run."""
 
 import json
 
 import pytest
 
+from src.config import get_settings
 from src.services import llm
 from src.services import project_research as pr
 from src.services.project_plan import NameEntry
@@ -454,3 +455,57 @@ def test_ledger_row_cost_prices_reserves_and_usage():
     real = [{"model": model, "billed": True, "input_tokens": 1000, "output_tokens": 100,
              "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}]
     assert 0 < pr.ledger_row_cost(real, model, "choose") < reserve
+
+
+@pytest.fixture
+def research_ready(monkeypatch, tmp_path):
+    """Research switched on, a priced model and both prompts present (in ``tmp_path``)."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "project_research_enabled", True)
+    monkeypatch.setattr(settings, "llm_project_research_model", "claude-opus-5")
+    research, choose = tmp_path / "research.md", tmp_path / "choose.md"
+    research.write_text("Research.", encoding="utf-8")
+    choose.write_text("Choose.", encoding="utf-8")
+    monkeypatch.setattr(pr, "RESEARCH_PROMPT_PATH", research)
+    monkeypatch.setattr(pr, "CHOOSE_PROMPT_PATH", choose)
+    monkeypatch.setattr(pr, "_WARNED", set())
+    return settings
+
+
+def test_research_unavailable_reason_is_none_when_research_can_run(research_ready):
+    assert pr.research_unavailable_reason() is None
+    config = pr._config()
+    assert config is not None and config.model == "claude-opus-5"
+
+
+def test_research_unavailable_reason_names_a_switched_off_research(research_ready):
+    research_ready.project_research_enabled = False
+    reason = pr.research_unavailable_reason()
+    assert reason is not None and "PROJECT_RESEARCH_ENABLED" in reason
+    assert pr._config() is None
+    assert pr._WARNED == set()  # the switch is a choice, not a problem to warn about
+
+
+def test_research_unavailable_reason_names_an_unpriced_model(research_ready, caplog):
+    caplog.set_level("WARNING", logger=pr.__name__)
+    research_ready.llm_project_research_model = "not-a-priced-model"
+    reason = pr.research_unavailable_reason()
+    assert reason is not None and "not-a-priced-model" in reason and "llm_pricing" in reason
+    assert pr._config() is None
+    assert "not priced" in caplog.text
+
+
+@pytest.mark.parametrize("empty", [True, False])
+def test_research_unavailable_reason_names_a_missing_or_empty_prompt(
+    research_ready, caplog, empty
+):
+    caplog.set_level("WARNING", logger=pr.__name__)
+    if empty:
+        pr.CHOOSE_PROMPT_PATH.write_text("  \n", encoding="utf-8")
+    else:
+        pr.CHOOSE_PROMPT_PATH.unlink()
+    reason = pr.research_unavailable_reason()
+    assert reason is not None and "missing or empty" in reason
+    assert str(pr.CHOOSE_PROMPT_PATH) in reason
+    assert pr._config() is None
+    assert "missing or empty" in caplog.text

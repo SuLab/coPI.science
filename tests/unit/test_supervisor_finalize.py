@@ -54,7 +54,7 @@ async def test_boot_spares_and_runs_a_finalize_stop(engine, pg_url, monkeypatch)
     run_id = await _run(factory, held_at=datetime.now(UTC))
     cmd_id = await _cmd(factory, "stop", {"finalize": True, "run_id": str(run_id)})
 
-    async def stub(*a):
+    async def stub(*a, **k):
         raise AssertionError("no start")
 
     try:
@@ -103,7 +103,7 @@ async def test_a_plain_stop_pending_after_the_run_is_settled_done(engine, pg_url
     async def seed_start():
         seeded["start"] = await _cmd(factory, "start", {"fresh": True})
 
-    async def run_fn(*a):
+    async def run_fn(*a, **k):
         seeded["stop"] = await _cmd(factory, "stop", None)
 
     # Session 1 is boot's stale, session 2 boot's finalize-only settle; the
@@ -125,7 +125,7 @@ async def test_a_start_claimed_while_an_engine_is_alive_fails(engine, pg_url):
     holder = SessionAdvisoryLock(pg_url, ENGINE_LOCK_KEY)
     assert await holder.acquire()
 
-    async def stub(*a):
+    async def stub(*a, **k):
         raise AssertionError("run_fn must not be called while an engine is alive")
 
     from tests.unit.test_supervisor import _hook_before_nth_session
@@ -171,7 +171,7 @@ async def test_a_sigterm_during_the_post_run_settle_reaches_the_supervisor(engin
     async def seed_start():
         seeded["start"] = await _cmd(factory, "start", {"fresh": True})
 
-    async def run_fn(*a):
+    async def run_fn(*a, **k):
         # What _run_simulation does: the engine installs its own handlers.
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):

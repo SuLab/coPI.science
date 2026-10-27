@@ -1,5 +1,5 @@
 """C-18 (jobs filters from the enum, unknown value refused without a 500) and C-20
-(start limits are >= 0 on the server)."""
+(start limits, each system's, are >= 0 on the server)."""
 
 import pytest
 from sqlalchemy import func, select
@@ -25,10 +25,13 @@ async def test_an_unknown_jobs_filter_is_a_400(client, db_session, query):
     assert r.status_code == 400
 
 
-@pytest.mark.parametrize("field", ["max_runtime", "max_proposals"])
+@pytest.mark.parametrize(
+    "field", ["max_runtime", "max_proposals", "max_projects", "projects_runtime"],
+)
 async def test_a_negative_start_limit_is_refused_server_side(client, db_session, field):
     admin = await factories.make_user(db_session, user_role=USER_ROLE_ADMIN)
-    data = {"max_runtime": "0", "max_proposals": "0", field: "-5"}
+    data = {"system": "both", "max_runtime": "0", "max_proposals": "0", "max_projects": "0",
+            "projects_runtime": "0", field: "-5"}
     r = await client.post("/admin/simulation/start", data=data, headers=auth_headers(admin.id))
     assert r.status_code == 422
     starts = await db_session.scalar(

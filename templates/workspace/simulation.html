@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Admin — Simulation — Blackbird{% endblock %}
+{% block title %}Workspace — Simulation — Blackbird{% endblock %}
 
 {% block extra_head %}
 <style>
@@ -160,12 +160,9 @@
         {% if status_row.detail.fresh is defined %}
         <div><dt class="text-gray-600">Fresh</dt><dd class="font-medium">{{ status_row.detail.fresh }}</dd></div>
         {% endif %}
-        {% if status_row.detail.max_runtime is defined %}
-        <div><dt class="text-gray-600">Max runtime</dt><dd class="font-medium">{{ status_row.detail.max_runtime }}</dd></div>
-        {% endif %}
-        {% if status_row.detail.max_proposals is defined %}
-        <div><dt class="text-gray-600">Max proposals</dt><dd class="font-medium">{{ status_row.detail.max_proposals }}</dd></div>
-        {% endif %}
+        {% for row in status_systems %}
+        <div><dt class="text-gray-600">{{ row.system }}</dt><dd class="font-medium">{{ row.outcome }} — {{ row.limits }}</dd></div>
+        {% endfor %}
     </dl>
     {% endif %}
     {% endif %}
@@ -186,74 +183,228 @@
 </div>
 </section>
 
-<!-- Start / stop controls -->
+<!-- Start / stop controls: the run strip, then one card per system (spec §4.2 of
+     docs/specs/2026-10-27-independent-simulation-controls-design.md). The start form is
+     empty here: the Fresh checkbox, both cards' limits and the Start buttons join it
+     through form="sim-start-form", so the cards can also hold their own Wind down and
+     Stop now forms. -->
+{% macro state_chip(v) -%}
+{% if v.state == 'running' %}
+<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">Running since {{ v.since | ts }}</span>
+{% elif v.state == 'starting' %}
+<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">Starting</span>
+{% elif v.state == 'winding_down' %}
+<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">Winding down{% if v.reason_label %}: {{ v.reason_label }}{% endif %}</span>
+{% elif v.state == 'stopped' %}
+<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">{% if v.reason_label and v.reason_label.startswith('stopped') %}{{ v.reason_label | capitalize }}{% else %}Stopped: {{ v.reason_label or 'ended' }}{% endif %}</span>
+{% else %}
+<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">Not running</span>
+{% endif %}
+{%- endmacro %}
+{% macro system_actions(name, label, v, confirm_text, disabled) -%}
+<div class="flex flex-wrap gap-3 mt-3">
+    {% if v.state == 'running' %}
+    <form action="/admin/simulation/system" method="post">
+        <input type="hidden" name="system" value="{{ name }}">
+        <input type="hidden" name="action" value="wind_down">
+        <button type="submit" aria-label="Wind down {{ label | lower }}"
+                class="inline-flex items-center px-4 py-2 rounded-md border border-gray-300 text-gray-800 text-base font-medium hover:bg-gray-50 disabled:opacity-50"
+                {% if disabled %}disabled{% endif %}>
+            Wind down
+        </button>
+    </form>
+    {% endif %}
+    <form action="/admin/simulation/system" method="post" data-confirm="{{ confirm_text }}">
+        <input type="hidden" name="system" value="{{ name }}">
+        <input type="hidden" name="action" value="stop_now">
+        <button type="submit" aria-label="Stop {{ label | lower }} now"
+                class="inline-flex items-center px-4 py-2 rounded-md border border-red-600 text-red-700 text-base font-medium hover:bg-red-50 disabled:opacity-50"
+                {% if disabled %}disabled{% endif %}>
+            Stop now
+        </button>
+    </form>
+</div>
+{%- endmacro %}
+{# The supervisor leaves the start it runs pending until the run ends, so a pending start
+   blocks only an idle start; a live run takes a per-system start beside it. #}
+{% set start_blocked = (live_run_id is none or run_stopping or pending_system or legacy_engine) if engine_is_alive else (pending_start or panel_state == 'starting' or finalize_pending) %}
+{% set actions_blocked = pending_system or run_stopping or legacy_engine %}
+{% set iv = systems.interviews %}
+{% set pv = systems.projects %}
 <section id="sec-controls">
+<form id="sim-start-form" action="/admin/simulation/start" method="post"></form>
+<div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5 mb-6">
+    <h2 class="text-lg font-semibold text-gray-900 mb-3">Start / stop</h2>
+    {% if live_run_id %}
+    <p class="text-base text-gray-700 mb-3">
+        Run <a class="text-indigo-700 hover:underline" href="/workspace/activity/{{ live_run_id }}">{{ (live_run_id | string)[:8] }}</a>
+        is live{% if live_run %}, started {{ live_run.started_at | ts }}{% endif %}.
+    </p>
+    {% elif engine_is_alive %}
+    <p class="text-base text-gray-700 mb-3">A run is starting.</p>
+    {% else %}
+    <p class="text-base text-gray-700 mb-3">No run is live.</p>
+    <div class="flex flex-wrap items-center gap-3 mb-3">
+        {% if latest_finalized %}
+        <input type="hidden" name="fresh" value="true" form="sim-start-form">
+        <label class="flex items-center gap-2 text-base text-gray-700">
+            <input type="checkbox" checked disabled class="rounded border-gray-300">
+            Fresh run (required: the latest run is finalized and cannot be resumed)
+        </label>
+        {% else %}
+        <label class="flex items-center gap-2 text-base text-gray-700">
+            <input type="checkbox" name="fresh" value="true" checked form="sim-start-form" class="rounded border-gray-300">
+            Fresh run (mints a new simulation run id — deletes nothing)
+        </label>
+        {% endif %}
+        <button type="submit" name="system" value="both" form="sim-start-form"
+                class="inline-flex items-center px-4 py-2 rounded-md bg-indigo-600 text-white text-base font-medium hover:bg-indigo-700 disabled:opacity-50"
+                {% if start_blocked or research_unavailable %}disabled{% endif %}>
+            Start both
+        </button>
+    </div>
+    {% endif %}
+    {% if pending_start and not engine_is_alive %}
+    <p class="text-base text-gray-700 max-w-[68ch] mb-3">
+        A start request is already pending (requested {{ pending_start.created_at | ts }}).
+    </p>
+    {% endif %}
+    {% if pending_system %}
+    <p class="text-base text-gray-700 max-w-[68ch] mb-3">
+        An interviews or projects request is pending (requested {{ pending_system.created_at | ts }}).
+    </p>
+    {% endif %}
+    {% if legacy_engine %}
+    <p class="text-base text-gray-700 max-w-[68ch] mb-3">
+        This engine predates per-system controls; use Stop everything.
+    </p>
+    {% endif %}
+    {% if finalize_pending and not engine_is_alive %}
+    <p class="text-base text-gray-700 max-w-[68ch] mb-3">
+        A Finalize run is pending; start after it finishes.
+    </p>
+    {% endif %}
+    <p class="text-base text-gray-700 max-w-[68ch] mb-3">
+        Stops the whole run. Refused unless an engine is running (including a starting or
+        unresponsive one). <strong>Stop everything</strong> announces owed headlines, open
+        interviews included, at most 25 per stop. <strong>Stop everything, hold open
+        interviews</strong> announces only interviews that have ended; the others wait for a
+        resume or a finalize.
+    </p>
+    <div class="flex flex-wrap gap-3">
+        <form action="/admin/simulation/stop" method="post"
+              data-confirm="{% if stop_counts %}Posts {{ stop_counts.posts }} of {{ stop_counts.owed }} owed headlines to Slack ({{ stop_counts.open }} from interviews still open; at most {{ stop_counts.cap }} per stop); cannot be undone{% else %}Posts every owed headline to Slack, including interviews still open; cannot be undone{% endif %}">
+            <button type="submit"
+                    class="inline-flex items-center px-4 py-2 rounded-md bg-red-600 text-white text-base font-medium hover:bg-red-700 disabled:opacity-50"
+                    {% if not engine_is_alive %}disabled{% endif %}>
+                Stop everything
+            </button>
+        </form>
+        <form action="/admin/simulation/stop" method="post">
+            <input type="hidden" name="hold_open" value="1">
+            <button type="submit"
+                    class="inline-flex items-center px-4 py-2 rounded-md border border-red-600 text-red-700 text-base font-medium hover:bg-red-50 disabled:opacity-50"
+                    {% if not engine_is_alive %}disabled{% endif %}>
+                Stop everything, hold open interviews
+            </button>
+        </form>
+    </div>
+</div>
+
 <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
     <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
-        <h2 class="text-lg font-semibold text-gray-900 mb-3">Start a run</h2>
-        {% if pending_start %}
-        <p class="text-base text-gray-700 max-w-[68ch] mb-3">
-            A start request is already pending (requested {{ pending_start.created_at | ts }}).
-        </p>
+        <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
+            <h2 class="text-lg font-semibold text-gray-900">Interviews</h2>
+            {{ state_chip(iv) }}
+        </div>
+        {% if iv.state in ('running', 'winding_down') %}
+        <dl class="grid grid-cols-2 gap-x-4 gap-y-1 text-base">
+            <dt class="text-gray-600">Proposals this session</dt>
+            <dd class="sc-num">{{ iv.count }}{% if iv.limits.count %} of {{ iv.limits.count }}{% endif %}</dd>
+            <dt class="text-gray-600">Open interviews</dt>
+            <dd class="sc-num">{{ iv.open_work }}</dd>
+            <dt class="text-gray-600">Time used</dt>
+            <dd class="sc-num">{% if iv.minutes_used is not none %}{{ iv.minutes_used }}{% else %}—{% endif %}{% if iv.limits.runtime_minutes %} of {{ iv.limits.runtime_minutes }}{% endif %} minutes</dd>
+        </dl>
+        {% if iv.state == 'winding_down' %}
+        <p class="mt-2 text-base text-gray-700">Waiting on: {{ iv.waiting_on | join(', ') if iv.waiting_on else 'nothing open' }}</p>
         {% endif %}
-        <form action="/admin/simulation/start" method="post" class="space-y-3">
-            {% if latest_finalized %}
-            <input type="hidden" name="fresh" value="true">
-            <label class="flex items-center gap-2 text-base text-gray-700">
-                <input type="checkbox" checked disabled class="rounded border-gray-300">
-                Fresh run (required: the latest run is finalized and cannot be resumed)
-            </label>
-            {% else %}
-            <label class="flex items-center gap-2 text-base text-gray-700">
-                <input type="checkbox" name="fresh" value="true" checked class="rounded border-gray-300">
-                Fresh run (mints a new simulation run id — deletes nothing)
-            </label>
-            {% endif %}
+        {{ system_actions('interviews', 'Interviews', iv, 'Stop interviews now: every open interview ends now and all of their owed headlines post to Slack, with no cap; cannot be undone', actions_blocked) }}
+        {% elif iv.state == 'starting' %}
+        <p class="text-base text-gray-700">Starting with the run.</p>
+        {% else %}
+        <div class="space-y-3">
             <div>
                 <label for="start-max-runtime" class="block text-sm font-medium text-gray-600 mb-1">Max runtime (minutes, 0 = indefinite)</label>
-                <input type="number" name="max_runtime" id="start-max-runtime" value="0" min="0"
+                <input type="number" name="max_runtime" id="start-max-runtime" value="0" min="0" form="sim-start-form"
                        class="border border-gray-300 rounded px-2 py-1 text-base w-40">
             </div>
             <div>
                 <label for="start-max-proposals" class="block text-sm font-medium text-gray-600 mb-1">Max proposals (0 = no limit)</label>
-                <input type="number" name="max_proposals" id="start-max-proposals" value="0" min="0"
+                <input type="number" name="max_proposals" id="start-max-proposals" value="0" min="0" form="sim-start-form"
                        class="border border-gray-300 rounded px-2 py-1 text-base w-40">
             </div>
-            <button type="submit"
+            <button type="submit" name="system" value="interviews" form="sim-start-form"
                     class="inline-flex items-center px-4 py-2 rounded-md bg-indigo-600 text-white text-base font-medium hover:bg-indigo-700 disabled:opacity-50"
-                    {% if engine_is_alive or pending_start %}disabled{% endif %}>
-                Start
+                    {% if start_blocked %}disabled{% endif %}>
+                Start interviews
             </button>
-        </form>
+        </div>
+        {% endif %}
+        {% if system_spend %}
+        <p class="mt-3 sc-meta">Spent in this run: {{ system_spend.interviews }}</p>
+        {% endif %}
     </div>
 
     <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5">
-        <h2 class="text-lg font-semibold text-gray-900 mb-3">Stop the run</h2>
-        <p class="text-base text-gray-700 max-w-[68ch] mb-3">
-            Sends a graceful stop to the live engine. Refused unless an engine is
-            running (including a starting or unresponsive one). <strong>Stop</strong> announces owed headlines, open
-            interviews included, at most 25 per stop. <strong>Stop — hold open
-            interviews</strong> announces only interviews that have ended; the others
-            wait for a resume or a finalize.
-        </p>
-        <div class="flex flex-wrap gap-3">
-            <form action="/admin/simulation/stop" method="post"
-                  data-confirm="{% if stop_counts %}Posts {{ stop_counts.posts }} of {{ stop_counts.owed }} owed headlines to Slack ({{ stop_counts.open }} from interviews still open; at most {{ stop_counts.cap }} per stop); cannot be undone{% else %}Posts every owed headline to Slack, including interviews still open; cannot be undone{% endif %}">
-                <button type="submit"
-                        class="inline-flex items-center px-4 py-2 rounded-md bg-red-600 text-white text-base font-medium hover:bg-red-700 disabled:opacity-50"
-                        {% if not engine_is_alive %}disabled{% endif %}>
-                    Stop
-                </button>
-            </form>
-            <form action="/admin/simulation/stop" method="post">
-                <input type="hidden" name="hold_open" value="1">
-                <button type="submit"
-                        class="inline-flex items-center px-4 py-2 rounded-md border border-red-600 text-red-700 text-base font-medium hover:bg-red-50 disabled:opacity-50"
-                        {% if not engine_is_alive %}disabled{% endif %}>
-                    Stop — hold open interviews
-                </button>
-            </form>
+        <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
+            <h2 class="text-lg font-semibold text-gray-900">Projects</h2>
+            {{ state_chip(pv) }}
         </div>
+        {% if pv.state in ('running', 'winding_down') %}
+        <dl class="grid grid-cols-2 gap-x-4 gap-y-1 text-base">
+            <dt class="text-gray-600">Finished projects</dt>
+            <dd class="sc-num">{{ pv.count }}{% if pv.limits.count %} of {{ pv.limits.count }}{% endif %}</dd>
+            <dt class="text-gray-600">Open projects</dt>
+            <dd class="sc-num">{{ pv.open_work }}</dd>
+            <dt class="text-gray-600">Failures in a row</dt>
+            <dd class="sc-num">{{ pv.failures_in_a_row }} (stops at {{ failures_in_a_row_max }})</dd>
+            <dt class="text-gray-600">Time used</dt>
+            <dd class="sc-num">{% if pv.minutes_used is not none %}{{ pv.minutes_used }}{% else %}—{% endif %}{% if pv.limits.runtime_minutes %} of {{ pv.limits.runtime_minutes }}{% endif %} minutes</dd>
+        </dl>
+        {% if pv.state == 'winding_down' %}
+        <p class="mt-2 text-base text-gray-700">Waiting on: {{ pv.waiting_on | join(', ') if pv.waiting_on else 'nothing open' }}</p>
+        {% endif %}
+        {{ system_actions('projects', 'Projects', pv, 'Stop projects now: every open project ends as not finished and its thread gets no more turns; cannot be undone', actions_blocked) }}
+        {% elif pv.state == 'starting' %}
+        <p class="text-base text-gray-700">Starting with the run.</p>
+        {% else %}
+        {% if research_unavailable %}
+        <p class="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-base text-amber-900 max-w-[68ch]">
+            Projects cannot start: {{ research_unavailable }}
+        </p>
+        {% endif %}
+        <div class="space-y-3">
+            <div>
+                <label for="start-projects-runtime" class="block text-sm font-medium text-gray-600 mb-1">Max runtime (minutes, 0 = indefinite)</label>
+                <input type="number" name="projects_runtime" id="start-projects-runtime" value="0" min="0" form="sim-start-form"
+                       class="border border-gray-300 rounded px-2 py-1 text-base w-40">
+            </div>
+            <div>
+                <label for="start-max-projects" class="block text-sm font-medium text-gray-600 mb-1">Finished projects (0 = no limit)</label>
+                <input type="number" name="max_projects" id="start-max-projects" value="0" min="0" form="sim-start-form"
+                       class="border border-gray-300 rounded px-2 py-1 text-base w-40">
+            </div>
+            <button type="submit" name="system" value="projects" form="sim-start-form"
+                    class="inline-flex items-center px-4 py-2 rounded-md bg-indigo-600 text-white text-base font-medium hover:bg-indigo-700 disabled:opacity-50"
+                    {% if start_blocked or research_unavailable %}disabled{% endif %}>
+                Start projects
+            </button>
+        </div>
+        {% endif %}
+        {% if system_spend %}
+        <p class="mt-3 sc-meta">Spent in this run: {{ system_spend.projects }}</p>
+        {% endif %}
     </div>
 </div>
 </section>
@@ -400,7 +551,7 @@
 <section id="sec-run">
 <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-5 mb-6">
     <h2 class="text-lg font-semibold text-gray-900 mb-3">Run selector</h2>
-    <form method="get" action="/admin/simulation" class="flex flex-wrap items-center gap-3">
+    <form method="get" action="/workspace/simulation" class="flex flex-wrap items-center gap-3">
         <select name="run" aria-label="Simulation run"
                 class="border border-gray-300 rounded px-2 py-1 text-base">
             {% for opt in run_options %}
@@ -758,7 +909,7 @@
   }
 
   function refreshUrl() {
-    const target = new URL('/admin/simulation', location.origin);
+    const target = new URL('/workspace/simulation', location.origin);
     const run = new URL(location.href).searchParams.get('run');
     if (run !== null) target.searchParams.set('run', run);
     return target.toString();

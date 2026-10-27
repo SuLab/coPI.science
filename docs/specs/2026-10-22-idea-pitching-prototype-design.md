@@ -308,7 +308,10 @@ and its D39 are unchanged.
   requested. So at run start every live lab is due; a lab activated or unmuted mid-run is due at once if it has had no
   project in this run, and otherwise on its schedule. My calls: at most one open project per lab, so slow research or
   a slow refinement delays the next one (measured, §2); `PROJECT_INTERVAL_HOURS` (default 24) exists for tests and
-  the dry run.
+  the dry run. *Owner, 2026-10-27: there is no interval and `PROJECT_INTERVAL_HOURS` is gone; a lab's next project
+  starts when its last one finishes, labs take turns so none is more than one ahead, a projects session with a
+  count never overshoots it, and projects wind down after 3 failures in a row
+  (`docs/specs/2026-10-27-independent-simulation-controls-design.md` §4.7).*
 - **How.** In the same once-a-minute check the engine writes a `requested` row for each due lab. Rows are unique per
   run, lab and slot (the lab's sequence number in this run), so a restart cannot write two. The engine never calls a
   model for research.
@@ -326,7 +329,10 @@ and its D39 are unchanged.
 - **Kill switch.** `HUB_PROJECTS_ENABLED`, snapshotted at engine start, stops new requests, postings and lab replies,
   and a switched-off run does not wait for lab replies at its drain.
   It never turns off how project threads are recognised or what is switched off inside them (§5.8): a run resumed
-  with the switch off still treats its open project threads as projects.
+  with the switch off still treats its open project threads as projects. *Owner, 2026-10-27: `HUB_PROJECTS_ENABLED`
+  is gone; projects start and stop from `/workspace/simulation`, apart from interviews, and a projects session's wind-down
+  replaces the `--max-proposals` drain above. Project threads are still recognised whether or not projects are
+  running (`docs/specs/2026-10-27-independent-simulation-controls-design.md` §4.2–§4.8).*
 
 ### 5.3 Research (D41, D48)
 
@@ -378,7 +384,9 @@ behind at most one call. A project's research state is stored on its row and adv
   limit or server error (never billed) is retried without counting; any other failure counts, and a session that
   fails 3 times ends with no candidates; a refusal ends its session at once. After a worker restart, a step whose call
   never finished is simply run again (its claimed row still counts against the ceiling). My estimate, to be measured
-  in the dry run (§8): $2–5 of research per project.
+  in the dry run (§8): $2–5 of research per project. *Owner, 2026-10-27: no spending limit on projects;
+  `PROJECT_RESEARCH_DAILY_USD_LIMIT` and its check are gone, the ledger stays, and the panel shows what projects have
+  spent in the run (`docs/specs/2026-10-27-independent-simulation-controls-design.md` §4.7).*
 - **Stored:** each session's candidates (kept and dropped, with why dropped), the sources with their titles, the
   profile's hash, the prompt files' hashes, and every call's usage.
 

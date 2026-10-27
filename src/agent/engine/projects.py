@@ -1,23 +1,23 @@
 """BlackbirdBot projects in the engine: the run clock, requests, postings, the lab's reply and
 the close (the projects prototype design, §5.2, §5.6, §5.7, §5.9).
 
-``Projects`` keeps the per-run clock the once-per-interval rule counts, writes a ``requested``
-row for each due live lab (the worker researches it; the engine never calls a model for
-research), posts a researched project as the hub, offers the lab its reply inside the lab's
-Phase-5 turn, and records the outcome when the project thread closes. Every status change is
-a compare-and-set (``UPDATE … WHERE status = <expected>``), so the engine and the worker never
-overwrite each other.
+``Projects`` keeps the per-run clock, writes a ``requested`` row for each due live lab (the
+worker researches it; the engine never calls a model for research), posts a researched project
+as the hub, offers the lab its reply inside the lab's Phase-5 turn, and records the outcome
+when the project thread closes. Every status change is a compare-and-set (``UPDATE … WHERE
+status = <expected>``), so the engine and the worker never overwrite each other.
 
-The switch ``hub_projects_enabled`` is read once, by ``_rehydrate_projects`` at engine start.
-It gates requests, postings, lab replies and the drain's wait for replies; it never gates how
-a project thread is recognised or ended (claims, the stale-project rules and the close).
+The Projects session (``ctx.sessions``, ``src/agent/sessions.py``) gates requests, postings
+and lab replies, and this unit reports the session's progress to it (``_observe_session``):
+its open projects are the work a wind-down waits for. It never gates how a project thread is
+recognised or ended (claims, the stale-project rules and the close).
 """
 
 from __future__ import annotations
 
 import logging
 import uuid
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import func, or_, select, update
@@ -26,28 +26,36 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from src.agent.agent import Agent
 from src.agent.claim_check import PROJECT_REPLY_THREAD_KEY, feedback_text
 from src.agent.engine import deps
+from src.agent.engine.constants import STOPPED_OUTCOME
 from src.agent.engine.context import EngineContext, via
 from src.agent.engine.helpers import _was_truncated
 from src.agent.engine.sidecar import _extract_project_json, _extract_slack_message
 from src.agent.message_log import PHASE_HUB_PROJECT, PHASE_PROJECT_REPLY
 from src.agent.persona_sections import section_items, sections
 from src.agent.role_capabilities import capabilities_for, spoke_role_names
+from src.agent.sessions import INTERVIEWS, PROJECTS
 from src.agent.state import ThreadState
 from src.models.agent_activity import AgentMessage, ThreadDecision
 from src.models.hub_project import (
+    FINISHED_STATUSES,
     OPEN_STATUSES,
+    REASON_CHOICE_FAILED,
     REASON_CLOSE_UNREADABLE,
     REASON_LAB_NOT_LIVE,
+    REASON_NO_IDEA,
     REASON_REPLY_FAILED,
+    REASON_RESEARCH_FAILED,
     REASON_RUN_ENDED,
+    REASON_STOPPED,
     REASON_THREAD_ABANDONED,
     REASON_THREAD_TIMEOUT,
+    STATUS_NOT_AGREED,
     STATUS_NOT_FINISHED,
     STATUS_POSTED,
+    STATUS_READY,
     STATUS_READY_TO_POST,
     STATUS_REFINING,
     STATUS_REQUESTED,
-    STATUS_RESEARCHING,
     THREAD_OUTCOME_PROJECT_CLOSED,
     HubProject,
     HubProjectClock,
@@ -81,8 +89,21 @@ ORPHAN_GRACE_SECONDS = 600.0
 REPLY_FAILURES_MAX = 2
 #: Postings and lab replies go to this channel.
 PROJECT_CHANNEL = "general"
-#: The statuses before a posting; ended ``run_ended_before_posting`` while the run drains.
-_BEFORE_POSTING = (STATUS_REQUESTED, STATUS_RESEARCHING, STATUS_READY_TO_POST)
+#: The finished statuses a Projects session's count counts.
+_COUNTED_STATUSES = (STATUS_READY, STATUS_NOT_AGREED)
+#: The ``not_finished`` reasons that count toward the session's failures in a row
+#: (``FAILURES_IN_A_ROW_MAX`` in ``src/agent/sessions.py``). The others (the run or session
+#: ending before a posting, a lab leaving the roster, an operator's stop) say nothing about
+#: whether projects can succeed, so the streak skips them.
+FAILURE_REASONS = (
+    REASON_NO_IDEA,
+    REASON_RESEARCH_FAILED,
+    REASON_CHOICE_FAILED,
+    REASON_REPLY_FAILED,
+    REASON_THREAD_TIMEOUT,
+    REASON_THREAD_ABANDONED,
+    REASON_CLOSE_UNREADABLE,
+)
 
 
 class Projects:
@@ -101,7 +122,7 @@ class Projects:
     simulation_run_id = via("ctx")
 
     OWNED_STATE: tuple[str, ...] = (
-        "_enabled", "_clock_seconds", "_last_tick", "_awaiting_reply", "_pending_links",
+        "_clock_seconds", "_last_tick", "_pending_links", "_lab_offsets", "_offsets_started_at",
     )
 
     def __init__(self, ctx: EngineContext, *, scheduler: Scheduler, slack_io: SlackIO) -> None:
@@ -109,22 +130,22 @@ class Projects:
         self.ctx = ctx
         self._scheduler = scheduler
         self._slack_io = slack_io
-        self._enabled = False
         # The run clock as last read or advanced (hub_project_clocks.run_seconds).
         self._clock_seconds = 0.0
         self._last_tick: float | None = None
-        # Posted projects of live labs still waiting for the lab's reply; the drain waits on it.
-        self._awaiting_reply = 0
         self._pending_links: dict[uuid.UUID, tuple[str, str]] = {}
+        # The spread's per-lab offsets for the Projects session that started at
+        # _offsets_started_at (``_request_due_labs``); a new session starts them afresh.
+        self._lab_offsets: dict[str, int] = {}
+        self._offsets_started_at: datetime | None = None
 
     # ------------------------------------------------------------------
     # Start and the tick
     # ------------------------------------------------------------------
 
     async def _rehydrate_projects(self) -> None:
-        """Snapshot the switch, then (with a database and a run) create this run's clock row
-        if missing, read the clock and resolve claims a previous process left. Never raises."""
-        self._enabled = bool(getattr(deps.get_settings(), "hub_projects_enabled", False))
+        """With a database and a run: create this run's clock row if missing, read the clock
+        and resolve claims a previous process left. Never raises."""
         if not self.session_factory or not self.simulation_run_id:
             return
         try:
@@ -144,14 +165,15 @@ class Projects:
         except Exception:
             logger.warning("Projects: restoring the run clock and claims failed", exc_info=True)
 
-    async def _projects_tick(self, *, draining: bool) -> None:
-        """Once per ``PROJECT_TICK_SECONDS``: advance the clock, resolve claims, end stale
-        projects, request due labs and post ready projects (the last two only while the switch
-        is on and the run is not draining), then recount the replies the drain waits for.
+    async def _projects_tick(self) -> None:
+        """Once per ``PROJECT_TICK_SECONDS``, in order: advance the clock, resolve claims, end
+        the unstarted projects (only while the Projects session winds down), end stale
+        projects, request due labs (only while it accepts new work), post ready projects (only
+        while it is active), and report the session's progress to ``ctx.sessions`` (only while
+        it is active).
 
-        ``draining`` is the post lane's ``max_proposals > 0 and _proposals_posted >=
-        max_proposals``. Each step that fails logs one warning and the next step still runs;
-        this never raises."""
+        Each step that fails logs one warning and the next step still runs; this never
+        raises."""
         now = deps.time.time()
         if self._last_tick is not None and now - self._last_tick < PROJECT_TICK_SECONDS:
             return
@@ -161,19 +183,23 @@ class Projects:
             0.0, min(now - self._last_tick, CLOCK_STEP_MAX_SECONDS),
         )
         self._last_tick = now
+        sessions = self.ctx.sessions
         try:
             async with self.session_factory() as db:
                 await self._run_project_step(db, "advancing the clock", self._advance_clock, elapsed)
                 await self._run_project_step(db, "resolving claims", self._resolve_project_claims)
-                await self._run_project_step(
-                    db, "ending stale projects", self._end_stale_projects, draining,
-                )
-                if self._enabled and not draining:
+                if sessions.winding_down(PROJECTS):
+                    await self._run_project_step(
+                        db, "ending unstarted projects", self._wind_down_unstarted,
+                    )
+                await self._run_project_step(db, "ending stale projects", self._end_stale_projects)
+                if sessions.accepting(PROJECTS):
                     await self._run_project_step(db, "requesting projects", self._request_due_labs)
+                if sessions.active(PROJECTS):
                     await self._run_project_step(db, "posting projects", self._post_ready_projects)
-                await self._run_project_step(
-                    db, "counting replies owed", self._count_awaiting_replies,
-                )
+                    await self._run_project_step(
+                        db, "observing the Projects session", self._observe_session,
+                    )
         except Exception:
             logger.warning("Projects: the tick could not open a session", exc_info=True)
 
@@ -370,31 +396,35 @@ class Projects:
     # Tick steps
     # ------------------------------------------------------------------
 
-    async def _end_stale_projects(self, db, draining: bool) -> None:
-        """End what can no longer finish: while draining, every project not yet posted and
-        not being posted (``run_ended_before_posting``); a posted project with no reply and no
-        reply claim whose lab is not live (``lab_not_live``); and the refining projects
-        ``_end_refining_projects`` covers."""
-        if draining:
-            result = await db.execute(
-                update(HubProject)
-                .where(
-                    HubProject.simulation_run_id == self.simulation_run_id,
-                    HubProject.status.in_(_BEFORE_POSTING),
-                    HubProject.posting_claimed_at.is_(None),
-                )
-                .values(
-                    status=STATUS_NOT_FINISHED, reason_code=REASON_RUN_ENDED,
-                    finished_at=func.now(), finished_run_seconds=self._clock_seconds,
-                    updated_at=func.now(),
-                )
-                .execution_options(synchronize_session=False)
+    async def _wind_down_unstarted(self, db) -> None:
+        """While the Projects session winds down: end every ``requested`` project of this run
+        (the worker has not started its research) ``not_finished`` /
+        ``run_ended_before_posting``, by a compare-and-set on ``requested``. A project the
+        worker is researching, or later, carries on to its end."""
+        result = await db.execute(
+            update(HubProject)
+            .where(
+                HubProject.simulation_run_id == self.simulation_run_id,
+                HubProject.status == STATUS_REQUESTED,
             )
-            await db.commit()
-            if result.rowcount:
-                logger.info(
-                    "Projects: %d unposted project(s) ended: the run is draining", result.rowcount,
-                )
+            .values(
+                status=STATUS_NOT_FINISHED, reason_code=REASON_RUN_ENDED,
+                finished_at=func.now(), finished_run_seconds=self._clock_seconds,
+                updated_at=func.now(),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await db.commit()
+        if result.rowcount:
+            logger.info(
+                "Projects: %d unstarted project(s) ended: Projects is winding down",
+                result.rowcount,
+            )
+
+    async def _end_stale_projects(self, db) -> None:
+        """End what can no longer finish: a posted project with no reply and no reply claim
+        whose lab is not live (``lab_not_live``), and the refining projects
+        ``_end_refining_projects`` covers."""
         posted = (await db.execute(
             select(HubProject.id, HubProject.agent_id).where(
                 HubProject.simulation_run_id == self.simulation_run_id,
@@ -415,7 +445,8 @@ class Projects:
         """End a refining project whose thread closed without a recorded close: a
         ``ThreadDecision`` of this run on its thread ends it ``thread_timeout`` (outcome
         ``timeout``), ``close_unreadable`` (``project_closed``: the close was posted but its
-        result was not written) or ``thread_abandoned`` (any other outcome). With no decision,
+        result was not written), ``stopped`` (outcome ``stopped``: an operator's Stop now) or
+        ``thread_abandoned`` (any other outcome). With no decision,
         a thread no agent holds whose reply claim is older than ``ORPHAN_GRACE_SECONDS`` ends
         ``thread_abandoned``: it was evicted without a decision (its root deleted on Slack, or
         missing from this run's log) and would otherwise keep the lab from every later project.
@@ -444,6 +475,7 @@ class Projects:
                 reason = {
                     "timeout": REASON_THREAD_TIMEOUT,
                     THREAD_OUTCOME_PROJECT_CLOSED: REASON_CLOSE_UNREADABLE,
+                    STOPPED_OUTCOME: REASON_STOPPED,
                 }.get(str(outcome), REASON_THREAD_ABANDONED)
                 await self._finish_project(db, row.id, expected=STATUS_REFINING, reason=reason)
             elif row.reply_ts not in held:
@@ -454,29 +486,43 @@ class Projects:
                 )
 
     async def _request_due_labs(self, db) -> None:
-        """Write a ``requested`` row for each due live lab (spec §5.2 "When"): no open project
-        in this run, and either no project in this run or ``project_interval_hours`` of run
-        time since its last one was requested. The slot is one past the lab's highest in
-        this run, so a repeated request conflicts and writes nothing."""
-        interval = float(deps.get_settings().project_interval_hours) * 3600.0
-        history = {
-            row.agent_id: row for row in (await db.execute(
-                select(
-                    HubProject.agent_id,
-                    func.max(HubProject.slot).label("slot"),
-                    func.max(HubProject.requested_run_seconds).label("last_requested"),
-                    func.count().filter(HubProject.status.in_(OPEN_STATUSES)).label("open"),
-                )
-                .where(HubProject.simulation_run_id == self.simulation_run_id)
-                .group_by(HubProject.agent_id)
-            )).all()
-        }
+        """Write a ``requested`` row for each due live lab under the current Projects
+        session's request rule (§4.4 and §4.7 of
+        ``docs/specs/2026-10-27-independent-simulation-controls-design.md``):
+
+        * pace: a lab with an open project in this run is not due; its next is due as soon as
+          its last finishes;
+        * spread: a lab is due only while its effective count (its projects requested since the
+          session started, plus its offset) is the lowest among the live labs. A lab first
+          seen live in this session gets the offset that puts it at the current minimum, so it
+          does not catch up on the projects it missed;
+        * no overshoot: with a count, requests stop once counted projects of the session plus
+          open projects of the run reach it, so a failed project frees its slot.
+
+        Labs are taken in agent-id order. The slot is one past the lab's highest in this run,
+        so a repeated request conflicts and writes nothing."""
+        session = self.ctx.sessions.current(PROJECTS)
+        if session is None:
+            return
+        since = session.started_at
+        if self._offsets_started_at != since:
+            self._lab_offsets = {}
+            self._offsets_started_at = since
+        history = await self._lab_history(db, since)
+        live = [agent_id for agent_id in sorted(self.agents) if self._project_lab_is_live(agent_id)]
+        if not live:
+            return
+        effective = self._effective_counts(
+            live, {lab: int(history[lab].started) if lab in history else 0 for lab in live},
+        )
+        floor = min(effective.values())
+        budget = await self._request_budget(db, session.limits.count, since, history)
         clock = self._clock_seconds
-        for agent_id in sorted(self.agents):
-            if not self._project_lab_is_live(agent_id):
-                continue
+        for agent_id in live:
+            if budget is not None and budget <= 0:
+                break
             past = history.get(agent_id)
-            if past is not None and (past.open or clock - past.last_requested < interval):
+            if (past is not None and past.open) or effective[agent_id] > floor:
                 continue
             slot = 1 if past is None else int(past.slot) + 1
             await db.execute(
@@ -492,6 +538,57 @@ class Projects:
                 "[%s] Projects: requested project slot %d at run time %.0f s",
                 agent_id, slot, clock,
             )
+            if budget is not None:
+                budget -= 1
+
+    async def _lab_history(self, db, since: datetime) -> dict[str, Any]:
+        """Per lab with a project in this run: its highest ``slot``, its ``open`` projects and
+        the projects ``started`` (requested at or after ``since``)."""
+        rows = (await db.execute(
+            select(
+                HubProject.agent_id,
+                func.max(HubProject.slot).label("slot"),
+                func.count().filter(HubProject.status.in_(OPEN_STATUSES)).label("open"),
+                func.count().filter(HubProject.requested_at >= since).label("started"),
+            )
+            .where(HubProject.simulation_run_id == self.simulation_run_id)
+            .group_by(HubProject.agent_id)
+        )).all()
+        return {row.agent_id: row for row in rows}
+
+    def _effective_counts(self, live: list[str], started: dict[str, int]) -> dict[str, int]:
+        """Each live lab's started count plus its offset. A live lab without an offset gets
+        the one that puts it at the lowest effective count of the labs that have one (0 when
+        none has), and keeps it for the rest of the session."""
+        for lab in live:
+            if lab in self._lab_offsets:
+                continue
+            known = [started[other] + self._lab_offsets[other]
+                     for other in live if other in self._lab_offsets]
+            self._lab_offsets[lab] = max(0, min(known) - started[lab]) if known else 0
+        return {lab: started[lab] + self._lab_offsets[lab] for lab in live}
+
+    async def _request_budget(
+        self, db, count: int, since: datetime, history: dict[str, Any],
+    ) -> int | None:
+        """How many more projects may be requested: None without a count, else the count less
+        the session's counted projects and the run's open projects."""
+        if count <= 0:
+            return None
+        counted = await self._counted_since(db, since)
+        open_projects = sum(int(row.open) for row in history.values())
+        return count - counted - open_projects
+
+    async def _counted_since(self, db, since: datetime) -> int:
+        """This run's projects that finished ``ready`` or ``not_agreed`` at or after
+        ``since``."""
+        return int(await db.scalar(
+            select(func.count()).select_from(HubProject).where(
+                HubProject.simulation_run_id == self.simulation_run_id,
+                HubProject.status.in_(_COUNTED_STATUSES),
+                HubProject.finished_at >= since,
+            )
+        ) or 0)
 
     async def _post_ready_projects(self, db) -> None:
         """Post each unclaimed ``ready_to_post`` project of this run as the poster.
@@ -561,24 +658,78 @@ class Projects:
                 logger.debug("Projects: rollback after a failed link failed", exc_info=True)
             self._pending_links[project_id] = (kind, ts)
 
-    async def _count_awaiting_replies(self, db) -> None:
-        """Recount the posted projects of live labs with no reply. 0 while the switch is off:
-        a switched-off run must not hold its drain for replies that will never be offered."""
-        if not self._enabled:
-            self._awaiting_reply = 0
+    async def _observe_session(self, db) -> None:
+        """Report the Projects session's progress to ``ctx.sessions.observe``, which applies
+        its limits and ends a wind-down with nothing open: ``count`` is the session's counted
+        projects (finished ``ready`` or ``not_agreed`` since it started), ``open_work`` the
+        run's open projects, ``waiting_on`` their labs, and ``failures_in_a_row`` the
+        ``FAILURE_REASONS`` endings among the session's finished projects, newest
+        ``finished_at`` first, up to the first counted one (other reasons are skipped)."""
+        session = self.ctx.sessions.current(PROJECTS)
+        if session is None or not session.active:
             return
-        labs = (await db.execute(
+        finished = (await db.execute(
+            select(HubProject.status, HubProject.reason_code).where(
+                HubProject.simulation_run_id == self.simulation_run_id,
+                HubProject.status.in_(FINISHED_STATUSES),
+                HubProject.finished_at >= session.started_at,
+            ).order_by(HubProject.finished_at.desc(), HubProject.updated_at.desc())
+        )).all()
+        counted = sum(1 for row in finished if row.status in _COUNTED_STATUSES)
+        failures = 0
+        for row in finished:
+            if row.status in _COUNTED_STATUSES:
+                break
+            if row.reason_code in FAILURE_REASONS:
+                failures += 1
+        waiting = (await db.execute(
             select(HubProject.agent_id).where(
                 HubProject.simulation_run_id == self.simulation_run_id,
-                HubProject.status == STATUS_POSTED,
-                HubProject.reply_ts.is_(None),
+                HubProject.status.in_(OPEN_STATUSES),
             )
         )).scalars().all()
-        self._awaiting_reply = sum(1 for agent_id in labs if self._project_lab_is_live(agent_id))
+        self.ctx.sessions.observe(
+            PROJECTS, count=counted, open_work=len(waiting), failures_in_a_row=failures,
+            waiting_on=list(waiting), now=deps.datetime.now(UTC),
+        )
 
-    def _awaiting_project_reply_count(self) -> int:
-        """Posted projects of live labs still owed the lab's reply, as of the last tick."""
-        return self._awaiting_reply
+    async def end_open_projects(self, reason: str) -> set[str]:
+        """End every open project of this run ``not_finished`` with ``reason`` (Projects' Stop
+        now) and return the ``reply_ts`` of the ended ones that had a project thread, for the
+        caller to close. Never raises: a failure logs one warning and returns what was ended.
+
+        One compare-and-set per open status, in ``OPEN_STATUSES`` order (the order a project
+        moves through), each committed: a worker write that lands meanwhile can only move a
+        row to a later status, which a later statement then ends, and a worker write after
+        this one finds its expected status gone and is refused."""
+        ended: set[str] = set()
+        if not self.session_factory or not self.simulation_run_id:
+            return ended
+        try:
+            async with self.session_factory() as db:
+                for status in OPEN_STATUSES:
+                    rows = (await db.execute(
+                        update(HubProject)
+                        .where(
+                            HubProject.simulation_run_id == self.simulation_run_id,
+                            HubProject.status == status,
+                        )
+                        .values(
+                            status=STATUS_NOT_FINISHED, reason_code=reason,
+                            finished_at=func.now(), finished_run_seconds=self._clock_seconds,
+                            updated_at=func.now(),
+                        )
+                        .returning(HubProject.id, HubProject.reply_ts)
+                        .execution_options(synchronize_session=False)
+                    )).all()
+                    await db.commit()
+                    for row in rows:
+                        logger.info("Projects: project %s ended not finished (%s)", row.id, reason)
+                        if row.reply_ts:
+                            ended.add(row.reply_ts)
+        except Exception:
+            logger.warning("Projects: ending the open projects (%s) failed", reason, exc_info=True)
+        return ended
 
     # ------------------------------------------------------------------
     # Roster predicates
@@ -603,23 +754,26 @@ class Projects:
     # The lab's reply (Phase 5)
     # ------------------------------------------------------------------
 
-    async def _offer_project_reply(self, agent: Agent, *, draining: bool) -> bool:
+    async def _offer_project_reply(self, agent: Agent) -> bool:
         """Offer ``agent`` its oldest unanswered posted project of this run, inside its Phase-5
         turn (spec §5.7). True: the turn was used for the reply, end it. False: carry on to the
         lab's own pitch.
 
-        False with no model call when the switch is off, there is no database, the lab has no
-        posted project without a claim or reply, or its open partnered threads reach
-        ``active_thread_threshold``. A refused rate reservation is False and counts nothing. A
-        model exception, a truncated or refused answer or an empty one is False and uncounted
-        (tried again at the lab's next turn, while its own pitch still runs) unless
-        ``draining``, when each counts and returns True: the drain waits for this reply, so a
-        reply that cannot succeed must not hold the run open. A post too long for one message,
-        a suppressed or blocked post, or one that raised counts and returns True. The second
-        counted failure ends the project ``not_finished`` / ``reply_failed``. Never changes
-        ``consecutive_phase5_skips`` or ``last_phase5_action_time``."""
-        if not self._enabled or not self.session_factory or not self.simulation_run_id:
+        False with no model call when Projects is not active, there is no database, the lab
+        has no posted project without a claim or reply, or its open partnered threads of active
+        systems reach ``active_thread_threshold``. A refused rate reservation is False and
+        counts nothing. A model exception, a truncated or refused answer or an empty one is
+        False and uncounted (tried again at the lab's next turn, while its own pitch still
+        runs) unless Projects is winding down, when each counts and returns True: the wind-down
+        waits for this reply, so a reply that cannot succeed must not hold it open. A post too
+        long for one message, a suppressed or blocked post, or one that raised counts and
+        returns True. The second counted failure ends the project ``not_finished`` /
+        ``reply_failed``. Never changes ``consecutive_phase5_skips`` or
+        ``last_phase5_action_time``."""
+        sessions = self.ctx.sessions
+        if not sessions.active(PROJECTS) or not self.session_factory or not self.simulation_run_id:
             return False
+        draining = sessions.winding_down(PROJECTS)
         settings = deps.get_settings()
         if self._open_partnered_thread_count(agent) >= settings.active_thread_threshold:
             return False
@@ -652,11 +806,17 @@ class Projects:
 
     def _open_partnered_thread_count(self, agent: Agent) -> int:
         """The agent's active threads whose partner is on the roster (the predicate
-        ``_open_interview_ids`` uses), so threads orphaned by a partner leaving the roster,
-        which nothing will close, cannot block the reply forever."""
+        ``_open_interview_ids`` uses) and whose system (Projects for a project thread,
+        Interviews otherwise) is active. Threads orphaned by a partner leaving the roster,
+        which nothing will close, and threads paused because their system is not running,
+        which get no turns, cannot block the reply."""
+        sessions = self.ctx.sessions
         return sum(
-            1 for t in agent.state.active_threads.values()
+            1 for thread_id, t in agent.state.active_threads.items()
             if t.status == "active" and t.other_agent_id in self.agents
+            and sessions.active(
+                PROJECTS if self.message_log.is_project_thread(thread_id) else INTERVIEWS
+            )
         )
 
     async def _unanswered_project(self, agent_id: str):

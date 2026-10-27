@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from scripts import projects_thread_replay as replay
 from src.agent.engine import deps
+from src.agent.sessions import INTERVIEWS, PROJECTS, Limits
 from src.config import get_settings
 from src.models import AgentMessage, AgentRegistry, User
 from src.models.hub_project import (
@@ -101,10 +102,13 @@ async def test_replay_engine_posts_and_the_hub_takes_up_the_reply(
         agents = await replay.replay_agents(factory, hub_id, lab_id)
         assert {a.agent_id for a in agents} == {hub_id, lab_id}
         sim = replay.build_replay_engine(factory, agents, run_id, max_minutes=5)
+        projects = sim.ctx.sessions.current(PROJECTS)
+        assert projects is not None and projects.limits == Limits(runtime_minutes=5)
+        assert not sim.ctx.sessions.active(INTERVIEWS), "the replay runs no interviews"
         sim.run_state.stop_event.set()  # the start sequence runs; the loop does not
         await sim.start()
 
-        await sim._projects_tick(draining=False)
+        await sim._projects_tick()
         async with factory() as db:
             project = (await db.execute(
                 select(HubProject).where(HubProject.simulation_run_id == run_id)
@@ -112,7 +116,7 @@ async def test_replay_engine_posts_and_the_hub_takes_up_the_reply(
         assert project.status == STATUS_POSTED
 
         lab = sim.agents[lab_id]
-        assert await sim._offer_project_reply(lab, draining=False) is True
+        assert await sim._offer_project_reply(lab) is True
         async with factory() as db:
             project = (await db.execute(
                 select(HubProject).where(HubProject.simulation_run_id == run_id)

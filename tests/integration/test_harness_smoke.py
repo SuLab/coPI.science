@@ -104,7 +104,8 @@ async def test_container_is_migrated(engine):
         # 0071 hub_declines (a hub decline without an assessment)
         # 0072 interview_trajectories (one model-written line per interview post)
         # 0073 hub_projects, hub_project_calls, hub_project_clocks, hub_project_reviews (projects prototype)
-        assert v == "0073"
+        # 0074 thread_outcome_enum 'stopped', sim_command_enum 'system' (independent controls)
+        assert v == "0074"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

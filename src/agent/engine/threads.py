@@ -6,7 +6,11 @@ import logging
 from typing import TYPE_CHECKING
 
 from src.agent.agent import Agent
-from src.agent.engine.constants import ABANDONED_OUTCOME, PRIOR_THREADS_KEPT_PER_PAIR
+from src.agent.engine.constants import (
+    ABANDONED_OUTCOME,
+    PRIOR_THREADS_KEPT_PER_PAIR,
+    STOPPED_OUTCOME,
+)
 from src.agent.engine.context import EngineContext, via
 from src.agent.engine.headlines import should_announce
 from src.agent.engine.helpers import _visibility_permits
@@ -143,9 +147,15 @@ class Threads:
         decision row, closed set, active-thread removal — but adds no prior-thread
         summary and queues no working-memory event: a project is not an interview,
         and neither Phase 5's dedup context nor either bot's memory may learn of it.
+
+        An operator's Stop now (``STOPPED_OUTCOME``) also queues no working-memory
+        event: an operator's stop is not something the agents lived through. Its
+        decision row, closed set, prior-thread summary and headline queue are as for
+        any other close.
         """
         self.ctx.claim_feedback.clear_thread(thread.thread_id)
         is_project = self.message_log.is_project_thread(thread.thread_id)
+        remember = not is_project and outcome != STOPPED_OUTCOME
         async with self._agent_locks.acquire_all(agent.agent_id, thread.other_agent_id):
             thread.status = "closed"
             self._closed_thread_ids.add(thread.thread_id)
@@ -197,14 +207,14 @@ class Threads:
             # protection the lock provided. summary_text is derived from a
             # cross-agent conversation, so it is fenced as untrusted before it
             # lands in working memory (SEC-14), same as before.
-            if not is_project:
+            if remember:
                 event = f"Thread in #{thread.channel} with {thread.other_agent_id} closed: {outcome}"
                 if summary_text:
                     event += f". Summary: {delimit(summary_text[:200], 'proposal_summary')}"
                 self._memory.enqueue(
                     (agent.agent_id, event, VISIBILITY_PUBLIC, None)
                 )
-            if other_agent and not is_project:
+            if other_agent and remember:
                 other_event = f"Thread in #{thread.channel} with {agent.agent_id} closed: {outcome}"
                 if summary_text:
                     other_event += f". Summary: {delimit(summary_text[:200], 'proposal_summary')}"

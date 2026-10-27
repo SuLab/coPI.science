@@ -516,7 +516,7 @@ are the two reasons that do not get a concluding reply.
 
 **Prompts are snapshotted per start.** The engine does not re-read `prompts/roles/**`
 or the rubric while it runs (`src/agent/prompt_snapshot.py`); a disk edit shows as a
-banner on `/admin/simulation` and applies at the next start. The web app and the
+banner on `/workspace/simulation` and applies at the next start. The web app and the
 worker still read per use.
 
 **Registries.** Verdict-field labels, staff-only fields and soft length bounds live in
@@ -698,25 +698,39 @@ run-selector / hub-conduct / Learn-default / trajectory design, §4.
 
 **BlackbirdBot projects (2026-10-26, migration `0073`).** Spec: "BlackbirdBot projects
 prototype: literature research finds new uses for each lab's work, refined with that lab —
-design", revision 4. Once per `PROJECT_INTERVAL_HOURS` of run time each live lab gets one
-project: an idea BlackbirdBot researches from the lab's public profile, posts to the lab, and
+design", revision 4. While a run has Projects running, each live lab gets one project at a
+time: an idea BlackbirdBot researches from the lab's public profile, posts to the lab, and
 refines with it in a Slack thread. Staff and reviewers read and review the results on
 `/workspace/projects`. Models and statuses: `src/models/hub_project.py`.
 
-- **The switch.** `HUB_PROJECTS_ENABLED` (default off) gates new requests, postings and lab
-  replies. The engine snapshots it at start, so a `.env` change needs
-  `$DC up -d --force-recreate agent`, only when `/admin/simulation` shows no live run. It never
-  changes how project threads are recognised or what is switched off inside them: a run resumed
-  with the switch off still treats its open project threads as projects. Host CI runs with it
-  forced off (`docs/operations/testing.md`, "Host CI and the engine fallback").
+- **Starting and stopping** (owner, 2026-10-27). There is no `HUB_PROJECTS_ENABLED` switch:
+  projects start from `/workspace/simulation` (the Projects card, or Start both), alone or beside
+  interviews, with a runtime and a number of finished projects; a project counts when it
+  closes Ready or Not agreed. Wind down, Stop now, the limits and how the run ends:
+  `docs/operations/host-and-simulation.md`, "Interviews and projects". The Projects session
+  (`src/agent/sessions.py`) gates requests, postings, lab replies and project-thread turns,
+  never how a project thread is recognised: a run with Projects not running still treats its
+  open project threads as projects, and they wait. While Interviews is not running, labs do
+  not pitch; they only answer project postings and talk in project threads, and their
+  waiting interview threads do not count against `active_thread_threshold` for a project
+  reply.
 - **Who and when.** A lab is live when its bot has a lab role, is active, is on the engine's
   roster and has a public profile with a Research Summary; a muted bot gets none. A per-run
   clock (`hub_project_clocks`) counts running time only: the engine adds at most 15 minutes per
-  tick, and a stop, hold or crash adds nothing. A lab is due when it has no open project in the
-  run and either has had none in this run or the interval has passed since its last request.
-  At most one open project per lab, so slow research or a slow thread delays the next one.
+  tick, and a stop, hold or crash adds nothing. There is no interval (`PROJECT_INTERVAL_HOURS`
+  is gone): a lab's next project is requested as soon as its last one finishes, at most one
+  open project per lab. Labs take turns: a lab is requested a project only when no live lab
+  has started fewer in this session, so none is more than one ahead, and a lab that becomes
+  live mid-session starts level with the fewest. With a count, counted plus open projects
+  never exceed it (no overshoot), and a failed project frees its slot for another.
+- **Failure stop.** When the last 3 projects of the session to finish all failed
+  (`no_idea`, `research_failed`, `choice_failed`, `reply_failed`, `thread_timeout`,
+  `thread_abandoned`, `close_unreadable`), projects wind down ("stopped after 3 failures in a
+  row"). A counted project resets the streak; `lab_not_live`, `run_ended_before_posting` and
+  `stopped` neither count nor break it.
 - **Research (worker).** `src/services/project_research.py`, after interview trajectories in
-  the worker's idle chain, one model call per idle slot, live run only: five specialist
+  the worker's idle chain, one model call per idle slot, only while the live run has Projects
+  running or winding down: five specialist
   research sessions (clinical, scientific, technologic, commercial, legal) with
   `search_pubmed`, `search_trials`, `search_prior_art` and `retrieve_abstract`, then one choice
   call (`prompts/projects/research.md`, `prompts/projects/choose.md`). Code checks
@@ -728,16 +742,18 @@ refines with it in a Slack thread. Staff and reviewers read and review the resul
   `>` and `@` from them and leaves out a title that carries a link or a bare domain. Settings:
   `PROJECT_RESEARCH_ENABLED` (default on), `LLM_PROJECT_RESEARCH_MODEL` (default
   `claude-opus-5`, must be priced), `PROJECT_RESEARCH_MAX_TOOL_ROUNDS` (default 8).
-- **Ledger and ceiling.** Every research and choice call is claimed in `hub_project_calls`
-  before it runs, at its worst case, and updated with its real usage after.
-  `PROJECT_RESEARCH_DAILY_USD_LIMIT` (default 25.0) sums the rows touched in the rolling 24
-  hours; a step that meets it waits. A rate limit or 5xx is retried without counting; three
+- **Ledger, no ceiling.** Every research and choice call is claimed in `hub_project_calls`
+  before it runs, at its worst case, and updated with its real usage after. There is no dollar
+  ceiling (owner, 2026-10-27; `PROJECT_RESEARCH_DAILY_USD_LIMIT` is gone): the failure stop and
+  the turn-taking are the only automatic brakes, and the Projects card shows what projects
+  have spent in the run. A rate limit or 5xx is retried without counting; three
   other failures (any other error, including one the client raises before sending, reserved at
   the call's worst case, and a paid reply the worker cannot apply) end a session; a refusal ends
   it at once. A step whose call never finished
-  (worker restart) runs again, and its claimed row still counts.
+  (worker restart) runs again, and its claimed row stays in the ledger.
 - **What the engine posts, and when.** From its once-a-minute projects tick the engine requests
-  due projects and posts each `ready_to_post` one as BlackbirdBot in `#general` (phase
+  projects (while Projects is running) and posts each `ready_to_post` one (while it is running
+  or winding down) as BlackbirdBot in `#general` (phase
   `hub_project`, the stored text, no model call), only while BlackbirdBot is on the roster; a
   claim is written first, so a crash cannot post twice. A posting may take two Slack messages
   (owner, 2026-10-27; `POSTING_MAX_MESSAGES`, at most 7,000 characters): the second continues
@@ -745,8 +761,8 @@ refines with it in a Slack thread. Staff and reviewers read and review the resul
   against the root row's text (`posting_head`). The lab's reply must still fit one message. The lab's reply is offered inside the
   lab's own Phase-5 turn, before its daily-cap check: one call
   (`prompts/projects/lab-posting-reply.md`), posted with the header `:test_tube: *Blackbird project:*
-  <title>` as phase `project_reply`. It does not count toward the lab's daily cap or
-  `--max-proposals`. A thread rooted at a `project_reply` post is a project thread: both bots
+  <title>` as phase `project_reply`. It does not count toward the lab's daily cap or the
+  interviews count. A thread rooted at a `project_reply` post is a project thread: both bots
   get project prompts and guidance (`src/agent/project_guidance.py`), BlackbirdBot also gets
   `search_pubmed` and `search_trials`, and verdict capture, assessment drops, ⏸️ declines, the
   panel floor, panel notes and every headline are off. BlackbirdBot's close carries a
@@ -762,16 +778,21 @@ refines with it in a Slack thread. Staff and reviewers read and review the resul
   replies and consults. The lab's reply step (phase `project_reply`, made before the thread
   exists) is not listed there but is counted in the page's refinement cost; research cost comes
   from the ledger.
-- **The `--max-proposals` drain.** Once the run reaches its target, no project is requested or
-  posted, and unposted projects end "not finished" (`run_ended_before_posting`). The drain also
-  waits for each posted project's lab reply while that lab is live: the drain warning names the
-  open interviews and the awaited replies, and the Projects page lists those projects as
-  "In progress". During a drain a failed reply attempt counts (outside it, only an unposted
+- **Winding down.** A projects wind-down (its count or runtime reached, the failure stop, or
+  Wind down by hand) requests nothing new and ends every project still `requested`, whose
+  research has not begun, as not finished (`run_ended_before_posting`). Projects whose research
+  has begun carry on: they are posted, wait for their lab's reply while that lab is live, and
+  refine to their close; the session ends when none is open, and the card names the labs it
+  waits on. During a wind-down a failed reply attempt counts (outside it, only an unposted
   reply does), and the second counted failure ends the project (`reply_failed`). A lab that has
-  left the roster ends its project (`lab_not_live`) and stops counting; a switched-off run does
-  not wait for replies.
-- **Stop, resume, finalize.** A stop or hold keeps open projects as they are; the Projects page
-  shows them "Paused", and a resume continues them. Finalizing, by any path, leaves open project
+  left the roster ends its project (`lab_not_live`) and stops counting.
+- **Stop now.** Every open project of the run ends not finished with reason `stopped`
+  (compare-and-set, so a research write the worker has in flight is refused), its thread closes
+  with outcome `stopped`, and nothing is posted to Slack about it.
+- **Stop, resume, finalize.** Stop everything or a hold keeps open projects as they are, and so
+  does a live run without Projects running; the Projects page shows them "In progress" while the run is live and "Paused" once it
+  stops, and the next
+  Projects start, in the same run or a resume, continues them. Finalizing, by any path, leaves open project
   rows as they are: the page and the report count a finalized run's open projects as "not
   finished" ("The run was finalized first") from the run's `finalized_at`.
 - **Statistics.** Interviews opened, consults per interview (`specialist_mix`,
@@ -790,8 +811,8 @@ refines with it in a Slack thread. Staff and reviewers read and review the resul
   never in a live container. `scripts/projects_thread_replay.py` replays one dry-run project's
   thread against a scratch database with real model calls (the owner approves each use).
   `scripts/projects_report.py --run <id> [--format md|json] [--out <path>]` is read-only and
-  prints the run's measures (outcomes and reasons, research and refinement cost, missed
-  intervals, gaps, anchors, sources, review figures); it refuses an `--out` inside the
+  prints the run's measures (outcomes and reasons, research and refinement cost, gaps,
+  anchors, sources, review figures); it refuses an `--out` inside the
   repository.
 - **Prompts, and the freeze.** The interview prompt sets are frozen (owner, 2026-10-26):
   scout_hub stays `1.12.0` and pi_lab `1.2.0`, with their stamps, `role.toml` files and every
@@ -802,7 +823,7 @@ refines with it in a Slack thread. Staff and reviewers read and review the resul
   project turns still use its unchanged interview system prompt, and BlackbirdBot's its
   unchanged identity block. The engine loads the four with the rest of the snapshot at start,
   logs their hash (`Project prompts: prompts/projects/ (hash …)`), and shows a mid-run edit as
-  `projects` drift on `/admin/simulation`. Editing them bumps no `role.toml` version; per-turn
+  `projects` drift on `/workspace/simulation`. Editing them bumps no `role.toml` version; per-turn
   project guidance and the `<project_json>` instructions are code strings in
   `src/agent/project_guidance.py`. The capability flag for the posting is in
   `role_capabilities.py`, not `role.toml`.

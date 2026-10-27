@@ -83,7 +83,7 @@ def _routes(ids: dict) -> dict[str, list[str]]:
             "/workspace/discussions", "/admin/agents", "/workspace/assessments",
             *[f"/workspace/assessments/{a}" for a in ids["assessments"]],
             "/admin/cohorts", "/admin/cohorts/topology", "/admin/access-requests",
-            "/admin/simulation", "/workspace/prompt-suggestions",
+            "/workspace/simulation", "/workspace/prompt-suggestions",
         ],
         "manager": [
             "/workspace/pis", f"/workspace/pis/{ids['pi']}", "/workspace/assessments",
