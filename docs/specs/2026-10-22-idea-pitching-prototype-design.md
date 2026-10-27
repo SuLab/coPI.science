@@ -404,7 +404,9 @@ not used or changed), with a structured answer:
     or "green fluorescent protein" pass;
   - no `@` anywhere;
   - each field within its length limit (my call: summary 600 characters, each plan field 300; the owner raised the
-    plan field to 500 on 2026-10-27, when 300 failed most choices in the dry-run re-checks).
+    plan field to 500 on 2026-10-27, when 300 failed most choices in the dry-run re-checks). *Owner, 2026-10-27,
+    when the model overran 500 too: the summary and plan fields have no limit of their own; the title keeps its
+    120 characters and the whole posting its two Slack messages (§5.6).*
   A failed check retries the call once with the failure stated; a second failure ends the project as not finished
   ("choice failed").
 - **No candidate.** If no candidate survives research, the project ends as not finished ("no idea found"), keeping

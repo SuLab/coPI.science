@@ -38,6 +38,11 @@ from the text below, all now in the tree:
   menard; deutsch failed twice on its 300-character Design field. `FIELD_MAX_CHARS` is now 500
   (each plan string and `lab_tools` item; `prompts/projects/choose.md` says so); nine fields at
   the limit still leave a posting within two messages. The summary stays at 600.
+- **No summary or plan-field limit (owner, 2026-10-27).** The third re-check ($1.32) readied
+  only gray and hu: deutsch and menard overran the 500-character Design field on both attempts.
+  `SUMMARY_MAX_CHARS` and `FIELD_MAX_CHARS` are gone; a choice's length checks are the title
+  (`TITLE_MAX_CHARS` 120) and the posting (two Slack messages, `POSTING_MAX_CHARS` 7,000), and
+  `choose.md` states the posting's limit instead of the field limits.
 
 - **Posting text.** `assemble_posting` also removes `<`, `>` and `@` from third-party source
   titles and ids and leaves out a title that still carries a link or a bare domain (PubMed,

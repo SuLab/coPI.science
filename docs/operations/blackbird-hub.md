@@ -721,8 +721,9 @@ refines with it in a Slack thread. Staff and reviewers read and review the resul
   `search_pubmed`, `search_trials`, `search_prior_art` and `retrieve_abstract`, then one choice
   call (`prompts/projects/research.md`, `prompts/projects/choose.md`). Code checks
   anchors (whole profile items), sources (retrieved in that session), other labs' names, `@`,
-  links and lengths (title 120, summary 600, each plan field 500 characters since
-  2026-10-27), then assembles and stores the posting; a failed choice is retried once. Source
+  links and the title's length (120 characters; since 2026-10-27 the summary and plan fields
+  have no limit of their own, only the whole posting's two Slack messages), then assembles and
+  stores the posting; a failed choice is retried once. Source
   titles come from PubMed, ClinicalTrials.gov and USPTO, not the model: the posting drops `<`,
   `>` and `@` from them and leaves out a title that carries a link or a bare domain. Settings:
   `PROJECT_RESEARCH_ENABLED` (default on), `LLM_PROJECT_RESEARCH_MODEL` (default

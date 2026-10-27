@@ -2,7 +2,7 @@
 
 Anchors (a project rests on whole items of the lab's public profile), sources (only what a
 research tool returned), names (no other lab, PI or bot), completeness of the plan template,
-the posting text and its one-Slack-message limit, and the outcome of a project's close.
+the posting text and its two-Slack-message limit, and the outcome of a project's close.
 Spec: docs/specs/2026-10-22-idea-pitching-prototype-design.md §5.3–§5.6, §5.9.
 
 Imports nothing from ``src.agent.engine`` or ``src.services.blackbird_rubric``; from
@@ -56,12 +56,10 @@ PLACEHOLDERS = frozenset(
 #: A posting may take this many Slack messages (owner, 2026-10-27: a long project posts as
 #: two rather than failing); the second continues in the first one's Slack thread.
 POSTING_MAX_MESSAGES = 2
-#: 3,500 characters per message, as when a posting had to fit one.
+#: 3,500 characters per message, as when a posting had to fit one. With ``TITLE_MAX_CHARS``,
+#: the only length limit on a choice: the summary and the plan fields have none of their own
+#: (owner, 2026-10-27, after the model overran a 300- and then a 500-character field limit).
 POSTING_MAX_CHARS = 7000
-SUMMARY_MAX_CHARS = 600
-#: Each plan string and each ``lab_tools`` item (owner, 2026-10-27: raised from 300, which
-#: failed most choices; nine fields at the limit still leave a posting within two messages).
-FIELD_MAX_CHARS = 500
 TITLE_MAX_CHARS = 120
 POSTING_MAX_SOURCES = 5
 POSTING_HEADER = ":test_tube: *Blackbird project for the {surname} lab*"

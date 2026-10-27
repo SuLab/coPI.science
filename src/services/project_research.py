@@ -86,9 +86,7 @@ from src.services.json_extract import extract_json
 from src.services.llm_pricing import PRICES, cost_for_tokens
 from src.services.project_plan import (
     ANCHOR_SECTIONS,
-    FIELD_MAX_CHARS,
     POSTING_MAX_MESSAGES,
-    SUMMARY_MAX_CHARS,
     TEMPLATE_FIELDS,
     TITLE_MAX_CHARS,
     NameEntry,
@@ -708,6 +706,9 @@ def _strings(choice: Mapping[str, Any]) -> list[str]:
 
 
 def _length_failures(choice: Mapping[str, Any]) -> list[str]:
+    """An empty title or summary, a title over ``TITLE_MAX_CHARS``, too many lab tools. The
+    summary and the plan fields have no length limit of their own: only the whole posting's
+    (``check_choice``) bounds them."""
     failures = []
     title, summary = _str(choice.get("title")), _str(choice.get("summary"))
     if not title:
@@ -716,14 +717,7 @@ def _length_failures(choice: Mapping[str, Any]) -> list[str]:
         failures.append(f"the title is longer than {TITLE_MAX_CHARS} characters")
     if not summary:
         failures.append("the summary is empty")
-    if len(summary) > SUMMARY_MAX_CHARS:
-        failures.append(f"the summary is longer than {SUMMARY_MAX_CHARS} characters")
-    plan = _plan_of(choice)
-    for key, label in TEMPLATE_FIELDS:
-        values = plan[key] if isinstance(plan[key], list) else [plan[key]]
-        if any(len(v) > FIELD_MAX_CHARS for v in values):
-            failures.append(f"{label}: an entry is longer than {FIELD_MAX_CHARS} characters")
-    if len(plan["lab_tools"]) > MAX_LAB_TOOLS:
+    if len(_plan_of(choice)["lab_tools"]) > MAX_LAB_TOOLS:
         failures.append(f"more than {MAX_LAB_TOOLS} lab tools are listed")
     return failures
 
@@ -756,7 +750,7 @@ def check_choice(
     """The model's choice's failures, in plain words (``[]`` when it passes): an index out
     of range; an anchor or source that is not the chosen candidate's; another lab's, PI's or
     bot's name; any ``@``; any link (``escape_for_slack`` would keep it live in
-    ``#general``); a title, summary or plan entry over its limit; more than
+    ``#general``); an empty title or summary; a title over ``TITLE_MAX_CHARS``; more than
     ``MAX_LAB_TOOLS`` lab tools; a posting that ``assemble_posting`` cannot fit."""
     if not _valid_index(choice.get("chosen"), survivors):
         return [f"chosen ({choice.get('chosen')!r}) is not the number of a listed candidate"]

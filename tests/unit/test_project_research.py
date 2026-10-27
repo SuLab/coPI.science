@@ -338,12 +338,25 @@ def test_check_choice_failures():
     one(_choice(summary="See <#C0ABC123|general> for more."), "contains a link")
     one(_choice(summary="Write to <mailto:x.example|the office>."), "contains a link")
     one(_choice(title="t" * 121), "the title is longer than")
-    one(_choice(summary="s" * 601), "the summary is longer than")
-    assert pr.FIELD_MAX_CHARS == 500  # owner, 2026-10-27 (was 300)
-    one(_choice(plan=_plan(readout="r" * 501)), "Readout")
-    one(_choice(plan=_plan(lab_tools=["x" * 501])), "an entry is longer than 500")
-    assert _check(_choice(plan=_plan(readout="r" * 500, design="d" * 500))) == []
+    one(_choice(title=""), "the title is empty")
+    one(_choice(summary=""), "the summary is empty")
     one(_choice(plan=_plan(lab_tools=[f"tool {n}" for n in range(11)])), "more than 10 lab tools")
+
+
+def test_only_the_posting_limits_the_summary_and_plan_fields():
+    """Owner, 2026-10-27: the model overran a 300- and then a 500-character plan-field limit,
+    so the summary and the plan fields have no limit of their own; the whole posting still
+    has to fit in two Slack messages."""
+    sentence = "Block MRGPRX4 to relieve cholestatic itch. "
+    long = _choice(
+        summary=sentence * 30,
+        plan=_plan(design="Two arms of twelve mice each. " * 50, lab_tools=["Calcium imaging " * 60]),
+    )
+    assert len(long["summary"]) > 1000 and len(long["plan"]["design"]) > 1000
+    assert _check(long) == []
+    assert _check(_choice(summary=sentence * 170)) == [
+        "the posting is too long for 2 Slack messages; shorten the summary or the plan"
+    ]
 
 
 def _shown(block: str, label: str) -> list[str]:
