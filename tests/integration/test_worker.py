@@ -703,6 +703,55 @@ async def test_the_stale_sweep_still_runs_without_the_notification_block(
     assert len(sweeps) >= 3, sweeps
 
 
+async def test_research_rounds_run_back_to_back_while_they_make_calls(
+    engine, pg_url, monkeypatch
+):
+    """A research round that made a call is followed by the next at once; after an idle
+    round the worker waits PROJECT_SWEEP_SECONDS (here an hour), so it never spins."""
+    rounds: list[bool] = []
+
+    async def _round(session_factory, should_continue=None):
+        assert should_continue is not None and should_continue() is True
+        result = len(rounds) < 3
+        rounds.append(result)
+        return result
+
+    async def _requeue(db, older_than_seconds=None):
+        return 0
+
+    async def _no_job(db):
+        return None
+
+    async def _nothing(session_factory):
+        return False
+
+    async def _no_sweep(session_factory):
+        return None
+
+    monkeypatch.setattr(worker_main, "claim_job", _no_job)
+    monkeypatch.setattr(worker_main, "requeue_stale_processing_jobs", _requeue)
+    monkeypatch.setattr(worker_main, "generate_chat_suggestions", _nothing)
+    monkeypatch.setattr(worker_main, "generate_trajectories", _nothing)
+    monkeypatch.setattr(worker_main, "run_persona_sweep", _no_sweep)
+    monkeypatch.setattr(worker_main, "research_round", _round)
+    monkeypatch.setattr(worker_main, "PROJECT_SWEEP_SECONDS", 3600)
+    monkeypatch.setattr(worker_main, "get_settings", lambda: SimpleNamespace(
+        database_url=pg_url, worker_poll_interval=0.01,
+    ))
+    worker_main._shutdown = False
+    task = asyncio.create_task(worker_main.run_worker())
+    try:
+        for _ in range(500):
+            if len(rounds) >= 4:
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.2)  # no fifth round after the idle one
+    finally:
+        worker_main._shutdown = True
+        await asyncio.wait_for(task, timeout=5)
+    assert rounds == [True, True, True, False]
+
+
 # ---------------------------------------------------------------------------
 # T5.4 — execute_generate_profile, and the ordering of completion vs the work
 # ---------------------------------------------------------------------------

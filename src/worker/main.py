@@ -8,11 +8,12 @@ company_discovery).
 While no job is waiting it also generates the assessment chat's opening questions,
 one set at a time (`src.services.assessment_chat_suggestions.generate_due`); when
 that had nothing to do, one finished interview's trajectory lines
-(`src.services.trajectory_generation.generate_due`); and, when neither made a call, one
-step of BlackbirdBot project research (`src.services.project_research.research_projects`),
-so a job waits behind at most one of those calls (CALL_TIMEOUT_SECONDS, 3 minutes, at worst),
-and runs the daily persona re-export sweep when it is due
-(`src.services.persona_sweep.run_persona_sweep`, spec 2026-10-05 D54).
+(`src.services.trajectory_generation.generate_due`); and, when neither made a call, a round
+of BlackbirdBot project research (`src.services.project_research.research_round`): up to
+`PROJECT_RESEARCH_CONCURRENCY` lanes taking steps back to back for up to
+`RESEARCH_ROUND_SECONDS`, so a job waits behind at most one round plus one step (a step's
+call is CALL_TIMEOUT_SECONDS, 3 minutes, at worst). It runs the daily persona re-export
+sweep when it is due (`src.services.persona_sweep.run_persona_sweep`, spec 2026-10-05 D54).
 
 A BULK-priority job that spends OpenAlex credits first reads OpenAlex's free daily
 meter and defers itself to the meter's reset when it exceeds the available free credits
@@ -65,7 +66,7 @@ from src.services.profile_pipeline import run_profile_pipeline
 from src.services.project_research import (
     SWEEP_INTERVAL_SECONDS as PROJECT_SWEEP_SECONDS,
 )
-from src.services.project_research import research_projects
+from src.services.project_research import research_round
 from src.services.review_bot import execute_review_analysis
 from src.services.trajectory_generation import (
     SWEEP_INTERVAL_SECONDS as TRAJECTORY_SWEEP_SECONDS,
@@ -525,6 +526,12 @@ async def _maybe_sweep_personas(
     return now + (PERSONA_SWEEP_RECHECK_SECONDS if swept is None else PERSONA_SWEEP_SECONDS)
 
 
+def _research_due(now: float, last_check: float | None, busy: bool) -> bool:
+    """Whether to run a research round now: at once after a round that made a call; after an
+    idle round at most once per PROJECT_SWEEP_SECONDS (event-loop seconds)."""
+    return busy or last_check is None or now - last_check >= PROJECT_SWEEP_SECONDS
+
+
 async def run_worker():
     """Main worker loop."""
     global _shutdown
@@ -551,6 +558,7 @@ async def run_worker():
     last_suggestion_check: float | None = None
     last_trajectory_check: float | None = None
     last_project_check: float | None = None
+    research_busy = False
     persona_sweep_due = 0.0
 
     while not _shutdown:
@@ -579,12 +587,11 @@ async def run_worker():
                 ):
                     last_trajectory_check = now
                     generated = await generate_trajectories(session_factory)
-                if not generated and (
-                    last_project_check is None
-                    or now - last_project_check >= PROJECT_SWEEP_SECONDS
-                ):
+                if not generated and _research_due(now, last_project_check, research_busy):
                     last_project_check = now
-                    generated = await research_projects(session_factory)
+                    generated = research_busy = await research_round(
+                        session_factory, should_continue=lambda: not _shutdown
+                    )
                 if not generated:
                     await asyncio.sleep(settings.worker_poll_interval)
 

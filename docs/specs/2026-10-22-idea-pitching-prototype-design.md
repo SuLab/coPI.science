@@ -339,6 +339,8 @@ and its D39 are unchanged.
 Runs in the worker, in its idle slot after interview trajectories, **one model call per slot**, so a job still waits
 behind at most one call. A project's research state is stored on its row and advanced one step at a time.
 
+Amended 2026-10-28 (D66, M1–M4; `docs/plans/2026-10-28-projects-thread-timeouts-and-research-throughput-plan.md`): research now runs in rounds of up to `PROJECT_RESEARCH_CONCURRENCY` (default 3) lanes that take one-call steps back to back for up to 60 s, each step leasing its project for 10 minutes, so a job waits behind at most one round plus one step.
+
 - **Statuses** (my call): `requested` → `researching` → `ready_to_post` → `posted` → `refining` → `ready`,
   `not_agreed` or `not_finished` (with a reason code). The worker takes the oldest `requested` or `researching`
   project of the live run.
@@ -529,11 +531,17 @@ by the system, and its science is not checked. Bracketed parts would come from t
   At any turn the lab starts its reply with ✅ only if it agrees the plan as it now stands is feasible and complete.
   When the lab's latest reply starts with ✅, BlackbirdBot may close at its next turn with ✅ if it agrees too; this is
   how refinement ends early on agreement (D45). On its last turn BlackbirdBot must close, with ✅ or ⚠️.
+
+  Amended 2026-10-28 (D66, M1–M4; `docs/plans/2026-10-28-projects-thread-timeouts-and-research-throughput-plan.md`): ordinals and the 12-message cap now count posts (consecutive log entries by one sender), not Slack chunks, and the cap never closes a project thread on BlackbirdBot's turn (a lab turn at the cap still times out), so BlackbirdBot gets its close turn unless the thread is abandoned.
 - **The close.** A BlackbirdBot reply that carries a readable `<project_json>` block (stripped before posting) is a
   close: the final plan's fields, the lab's tools and models used, its own position (✅ or ⚠️), the gaps and the
   disagreements. Its visible text starts with ✅ or ⚠️ and states the final plan. The engine then records the outcome
   (§5.9) and closes the thread with a new outcome value, `project_closed`. A reply in the close band without a
   readable block ends the project as not finished ("close unreadable") and closes the thread the same way.
+  Amended 2026-10-28 (M3; `docs/plans/2026-10-28-projects-thread-timeouts-and-research-throughput-plan.md`): "readable"
+  now includes a block with raw control characters in its strings, a block that ends early (its missing closing
+  brackets are appended) and one whose `position`, `gaps` or `disagreements` sit inside `plan` (they move to the top
+  level); there is no second model call.
 - **BlackbirdBot's prompts there.** A new system prompt, `prompts/roles/scout_hub/agent-system-project.md`, composed
   like today's (identity and working memory, no `{rubric}`), and a new reply template, `phase4-project-reply.md`,
   carrying the opening plan, its anchors and sources, and the choice's reasons (all fenced). Its aim is to turn its
@@ -709,6 +717,7 @@ Both prompt-set bumps run `scripts/sync_prompt_set_docs.py`, and the first run a
   is itself information; the measures show how often.
 - **PR6 Cost.** Research with tool calls is the most expensive worker job. *Prototype:* one call per idle slot, a
   per-call ledger under the daily ceiling, the round limit, costs stored per project, and the dry run before go-live.
+  Amended 2026-10-28 (D66, M1–M4; `docs/plans/2026-10-28-projects-thread-timeouts-and-research-throughput-plan.md`): research now takes one call per step in up to 3 concurrent lanes with no idle wait between steps, so research spends faster per hour while its cost per project is unchanged.
 - **PR7 BlackbirdBot's load.** One more thread of up to 12 messages per lab per day on the same rate allowances.
   *Prototype:* allowances not raised; interviews may slow; the switch stops new projects.
 - **PR8 Public posting.** Postings are in `#general`, which every lab and workspace member reads. *Prototype:* built
@@ -719,6 +728,7 @@ Both prompt-set bumps run `scripts/sync_prompt_set_docs.py`, and the first run a
 - **PR11 The run ends mid-project.** *Prototype:* paused while stopped, continued on resume, not finished once
   finalized.
 - **PR12 Split replies shift turns.** *Prototype:* the parity-aware turn bands of §5.8; tested at both parities.
+  Amended 2026-10-28 (D66, M1–M4; `docs/plans/2026-10-28-projects-thread-timeouts-and-research-throughput-plan.md`): a project thread counts a split reply as one post (`group_posts`), so a split no longer shifts its ordinals; interviews still count chunks.
 - **PR13 A lab re-pitches Blackbird's idea as its own.** *Prototype:* project threads stay out of the lab's memory,
   its Phase-5 recent posts and its list of earlier discussions.
 - **PR14 A shortcut becomes permanent.** *Prototype:* §12.

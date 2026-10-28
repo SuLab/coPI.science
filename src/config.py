@@ -433,12 +433,16 @@ class Settings(BaseSettings):
     # with LLM_PROJECT_RESEARCH_MODEL, which must be priced in src/services/llm_pricing.py,
     # or nothing is researched; PROJECT_RESEARCH_ENABLED=false stops the research step
     # alone. There is no dollar ceiling; every call is still recorded in hub_project_calls.
-    # A research session runs at most PROJECT_RESEARCH_MAX_TOOL_ROUNDS tool rounds. The
+    # A research session runs at most PROJECT_RESEARCH_MAX_TOOL_ROUNDS tool rounds, and the
+    # worker researches up to PROJECT_RESEARCH_CONCURRENCY projects at once. The
     # removed HUB_PROJECTS_ENABLED, PROJECT_INTERVAL_HOURS and
     # PROJECT_RESEARCH_DAILY_USD_LIMIT are ignored if still set (extra="ignore").
     project_research_enabled: bool = True
     llm_project_research_model: str = "claude-opus-5"
     project_research_max_tool_rounds: int = 8
+    # Owner decision D66 (2026-10-28): the worker researches up to this many projects at once
+    # (clamped to 1..8, RESEARCH_MAX_LANES in src/services/project_research.py).
+    project_research_concurrency: int = 3
 
     # Worker
     worker_poll_interval: int = 5  # seconds

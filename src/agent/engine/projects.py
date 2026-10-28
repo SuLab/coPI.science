@@ -30,7 +30,7 @@ from src.agent.engine.constants import STOPPED_OUTCOME
 from src.agent.engine.context import EngineContext, via
 from src.agent.engine.helpers import _was_truncated
 from src.agent.engine.sidecar import _extract_project_json, _extract_slack_message
-from src.agent.message_log import PHASE_HUB_PROJECT, PHASE_PROJECT_REPLY
+from src.agent.message_log import PHASE_HUB_PROJECT, PHASE_PROJECT_REPLY, group_posts
 from src.agent.persona_sections import section_items, sections
 from src.agent.role_capabilities import capabilities_for, spoke_role_names
 from src.agent.sessions import INTERVIEWS, PROJECTS
@@ -1029,16 +1029,11 @@ class Projects:
         return found is not None
 
     def _latest_lab_position(self, thread_id: str, lab_agent_id: str) -> str | None:
-        """The lab's position in a project thread: consecutive entries by one sender form one
-        post (a reply over Slack's limit arrives as several chunks, its marker on the first);
-        the last post by the lab that is not the root gives ``position_marker`` of its first
-        entry. None when the lab has no such post or it opens with no marker."""
-        posts: list[list[Any]] = []
-        for entry in self.message_log.get_thread_history(thread_id):
-            if posts and posts[-1][0].sender_agent_id == entry.sender_agent_id:
-                posts[-1].append(entry)
-            else:
-                posts.append([entry])
+        """The lab's position in a project thread, read per post (`group_posts`: a reply over
+        Slack's limit arrives as several chunks, its marker on the first): the last post by
+        the lab that is not the root gives ``position_marker`` of its first entry. None when
+        the lab has no such post or it opens with no marker."""
+        posts = group_posts(self.message_log.get_thread_history(thread_id))
         for post in reversed(posts):
             if post[0].sender_agent_id != lab_agent_id:
                 continue

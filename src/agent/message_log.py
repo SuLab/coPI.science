@@ -3,6 +3,7 @@
 import bisect
 import logging
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Callable
 
@@ -84,6 +85,27 @@ def is_panel_note(entry: "LogEntry") -> bool:
     should be returned.
     """
     return entry.phase == PHASE_PANEL_NOTE
+
+
+def group_posts(entries: Iterable[LogEntry]) -> list[list[LogEntry]]:
+    """Group log entries into posts: consecutive entries with the same
+    ``sender_agent_id`` and ``sender_name`` form one post, in the order given.
+
+    A message over Slack's 4,000-character limit is logged as several chunks a
+    second or less apart, while turns are a minute or more apart (run 1abf809c:
+    chunks at most 0.41 s apart, turns at least 72 s). The name keeps apart
+    entries with no ``sender_agent_id``: two humans in a row, or a human and a
+    bot row restored without one, are separate posts.
+    """
+    posts: list[list[LogEntry]] = []
+    for entry in entries:
+        if posts and (posts[-1][0].sender_agent_id, posts[-1][0].sender_name) == (
+            entry.sender_agent_id, entry.sender_name
+        ):
+            posts[-1].append(entry)
+        else:
+            posts.append([entry])
+    return posts
 
 
 def _entry_allowed(entry: "LogEntry", allowed_sender_ids: set[str] | None) -> bool:

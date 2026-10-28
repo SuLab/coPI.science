@@ -8,11 +8,13 @@ from src.agent.message_log import (
     PHASE_PROJECT_REPLY,
     LogEntry,
     MessageLog,
+    group_posts,
 )
 
 CH = "general"
 HUB = ("blackbird", "BlackbirdBot")
 LAB = ("wang", "WangBot")
+HUMAN = (None, "Wang (PI)")
 
 
 def _entry(ts, sender, content, *, thread_ts=None, phase=None):
@@ -100,3 +102,61 @@ def test_new_methods_are_classified():
     for name in ("is_hidden_entry", "is_project_thread", "is_project_entry"):
         doc = inspect.getdoc(getattr(MessageLog, name)) or ""
         assert "COHORT-GATE: UNGATED" in doc, name
+
+
+def test_group_posts_merges_consecutive_chunks_by_sender():
+    root = "500.000000"
+    entries = [
+        _entry(root, LAB, "Blackbird project: organoids", phase=PHASE_PROJECT_REPLY),
+        _entry("500.100000", HUB, "chunk 1", thread_ts=root),
+        _entry("500.200000", HUB, "chunk 2", thread_ts=root),
+        _entry("580.000000", LAB, "answer", thread_ts=root),
+        _entry("660.000000", HUB, "chunk 1", thread_ts=root),
+        _entry("660.100000", HUB, "chunk 2", thread_ts=root),
+        _entry("660.200000", HUB, "chunk 3", thread_ts=root),
+    ]
+    log = _log(*entries)
+    posts = group_posts(log.get_thread_history(root))
+    assert [[e.ts for e in post] for post in posts] == [
+        [root],
+        ["500.100000", "500.200000"],
+        ["580.000000"],
+        ["660.000000", "660.100000", "660.200000"],
+    ]
+    # The log itself still counts entries.
+    assert log.get_thread_message_count(root) == 7
+
+
+def test_group_posts_keeps_alternating_senders_apart():
+    entries = [_entry("600.000000", LAB, "a"), _entry("601.000000", HUB, "b"),
+               _entry("602.000000", LAB, "c")]
+    assert [[e.ts for e in post] for post in group_posts(entries)] == [
+        ["600.000000"], ["601.000000"], ["602.000000"],
+    ]
+
+
+def test_a_human_message_is_its_own_post():
+    entries = [_entry("700.000000", HUB, "a"), _entry("701.000000", HUMAN, "b"),
+               _entry("702.000000", HUB, "c")]
+    assert [[e.ts for e in post] for post in group_posts(entries)] == [
+        ["700.000000"], ["701.000000"], ["702.000000"],
+    ]
+
+
+def test_two_humans_in_a_row_are_two_posts():
+    entries = [_entry("710.000000", HUMAN, "a"), _entry("711.000000", (None, "Lee (PI)"), "b")]
+    assert len(group_posts(entries)) == 2
+
+
+def test_a_bot_post_restored_without_an_agent_id_stays_one_post():
+    # agent_messages.agent_id is nullable: such a bot row restores as sender_agent_id None
+    restored = (None, "WangBot")
+    entries = [_entry("720.000000", restored, "part 1"), _entry("720.100000", restored, "part 2"),
+               _entry("721.000000", HUMAN, "c")]
+    assert [[e.ts for e in post] for post in group_posts(entries)] == [
+        ["720.000000", "720.100000"], ["721.000000"],
+    ]
+
+
+def test_group_posts_of_nothing_is_empty():
+    assert group_posts([]) == []

@@ -6,7 +6,7 @@ Projects session, the choice and the posting, and the dry-run script
 import json
 import uuid
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -602,6 +602,46 @@ async def test_a_project_the_engine_ended_is_not_overwritten(
     project = await _project(db_session, world.project_id)
     assert (project.status, project.reason_code) == ("not_finished", "lab_not_live")
     assert project.research["sessions"][0]["rounds"] == 0  # the claim's state, not the result's
+    (call,) = await _calls(db_session, world.project_id)
+    assert call.status == "done"  # the paid call is still recorded
+
+
+async def test_a_claimed_step_holds_its_project_while_its_call_runs(
+    db_session, factory, world, install, tools
+):
+    seen = {}
+
+    async def look_mid_step():
+        project = await _project(db_session, world.project_id)
+        seen["lease_seconds"] = _seconds_out(project.next_step_after)
+        seen["due"] = await pr._due_project(db_session, world.run.id)
+
+    tools.during = look_mid_step
+    install(_tool_reply("search_pubmed"))
+
+    assert await pr.research_projects(factory) is True
+    assert 590 < seen["lease_seconds"] <= 605
+    assert seen["due"] is None  # no other lane takes a leased project
+    project = await _project(db_session, world.project_id)
+    assert project.next_step_after is None
+
+
+async def test_a_step_that_lost_its_lease_does_not_store(
+    db_session, factory, world, install, tools
+):
+    async def another_lane_leases_it():
+        await db_session.execute(
+            update(HubProject).where(HubProject.id == world.project_id)
+            .values(next_step_after=datetime.now(UTC) + timedelta(minutes=30))
+        )
+
+    tools.during = another_lane_leases_it
+    install(_tool_reply("search_pubmed"))
+
+    assert await pr.research_projects(factory) is True
+    project = await _project(db_session, world.project_id)
+    assert project.research["sessions"][0]["rounds"] == 0  # the claim's state, not the result's
+    assert _seconds_out(project.next_step_after) > 1700  # the other lease stands
     (call,) = await _calls(db_session, world.project_id)
     assert call.status == "done"  # the paid call is still recorded
 

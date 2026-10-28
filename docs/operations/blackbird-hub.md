@@ -729,8 +729,17 @@ refines with it in a Slack thread. Staff and reviewers read and review the resul
   row"). A counted project resets the streak; `lab_not_live`, `run_ended_before_posting` and
   `stopped` neither count nor break it.
 - **Research (worker).** `src/services/project_research.py`, after interview trajectories in
-  the worker's idle chain, one model call per idle slot, only while the live run has Projects
-  running or winding down: five specialist
+  the worker's idle chain, only while the live run has Projects running or winding down. Each
+  step is one model call. Research runs in rounds (`research_round`) of up to
+  `PROJECT_RESEARCH_CONCURRENCY` lanes (at most 8), each researching a different project; a lane
+  takes steps back to back for up to `RESEARCH_ROUND_SECONDS` (60 s) before the worker looks for a
+  job again, so a job waits behind at most one round plus one step, and takes no new step once the
+  worker is shutting down. After a round that made a call the next
+  round starts at once; after an idle round the worker waits the 30 s sweep interval. A claimed
+  step leases its project for `STEP_LEASE` (10 minutes) through `next_step_after`, so no other
+  lane takes it, and stores its result only while it still holds the lease; a step that lost its
+  lease stores nothing, but its paid call is still recorded. A worker that dies mid-step leaves
+  the lease behind, and the step runs again once it expires. The research itself: five specialist
   research sessions (clinical, scientific, technologic, commercial, legal) with
   `search_pubmed`, `search_trials`, `search_prior_art` and `retrieve_abstract`, then one choice
   call (`prompts/projects/research.md`, `prompts/projects/choose.md`). Code checks
@@ -741,7 +750,8 @@ refines with it in a Slack thread. Staff and reviewers read and review the resul
   titles come from PubMed, ClinicalTrials.gov and USPTO, not the model: the posting drops `<`,
   `>` and `@` from them and leaves out a title that carries a link or a bare domain. Settings:
   `PROJECT_RESEARCH_ENABLED` (default on), `LLM_PROJECT_RESEARCH_MODEL` (default
-  `claude-opus-5`, must be priced), `PROJECT_RESEARCH_MAX_TOOL_ROUNDS` (default 8).
+  `claude-opus-5`, must be priced), `PROJECT_RESEARCH_MAX_TOOL_ROUNDS` (default 8),
+  `PROJECT_RESEARCH_CONCURRENCY` (default 3; owner, 2026-10-28).
 - **Ledger, no ceiling.** Every research and choice call is claimed in `hub_project_calls`
   before it runs, at its worst case, and updated with its real usage after. There is no dollar
   ceiling (owner, 2026-10-27; `PROJECT_RESEARCH_DAILY_USD_LIMIT` is gone): the failure stop and
@@ -767,7 +777,17 @@ refines with it in a Slack thread. Staff and reviewers read and review the resul
   `search_pubmed` and `search_trials`, and verdict capture, assessment drops, ⏸️ declines, the
   panel floor, panel notes and every headline are off. BlackbirdBot's close carries a
   `<project_json>` block (stripped before posting), and the thread closes with outcome
-  `project_closed`. Project threads stay out of both bots' working memory and prior-thread lists.
+  `project_closed`. A project thread counts posts, not Slack messages, for its turn ordinal and
+  its 12-message cap: consecutive log entries by one sender are one post (`group_posts`,
+  `src/agent/message_log.py`), so a reply split into chunks counts once; interviews still count
+  log entries. The cap never closes a project thread on BlackbirdBot's turn (from ordinal 11
+  that turn is its must-close turn), so BlackbirdBot always gets its close turn; a lab turn at
+  the cap still ends the thread as a time-out (the project fails `thread_timeout`). The close reader
+  (`_extract_project_json`, `src/agent/engine/sidecar.py`) tolerates raw control characters
+  inside strings, repairs a block that ends early by appending its missing closing brackets,
+  and moves `position`, `gaps` and `disagreements` out of `plan` when the top level lacks them;
+  each repair logs a warning. It makes no second model call: a block still unreadable is no
+  close before BlackbirdBot's last turn and `close_unreadable` at it. Project threads stay out of both bots' working memory and prior-thread lists.
   A project thread whose project is missing or already finished (a resume reopening it, or a
   reply linked after the project ended) is closed as abandoned at its next turn, with no model
   call.

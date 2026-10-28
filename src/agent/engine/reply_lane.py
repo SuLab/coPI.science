@@ -24,6 +24,7 @@ from src.agent.engine.sidecar import (
     _reply_closes_thread,
     _strip_assessment_sidecar,
 )
+from src.agent.message_log import group_posts
 from src.agent.project_guidance import (
     THREAD_KIND_INTERVIEW,
     THREAD_KIND_PROJECT,
@@ -716,7 +717,8 @@ class ReplyLane:
     ) -> list[dict] | None:
         """The checks that run before a reply is composed: evict a thread whose root is
         absent from this run's log, refuse one the agent is not allowed in, and close
-        one that is full. Returns the thread history to compose from, or None when
+        one that is full (a project thread counts posts, and is never closed here on
+        BlackbirdBot's turn). Returns the thread history to compose from, or None when
         the turn is over (the thread was evicted, refused or closed)."""
         # Get thread history from message log
         history_entries = self.message_log.get_thread_history(thread.thread_id)
@@ -748,6 +750,12 @@ class ReplyLane:
 
         # Update message count.
         thread.message_count = len(history_entries)
+        # A project thread counts posts, not log entries: a reply over Slack's limit is
+        # logged as several chunks (run 1abf809c: threads stopped at 12 entries holding
+        # 6-7 posts, before BlackbirdBot's close).
+        is_project = self.message_log.is_project_thread(thread.thread_id)
+        if is_project:
+            thread.message_count = len(group_posts(history_entries))
 
         # Final participation check before composing a reply
         allowed = self.message_log.get_thread_allowed_agents(thread.thread_id)
@@ -780,7 +788,13 @@ class ReplyLane:
         # for the default value. `_warn_if_hub_conclude_missing_assessment`
         # reads thread_guidance directly (not this setting) for exactly this
         # reason.
-        if thread.message_count >= settings.max_thread_messages:
+        #
+        # A project thread's hub turn is never closed here: from HUB_CLOSE_FROM it is
+        # BlackbirdBot's must-close turn (`project_turn`), so the thread ends with its
+        # close or on an abandon path. A lab turn at the cap still times out.
+        if thread.message_count >= settings.max_thread_messages and not (
+            is_project and agent.role in hub_role_names()
+        ):
             logger.info(
                 "[%s] Thread %s reached max messages, closing",
                 agent.agent_id, thread.thread_id,

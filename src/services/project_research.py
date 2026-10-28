@@ -1,9 +1,11 @@
-"""BlackbirdBot projects: the worker's research and choice, one model call per idle slot.
+"""BlackbirdBot projects: the worker's research and choice, one model call per step.
 
 Spec: docs/specs/2026-10-22-idea-pitching-prototype-design.md §5.3 (research) and §5.4
 (choice). The engine requests a project per lab (``hub_projects``, status ``requested``);
 this module takes the oldest due project of the live run, while that run's Projects session is
-active (``live_projects_run_id``), and advances it by ONE model call:
+active (``live_projects_run_id``), and advances it by ONE model call per step. The worker
+runs up to ``project_research_concurrency`` lanes (``research_round``) that take steps back to
+back, and a claimed step leases its project (``STEP_LEASE``) so no other lane takes it:
 
 - five research sessions (``RESEARCH_DOMAINS``), one after another. Each session's system
   prompt is ``prompts/projects/research.md`` plus that specialist's "What you own" and "What
@@ -30,7 +32,8 @@ step simply runs again. A rate limit or 5xx answer (never billed) waits
 without counting; any other failure counts, ``MAX_SESSION_FAILURES`` end a session, and a
 refusal ends its session at once. Every project write is a compare-and-set on the status
 this step read, so a project the engine moved meanwhile (ended, say) is left as the engine
-wrote it.
+wrote it; a step's own writes also require its lease, so a step that outlived it stores only
+its call row.
 
 The inputs are the lab's public persona file only: no private profile, staff review or
 interview transcript. Nothing here logs candidate, plan or posting text.
@@ -38,6 +41,7 @@ interview transcript. Nothing here logs candidate, plan or posting text.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
@@ -45,7 +49,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -146,6 +150,17 @@ CALL_TIMEOUT_SECONDS = 180.0
 RESERVE_INPUT_FLOOR = 16_000
 #: The worker asks for due work at most this often while idle.
 SWEEP_INTERVAL_SECONDS = 30.0
+#: A lane takes steps back to back until one makes no call or this many seconds have passed
+#: since its round began, so a job waits behind at most one round plus one step.
+RESEARCH_ROUND_SECONDS = 60.0
+#: The most lanes a round runs, whatever ``project_research_concurrency`` says: each lane holds
+#: one connection of the worker's pool (5 + 10 overflow, one kept by the worker lock) and makes
+#: one API call at a time (8 per process, ``src/services/llm.py``).
+RESEARCH_MAX_LANES = 8
+#: A claimed step holds its project this long through ``next_step_after``, so no other lane
+#: takes it while its call runs. A worker that dies mid-step leaves the lease, and the step
+#: runs again after it (its claimed call row stays on the ledger).
+STEP_LEASE = timedelta(minutes=10)
 #: Counted failures that end a research session with no candidates.
 MAX_SESSION_FAILURES = 3
 #: The wait after a counted failure, and while PubMed cannot be reached.
@@ -1284,6 +1299,7 @@ class _Claim:
     step: NextStep
     roster: list[NameEntry]
     hub_agent_ids: frozenset[str]
+    lease_until: datetime
 
 
 async def _due_project(db: AsyncSession, run_id: uuid.UUID) -> HubProject | None:
@@ -1307,12 +1323,23 @@ async def _due_project(db: AsyncSession, run_id: uuid.UUID) -> HubProject | None
     ).scalars().first()
 
 
-async def _move(db: AsyncSession, project_id: uuid.UUID, expected: str, **values: Any) -> bool:
-    """Compare-and-set on the project's status; False when the engine moved it."""
+async def _move(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    expected: str,
+    *,
+    lease: datetime | None = None,
+    **values: Any,
+) -> bool:
+    """Compare-and-set on the project's status and, given ``lease``, on ``next_step_after``
+    still being that lease; False when the engine moved the project or the lease was lost."""
     values["updated_at"] = func.clock_timestamp()
+    conditions = [HubProject.id == project_id, HubProject.status == expected]
+    if lease is not None:
+        conditions.append(HubProject.next_step_after == lease)
     result = await db.execute(
         update(HubProject)
-        .where(HubProject.id == project_id, HubProject.status == expected)
+        .where(*conditions)
         .values(**values)
         .execution_options(synchronize_session=False)
     )
@@ -1336,9 +1363,10 @@ def _ended(reason: str, run_id: uuid.UUID) -> dict[str, Any]:
 
 
 async def _claim(db: AsyncSession, config: _Config) -> _Claim | None:
-    """Take the next step of the live run's oldest due project and claim its call in the
-    ledger (committed before the call). None when no call is due; a project that ends
-    without a call (no lab persona, no surviving candidate) is ended and committed here."""
+    """Take the next step of the live run's oldest due project, lease the project for
+    ``STEP_LEASE`` and claim its call in the ledger (both committed before the call). None
+    when no call is due; a project that ends without a call (no lab persona, no surviving
+    candidate) is ended and committed here."""
     run_id = await live_projects_run_id(db)
     if run_id is None:
         return None
@@ -1364,7 +1392,11 @@ async def _claim(db: AsyncSession, config: _Config) -> _Claim | None:
         await db.commit()
         logger.info("Projects: project=%s ended no_idea", project.id)
         return None
-    if not await _move(db, project.id, expected, status=STATUS_RESEARCHING, research=state):
+    lease_until = datetime.now(UTC) + STEP_LEASE
+    if not await _move(
+        db, project.id, expected, status=STATUS_RESEARCHING, research=state,
+        next_step_after=lease_until,
+    ):
         await db.commit()
         return None
     roster, hub_agent_ids = await load_roster(db)
@@ -1379,13 +1411,16 @@ async def _claim(db: AsyncSession, config: _Config) -> _Claim | None:
         )
     )
     await db.commit()
-    return _Claim(project.id, run_id, call_id, lab, state, step, roster, hub_agent_ids)
+    return _Claim(
+        project.id, run_id, call_id, lab, state, step, roster, hub_agent_ids, lease_until
+    )
 
 
 async def _store(
     db: AsyncSession, claim: _Claim, state: dict, outcome: StepOutcome, latency_ms: int
 ) -> bool:
-    """The call row's result and the project's move; False when the engine moved it."""
+    """The call row's result (always, since the call is paid) and the project's move; False
+    when the engine moved the project or the step lost its lease."""
     await db.execute(
         update(HubProjectCall)
         .where(HubProjectCall.id == claim.call_id)
@@ -1398,18 +1433,20 @@ async def _store(
     )
     if outcome.choice is not None:
         return await _move(
-            db, claim.project_id, STATUS_RESEARCHING, status=STATUS_READY_TO_POST,
-            research=state, choice=outcome.choice, title=outcome.choice["title"],
-            posting_text=outcome.posting_text, next_step_after=None,
+            db, claim.project_id, STATUS_RESEARCHING, lease=claim.lease_until,
+            status=STATUS_READY_TO_POST, research=state, choice=outcome.choice,
+            title=outcome.choice["title"], posting_text=outcome.posting_text,
+            next_step_after=None,
         )
     if outcome.end_reason is not None:
         return await _move(
-            db, claim.project_id, STATUS_RESEARCHING, research=state,
+            db, claim.project_id, STATUS_RESEARCHING, lease=claim.lease_until, research=state,
             **_ended(outcome.end_reason, claim.run_id),
         )
     wait_until = datetime.now(UTC) + outcome.wait if outcome.wait is not None else None
     return await _move(
-        db, claim.project_id, STATUS_RESEARCHING, research=state, next_step_after=wait_until
+        db, claim.project_id, STATUS_RESEARCHING, lease=claim.lease_until, research=state,
+        next_step_after=wait_until,
     )
 
 
@@ -1484,3 +1521,46 @@ async def research_projects(session_factory: async_sessionmaker) -> bool:
             exc_info=not isinstance(exc, SQLAlchemyError),
         )
         return False
+
+
+async def _research_lane(
+    session_factory: async_sessionmaker, deadline: float,
+    should_continue: Callable[[], bool] | None,
+) -> bool:
+    made_call = False
+    while (should_continue is None or should_continue()) and await research_projects(
+        session_factory
+    ):
+        made_call = True
+        if time.monotonic() >= deadline:
+            break
+    return made_call
+
+
+async def research_round(
+    session_factory: async_sessionmaker,
+    slots: int | None = None,
+    should_continue: Callable[[], bool] | None = None,
+) -> bool:
+    """Run ``slots`` lanes at once (default ``project_research_concurrency``, clamped to
+    1..``RESEARCH_MAX_LANES``). Each lane takes steps (``research_projects``) back to back
+    until one makes no call, ``RESEARCH_ROUND_SECONDS`` have passed since the round began, or
+    ``should_continue`` (checked before each step; the worker passes its shutdown flag)
+    returns False. True when any lane made a call. Never raises: a lane that raises ends
+    alone and counts as making no call."""
+    try:
+        if slots is None:
+            slots = get_settings().project_research_concurrency
+        slots = min(max(1, int(slots)), RESEARCH_MAX_LANES)
+    except Exception as exc:  # noqa: BLE001 — see the docstring
+        logger.warning("Projects: research concurrency unreadable (%s)", type(exc).__name__)
+        return False
+    deadline = time.monotonic() + RESEARCH_ROUND_SECONDS
+    results = await asyncio.gather(
+        *(_research_lane(session_factory, deadline, should_continue) for _ in range(slots)),
+        return_exceptions=True,
+    )
+    for result in results:
+        if isinstance(result, BaseException):
+            logger.warning("Projects: a research lane failed (%s)", type(result).__name__)
+    return any(result is True for result in results)

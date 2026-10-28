@@ -30,7 +30,9 @@ stopping, restarting).
 - A project thread (its root's phase is `project_reply`; `src/agent/engine/projects.py`) is
   not an interview: no assessment, drop, decline, panel note or headline, and ⏸️ never closes
   it. BlackbirdBot closes it with a `<project_json>` sidecar, stripped before posting, and the
-  thread is recognised from the root's phase whether or not Projects is running.
+  thread is recognised from the root's phase whether or not Projects is running. Its turns
+  and its 12-message cap count posts, not Slack chunks (`group_posts`), and the cap never
+  closes it on BlackbirdBot's turn.
 - Interviews and projects run as sessions (`src/agent/sessions.py`, one `Sessions` on
   `ctx.sessions`): every lane asks it before acting (pitching, auto-activation, reply turns,
   project requests, postings and replies), so a system that is not running gets no turns and

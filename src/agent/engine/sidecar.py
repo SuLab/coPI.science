@@ -196,23 +196,80 @@ _PROJECT_JSON_RE = re.compile(r"<project_json>\s*(.*?)\s*</project_json>", re.DO
 _PROJECT_UNCLOSED_RE = re.compile(r"<project_json>.*\Z", re.DOTALL)
 
 
+# The close block's top-level keys besides `plan`. A block that ends one bracket short
+# leaves them inside `plan` (run 1abf809c), so a top level that lacks one takes it from there.
+_PROJECT_TOP_KEYS = ("position", "gaps", "disagreements")
+_CLOSER_FOR = {"{": "}", "[": "]"}
+
+
+def _missing_closers(text: str) -> str | None:
+    """The closing brackets that complete ``text``, innermost first: "" when it is balanced,
+    None when a bracket closes out of order or ``text`` ends inside a string. Brackets
+    inside strings (backslash escapes included) are skipped."""
+    open_closers: list[str] = []
+    in_string = escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in _CLOSER_FOR:
+            open_closers.append(_CLOSER_FOR[ch])
+        elif ch in "}]":
+            if not open_closers or open_closers.pop() != ch:
+                return None
+    if in_string:
+        return None
+    return "".join(reversed(open_closers))
+
+
 def _extract_project_json(raw: str | None) -> dict | None:
     """The LAST closed ``<project_json>`` block of ``raw`` as a dict, or None.
 
     One optional wrapping code fence is tolerated (``_unfence_sidecar``). Only the last
     block is read, unlike ``_extract_assessment_json``: a close is one decision, and an
     unusable final block is an unreadable close rather than a cue to fall back to an
-    earlier draft. None when there is no block, the block does not parse, or it is not an
-    object whose ``plan`` is an object. Never raises.
+    earlier draft. Raw control characters inside strings are accepted. Two repairs are
+    made, each logged as a warning that names the change but never the block's text:
+    a block that ends early (the parse fails at its last character) gets its missing
+    closing brackets (``_missing_closers``) appended; and each ``_PROJECT_TOP_KEYS`` key
+    the top level lacks is moved out of ``plan`` when ``plan`` holds it. None when there
+    is no block, the block still does not parse, or it is not an object whose ``plan`` is
+    an object. Never raises.
     """
     blocks = _PROJECT_JSON_RE.findall(raw or "")
     if not blocks:
         return None
+    body = _unfence_sidecar(blocks[-1])
     try:
-        parsed = json.loads(_unfence_sidecar(blocks[-1]))
+        parsed = json.loads(body, strict=False)
     except (json.JSONDecodeError, ValueError) as exc:
-        logger.warning("[project] close block unparseable: %s", exc)
-        return None
+        # Only an error at the very end is a block that stopped early; one mid-text
+        # (an unescaped quote, a misnested bracket) is not guessed at.
+        at_end = getattr(exc, "pos", -1) >= len(body.rstrip())
+        closers = _missing_closers(body) if at_end else None
+        if not closers:
+            logger.warning("[project] close block unparseable: %s", exc)
+            return None
+        try:
+            parsed = json.loads(body + closers, strict=False)
+        except (json.JSONDecodeError, ValueError):
+            logger.warning("[project] close block unparseable: %s", exc)
+            return None
+        logger.warning("[project] close block repaired: appended %r", closers)
+    if isinstance(parsed, dict) and isinstance(parsed.get("plan"), dict):
+        plan = parsed["plan"]
+        moved = [key for key in _PROJECT_TOP_KEYS if key not in parsed and key in plan]
+        for key in moved:
+            parsed[key] = plan.pop(key)
+        if moved:
+            logger.warning("[project] close block repaired: moved %s out of plan",
+                           ", ".join(moved))
     if not isinstance(parsed, dict) or not isinstance(parsed.get("plan"), dict):
         logger.warning("[project] close block is not an object with a plan object")
         return None

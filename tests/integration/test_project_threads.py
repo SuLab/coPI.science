@@ -103,6 +103,16 @@ def _history(count: int, *, lab_latest: str = "We have used that model.",
     return entries
 
 
+def _chunked(history: list[tuple[str | None, str]], chunks: int) -> list[tuple[str | None, str]]:
+    """``history`` with every entry after the root logged as ``chunks`` chunks, as a reply
+    over Slack's limit is; every chunk after the first ends " (part k)"."""
+    out = [history[0]]
+    for sender, text in history[1:]:
+        out.append((sender, text))
+        out.extend((sender, f"{text} (part {k})") for k in range(2, chunks + 1))
+    return out
+
+
 async def _projects(factory, run_id):
     async with factory() as db:
         return (await db.execute(
@@ -126,8 +136,9 @@ async def _drive_project(
     generate: Callable | None = None,
 ):
     """One turn of the hub (or, ``as_lab``, the lab) in a project thread whose log holds
-    ``history``. Returns ``(sim, agent, thread, calls, factory, run_id)``; ``calls`` holds
-    the kwargs of every ``generate_with_tools`` call."""
+    ``history``, whose ``None`` senders are the lab's PI (a human message). Returns
+    ``(sim, agent, thread, calls, factory, run_id)``; ``calls`` holds the kwargs of every
+    ``generate_with_tools`` call."""
     factory = async_sessionmaker(engine, expire_on_commit=False)
     run_id = await _new_run(factory)
     hub = Agent("blackbird", "BlackbirdBot", "Blackbird", role="scout_hub")
@@ -150,9 +161,10 @@ async def _drive_project(
         # Sub-second steps after ROOT: FakeSlackClient numbers its posts 1700000001.000000
         # upwards, and a seeded entry on one of those ts would swallow the turn's own post.
         ts = ROOT if i == 0 else f"1700000000.{i:06d}"
+        names = {"gordy": "GordyBot", "blackbird": "BlackbirdBot", None: "Gordy (PI)"}
         sim.message_log.append(LogEntry(
-            ts=ts, channel=CHANNEL, sender_agent_id=sender,
-            sender_name="GordyBot" if sender == "gordy" else "BlackbirdBot",
+            ts=ts, channel=CHANNEL, sender_agent_id=sender, sender_name=names[sender],
+            is_bot=sender is not None,
             content=text, thread_ts=None if i == 0 else ROOT, posted_at=float(ts),
             slack_ts=ts, slack_channel_id="C_GENERAL",
             phase="project_reply" if i == 0 else None,
@@ -269,7 +281,8 @@ async def test_close_at_the_last_turn_records_the_outcome_and_closes(engine, mon
 
 
 @pytest.mark.asyncio
-async def test_close_band_reached_at_ordinal_11_after_a_split(engine, monkeypatch):
+async def test_a_split_post_counts_once(engine, monkeypatch):
+    # A project thread counts posts, not log entries: the lab's post in two chunks is one.
     history = _history(10, lab_latest="✅ Agreed.", split_at=5)
     assert [s for s, _ in history][4:6] == ["gordy", "gordy"], "one lab post in two chunks"
     raw = "<slack_message>✅ Final plan as agreed.</slack_message>\n" + _close_block()
@@ -278,11 +291,109 @@ async def test_close_band_reached_at_ordinal_11_after_a_split(engine, monkeypatc
     )
     try:
         meta = calls[0]["log_meta"]
-        assert meta["message_ordinal"] == 11
+        assert meta["message_ordinal"] == 10
+        assert meta["thread_phase"] == "project_refine"
+        assert thread.status == "closed"
+        [project] = await _projects(factory, run_id)
+        assert project.status == STATUS_READY
+        [decision] = await _decisions(factory, run_id)
+        assert decision.outcome == "project_closed"
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_posts_split_three_ways_still_reach_the_close_at_12(engine, monkeypatch):
+    history = _chunked(_history(11, lab_latest="✅ Agreed, we can run it."), 3)
+    assert len(history) == 31
+    raw = "<slack_message>✅ We agree. Final plan below.</slack_message>\n" + _close_block()
+    sim, _agent, thread, calls, factory, run_id = await _drive_project(
+        engine, monkeypatch, raw, history=history,
+    )
+    try:
+        meta = calls[0]["log_meta"]
+        assert meta["message_ordinal"] == 12
         assert meta["thread_phase"] == "project_close"
+        [project] = await _projects(factory, run_id)
+        assert project.status == STATUS_READY
+        assert [(d.thread_id, d.outcome) for d in await _decisions(factory, run_id)] == [
+            (ROOT, "project_closed")
+        ]
+        assert thread.status == "closed"
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_hub_turn_past_the_cap_closes_instead_of_timing_out(engine, monkeypatch):
+    raw = "<slack_message>✅ We agree. Final plan below.</slack_message>\n" + _close_block()
+    sim, _agent, thread, calls, factory, run_id = await _drive_project(
+        engine, monkeypatch, raw, history=_history(13, lab_latest="✅ Agreed."),
+    )
+    try:
+        meta = calls[0]["log_meta"]
+        assert meta["message_ordinal"] == 14
+        assert meta["thread_phase"] == "project_close"
+        [project] = await _projects(factory, run_id)
+        assert project.status == STATUS_READY
+        [decision] = await _decisions(factory, run_id)
+        assert decision.outcome == "project_closed"
+        assert thread.status == "closed"
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_human_message_counts_and_the_hub_still_closes(engine, monkeypatch):
+    history = _history(11, lab_latest="✅ Agreed.")
+    history.insert(6, (None, "Looks good from here."))
+    assert len(history) == 12
+    raw = "<slack_message>✅ We agree. Final plan below.</slack_message>\n" + _close_block()
+    sim, _agent, thread, calls, factory, run_id = await _drive_project(
+        engine, monkeypatch, raw, history=history,
+    )
+    try:
+        meta = calls[0]["log_meta"]
+        assert meta["message_ordinal"] == 13
+        assert meta["thread_phase"] == "project_close"
+        [project] = await _projects(factory, run_id)
+        assert project.status == STATUS_READY
+        assert thread.status == "closed"
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_lab_turn_at_the_cap_still_times_out(engine, monkeypatch):
+    sim, _agent, thread, calls, factory, run_id = await _drive_project(
+        engine, monkeypatch, "<slack_message>One more thing.</slack_message>",
+        history=_history(12), as_lab=True,
+    )
+    try:
+        assert calls == []
+        assert thread.status == "closed"
+        [decision] = await _decisions(factory, run_id)
+        assert decision.outcome == "timeout"
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_an_early_close_one_brace_short_is_recorded(engine, monkeypatch):
+    # Run 1abf809c's shape: `plan` never closed, so `gaps` and `disagreements` sit inside it.
+    block = ('<project_json>{"position": "agree", "plan": {' + json.dumps(PLAN)[1:-1]
+             + ', "gaps": [], "disagreements": []}</project_json>')
+    raw = "<slack_message>✅ Then we are done: final plan below.</slack_message>\n" + block
+    sim, _agent, thread, calls, factory, run_id = await _drive_project(
+        engine, monkeypatch, raw, history=_history(9, lab_latest="✅ This plan works for us."),
+    )
+    try:
         assert thread.status == "closed"
         [decision] = await _decisions(factory, run_id)
         assert decision.outcome == "project_closed"
+        [project] = await _projects(factory, run_id)
+        assert project.status == STATUS_READY
+        assert project.final["plan"] == PLAN
     finally:
         await _delete_run(factory, run_id)
 
