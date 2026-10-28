@@ -16,6 +16,12 @@ For how the parts fit together, read
     again.</dd>
     {% endif %}
 
+    <dt id="term-acknowledged-limits">Acknowledged limits</dt>
+    <dd>On a <strong>Ready</strong> project's details page, under <strong>Positions</strong>:
+    the points the close recorded as limits of a plan that BlackbirdBot and the lab both agreed.
+    On a <strong>Not agreed</strong> project the same list is headed <strong>Gaps</strong>. See
+    <a href="{{ page_url(request, 'help_page', slug='projects', fragment='detail') }}">The details page</a>.</dd>
+
     {% if permissions.staff %}
     <dt id="term-activate">Activate</dt>
     <dd>The button that puts a pending lab agent live once its Slack bot is installed. It
@@ -83,13 +89,15 @@ For how the parts fit together, read
     The chat is not available while an admin is viewing the site as someone else.{% endif %}</dd>
 
     <dt id="term-assignment">Assignment ("Assign to")</dt>
-    <dd>Who an assessment is assigned to, shown as <strong>Assigned</strong> on its card and
-    page. <strong>Assigned to me</strong> on the Assessments page shows only yours.
+    <dd>Who an assessment or a project is assigned to, shown as <strong>Assigned</strong> on
+    its card and page. <strong>Assigned to me</strong> on the Assessments and Projects pages
+    shows only yours.
     {% if permissions.staff %}Managers and admins set it with <strong>Assign to</strong> and
-    <strong>Remove</strong> on the assessment's page; the list of names includes managers
-    and admins as well as reviewers. The older label was <strong>Assign reviewer</strong>.
-    {% else %}A manager can assign assessments.{% endif %} An assignment never changes who
-    can open or review an assessment.</dd>
+    <strong>Remove</strong> on the assessment's or project's page; the list of names includes
+    managers and admins as well as reviewers. The older label was <strong>Assign
+    reviewer</strong>.
+    {% else %}A manager can assign assessments and projects.{% endif %} An assignment never
+    changes who can open or review an assessment or a project.</dd>
 
     {% if permissions.staff %}
     <dt id="term-awaiting-token">Awaiting Token</dt>
@@ -135,7 +143,9 @@ For how the parts fit together, read
     <dt id="term-consult">Consult</dt>
     <dd>One question BlackbirdBot put to a specialist during an interview, and the answer: a
     signal, the specialist's concerns and questions to ask the PI. See Specialist
-    panel.</dd>
+    panel. BlackbirdBot also consults specialists while refining a project; a project's page
+    shows what each specialist established, its concerns and its questions, never a
+    signal.</dd>
 
     {% if permissions.staff %}
     <dt id="term-corpus">Corpus</dt>
@@ -184,7 +194,9 @@ For how the parts fit together, read
     <dt id="term-evidence-summary">Evidence summary</dt>
     <dd>A section near the top of an assessment's page that sorts what the assessment holds
     into strengths, risks, mid-scale dimensions and things not established. It is worked out
-    from the stored dimension scores, gates, red flags and specialist signals.</dd>
+    from the stored dimension scores, gates, red flags and specialist signals. A project's
+    page has its own Evidence summary: what each specialist established, its concerns and its
+    questions to ask, from the latest consult in each specialist's domain.</dd>
 
     {% if permissions.staff %}
     <dt id="term-excluded-papers">Excluded papers</dt>
@@ -231,7 +243,7 @@ For how the parts fit together, read
 
     <dt id="term-in-one-minute">In one minute</dt>
     <dd>BlackbirdBot's short pitch of the idea, at the top of an assessment's card and
-    page.</dd>
+    page; on a project's card and page, BlackbirdBot's summary of the project.</dd>
 
     <dt id="term-in-progress">In progress</dt>
     <dd>A project outcome: the project is still open in the live run. The Projects list's
@@ -276,7 +288,9 @@ For how the parts fit together, read
 
     <dt id="term-key-points">Key points</dt>
     <dd>BlackbirdBot's short list of the points that matter most about an idea, sometimes in
-    labelled groups, beside "In one minute" on a card and on an assessment's page.</dd>
+    labelled groups, beside "In one minute" on a card and on an assessment's page. On a
+    project's card and page, Key points gives parts of the plan, both positions and
+    counts of what the project recorded.</dd>
 
     <dt id="term-lab">Lab</dt>
     <dd>A PI's lab, represented in Slack by its lab agent. On the Assessments pages,
@@ -319,14 +333,20 @@ For how the parts fit together, read
     pages show the reason, for example "No idea found" or "The run was finalized first". See
     <a href="{{ page_url(request, 'help_page', slug='projects', fragment='list') }}">The Projects list</a>.</dd>
 
+    <dt id="term-not-found-in-profile">Not found in the lab's profile</dt>
+    <dd>Older wording for <strong>stated by the lab</strong>: see Stated by the lab.</dd>
+
     <dt id="term-opening-plan">Opening plan</dt>
     <dd>The plan BlackbirdBot posts with a project, one line per field (indication, target or
     mechanism, model, controls, standard of care, readout, design, time and budget, and the
     lab's tools and models), filled as far as its research supports. The lab and BlackbirdBot
-    then refine it into the final plan. The details page shows both.</dd>
+    then refine it into the final plan. The details page shows the final plan, marking each
+    field "changed since posting" where it differs, with the opening text under <strong>As
+    first posted</strong>; a project with no close shows the opening plan, headed
+    <strong>Plan (as posted)</strong>.</dd>
 
     <dt id="term-opening-questions">Opening questions</dt>
-    <dd>Suggested questions about one assessment, offered in its chat. Some also
+    <dd>Suggested questions about one assessment or project, offered in its chat. Some also
     appear at the end of a section of the page, as buttons starting
     <strong>Ask:</strong>. Clicking either kind sends that question to the chat straight
     away.</dd>
@@ -399,6 +419,21 @@ For how the parts fit together, read
     or <strong>Not finished</strong>, and managers and reviewers review it on the Projects page.
     See <a href="{{ page_url(request, 'help_page', slug='projects', fragment='list') }}">Projects</a>.</dd>
 
+    <dt id="term-project-chat">Project chat</dt>
+    <dd>A chat on a finished project's details page, opened with <strong>Ask about this
+    project</strong>, where you can ask questions about that project. It does not rate the
+    project, recommend whether to fund it, or write your review. See
+    <a href="{{ page_url(request, 'help_page', slug='projects', fragment='chat') }}">Asking about a project</a>.</dd>
+
+    <dt id="term-project-stages">Project stages</dt>
+    <dd>Where an open project stands, on its card in the Projects list: <strong>Waiting for
+    research</strong> (requested, research not started yet), <strong>Researching</strong>,
+    <strong>Ready to post</strong> (researched, the posting not yet in Slack),
+    <strong>Posted</strong> (in Slack, waiting for the lab's reply) and
+    <strong>Refining</strong> (the lab has replied and the plan is being refined in the
+    thread). "Paused" before the stage means the run is stopped or held. See
+    <a href="{{ page_url(request, 'help_page', slug='projects', fragment='list') }}">The Projects list</a>.</dd>
+
     {% if permissions.staff %}
     <dt id="term-prompt-suggestion">Prompt suggestion</dt>
     <dd>A proposed change to a prompt or to the rubric, written by the prompt-suggestion bot
@@ -410,6 +445,12 @@ For how the parts fit together, read
     <dd>On the PIs page, how many of a PI's publications fall inside their JHU tenure.
     Publications with no year are left out, and the count notes how many. Without a tenure
     start the column counts the full career and says so.</dd>
+
+    <dt id="term-quick-review">Quick review (projects)</dt>
+    <dd>A short review form on each finished project's card in the Projects list: a rating,
+    Fund or Don't fund, and a comment. It writes your one review of the project; editing it is
+    on the project's own page. See
+    <a href="{{ page_url(request, 'help_page', slug='projects', fragment='reviewing') }}">Recording your review</a>.</dd>
 
     <dt id="term-quick-scoring">Quick scoring</dt>
     <dd>A short review form at the foot of each card on the Assessments page: an overall
@@ -493,8 +534,8 @@ For how the parts fit together, read
     <strong>Completed</strong>.</dd>
 
     <dt id="term-sources">Sources</dt>
-    <dd>Under an answer in the assessment chat, the parts of the assessment page the answer
-    drew on. <strong>Show in page</strong> jumps to one of them.</dd>
+    <dd>Under an answer in the assessment chat or the project chat, the parts of the page the
+    answer drew on. <strong>Show in page</strong> jumps to one of them.</dd>
 
     <dt id="term-specialist-panel">Specialist panel</dt>
     <dd>The AI specialists BlackbirdBot can consult during an interview, each expert in one
@@ -526,6 +567,15 @@ For how the parts fit together, read
     unchanged; <strong>file missing</strong> means it cannot be compared.</dd>
     {% endif %}
 
+    <dt id="term-stated-by-the-lab">Stated by the lab, in the lab's profile</dt>
+    <dd>The marks on each item under <strong>The lab's tools and models</strong> on a
+    project's details page. <strong>in the lab's profile</strong> means the item's name
+    contains a method or model listed in the lab's public profile, or one of the project's
+    anchors, and the mark names what it matched; only names of more than one word count, and a
+    target or keyword alone does not. <strong>stated by the lab</strong> means the plan names
+    it but the profile does not show it. Older wording: "not found in the lab's profile". See
+    <a href="{{ page_url(request, 'help_page', slug='projects', fragment='detail') }}">The details page</a>.</dd>
+
     {% if permissions.staff %}
     <dt id="term-suggested-confirmed-companies">Suggested and confirmed companies</dt>
     <dd><strong>Suggested</strong> companies were found by discovery and reach nothing until a
@@ -549,7 +599,8 @@ For how the parts fit together, read
     <dt id="term-unreviewed-reviewed">Unreviewed, Reviewed</dt>
     <dd>The tabs on the Assessments page. <strong>Reviewed</strong> holds assessments with
     written feedback; <strong>Unreviewed</strong> those with none; <strong>All</strong> both.
-    Being assigned does not make an assessment reviewed.</dd>
+    Being assigned does not make an assessment reviewed. The Projects page has the same tabs:
+    a project is <strong>Reviewed</strong> once anyone has reviewed it.</dd>
 
     <dt id="term-verdict">Verdict</dt>
     <dd>BlackbirdBot's conclusion at the end of an interview. Its assessment records it; an

@@ -202,3 +202,216 @@ async def test_deleted_reviewer_keeps_the_name(client, db_session):
         await client.get(f"/workspace/projects/{project.id}", headers=auth_headers(viewer.id))
     ).text
     assert "Departed Reviewer" in html
+
+
+# Return state (plan contract C6): the list's quick review and the details page's forms.
+
+LIST = {**GOOD, "surface": "projects-list"}
+
+
+def _flashes(response) -> list[dict]:
+    return (session_from_response(response) or {}).get(FLASH_SESSION_KEY, [])
+
+
+async def test_quick_review_returns_to_card_anchor(client, db_session):
+    project = await _project(db_session)
+    reviewer = await factories.make_user(db_session, user_role="reviewer")
+    response = await client.post(
+        f"/reviews/projects/{project.id}/review",
+        data={**LIST, "review": "all", "next_id": ""},
+        headers=auth_headers(reviewer.id),
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/workspace/projects?review=all#p-{project.id}"
+    assert _flashes(response) == [{"text": "Review saved.", "kind": "success"}]
+
+
+async def test_quick_review_moves_to_next_card_on_unreviewed(client, db_session):
+    project = await _project(db_session)
+    following = await _project(db_session)
+    reviewer = await factories.make_user(db_session, user_role="reviewer")
+    response = await client.post(
+        f"/reviews/projects/{project.id}/review",
+        data={**LIST, "next_id": str(following.id)},
+        headers=auth_headers(reviewer.id),
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/workspace/projects#p-{following.id}"
+    assert _flashes(response) == [
+        {"text": "Review saved; moved to Reviewed.", "kind": "success"}
+    ]
+    assert len(await _reviews(db_session, project.id)) == 1
+
+
+async def test_quick_review_last_card_has_no_fragment(client, db_session):
+    project = await _project(db_session)
+    reviewer = await factories.make_user(db_session, user_role="reviewer")
+    response = await client.post(
+        f"/reviews/projects/{project.id}/review",
+        data={**LIST, "lab": "lab1", "next_id": ""},
+        headers=auth_headers(reviewer.id),
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/workspace/projects?lab=lab1"
+
+
+async def test_quick_review_after_someone_else_reviewed(client, db_session):
+    project = await _project(db_session)
+    following = await _project(db_session)
+    other = await factories.make_user(db_session, user_role="manager")
+    await submit_project_review(db_session, project=project, reviewer=other, rating=2,
+                                comment="", fund=False)
+    reviewer = await factories.make_user(db_session, user_role="reviewer")
+    response = await client.post(
+        f"/reviews/projects/{project.id}/review",
+        data={**LIST, "next_id": str(following.id)},
+        headers=auth_headers(reviewer.id),
+    )
+    assert response.headers["location"] == f"/workspace/projects#p-{following.id}"
+    assert _flashes(response) == [
+        {"text": "Review saved; moved to Reviewed.", "kind": "success"}
+    ]
+    assert {r.reviewer_user_id for r in await _reviews(db_session, project.id)} == {
+        other.id,
+        reviewer.id,
+    }
+
+
+async def test_quick_review_duplicate(client, db_session):
+    project = await _project(db_session)
+    following = await _project(db_session)
+    reviewer = await factories.make_user(db_session, user_role="reviewer")
+    await submit_project_review(db_session, project=project, reviewer=reviewer, rating=4,
+                                comment="", fund=True)
+    response = await client.post(
+        f"/reviews/projects/{project.id}/review",
+        data={**LIST, "next_id": str(following.id)},
+        headers=auth_headers(reviewer.id),
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/workspace/projects#p-{following.id}"
+    assert _flashes(response) == [
+        {
+            "text": "You have already reviewed this project; edit your review on its page.",
+            "kind": "info",
+        }
+    ]
+    assert len(await _reviews(db_session, project.id)) == 1
+
+
+async def test_junk_state_dropped(client, db_session):
+    first = await _project(db_session)
+    second = await _project(db_session)
+    reviewer = await factories.make_user(db_session, user_role="reviewer")
+    headers = auth_headers(reviewer.id)
+    response = await client.post(
+        f"/reviews/projects/{first.id}/review",
+        data={**LIST, "review": "all", "run_id": "x", "lab": "l" * 60, "sort": "bogus",
+              "next_id": "not-a-uuid"},
+        headers=headers,
+    )
+    assert response.headers["location"] == f"/workspace/projects?review=all#p-{first.id}"
+    response = await client.post(
+        f"/reviews/projects/{second.id}/review",
+        data={**LIST, "review": "all", "lab": "lab1\r\nX-Injected: y"},
+        headers=headers,
+    )
+    location = response.headers["location"]
+    assert "\r" not in location and "\n" not in location
+    assert "lab" not in location.split("#")[0]
+    assert location == f"/workspace/projects?review=all#p-{second.id}"
+
+
+async def test_quick_review_bad_next_id_has_no_fragment(client, db_session):
+    project = await _project(db_session)
+    reviewer = await factories.make_user(db_session, user_role="reviewer")
+    response = await client.post(
+        f"/reviews/projects/{project.id}/review",
+        data={**LIST, "next_id": "p-1#x"},
+        headers=auth_headers(reviewer.id),
+    )
+    assert response.headers["location"] == "/workspace/projects"
+
+
+async def test_quick_review_mine_filter_moves_to_next_card(client, db_session):
+    project = await _project(db_session)
+    following = await _project(db_session)
+    reviewer = await factories.make_user(db_session, user_role="reviewer")
+    response = await client.post(
+        f"/reviews/projects/{project.id}/review",
+        data={**LIST, "review": "all", "mine": "1", "next_id": str(following.id)},
+        headers=auth_headers(reviewer.id),
+    )
+    assert response.headers["location"] == (
+        f"/workspace/projects?review=all&mine=1#p-{following.id}"
+    )
+    assert _flashes(response) == [{"text": "Review saved.", "kind": "success"}]
+
+
+async def test_detail_surface_keeps_state(client, db_session):
+    project = await _project(db_session)
+    reviewer = await factories.make_user(db_session, user_role="reviewer")
+    admin = await factories.make_user(db_session, user_role="admin")
+    state = {"surface": "project-detail", "lab": "lab1"}
+    expected = f"/workspace/projects/{project.id}?lab=lab1#reviews"
+
+    response = await client.post(
+        f"/reviews/projects/{project.id}/review",
+        data={**GOOD, **state},
+        headers=auth_headers(reviewer.id),
+    )
+    assert (response.status_code, response.headers["location"]) == (303, expected)
+    assert _last_flash(response) == {"text": "Review saved.", "kind": "success"}
+    (review,) = await _reviews(db_session, project.id)
+
+    response = await client.post(
+        f"/reviews/project-reviews/{review.id}/edit",
+        data={**GOOD, **state},
+        headers=auth_headers(reviewer.id),
+    )
+    assert (response.status_code, response.headers["location"]) == (303, expected)
+    assert _last_flash(response) == {"text": "Review updated.", "kind": "success"}
+
+    response = await client.post(
+        f"/reviews/project-reviews/{review.id}/delete", data=state, headers=auth_headers(admin.id)
+    )
+    assert (response.status_code, response.headers["location"]) == (303, expected)
+    assert _last_flash(response) == {"text": "Review deleted.", "kind": "success"}
+
+
+async def test_no_surface_behaves_as_before(client, db_session):
+    project = await _project(db_session)
+    reviewer = await factories.make_user(db_session, user_role="reviewer")
+    admin = await factories.make_user(db_session, user_role="admin")
+    response = await client.post(
+        f"/reviews/projects/{project.id}/review",
+        data={**GOOD, "lab": "lab1", "next_id": ""},
+        headers=auth_headers(reviewer.id),
+    )
+    assert _redirects_to_reviews(response, project.id)
+    (review,) = await _reviews(db_session, project.id)
+    response = await client.post(
+        f"/reviews/project-reviews/{review.id}/edit",
+        data={**GOOD, "lab": "lab1"},
+        headers=auth_headers(reviewer.id),
+    )
+    assert _redirects_to_reviews(response, project.id)
+    response = await client.post(
+        f"/reviews/project-reviews/{review.id}/delete",
+        data={"lab": "lab1"},
+        headers=auth_headers(admin.id),
+    )
+    assert _redirects_to_reviews(response, project.id)
+
+
+async def test_impersonated_quick_review_refused(client, db_session):
+    project = await _project(db_session)
+    admin = await factories.make_user(db_session, user_role="admin")
+    manager = await factories.make_user(db_session, user_role="manager")
+    response = await client.post(
+        f"/reviews/projects/{project.id}/review",
+        data={**LIST, "next_id": ""},
+        headers=auth_headers(admin.id, impersonate=manager.id),
+    )
+    assert response.status_code == 403
+    assert await _reviews(db_session, project.id) == []

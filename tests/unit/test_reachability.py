@@ -1056,10 +1056,12 @@ def test_static_link_resolution_coverage_is_reported():
     # The shared run bar (2026-10-19) takes its form action as a parameter, so its one
     # `{{ action }}` is unresolvable; each page passes `page_url(...)` of itself.
     # The Projects details page (2026-10-26) adds two: each source's `{{ source.url }}` (PubMed or ClinicalTrials.gov) and the admin's `{{ project.calls_url }}`.
+    # The Projects redesign (2026-10-27) adds fifteen same-page `#…` links: eleven on the
+    # details page (its jump nav and the brief's count links) and four on the Projects help page.
     unresolvable = len(values) - len(resolvable)
-    assert unresolvable <= 67, (
+    assert unresolvable <= 82, (
         f"{unresolvable} of {len(values)} href/action values do not resolve to a "
-        "checkable local path (was 67) — the matcher probably regressed, or a new "
+        "checkable local path (was 82) — the matcher probably regressed, or a new "
         "link is built from a variable"
     )
 

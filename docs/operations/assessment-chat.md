@@ -4,12 +4,13 @@ Reference detail behind the rules in the root `CLAUDE.md`, which keeps only what
 every session needs. Dated statements hold as of the date they give; re-measure a
 count or a line number before relying on it.
 
-`/admin/assessments/{id}` and `/manager/assessments/{id}` carry an "Ask about this
-assessment" drawer: admin, manager and reviewer can ask questions about THAT assessment
-and get short, cited, streamed answers from `claude-opus-5-5`
-(`settings.llm_assessment_chat_model`). Design and evidence:
-`docs/specs/2026-09-24-assessment-chat-design.md`; plan:
-`docs/plans/2026-09-24-assessment-chat-plan.md`.
+The assessment page, `/workspace/assessments/{id}` (the old `/admin/…` and `/manager/…`
+detail paths redirect there), carries an "Ask about this assessment" drawer: admin,
+manager and reviewer can ask questions about THAT assessment and get short, cited,
+streamed answers from `claude-opus-5-5` (`settings.llm_assessment_chat_model`). Design
+and evidence: `docs/specs/2026-09-24-assessment-chat-design.md`; plan:
+`docs/plans/2026-09-24-assessment-chat-plan.md`. A finished BlackbirdBot project has
+the same chat over its own record: see "Project chat" below.
 
 - **The record is the page, per tier.** `src/services/assessment_chat_record.py` builds
   five citation documents — the verdict, the interview transcript, the specialist panel
@@ -78,18 +79,20 @@ and get short, cited, streamed answers from `claude-opus-5-5`
   it, and a refused one is shown as refused and never replayed.
 - **Kill switch:** `ASSESSMENT_CHAT_ENABLED=false` in `.env`, then
   `$DC up -d --force-recreate blackbird-app` — the button disappears and the routes
-  answer 503.
+  answer 503. It switches the project chat off too.
 - **Not logged to `llm_call_logs`** (like the review bot); the ledger is the cost
   record. Operator SQL:
 
-      -- questions and tokens per day and model
-      SELECT date_trunc('day', created_at) AS day, model, served_by_model, status, count(*),
+      -- questions and tokens per day, chat and model (subject NULL = before 0076, assessments)
+      SELECT date_trunc('day', created_at) AS day, coalesce(subject, 'assessment') AS subject,
+             model, served_by_model, status, count(*),
              sum(input_tokens), sum(output_tokens), sum(cache_read_input_tokens),
              sum(cache_creation_input_tokens)
-      FROM assessment_chat_usage GROUP BY 1, 2, 3, 4 ORDER BY 1 DESC;
-      -- refusals by category (no content)
-      SELECT refusal_category, count(*) FROM assessment_chat_turns
-      WHERE status = 'refused' GROUP BY 1;
+      FROM assessment_chat_usage GROUP BY 1, 2, 3, 4, 5 ORDER BY 1 DESC;
+      -- refusals by chat and category (no content)
+      SELECT CASE WHEN project_id IS NULL THEN 'assessment' ELSE 'project' END AS subject,
+             refusal_category, count(*) FROM assessment_chat_turns
+      WHERE status = 'refused' GROUP BY 1, 2;
 
 **Tildes render literally** (2026-09-29, P0-12): the chat's private marked instance
 disables GFM strikethrough like the detail pages do, so "~30%" is not turned into a
@@ -167,11 +170,13 @@ better human reviews, so the questions point at what a reviewer has to judge.
   question came from: `typed`, `drawer_generated`, `drawer_template`, `inline_generated`,
   `inline_template` (NULL before `0059`). Neither counts an impersonated session.
 
-      -- openings and questions per day, by entry point and origin
-      SELECT date_trunc('day', created_at) AS day, opened_via, count(*)
-      FROM assessment_chat_opens GROUP BY 1, 2 ORDER BY 1 DESC;
-      SELECT date_trunc('day', created_at) AS day, question_origin, count(*)
-      FROM assessment_chat_usage GROUP BY 1, 2 ORDER BY 1 DESC;
+      -- openings and questions per day, by chat, entry point and origin
+      SELECT date_trunc('day', created_at) AS day, coalesce(subject, 'assessment') AS subject,
+             opened_via, count(*)
+      FROM assessment_chat_opens GROUP BY 1, 2, 3 ORDER BY 1 DESC;
+      SELECT date_trunc('day', created_at) AS day, coalesce(subject, 'assessment') AS subject,
+             question_origin, count(*)
+      FROM assessment_chat_usage GROUP BY 1, 2, 3 ORDER BY 1 DESC;
       -- human reviews written after their author asked the chat about that assessment
       SELECT count(*) FILTER (WHERE asked) AS after_chat, count(*) AS reviews FROM (
         SELECT EXISTS (SELECT 1 FROM assessment_chat_usage u
@@ -182,3 +187,57 @@ better human reviews, so the questions point at what a reviewer has to judge.
       -- generation outcomes
       SELECT context_tier, status, error_code, count(*), sum(attempts)
       FROM assessment_chat_suggestions GROUP BY 1, 2, 3;
+
+## Project chat (migration `0076`)
+
+A finished BlackbirdBot project's details page carries an "Ask about this project"
+drawer, built from the same partial (`templates/assessments/_chat_drawer.html` with
+`chat_kind="project"`) and script, plus inline "Ask:" buttons at the end of the Brief,
+Evidence summary, Plan and Positions cards and a "chat" button on the list card (the
+`#chat` fragment). Design: `docs/specs/2026-10-27-projects-pages-redesign-design.md` §8.
+Everything above holds unless this section says otherwise.
+
+- **Finished projects only.** Finished as the page shows it: Ready, Not agreed or Not
+  finished, including an open project of a finalized run. An open project's record would
+  change under the conversation, so its routes answer 409 `project_open`. A finished
+  project's plan, posts and close no longer change, so it has no verdict revisions: no
+  "Verdict updated" divider and no notice. Its record still holds the project's reviews
+  and the tool marks matched against the lab's current profile, so a new, edited or
+  deleted review (or a regenerated profile) changes the record, and earlier answers then
+  say the record changed after them.
+- **Routes** (`src/routers/project_chat.py`): `GET /project-chat/{id}`, and `POST`
+  `/project-chat/{id}/messages`, `/clear`, `/opened`. Refusals in order: 403
+  `impersonating`, 403 `forbidden` (only admin, manager and reviewer; never a PI), 503
+  `disabled`, 404 `not_found`, 409 `project_open`, 415; then the ask's own checks.
+- **Switch:** `PROJECT_CHAT_ENABLED`, default false. Switch it on in `.env` only after a
+  real-model smoke question on a finished project, then
+  `$DC up -d --force-recreate blackbird-app` (the worker does not read it).
+  `ASSESSMENT_CHAT_ENABLED=false` also turns the project chat off.
+- **One budget.** The project chat uses the assessment chat's model, effort and limits
+  (every `assessment_chat_*` setting) and its tables, so one answer in flight per user,
+  the daily question and dollar limits and the spend lock cover both chats together.
+  The conversation, its history, the turn cap, Clear and the opens are per subject.
+- **The record** (`src/services/project_chat_record.py`): five citation documents built
+  from the project page's read model — Project (brief, outcome, plan, positions, tools),
+  Conversation (the posting, the lab's reply and the thread's posts), Specialists (each
+  consult's question and findings), Research (the sources) and Reviews (the project
+  reviews). Every tier gets the same record. No record holds a specialist's signal,
+  confidence or raw opinion, any cost or call count, a score or a recommendation;
+  `tests/integration/test_project_chat_parity.py` pins it.
+- **Prompt:** `prompts/project-chat.md`, read per question like the assessment
+  prompt (missing file: 503). It never rates the project, recommends whether to fund
+  it or writes the user's review. It is in no role's prompt set: an edit bumps no version.
+- **Opening questions:** the template set only (at most four, each anchored to its
+  card); no generated sets, so no worker change.
+- **Storage (`0076`).** `assessment_chat_turns.project_id` → `hub_projects` ON DELETE
+  CASCADE (a project's turns go with it), `assessment_id` nullable, and the check
+  `ck_assessment_chat_turns_one_subject` (exactly one of the two). The ledger
+  (`assessment_chat_usage`) and `assessment_chat_opens` gain `project_id` (ON DELETE
+  SET NULL, so they outlive the project) and `subject` (`assessment` | `project`; NULL
+  on rows written before `0076`, all assessments, not backfilled). The table names keep
+  their `assessment_` prefix. The downgrade deletes project turns only.
+
+      -- project chat questions and spend per day
+      SELECT date_trunc('day', created_at) AS day, status, count(*),
+             sum(input_tokens), sum(output_tokens)
+      FROM assessment_chat_usage WHERE subject = 'project' GROUP BY 1, 2 ORDER BY 1 DESC;

@@ -16,7 +16,7 @@ What follows --target and what does not:
     or the comparison FAILs; a snapshot ``target`` other than --target only WARNs.
   * The pinned table/column/index/constraint expectations (EXPECTED_TABLES,
     EXPECTED_COLUMNS, EXPECTED_INDEXES, EXPECTED_CONSTRAINTS) describe the 0019-0023
-    chain and the 0056, 0062, 0065, 0068, 0069, 0070, 0071, 0072 and 0073 objects only (VERIFIED_REVISIONS), whatever the target.
+    chain and the 0056, 0062, 0065, 0068, 0069, 0070, 0071, 0072, 0073, 0075 and 0076 objects only (VERIFIED_REVISIONS), whatever the target.
 
 Exit codes (contract):
 
@@ -241,22 +241,41 @@ EXPECTED_COLUMNS: tuple[tuple[str, str, str, bool, str | None], ...] = (
     ("hub_project_reviews", "fund", "boolean", False, ""),
     ("hub_project_reviews", "created_at", "timestamp with time zone", False, "now()"),
     ("hub_project_reviews", "updated_at", "timestamp with time zone", False, "now()"),
+    # 0075 — hub_project_review_assignments. The migration writes no row.
+    ("hub_project_review_assignments", "id", "uuid", False, None),
+    ("hub_project_review_assignments", "project_id", "uuid", False, ""),
+    ("hub_project_review_assignments", "assignee_user_id", "uuid", False, ""),
+    ("hub_project_review_assignments", "assignee_name", "character varying", False, ""),
+    ("hub_project_review_assignments", "assigned_by_user_id", "uuid", True, ""),
+    ("hub_project_review_assignments", "assigned_by_name", "character varying", False, ""),
+    ("hub_project_review_assignments", "created_at", "timestamp with time zone", False, "now()"),
+    # 0076 — the chat tables' project subject. NULL subject means "written before 0076"
+    # (every such row an assessment); never back-filled.
+    ("assessment_chat_turns", "project_id", "uuid", True, ""),
+    ("assessment_chat_usage", "project_id", "uuid", True, ""),
+    ("assessment_chat_usage", "subject", "character varying", True, ""),
+    ("assessment_chat_opens", "project_id", "uuid", True, ""),
+    ("assessment_chat_opens", "subject", "character varying", True, ""),
+    # 0076 RELAXES this one (a project turn has none). If it is still NOT NULL, 0076 did not
+    # really run.
+    ("assessment_chat_turns", "assessment_id", "uuid", True, ""),
 )
 
 EXPECTED_TABLES = (
     "pi_dm_messages", "cohorts", "cohort_memberships", "cohort_audit_events", "rubric_documents",
     "publication_candidates", "authorship_claim_checks", "hub_declines",
     "interview_trajectories", "hub_projects", "hub_project_calls", "hub_project_clocks",
-    "hub_project_reviews",
+    "hub_project_reviews", "hub_project_review_assignments",
 )
 
 #: Revisions this script's EXPECTED_TABLES/EXPECTED_COLUMNS/EXPECTED_INDEXES below
-#: actually verify. Pinned: 0019-0023, 0056, 0062, 0065, 0068, 0069, 0070, 0071, 0072 and 0073. Not pinned (documented omission):
-#: the 0024-0055, 0057-0061, 0063-0064 and 0066-0067 objects, which preflight's PLANNED_OBJECTS collision check and
+#: actually verify. Pinned: 0019-0023, 0056, 0062, 0065, 0068, 0069, 0070, 0071, 0072, 0073,
+#: 0075 and 0076. Not pinned (documented omission): the 0024-0055, 0057-0061, 0063-0064
+#: and 0066-0067 objects (0074 creates none), which preflight's PLANNED_OBJECTS collision check and
 #: tests/integration/test_model_migration_parity.py cover. Bump this tuple (and add the
 #: corresponding EXPECTED_* entries) to extend the pins. The row-count and enum checks
 #: do not read it: they are scoped by revision span instead.
-VERIFIED_REVISIONS: tuple[str, ...] = ("0019", "0020", "0021", "0022", "0023", "0056", "0062", "0065", "0068", "0069", "0070", "0071", "0072", "0073")
+VERIFIED_REVISIONS: tuple[str, ...] = ("0019", "0020", "0021", "0022", "0023", "0056", "0062", "0065", "0068", "0069", "0070", "0071", "0072", "0073", "0075", "0076")
 
 #: index name -> the exact pg_indexes.indexdef tail, so a same-named index on the WRONG
 #: columns (or a partial index that lost its predicate) fails too.
@@ -311,6 +330,16 @@ EXPECTED_INDEXES: dict[str, str] = {
     "ix_hub_projects_run_reply": "USING btree (simulation_run_id, reply_ts)",
     "ix_hub_project_calls_updated": "USING btree (updated_at)",
     "ix_hub_project_calls_project": "USING btree (project_id)",
+    # 0075: the unique constraint's backing index and the two plain indexes.
+    "uq_hub_project_review_assignment_once": "USING btree (project_id, assignee_user_id)",
+    "ix_hub_project_review_assignments_project_id": "USING btree (project_id)",
+    "ix_hub_project_review_assignments_assignee": "USING btree (assignee_user_id)",
+    # 0076.
+    "ix_assessment_chat_turns_project_conversation": (
+        "USING btree (project_id, user_id, context_tier, created_at)"
+    ),
+    "ix_assessment_chat_usage_project_id": "USING btree (project_id)",
+    "ix_assessment_chat_opens_project_id": "USING btree (project_id)",
 }
 
 #: constraint name -> (table, pg_get_constraintdef)
@@ -391,6 +420,37 @@ EXPECTED_CONSTRAINTS: dict[str, tuple[str, str]] = {
     "hub_project_reviews_reviewer_user_id_fkey": (
         "hub_project_reviews", "REFERENCES users(id) ON DELETE SET NULL",
     ),
+    # 0075. Its foreign keys are inline, so they carry Postgres's default names.
+    "uq_hub_project_review_assignment_once": (
+        "hub_project_review_assignments", "UNIQUE (project_id, assignee_user_id)",
+    ),
+    "hub_project_review_assignments_project_id_fkey": (
+        "hub_project_review_assignments", "REFERENCES hub_projects(id) ON DELETE CASCADE",
+    ),
+    "hub_project_review_assignments_assignee_user_id_fkey": (
+        "hub_project_review_assignments", "REFERENCES users(id) ON DELETE CASCADE",
+    ),
+    "hub_project_review_assignments_assigned_by_user_id_fkey": (
+        "hub_project_review_assignments", "REFERENCES users(id) ON DELETE SET NULL",
+    ),
+    # 0076. Each subject CHECK is pinned by its last allowed value.
+    "fk_assessment_chat_turns_project_id_hub_projects": (
+        "assessment_chat_turns",
+        "FOREIGN KEY (project_id) REFERENCES hub_projects(id) ON DELETE CASCADE",
+    ),
+    "fk_assessment_chat_usage_project_id_hub_projects": (
+        "assessment_chat_usage",
+        "FOREIGN KEY (project_id) REFERENCES hub_projects(id) ON DELETE SET NULL",
+    ),
+    "fk_assessment_chat_opens_project_id_hub_projects": (
+        "assessment_chat_opens",
+        "FOREIGN KEY (project_id) REFERENCES hub_projects(id) ON DELETE SET NULL",
+    ),
+    "ck_assessment_chat_turns_one_subject": (
+        "assessment_chat_turns", "num_nonnulls(assessment_id, project_id) = 1",
+    ),
+    "ck_assessment_chat_usage_subject": ("assessment_chat_usage", "'project'"),
+    "ck_assessment_chat_opens_subject": ("assessment_chat_opens", "'project'"),
 }
 
 EXPECTED_ENUMS: dict[str, tuple[str, ...]] = {

@@ -75,7 +75,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0074"
+DEFAULT_TARGET = "0076"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -113,7 +113,10 @@ DEFAULT_TARGET = "0074"
 #: PLANNED_RECREATES) below, plus 0063's two nullable columns, 0064's one, 0065's
 #: index (its CHECK swap recreates an existing constraint, which the collision check must
 #: not list), 0066's table, 0067's table, 0068's column and CHECK, 0069's column, foreign key and index, 0070's table, 0071's table, 0072's table, unique, CHECK and index, and 0073's four tables with their
-#: uniques, CHECKs and indexes. 0063's and 0073's ADD VALUE on
+#: uniques, CHECKs and indexes, 0075's table with its unique and indexes, and 0076's five
+#: columns, three foreign keys, three indexes and three CHECKs on the chat tables (its
+#: DROP NOT NULL on assessment_chat_turns.assessment_id creates nothing). 0063's and 0073's
+#: ADD VALUE on
 #: thread_outcome_enum, and 0074's two ADD VALUEs (thread_outcome_enum and
 #: sim_command_enum), enumerate nothing: adding a value to an existing type creates
 #: no object to collide with — the same reason 0058's job_type_enum ADD VALUE has no
@@ -124,7 +127,7 @@ SUPPORTED_START_REVISIONS = (
     "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
     "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060",
     "0061", "0062", "0063", "0064", "0065", "0066", "0067", "0068", "0069", "0070", "0071",
-    "0072", "0073",
+    "0072", "0073", "0074", "0075",
 )
 
 #: Tables whose row counts are snapshotted for postflight. Empty = every user table.
@@ -637,11 +640,58 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0073", "index", "ix_hub_projects_run_reply", "hub_projects"),
     PlannedObject("0073", "index", "ix_hub_project_calls_updated", "hub_project_calls"),
     PlannedObject("0073", "index", "ix_hub_project_calls_project", "hub_project_calls"),
+    # 0075_project_review_assignments. Its three foreign keys are inline and unnamed, as
+    # 0073's are.
+    PlannedObject("0075", "table", "hub_project_review_assignments"),
+    PlannedObject(
+        "0075", "constraint", "uq_hub_project_review_assignment_once",
+        "hub_project_review_assignments",
+    ),
+    PlannedObject(
+        "0075", "index", "ix_hub_project_review_assignments_project_id",
+        "hub_project_review_assignments",
+    ),
+    PlannedObject(
+        "0075", "index", "ix_hub_project_review_assignments_assignee",
+        "hub_project_review_assignments",
+    ),
+    # 0076_project_chat. Its foreign keys are named, as 0069's is.
+    PlannedObject("0076", "column", "project_id", "assessment_chat_turns"),
+    PlannedObject("0076", "column", "project_id", "assessment_chat_usage"),
+    PlannedObject("0076", "column", "subject", "assessment_chat_usage"),
+    PlannedObject("0076", "column", "project_id", "assessment_chat_opens"),
+    PlannedObject("0076", "column", "subject", "assessment_chat_opens"),
+    PlannedObject(
+        "0076", "constraint", "fk_assessment_chat_turns_project_id_hub_projects",
+        "assessment_chat_turns",
+    ),
+    PlannedObject(
+        "0076", "constraint", "fk_assessment_chat_usage_project_id_hub_projects",
+        "assessment_chat_usage",
+    ),
+    PlannedObject(
+        "0076", "constraint", "fk_assessment_chat_opens_project_id_hub_projects",
+        "assessment_chat_opens",
+    ),
+    PlannedObject(
+        "0076", "index", "ix_assessment_chat_turns_project_conversation", "assessment_chat_turns",
+    ),
+    PlannedObject("0076", "index", "ix_assessment_chat_usage_project_id", "assessment_chat_usage"),
+    PlannedObject("0076", "index", "ix_assessment_chat_opens_project_id", "assessment_chat_opens"),
+    PlannedObject(
+        "0076", "constraint", "ck_assessment_chat_turns_one_subject", "assessment_chat_turns",
+    ),
+    PlannedObject(
+        "0076", "constraint", "ck_assessment_chat_usage_subject", "assessment_chat_usage",
+    ),
+    PlannedObject(
+        "0076", "constraint", "ck_assessment_chat_opens_subject", "assessment_chat_opens",
+    ),
 )
 
 #: What ``upgrade()`` DROPS. Kept apart from PLANNED_OBJECTS because the collision check
 #: must never treat a drop's precondition (the object exists) as a collision. 0026 is
-#: the only upgrade-time ``drop_table`` in 0019-0073.
+#: the only upgrade-time ``drop_table`` in 0019-0076.
 PLANNED_DROPS: tuple[PlannedObject, ...] = (
     PlannedObject("0026", "table", "grantbot_posted_foas"),
 )
@@ -661,7 +711,7 @@ REVISION_ORDER = (
     "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
     "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060",
     "0061", "0062", "0063", "0064", "0065", "0066", "0067", "0068", "0069", "0070", "0071", "0072",
-    "0073", "0074",
+    "0073", "0074", "0075", "0076",
 )
 
 

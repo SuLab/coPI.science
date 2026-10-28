@@ -99,6 +99,13 @@ QUESTION_ORIGINS = (
 #: or an inline question beside a page section.
 OPEN_VIAS = ("bubble", "link", "inline")
 
+#: What a chat is about (0076): an opportunity assessment, or a BlackbirdBot project. A turn
+#: names exactly one (``ck_assessment_chat_turns_one_subject``); the ledger and the openings
+#: record the kind in ``subject`` (NULL on rows written before 0076, all of them assessments).
+CHAT_SUBJECT_ASSESSMENT = "assessment"
+CHAT_SUBJECT_PROJECT = "project"
+CHAT_SUBJECTS = (CHAT_SUBJECT_ASSESSMENT, CHAT_SUBJECT_PROJECT)
+
 SUGGESTION_STATUS_READY = "ready"
 SUGGESTION_STATUS_FAILED = "failed"  # retried, up to the service's attempt cap
 SUGGESTION_STATUS_REFUSED = "refused"  # a refusal; never retried for this revision
@@ -110,17 +117,26 @@ def _sql_in(values: tuple[str, ...]) -> str:
 
 
 class AssessmentChatTurn(Base):
-    """One question and its answer, private to ``user_id``."""
+    """One question and its answer, private to ``user_id``. About exactly one subject: an
+    assessment (``assessment_id``) or, since 0076, a project (``project_id``)."""
 
     __tablename__ = "assessment_chat_turns"
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    assessment_id: Mapped[uuid.UUID] = mapped_column(
+    #: NULL only on a project turn (0076).
+    assessment_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("opportunity_assessments.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
+    )
+    #: The project a project turn is about (0076); CASCADEs with the project, and so with
+    #: its run.
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("hub_projects.id", ondelete="CASCADE"),
+        nullable=True,
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
@@ -172,9 +188,20 @@ class AssessmentChatTurn(Base):
         CheckConstraint(
             f"status IN ({_sql_in(CHAT_STATUSES)})", name="ck_assessment_chat_turns_status"
         ),
+        CheckConstraint(
+            "num_nonnulls(assessment_id, project_id) = 1",
+            name="ck_assessment_chat_turns_one_subject",
+        ),
         Index(
             "ix_assessment_chat_turns_conversation",
             "assessment_id",
+            "user_id",
+            "context_tier",
+            "created_at",
+        ),
+        Index(
+            "ix_assessment_chat_turns_project_conversation",
+            "project_id",
             "user_id",
             "context_tier",
             "created_at",
@@ -190,7 +217,10 @@ class AssessmentChatTurn(Base):
     )
 
     def __repr__(self) -> str:
-        return f"<AssessmentChatTurn {self.id} assessment={self.assessment_id} status={self.status}>"
+        return (
+            f"<AssessmentChatTurn {self.id} assessment={self.assessment_id} "
+            f"project={self.project_id} status={self.status}>"
+        )
 
 
 class AssessmentChatUsage(Base):
@@ -214,6 +244,14 @@ class AssessmentChatUsage(Base):
         ForeignKey("opportunity_assessments.id", ondelete="SET NULL"),
         nullable=True,
     )
+    #: The project a project question was about (0076); SET NULL, like ``assessment_id``.
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("hub_projects.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    #: One of CHAT_SUBJECTS (0076). NULL on rows written before 0076 (all assessments).
+    subject: Mapped[str | None] = mapped_column(String(12), nullable=True)
     context_tier: Mapped[str] = mapped_column(String(10), nullable=False)
     model: Mapped[str] = mapped_column(String(100), nullable=False)
     served_by_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -243,10 +281,14 @@ class AssessmentChatUsage(Base):
             f"question_origin IN ({_sql_in(QUESTION_ORIGINS)})",
             name="ck_assessment_chat_usage_question_origin",
         ),
+        CheckConstraint(
+            f"subject IN ({_sql_in(CHAT_SUBJECTS)})", name="ck_assessment_chat_usage_subject"
+        ),
         Index("ix_assessment_chat_usage_user_created", "user_id", "created_at"),
         Index("ix_assessment_chat_usage_created", "created_at"),
         Index("ix_assessment_chat_usage_turn_id", "turn_id"),
         Index("ix_assessment_chat_usage_assessment_id", "assessment_id"),
+        Index("ix_assessment_chat_usage_project_id", "project_id"),
         Index(
             "ix_chat_usage_streaming", "created_at",
             postgresql_where=text("status = 'streaming'"),
@@ -340,6 +382,14 @@ class AssessmentChatOpen(Base):
         ForeignKey("opportunity_assessments.id", ondelete="SET NULL"),
         nullable=True,
     )
+    #: The project whose drawer was opened (0076); SET NULL.
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("hub_projects.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    #: One of CHAT_SUBJECTS (0076). NULL on rows written before 0076 (all assessments).
+    subject: Mapped[str | None] = mapped_column(String(12), nullable=True)
     context_tier: Mapped[str] = mapped_column(String(10), nullable=False)
     #: One of OPEN_VIAS; NULL when the page did not say.
     opened_via: Mapped[str | None] = mapped_column(String(10), nullable=True)
@@ -354,8 +404,12 @@ class AssessmentChatOpen(Base):
         CheckConstraint(
             f"opened_via IN ({_sql_in(OPEN_VIAS)})", name="ck_assessment_chat_opens_via"
         ),
+        CheckConstraint(
+            f"subject IN ({_sql_in(CHAT_SUBJECTS)})", name="ck_assessment_chat_opens_subject"
+        ),
         Index("ix_assessment_chat_opens_user_id", "user_id"),
         Index("ix_assessment_chat_opens_assessment_id", "assessment_id"),
+        Index("ix_assessment_chat_opens_project_id", "project_id"),
         Index("ix_assessment_chat_opens_created", "created_at"),
     )
 

@@ -125,7 +125,7 @@ SCHEMAS = {
 
 # These fields contain intentionally open research/rubric JSON, not ORM objects.
 JSON_FIELDS = frozenset(
-    "techniques experimental_models disease_areas key_targets keywords scores gating dimension_rationales gating_rationales key_points dimension_scores identity_evidence evidence components coverage config fields content prompt_files feedback_snapshot analysis raw_verdict".split()
+    "techniques experimental_models disease_areas key_targets keywords scores gating dimension_rationales gating_rationales key_points dimension_scores identity_evidence evidence components coverage config fields content prompt_files feedback_snapshot analysis raw_verdict raw_choice raw_final".split()
 )
 SECRET_KEYS = frozenset(
     "password password_hash slack_bot_token token_hash private_profile_seed private_profile_md user_submitted_texts pending_profile system_prompt messages_json".split()
@@ -136,7 +136,7 @@ STAFF_KEYS = frozenset(
 )
 ADMIN_KEYS = frozenset(
     "raw_verdict raw_opinion raw_opinion_truncated unplaced_turns held_counts in_doubt "
-    "microsoft_link research_cost_usd refinement_cost_usd calls_url".split()
+    "microsoft_link research_cost_usd refinement_cost_usd calls_url raw_choice raw_final".split()
 )
 REVIEWER_SCHEMAS = {
     "PiGrantIdentity": SCHEMAS["PiGrantIdentity"] - {"candidates"},
@@ -227,10 +227,15 @@ VIEW_FIELDS = frozenset(
         "reviewed_by_me reason_label finished_at posted_at project plan_rows opening_rows tool_rows item "
         "in_profile hub_position lab_position gaps disagreements why_chosen others use sources ident fund "
         "can_edit my_review can_review_projects research_cost_usd refinement_cost_usd calls_url "
+        "list_state review_filter assignment_filter tiles not_finished_reasons is_finished next_id "
+        "stage stage_label stage_paused stage_time stage_time_label gap_count disagreement_count "
+        "reviewers run_started_at has_close plan_title changed opening_value matched "
+        "sources_by_kind earlier_count truncated thread_unavailable posts closed_thread "
+        "raw_choice raw_final assignments chat_available card_chat_available "
     ).split()
 )
 DYNAMIC_MAP_FIELDS = frozenset(
-    "runs_by_id assessment_counts_by_run pi_user_ids panel_by_thread agent_stats channel_stats band_counts drop_counts review_counts counts gating_definitions gating_reasons gating_descriptions".split()
+    "runs_by_id assessment_counts_by_run pi_user_ids panel_by_thread agent_stats channel_stats band_counts drop_counts review_counts list_state counts gating_definitions gating_reasons gating_descriptions".split()
 )
 
 

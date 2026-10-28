@@ -42,6 +42,7 @@ from src.models.hub_project import (
     HubProjectCall,
     HubProjectClock,
     HubProjectReview,
+    HubProjectReviewAssignment,
 )
 from src.models.email_notification import (
     EmailEngagementTracker,
@@ -163,4 +164,5 @@ __all__ = [
     "HubProjectCall",
     "HubProjectClock",
     "HubProjectReview",
+    "HubProjectReviewAssignment",
 ]

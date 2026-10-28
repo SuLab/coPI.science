@@ -279,9 +279,9 @@ def test_supported_start_revisions_are_exactly_the_documented_set():
         "0039", "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048",
         "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058",
         "0059", "0060", "0061", "0062", "0063", "0064", "0065", "0066", "0067", "0068",
-        "0069", "0070", "0071", "0072", "0073",
+        "0069", "0070", "0071", "0072", "0073", "0074", "0075",
     )
-    assert pf.DEFAULT_TARGET == "0074"
+    assert pf.DEFAULT_TARGET == "0076"
 
 
 def test_every_post_branch_revision_is_a_supported_start():
@@ -2087,6 +2087,42 @@ def test_0074_plans_no_objects():
     assert pf.planned_objects_between("0073", "0074") == ()
 
 
+def test_0075_plans_the_assignment_table():
+    """The table, its unique and its two indexes; its three foreign keys are inline and
+    unnamed, as 0073's are, and postflight pins them by Postgres's default names."""
+    planned = {(o.kind, o.name) for o in pf.planned_objects_between("0074", "0075")}
+    assert planned == {
+        ("table", "hub_project_review_assignments"),
+        ("constraint", "uq_hub_project_review_assignment_once"),
+        ("index", "ix_hub_project_review_assignments_project_id"),
+        ("index", "ix_hub_project_review_assignments_assignee"),
+    }
+
+
+def test_0076_plans_project_chat_objects():
+    planned = {
+        (o.kind, o.table, o.name) for o in pf.planned_objects_between("0075", "0076")
+    }
+    assert planned == {
+        ("column", "assessment_chat_turns", "project_id"),
+        ("column", "assessment_chat_usage", "project_id"),
+        ("column", "assessment_chat_usage", "subject"),
+        ("column", "assessment_chat_opens", "project_id"),
+        ("column", "assessment_chat_opens", "subject"),
+        ("constraint", "assessment_chat_turns", "fk_assessment_chat_turns_project_id_hub_projects"),
+        ("constraint", "assessment_chat_usage", "fk_assessment_chat_usage_project_id_hub_projects"),
+        ("constraint", "assessment_chat_opens", "fk_assessment_chat_opens_project_id_hub_projects"),
+        ("index", "assessment_chat_turns", "ix_assessment_chat_turns_project_conversation"),
+        ("index", "assessment_chat_usage", "ix_assessment_chat_usage_project_id"),
+        ("index", "assessment_chat_opens", "ix_assessment_chat_opens_project_id"),
+        ("constraint", "assessment_chat_turns", "ck_assessment_chat_turns_one_subject"),
+        ("constraint", "assessment_chat_usage", "ck_assessment_chat_usage_subject"),
+        ("constraint", "assessment_chat_opens", "ck_assessment_chat_opens_subject"),
+    }
+    # 0076 creates no table: it alters the three chat tables.
+    assert pf.tables_created_between("0075", "0076") == frozenset()
+
+
 def test_postflight_pins_the_0071_objects():
     assert "0071" in po.VERIFIED_REVISIONS
     assert "hub_declines" in po.EXPECTED_TABLES
@@ -2138,3 +2174,44 @@ def test_postflight_pins_the_0073_objects():
         "hub_project_reviews", "REFERENCES hub_projects(id) ON DELETE CASCADE")
     assert po.EXPECTED_CONSTRAINTS["hub_project_reviews_reviewer_user_id_fkey"] == (
         "hub_project_reviews", "REFERENCES users(id) ON DELETE SET NULL")
+
+
+def test_postflight_pins_the_0075_objects():
+    assert "0075" in po.VERIFIED_REVISIONS
+    assert "hub_project_review_assignments" in po.EXPECTED_TABLES
+    assert ("hub_project_review_assignments", "assignee_user_id", "uuid", False, "") in (
+        po.EXPECTED_COLUMNS)
+    assert ("hub_project_review_assignments", "assigned_by_user_id", "uuid", True, "") in (
+        po.EXPECTED_COLUMNS)
+    assert po.EXPECTED_INDEXES["uq_hub_project_review_assignment_once"] == (
+        "USING btree (project_id, assignee_user_id)")
+    assert po.EXPECTED_CONSTRAINTS["uq_hub_project_review_assignment_once"] == (
+        "hub_project_review_assignments", "UNIQUE (project_id, assignee_user_id)")
+    assert po.EXPECTED_CONSTRAINTS["hub_project_review_assignments_project_id_fkey"] == (
+        "hub_project_review_assignments", "REFERENCES hub_projects(id) ON DELETE CASCADE")
+    assert po.EXPECTED_CONSTRAINTS["hub_project_review_assignments_assignee_user_id_fkey"] == (
+        "hub_project_review_assignments", "REFERENCES users(id) ON DELETE CASCADE")
+    assert po.EXPECTED_CONSTRAINTS[
+        "hub_project_review_assignments_assigned_by_user_id_fkey"
+    ] == ("hub_project_review_assignments", "REFERENCES users(id) ON DELETE SET NULL")
+
+
+def test_postflight_pins_the_0076_objects():
+    assert "0076" in po.VERIFIED_REVISIONS
+    # 0076 relaxes assessment_id: still NOT NULL means it did not really run.
+    assert ("assessment_chat_turns", "assessment_id", "uuid", True, "") in po.EXPECTED_COLUMNS
+    assert ("assessment_chat_usage", "subject", "character varying", True, "") in (
+        po.EXPECTED_COLUMNS)
+    assert po.EXPECTED_INDEXES["ix_assessment_chat_turns_project_conversation"] == (
+        "USING btree (project_id, user_id, context_tier, created_at)")
+    assert po.EXPECTED_CONSTRAINTS["ck_assessment_chat_turns_one_subject"] == (
+        "assessment_chat_turns", "num_nonnulls(assessment_id, project_id) = 1")
+    assert po.EXPECTED_CONSTRAINTS["fk_assessment_chat_turns_project_id_hub_projects"] == (
+        "assessment_chat_turns",
+        "FOREIGN KEY (project_id) REFERENCES hub_projects(id) ON DELETE CASCADE")
+    for table in ("assessment_chat_usage", "assessment_chat_opens"):
+        fk = f"fk_{table}_project_id_hub_projects"
+        assert po.EXPECTED_CONSTRAINTS[fk] == (
+            table, "FOREIGN KEY (project_id) REFERENCES hub_projects(id) ON DELETE SET NULL")
+        check = "ck_" + table + "_subject"
+        assert po.EXPECTED_CONSTRAINTS[check] == (table, "'project'")

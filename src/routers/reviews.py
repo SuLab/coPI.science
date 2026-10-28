@@ -3,7 +3,8 @@ staff-only or admin-only declare a NARROWER singleton, which is the real gate
 for them. Feedback/status writes now ALLOW an impersonated session (F4,
 2026-09-10) and attribute the write to the impersonated user, with the real
 admin recorded via ``recorded_by``; assign/unassign, suggestion-status and
-the project-review writes still refuse impersonation outright.
+the project-review and project-assignment writes still refuse impersonation
+outright.
 
 Dependencies are module-level singletons (``_DB``/``_REVIEW``/``_STAFF``/
 ``_ADMIN``) rather than inline ``Depends(...)`` calls in argument defaults,
@@ -49,10 +50,13 @@ from src.services.directory import (
 )
 from src.services.project_reviews import (
     DuplicateProjectReviewError,
+    assign_project_reviewer,
     delete_project_review,
     edit_project_review,
     submit_project_review,
+    unassign_project_reviewer,
 )
+from src.services.projects_view import project_list_query, project_list_state
 from src.web.flash import flash
 from src.web.urls import page_url
 
@@ -674,16 +678,57 @@ async def _load_project_review(db: AsyncSession, review_id: uuid.UUID) -> HubPro
     return review
 
 
-def _project_redirect(request: Request, project_id: uuid.UUID) -> RedirectResponse:
+#: Where a project review form came from (spec §6.1, plan contract C6). A post with
+#: neither (a tab opened before the field existed) returns as it always did.
+_PROJECTS_LIST_SURFACE = "projects-list"
+_PROJECT_DETAIL_SURFACE = "project-detail"
+
+
+def _project_form_state(form: FormData) -> dict[str, str]:
+    """The list state the form carried, validated by the list's own rules.
+
+    ``project_list_state`` drops a junk or default value instead of echoing it, and
+    ``project_list_query`` urlencodes what survives, so nothing posted here reaches the
+    ``Location`` header raw (no CR/LF injection, no smuggled ``&``).
+    """
+    return project_list_state(
+        run_id=_form_str(form, "run_id"),
+        lab=_form_str(form, "lab"),
+        outcome=_form_str(form, "outcome"),
+        review=_form_str(form, "review"),
+        sort=_form_str(form, "sort"),
+        mine=_form_str(form, "mine"),
+        assignment=_form_str(form, "assignment"),
+    )
+
+
+def _project_redirect(
+    request: Request,
+    project_id: uuid.UUID,
+    *,
+    surface: str | None = None,
+    state: dict[str, str] | None = None,
+) -> RedirectResponse:
+    """The details page's Reviews card; with ``surface=project-detail``, keeping the state."""
+    query = project_list_query(state or {}) if surface == _PROJECT_DETAIL_SURFACE else ""
+    path = page_url(request, "workspace_project_detail", project_id=project_id)
+    return RedirectResponse(path + query + "#reviews", status_code=303)
+
+
+def _projects_list_redirect(
+    request: Request, state: dict[str, str], fragment_id: uuid.UUID | None
+) -> RedirectResponse:
+    """The list with its state, at ``#p-<fragment_id>`` (no fragment when None)."""
+    fragment = f"#p-{fragment_id}" if fragment_id is not None else ""
     return RedirectResponse(
-        page_url(request, "workspace_project_detail", project_id=project_id, fragment="reviews"),
+        page_url(request, "workspace_projects") + project_list_query(state) + fragment,
         status_code=303,
     )
 
 
 # Project reviews (spec §5.11). Unlike assessment feedback, every write refuses an
-# impersonated session, and the details page shows no form then. The handlers are not
-# named like the services they call: a same-named handler would rebind the import.
+# impersonated session, and the pages show no form then. The handlers are not named
+# like the services they call: a same-named handler would rebind the import.
 
 
 @router.post("/projects/{project_id}/review")
@@ -696,9 +741,23 @@ async def project_review_submit(
     db: AsyncSession = _DB,
     current_user: User = _REVIEW,
 ):
+    """Save one review; return to where the form was (contract C6).
+
+    From the list (``surface=projects-list``) the reader lands on the card's anchor, or on
+    ``next_id`` when the reviewed card has left the list: the Unreviewed tab (no ``review``
+    in the state) or "Not reviewed by me" (``mine=1``). A duplicate lands the same way with
+    only its own note.
+    """
     refuse_impersonation(current_user)
     fund_value = _parse_fund(fund)
     project = await _load_project(db, project_id)
+    form = await request.form()
+    surface = _form_str(form, "surface")
+    state = _project_form_state(form)
+    from_list = surface == _PROJECTS_LIST_SURFACE
+    unreviewed_tab = from_list and "review" not in state
+    leaves_list = unreviewed_tab or (from_list and state.get("mine") == "1")
+    duplicate = False
     try:
         await submit_project_review(
             db,
@@ -709,9 +768,17 @@ async def project_review_submit(
             fund=fund_value,
         )
     except DuplicateProjectReviewError:
-        flash(request, "You have already reviewed this project; edit your review below.", "info")
+        duplicate = True
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if duplicate:
+        flash(
+            request,
+            "You have already reviewed this project; edit your review on its page."
+            if from_list
+            else "You have already reviewed this project; edit your review below.",
+            "info",
+        )
     else:
         await db.commit()
         logger.info(
@@ -722,8 +789,17 @@ async def project_review_submit(
             rating,
             fund_value,
         )
-        flash(request, "Review saved.", "success")
-    return _project_redirect(request, project_id)
+        flash(
+            request,
+            "Review saved; moved to Reviewed." if unreviewed_tab else "Review saved.",
+            "success",
+        )
+    if from_list:
+        # next_id is "" on the last card; only a UUID is echoed into the fragment.
+        next_raw = _form_str(form, "next_id")
+        next_id = _optional_uuid(next_raw) if next_raw else None
+        return _projects_list_redirect(request, state, next_id if leaves_list else project_id)
+    return _project_redirect(request, project_id, surface=surface, state=state)
 
 
 @router.post("/project-reviews/{review_id}/edit")
@@ -757,7 +833,13 @@ async def project_review_edit(
         fund_value,
     )
     flash(request, "Review updated.", "success")
-    return _project_redirect(request, review.project_id)
+    form = await request.form()
+    return _project_redirect(
+        request,
+        review.project_id,
+        surface=_form_str(form, "surface"),
+        state=_project_form_state(form),
+    )
 
 
 @router.post("/project-reviews/{review_id}/delete")
@@ -776,4 +858,71 @@ async def project_review_delete(
         "Project review %s deleted by %s (%s)", review_id, current_user.name, current_user.id
     )
     flash(request, "Review deleted.", "success")
-    return _project_redirect(request, project_id)
+    form = await request.form()
+    return _project_redirect(
+        request, project_id, surface=_form_str(form, "surface"), state=_project_form_state(form)
+    )
+
+
+# Project review assignments (spec §7.2, contract C7). Staff only, never under
+# impersonation, and only from the details page: both return to its Reviews card with
+# the list state.
+
+
+@router.post("/projects/{project_id}/assign")
+async def project_assign(
+    project_id: uuid.UUID,
+    request: Request,
+    assignee_user_id: str = Form(...),
+    db: AsyncSession = _DB,
+    current_user: User = _STAFF,
+):
+    refuse_impersonation(current_user)
+    project = await _load_project(db, project_id)
+    assignee = await _load_assignee(db, _parse_assignee_id(assignee_user_id))
+    await assign_project_reviewer(
+        db, project=project, assignee=assignee, assigned_by=current_user
+    )
+    await db.commit()
+    logger.info(
+        "Project %s assigned to %s (%s) by %s (%s)",
+        project_id,
+        assignee.name,
+        assignee.id,
+        current_user.name,
+        current_user.id,
+    )
+    return _project_redirect(
+        request,
+        project_id,
+        surface=_PROJECT_DETAIL_SURFACE,
+        state=_project_form_state(await request.form()),
+    )
+
+
+@router.post("/projects/{project_id}/unassign")
+async def project_unassign(
+    project_id: uuid.UUID,
+    request: Request,
+    assignee_user_id: str = Form(...),
+    db: AsyncSession = _DB,
+    current_user: User = _STAFF,
+):
+    refuse_impersonation(current_user)
+    project = await _load_project(db, project_id)
+    assignee_id = _parse_assignee_id(assignee_user_id)
+    await unassign_project_reviewer(db, project=project, assignee_user_id=assignee_id)
+    await db.commit()
+    logger.info(
+        "Project %s unassigned from user %s by %s (%s)",
+        project_id,
+        assignee_id,
+        current_user.name,
+        current_user.id,
+    )
+    return _project_redirect(
+        request,
+        project_id,
+        surface=_PROJECT_DETAIL_SURFACE,
+        state=_project_form_state(await request.form()),
+    )

@@ -36,7 +36,7 @@ from src.web.security_headers import new_nonce, security_header_items
 from src.web.templating import make_templates
 
 #: Path prefixes whose callers are scripts; they keep FastAPI's JSON error bodies.
-JSON_PATH_PREFIXES: tuple[str, ...] = ("/assessment-chat/", "/api/")
+JSON_PATH_PREFIXES: tuple[str, ...] = ("/assessment-chat/", "/project-chat/", "/api/")
 
 #: The page heading per status; any other status uses its HTTP reason phrase.
 ERROR_TITLES: dict[int, str] = {

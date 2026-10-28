@@ -1,8 +1,10 @@
 // Assessment chat drawer — docs/specs/2026-09-24-assessment-chat-design.md §8.3.
 //
 // Talks only to the four URLs the drawer partial writes into
-// window.ASSESSMENT_CHAT, so this file names no route of its own. The rules it
-// keeps, each from the spec:
+// window.ASSESSMENT_CHAT, so this file names no route of its own. The same file
+// drives the project chat (docs/specs/2026-10-27-projects-pages-redesign-design.md
+// §8.7): the partial then sets `subject: "project"` and an `errors` table whose
+// sentences replace this file's. The rules it keeps, each from the spec:
 //   * questions, labels, cited text and every status line go in as textContent;
 //   * model text reaches innerHTML only through DOMPurify with the chat-only
 //     profile below (no img/svg/iframe/form/style; https hrefs only), and not at
@@ -10,7 +12,8 @@
 //   * nothing is clickable while an answer streams; afterwards a link survives
 //     only when its rendered href is EXACTLY an allowed URL, verbatim or as
 //     marked's own encoding of it — never decoded (D20, SEC-1a);
-//   * error text comes from the fixed table below, never from the server.
+//   * error text comes from the fixed table below (or the partial's overrides),
+//     never from the server.
 (function () {
   "use strict";
 
@@ -88,8 +91,22 @@
     busy: "The chat is busy. Try again in a moment.",
     session_ended: "Your session has ended — reload the page.",
     network: "The connection was lost. Reopen the chat to see whether the answer was saved.",
+    project_open: "This project is still in progress; the chat opens once it finishes.",
     unknown: "Something went wrong. Try again."
   };
+  // The partial's sentences for its subject (the project chat's "switched off",
+  // "no longer exists" and "still in progress") replace the defaults above. They
+  // are the template's fixed text, never the server's.
+  if (cfg.errors && typeof cfg.errors === "object") {
+    Object.keys(cfg.errors).forEach(function (code) {
+      if (typeof cfg.errors[code] === "string") {
+        ERRORS[code] = cfg.errors[code];
+      }
+    });
+  }
+  // A project's record never changes under its conversation (only finished
+  // projects have a chat), so it has no verdict revisions and no verdict notice.
+  const IS_PROJECT = cfg.subject === "project";
 
   const els = {
     log: drawer.querySelector("[data-chat-log]"),
@@ -579,11 +596,13 @@
     });
     state.turns.forEach(function (turn, i) {
       const prev = i > 0 ? state.turns[i - 1] : null;
-      const revisionStart = prev !== null && (prev.verdict_revision || 1) !== (turn.verdict_revision || 1);
+      const revisionStart = !IS_PROJECT && prev !== null && (prev.verdict_revision || 1) !== (turn.verdict_revision || 1);
       log.appendChild(turnNode(turn, olderLeftOut && i === firstIn, revisionStart));
     });
     els.starters.hidden = state.turns.length > 0;
-    els.notice.hidden = !(state.limits && state.limits.verdict_may_change);
+    if (els.notice) {
+      els.notice.hidden = IS_PROJECT || !(state.limits && state.limits.verdict_may_change);
+    }
     updateUsage();
     updateCounter();
     setBusy(state.busy);
@@ -602,7 +621,7 @@
     return (resp.headers.get("content-type") || "").indexOf("application/json") === 0;
   }
 
-  const TERMINAL_CODES = { session_ended: true, not_found: true, disabled: true, forbidden: true, impersonating: true };
+  const TERMINAL_CODES = { session_ended: true, not_found: true, disabled: true, forbidden: true, impersonating: true, project_open: true };
 
   function schedulePoll() {
     if (state.poll) {

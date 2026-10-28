@@ -33,8 +33,8 @@ def _login_location(request: Request) -> str:
 
     Only GET navigations to a real page are worth resuming after sign-in, so
     we skip POSTs (replaying them as a GET would be wrong), the login/root
-    pages (no point looping back to them), anything under /assessment-chat/
-    (those are JSON endpoints the drawer polls in the background, not a page to
+    pages (no point looping back to them), anything under /assessment-chat/ or
+    /project-chat/ (JSON endpoints the drawer polls in the background, not a page to
     resume — remembering one as `next` would land a freshly signed-in user on
     raw JSON), and anything under /help/shots/ (help screenshots a page loads
     lazily; resuming one would land the user on a raw image). The destination
@@ -43,7 +43,7 @@ def _login_location(request: Request) -> str:
     if request.method != "GET":
         return "/login"
     target = request.url.path
-    if target.startswith(("/assessment-chat/", "/help/shots/")):
+    if target.startswith(("/assessment-chat/", "/project-chat/", "/help/shots/")):
         return "/login"
     if request.url.query:
         target += "?" + request.url.query

@@ -42,6 +42,7 @@ from src.models import (
     CohortMembership,
     DelegateInvitation,
     PromptChangeSuggestion,
+    SpecialistConsult,
 )
 from src.models.hub_project import STATUS_READY, HubProject, HubProjectReview
 from tests import factories
@@ -143,6 +144,7 @@ SKIPPED: dict[str, str] = {
     "/auth/microsoft/link": "redirects to Microsoft or /settings; 404 while the feature is off",
     "/auth/microsoft/callback": "Microsoft OAuth redirect target; redirects, renders no page",
     "/assessment-chat/{assessment_id}": "JSON for static/js/assessment_chat.js",
+    "/project-chat/{project_id}": "JSON for static/js/assessment_chat.js",
     "/api/health": "JSON health probe",
     "/admin/activity/{run_id}/llm-calls/{call_id}/bodies": "HTML fragment for the llm_calls page; no layout",
     "/help/tutorials/{tutorial}": "redirects to step 1",
@@ -405,6 +407,71 @@ async def seed_ready_project(db, *, run, lab_agent_id: str) -> HubProject:
     return project
 
 
+async def seed_unreviewed_project(db, *, run, lab_agent_id: str) -> HubProject:
+    """A ``not_agreed`` project with no review, so the list's default Unreviewed tab renders its
+    card and quick-review form, and its details page renders every section: a two-chunk posting,
+    the lab's reply, thread posts in Markdown, two consults (one cut off), gaps and disagreements."""
+    now = datetime.now(UTC)
+    base = now.timestamp() - 3600
+    posting_ts, reply_ts = f"{base:.6f}", f"{base + 60:.6f}"
+    choice = {
+        "chosen": {"use": "Gate assay repurposed", "why": "Reuses the lab's assay",
+                   "domain": "clinical"},
+        "why_chosen": "It reuses the lab's validated assay in a new disease.",
+        "others": [{"use": "Gate imaging study", "domain": "scientific", "note": "Costlier."}],
+        "title": "Gate assay repurposed",
+        "summary": "Blackbird proposes the lab's assay as a stratification test.",
+        "plan": project_plan(indication="Gate disease, opening wording"),
+        "anchors": [{"section": "Key Methods and Technologies", "item": "cryo-EM"}],
+        "sources": [
+            {"key": "pmid:31500698", "kind": "pubmed", "title": "A gate assay paper",
+             "domain": "scientific", "shows": "The assay works."},
+            {"key": "patent:US11234567B2", "kind": "patent", "title": "A gate patent",
+             "domain": "legal", "shows": "Prior art."},
+        ],
+    }
+    final = {
+        "plan": project_plan(indication="Gate disease, final wording", lab_tools=["cryo-EM imaging"]),
+        "tool_marks": [{"item": "cryo-EM imaging", "in_profile": False}],
+        "hub_position": "agree", "lab_position": "disagree",
+        "gaps": ["No patient samples yet."], "disagreements": ["The lab doubts the budget."],
+    }
+    project = HubProject(
+        simulation_run_id=run.id, agent_id=lab_agent_id, slot=2, status="not_agreed",
+        requested_run_seconds=0.0, choice=choice, title=choice["title"],
+        posting_text="Gate posting, first part.\nGate posting, second part.",
+        posting_ts=posting_ts, posted_at=now - timedelta(minutes=60), reply_ts=reply_ts,
+        final=final, finished_at=now - timedelta(minutes=10), finished_run_seconds=3000.0,
+    )
+    db.add(project)
+    for agent_id, ts, thread_ts, phase, content, at in (
+        ("blackbird", posting_ts, None, "hub_project", "Gate posting, first part.", base),
+        ("blackbird", f"{base + 1:.6f}", posting_ts, "hub_project", "Gate posting, second part.",
+         base + 1),
+        (lab_agent_id, reply_ts, None, "project_reply", "We would use **cryo-EM** here.", base + 60),
+        ("blackbird", f"{base + 120:.6f}", reply_ts, "thread_reply",
+         "Two questions:\n\n- the budget\n- the samples", base + 120),
+        (lab_agent_id, f"{base + 240:.6f}", reply_ts, "thread_reply", "The budget is too low.",
+         base + 240),
+        ("blackbird", f"{base + 300:.6f}", reply_ts, "thread_reply", "⚠️ Closing: not agreed.",
+         base + 300),
+    ):
+        await factories.make_agent_message(
+            db, run=run, agent_id=agent_id, channel_name="general", message_ts=ts,
+            thread_ts=thread_ts, phase=phase, content=content, posted_at=at,
+        )
+    for domain, truncated in (("scientific", False), ("clinical", True)):
+        db.add(SpecialistConsult(
+            simulation_run_id=run.id, agent_id="blackbird", thread_id=reply_ts, domain=domain,
+            question=f"Gate {domain} question?", verdict_signal="gap", confidence="moderate",
+            raw_opinion="Gate raw opinion", truncated=truncated,
+            concerns=[f"Gate {domain} concern"], established=[f"Gate {domain} finding"],
+            questions_to_ask=[f"Gate {domain} ask?"],
+        ))
+    await db.flush()
+    return project
+
+
 @pytest.fixture
 async def gate_world(db_session) -> GateWorld:
     users = {
@@ -455,11 +522,14 @@ async def gate_world(db_session) -> GateWorld:
         transcript_available=True,
     )
     db_session.add(suggestion)
-    project = await seed_ready_project(db_session, run=run, lab_agent_id="gatepi")
+    ready = await seed_ready_project(db_session, run=run, lab_agent_id="gatepi")
     db_session.add(HubProjectReview(
-        project_id=project.id, reviewer_user_id=users["reviewer"].id,
+        project_id=ready.id, reviewer_user_id=users["reviewer"].id,
         reviewer_name="Gate Reviewer", rating=4, comment="Gate project review", fund=True,
     ))
+    # The gated details page is the unreviewed project: it renders every section, and the
+    # list's default (Unreviewed) tab renders its card and quick-review form.
+    project = await seed_unreviewed_project(db_session, run=run, lab_agent_id="gatepi")
     db_session.add(DelegateInvitation(
         agent_registry_id=agent.id, invited_by_user_id=users["pi"].id,
         email="invitee@example.org", token="gate-invite-token", status="pending",

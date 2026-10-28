@@ -16,6 +16,7 @@ Four tables back the projects prototype (docs/specs/2026-10-22-idea-pitching-pro
   once-per-interval rule counts.
 - ``hub_project_reviews``: staff and reviewer reviews of a project (a 1–5 rating, a comment,
   fund or don't fund), kept apart from assessment reviews.
+- ``hub_project_review_assignments`` (migration 0075): who staff assigned to review a project.
 
 No relationship is declared on ``SimulationRun``: deleting a run removes its projects (and,
 through ``hub_projects``, their calls and reviews) through the database's ON DELETE CASCADE.
@@ -252,3 +253,44 @@ class HubProjectReview(Base):
 
     def __repr__(self) -> str:
         return f"<HubProjectReview project={self.project_id} rating={self.rating} fund={self.fund}>"
+
+
+class HubProjectReviewAssignment(Base):
+    """A staff member or reviewer assigned to review one project (migration 0075).
+
+    Mirrors ``AssessmentReviewAssignment``: ``project_id`` CASCADEs (so deleting a run removes
+    it through ``hub_projects``), ``assignee_user_id`` CASCADEs (an assignment to a deleted user
+    means nothing), ``assigned_by_user_id`` is SET NULL with ``assigned_by_name`` kept. One row
+    per (project, assignee): assigning the same person again is a no-op.
+    """
+
+    __tablename__ = "hub_project_review_assignments"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id", "assignee_user_id", name="uq_hub_project_review_assignment_once"
+        ),
+        Index("ix_hub_project_review_assignments_project_id", "project_id"),
+        Index("ix_hub_project_review_assignments_assignee", "assignee_user_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("hub_projects.id", ondelete="CASCADE"), nullable=False
+    )
+    assignee_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    assignee_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    assigned_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    assigned_by_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<HubProjectReviewAssignment project={self.project_id} "
+            f"assignee={self.assignee_user_id}>"
+        )

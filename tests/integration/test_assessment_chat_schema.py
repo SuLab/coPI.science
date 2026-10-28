@@ -1,10 +1,11 @@
-"""Migrations 0051 and 0059: the assessment-chat tables, their constraints and cascades.
+"""Migrations 0051, 0059 and 0076: the assessment-chat tables, their constraints and cascades.
 
 Spec §7. The partial unique index is what makes "one answer in flight per user"
 atomic; the cascades are what make a chat private content (it goes with the
 assessment and with the user) while the usage ledger survives both. 0059's
 suggestion sets go with their assessment; its drawer openings, like the ledger,
-outlive both.
+outlive both. 0076 gives the tables a project subject: a turn names exactly one of an
+assessment and a project and goes with either; ledger and openings outlive the project.
 """
 
 import uuid
@@ -39,6 +40,9 @@ INDEXES = {
     "ix_assessment_chat_opens_user_id",
     "ix_assessment_chat_opens_assessment_id",
     "ix_assessment_chat_opens_created",
+    "ix_assessment_chat_turns_project_conversation",
+    "ix_assessment_chat_usage_project_id",
+    "ix_assessment_chat_opens_project_id",
 }
 CHECKS = {
     "ck_assessment_chat_turns_tier",
@@ -49,6 +53,9 @@ CHECKS = {
     "ck_assessment_chat_suggestions_status",
     "ck_assessment_chat_opens_tier",
     "ck_assessment_chat_opens_via",
+    "ck_assessment_chat_turns_one_subject",
+    "ck_assessment_chat_usage_subject",
+    "ck_assessment_chat_opens_subject",
 }
 
 
@@ -339,3 +346,81 @@ async def test_an_opening_outlives_its_user_and_checks_its_via(db_session):
             db_session.add(
                 AssessmentChatOpen(assessment_id=a.id, context_tier="staff", opened_via="email")
             )
+
+
+async def _project_id(db_session) -> uuid.UUID:
+    run = await factories.make_simulation_run(db_session)
+    project_id = uuid.uuid4()
+    await db_session.execute(
+        text(
+            "INSERT INTO hub_projects "
+            "(id, simulation_run_id, agent_id, slot, status, requested_run_seconds) "
+            "VALUES (:id, :run, 'lab1', 1, 'ready', 0)"
+        ),
+        {"id": project_id, "run": run.id},
+    )
+    return project_id
+
+
+@pytest.mark.parametrize("subject", ["neither", "both"])
+async def test_a_turn_names_exactly_one_subject(db_session, subject):
+    a = await _assessment(db_session)
+    project_id = await _project_id(db_session)
+    user = await factories.make_user(db_session)
+    both = subject == "both"
+    turn = _turn(a.id if both else None, user.id, project_id=project_id if both else None)
+    with pytest.raises(IntegrityError) as caught:
+        async with db_session.begin_nested():
+            db_session.add(turn)
+    assert "ck_assessment_chat_turns_one_subject" in str(caught.value.orig)
+
+
+async def test_deleting_the_project_removes_its_turns_and_keeps_usage_and_openings(db_session):
+    project_id = await _project_id(db_session)
+    user = await factories.make_user(db_session)
+    turn = _turn(None, user.id, project_id=project_id)
+    usage = _usage(turn, project_id=project_id, subject="project")
+    opened = AssessmentChatOpen(
+        user_id=user.id, project_id=project_id, subject="project", context_tier="staff",
+    )
+    db_session.add_all([turn, usage, opened])
+    await db_session.flush()
+
+    await db_session.execute(text("DELETE FROM hub_projects WHERE id = :id"), {"id": project_id})
+
+    left = (
+        await db_session.execute(
+            text("SELECT count(*) FROM assessment_chat_turns WHERE id = :id"), {"id": turn.id}
+        )
+    ).scalar_one()
+    ledger = (
+        await db_session.execute(
+            text("SELECT turn_id, project_id, subject FROM assessment_chat_usage WHERE id = :id"),
+            {"id": usage.id},
+        )
+    ).one()
+    opening = (
+        await db_session.execute(
+            text("SELECT project_id, subject FROM assessment_chat_opens WHERE id = :id"),
+            {"id": opened.id},
+        )
+    ).one()
+    assert left == 0
+    assert (ledger.turn_id, ledger.project_id, ledger.subject) == (None, None, "project")
+    assert (opening.project_id, opening.subject) == (None, "project")
+
+
+@pytest.mark.parametrize("model", ["usage", "open"])
+async def test_the_subject_is_checked(db_session, model):
+    a = await _assessment(db_session)
+    user = await factories.make_user(db_session)
+    turn = _turn(a.id, user.id)
+    db_session.add(turn)
+    await db_session.flush()
+    row = (
+        _usage(turn, subject="grant") if model == "usage"
+        else AssessmentChatOpen(assessment_id=a.id, context_tier="staff", subject="grant")
+    )
+    with pytest.raises(IntegrityError):
+        async with db_session.begin_nested():
+            db_session.add(row)

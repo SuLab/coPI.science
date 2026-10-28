@@ -1793,3 +1793,79 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > changes nothing: both enum values stay (Postgres cannot drop one; the upgrade's
 > `IF NOT EXISTS` keeps a later upgrade clean). Never reuse revision id `0074`. Never start a
 > run as part of this deploy; runs start only from `/workspace/simulation`.
+
+> **Deploy order for `0075_project_review_assignments` — migrate BEFORE the new web image
+> serves, only when no projects run is live, with the WORKER IDLE; rebuild `blackbird-app`
+> only.** `0075` belongs to the projects pages redesign
+> (`docs/specs/2026-10-27-projects-pages-redesign-design.md` §7) and ships with `0076` in one
+> release (one build, one `run_migration.sh --apply` to `0076`). It creates
+> `hub_project_review_assignments` (staff assign a project to a reviewer): one row per
+> project and assignee (unique `uq_hub_project_review_assignment_once`, indexes
+> `ix_hub_project_review_assignments_project_id` and `ix_hub_project_review_assignments_assignee`),
+> `project_id` cascading from `hub_projects` (so a run's deletion removes it),
+> `assignee_user_id` cascading from `users`, `assigned_by_user_id` `ON DELETE SET NULL`.
+>
+> *Old code on the new schema* is safe: nothing old reads the table. *New code on the old
+> schema* fails: the Projects list and a project's details page select the table and raise
+> `UndefinedTable` (a 500 on both pages). **Images:** the engine and the worker never read
+> the table, so neither the agent nor the worker image needs a rebuild.
+>
+> **When:** only when no projects run is live (owner decision D61: `/workspace/simulation`
+> shows no running run with a Projects session; never stop a run for this migration), and
+> with the worker idle (no `processing` job), for the reason the `0059` box gives: the
+> foreign keys lock `hub_projects` and `users` briefly and the chain's 10 s `lock_timeout`
+> rolls back behind a worker transaction. Check
+> `$DC exec -T postgres psql -U copi -d copi -c "select count(*) from jobs where status='processing'"`
+> prints 0. A `lock_timeout` rollback is harmless: re-run it.
+>
+> Before: `SELECT version_num FROM alembic_version;` reads `0074`, and
+> `SELECT to_regclass('public.hub_project_review_assignments');` is NULL. Tag the rollback
+> image `rollback-pre-0075` first. After: `$DC run --rm blackbird-app alembic current` reads
+> the head (`0076` when shipped with it). The migration writes no row; there is no back-fill.
+>
+> **Rollback:** first run the `rollback-pre-0075` image (the table is harmless to old code);
+> only then, if wanted, `alembic downgrade 0074` from a one-off container off the NEW image
+> (through `0076`'s downgrade first) drops the table and every assignment. **Never downgrade
+> first:** the new image would then fail as above. Never reuse revision id `0075`. Never
+> start a run as part of this deploy.
+
+> **Deploy order for `0076_project_chat` — migrate BEFORE the new web image serves, only
+> when no projects run is live, with the WORKER IDLE; rebuild `blackbird-app` only.** `0076`
+> gives the assessment chat's tables a project subject for "Ask about this project"
+> (`docs/specs/2026-10-27-projects-pages-redesign-design.md` §8.2, §8.8), and ships with
+> `0075`. `assessment_chat_turns` gains `project_id` (`ON DELETE CASCADE` from
+> `hub_projects`, FK `fk_assessment_chat_turns_project_id_hub_projects`, index
+> `ix_assessment_chat_turns_project_conversation`), its `assessment_id` becomes nullable, and
+> CHECK `ck_assessment_chat_turns_one_subject` requires exactly one of the two.
+> `assessment_chat_usage` and `assessment_chat_opens` each gain `project_id` (`ON DELETE SET
+> NULL`, indexed `ix_assessment_chat_usage_project_id` / `ix_assessment_chat_opens_project_id`)
+> and `subject` (`assessment` or `project`, CHECKs `ck_assessment_chat_usage_subject` /
+> `ck_assessment_chat_opens_subject`). NULL `subject` means the row was written before `0076`
+> (every one an assessment); it is never back-filled.
+>
+> *Old code on the new schema* is safe: it never writes a NULL `assessment_id`, selects turns
+> by `assessment_id`, and leaves the new columns NULL. *New code on the old schema* fails:
+> the chat models map `project_id` and `subject`, so every chat request (assessment and
+> project) raises `UndefinedColumn`. **Images:** the engine and the worker never read the new
+> columns, so neither the agent nor the worker image needs a rebuild.
+>
+> **When:** as for `0075`: only when no projects run is live (D61), with the worker idle (no
+> `processing` job). `ALTER TABLE` takes a brief ACCESS EXCLUSIVE lock on each chat table
+> (small: seven ledger rows on 2026-10-27) and the foreign keys lock `hub_projects`; a 10 s
+> `lock_timeout` rollback is harmless: re-run it.
+>
+> Before: `SELECT version_num FROM alembic_version;` reads `0075` (or `0074` when applied
+> with it). After: `$DC run --rm blackbird-app alembic current` reads `0076`, and
+> `\d assessment_chat_turns` shows `assessment_id` nullable and `project_id`. The project
+> chat stays off until `PROJECT_CHAT_ENABLED=true` is set in `.env` (then
+> `$DC up -d --force-recreate --no-deps blackbird-app`).
+>
+> **Rollback:** first run the rollback image (`rollback-pre-0075` when shipped together); only
+> then, if wanted, `alembic downgrade 0075` from a one-off container off the NEW image. It
+> DELETES every project chat turn (questions and answers), then drops the checks, indexes,
+> foreign keys and columns and restores NOT NULL on `assessment_id`. Ledger and opens rows
+> stay (the ledger outlives its subject); a project question's ledger row loses its `turn_id`
+> with the turn, and every row loses `project_id` and `subject` with the columns, so a
+> later re-upgrade reads the project rows as pre-`0076` (NULL `subject`) assessment rows.
+> **Never downgrade first.** Never reuse revision id `0076`. Never start a run as part of
+> this deploy.

@@ -96,9 +96,12 @@ ERROR_IN_PROGRESS = "in_progress"
 
 #: The page sections that show inline asks (element ids in
 #: templates/admin/_assessment_detail_body.html). A block anchored anywhere else — an
-#: interview message, a consult card — is offered in the drawer only.
+#: interview message, a consult card — is offered in the drawer only. `evidence`, `plan`
+#: and `positions` are cards of the project details page
+#: (templates/workspace/project_detail.html), which shares `brief` too.
 INLINE_SECTIONS = frozenset(
-    {"brief", "signals", "ask", "verdict", "panel", "gating", "red-flags", "rationale", "scores"}
+    {"brief", "signals", "ask", "verdict", "panel", "gating", "red-flags", "rationale", "scores",
+     "evidence", "plan", "positions"}
 )
 #: `score-rationale` sits inside the brief card.
 _SECTION_OF_ANCHOR = {"score-rationale": "brief"}

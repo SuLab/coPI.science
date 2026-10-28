@@ -65,7 +65,7 @@
       "shots.py#assign-to": "049d17cea0a41ed1bdc718a5230465545384f24b46fc94213ac7de3a3cc76eb5",
       "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
-      "templates/assessments/_chat_drawer.html": "081f1a3ea7ec572c52f7f995a6a76db89ecbea463802df77e53cadfacd455336",
+      "templates/assessments/_chat_drawer.html": "ba33b4b38d567e38bdc6861b26b08504749832ec81b207ba6cb150fcd419ee2b",
       "templates/assessments/_detail_body.html": "a8ae8cf3fdeef08fe7968a2e14a672800fc89e9ff693994d17623fb8156dafae",
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
@@ -73,7 +73,7 @@
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
       "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "e97bb92b4395e665329549ca2081732737f3402e"
   },
   "card-rubric-gating": {
     "audience": "all",
@@ -105,7 +105,7 @@
       "shots.py#chat-drawer": "bff926b223b15710a3645add20bfbaf1860937aac6e7e81c41cc60543311a071",
       "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
-      "templates/assessments/_chat_drawer.html": "081f1a3ea7ec572c52f7f995a6a76db89ecbea463802df77e53cadfacd455336",
+      "templates/assessments/_chat_drawer.html": "ba33b4b38d567e38bdc6861b26b08504749832ec81b207ba6cb150fcd419ee2b",
       "templates/assessments/_detail_body.html": "a8ae8cf3fdeef08fe7968a2e14a672800fc89e9ff693994d17623fb8156dafae",
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
@@ -113,7 +113,7 @@
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
       "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "e97bb92b4395e665329549ca2081732737f3402e"
   },
   "detail-brief": {
     "audience": "all",
@@ -125,7 +125,7 @@
       "shots.py#detail-brief": "d56981af99b7d835163cfb8fb44afcde3f51513b5e5ed3d63b0a81f2c56283d8",
       "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
-      "templates/assessments/_chat_drawer.html": "081f1a3ea7ec572c52f7f995a6a76db89ecbea463802df77e53cadfacd455336",
+      "templates/assessments/_chat_drawer.html": "ba33b4b38d567e38bdc6861b26b08504749832ec81b207ba6cb150fcd419ee2b",
       "templates/assessments/_detail_body.html": "a8ae8cf3fdeef08fe7968a2e14a672800fc89e9ff693994d17623fb8156dafae",
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
@@ -133,7 +133,7 @@
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
       "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "e97bb92b4395e665329549ca2081732737f3402e"
   },
   "detail-evidence": {
     "audience": "all",
@@ -145,7 +145,7 @@
       "shots.py#detail-evidence": "3148a5cbcab10f9f70d96a3249d897d394356bb41f5e1595fccd98cbf6e17b40",
       "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
-      "templates/assessments/_chat_drawer.html": "081f1a3ea7ec572c52f7f995a6a76db89ecbea463802df77e53cadfacd455336",
+      "templates/assessments/_chat_drawer.html": "ba33b4b38d567e38bdc6861b26b08504749832ec81b207ba6cb150fcd419ee2b",
       "templates/assessments/_detail_body.html": "a8ae8cf3fdeef08fe7968a2e14a672800fc89e9ff693994d17623fb8156dafae",
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
@@ -153,7 +153,7 @@
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
       "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "e97bb92b4395e665329549ca2081732737f3402e"
   },
   "detail-panel-gating": {
     "audience": "all",
@@ -165,7 +165,7 @@
       "shots.py#detail-panel-gating": "744dc330f47c5d07128f93440eafa9c0ce4605e1626259071be86a46ca491d1e",
       "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
-      "templates/assessments/_chat_drawer.html": "081f1a3ea7ec572c52f7f995a6a76db89ecbea463802df77e53cadfacd455336",
+      "templates/assessments/_chat_drawer.html": "ba33b4b38d567e38bdc6861b26b08504749832ec81b207ba6cb150fcd419ee2b",
       "templates/assessments/_detail_body.html": "a8ae8cf3fdeef08fe7968a2e14a672800fc89e9ff693994d17623fb8156dafae",
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
@@ -173,7 +173,7 @@
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
       "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "e97bb92b4395e665329549ca2081732737f3402e"
   },
   "detail-timeline": {
     "audience": "all",
@@ -185,7 +185,7 @@
       "shots.py#detail-timeline": "d4961954f27aa38df693328efc786bd1b472c635dbc95fb0d8ff138a85dd188b",
       "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
-      "templates/assessments/_chat_drawer.html": "081f1a3ea7ec572c52f7f995a6a76db89ecbea463802df77e53cadfacd455336",
+      "templates/assessments/_chat_drawer.html": "ba33b4b38d567e38bdc6861b26b08504749832ec81b207ba6cb150fcd419ee2b",
       "templates/assessments/_detail_body.html": "a8ae8cf3fdeef08fe7968a2e14a672800fc89e9ff693994d17623fb8156dafae",
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
@@ -193,7 +193,7 @@
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
       "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "e97bb92b4395e665329549ca2081732737f3402e"
   },
   "discussions": {
     "audience": "staff",
@@ -464,7 +464,7 @@
       "shots.py#review-form": "827a362f8921dd50737f78418b3eb440e721ad00d1ac0fbd1495b634631d3306",
       "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
-      "templates/assessments/_chat_drawer.html": "081f1a3ea7ec572c52f7f995a6a76db89ecbea463802df77e53cadfacd455336",
+      "templates/assessments/_chat_drawer.html": "ba33b4b38d567e38bdc6861b26b08504749832ec81b207ba6cb150fcd419ee2b",
       "templates/assessments/_detail_body.html": "a8ae8cf3fdeef08fe7968a2e14a672800fc89e9ff693994d17623fb8156dafae",
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
@@ -472,7 +472,7 @@
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
       "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "e97bb92b4395e665329549ca2081732737f3402e"
   },
   "slack-bots": {
     "audience": "staff",

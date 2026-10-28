@@ -224,6 +224,170 @@ async def _seed_phase3(s, *, run, now: datetime) -> dict:
     }
 
 
+#: The projects pages' journeys (spec 2026-10-27 §6.6): an invented plan for every project.
+PROJ_PLAN = {
+    "indication": "Idiopathic pulmonary fibrosis with progressive decline",
+    "target": "TGF-beta driven myofibroblast activation",
+    "model": "precision-cut lung slices from bleomycin-treated mice",
+    "positive_control": "nintedanib",
+    "negative_control": "vehicle-treated slices",
+    "standard_of_care": "pirfenidone",
+    "readout": "collagen deposition by second-harmonic imaging",
+    "design": "three doses against both controls, six slices per arm",
+    "time_and_budget": "Nine months and one postdoc",
+    "lab_tools": ["fibroblast reporter lines (published)", "a custom imaging rig"],
+}
+
+
+def _proj_choice(title: str, summary: str) -> dict:
+    return {
+        "chosen": {"use": "Repurpose the reporter lines as a fibrosis screen",
+                   "why": "They read out activation directly.", "domain": "scientific"},
+        "why_chosen": "The lab's reporter lines measure **myofibroblast activation** directly.",
+        "others": [{"use": "A diagnostic assay from the same lines", "domain": "clinical",
+                    "note": "No validated cut-off yet."}],
+        "title": title,
+        "summary": summary,
+        "plan": dict(PROJ_PLAN),
+        "anchors": [{"section": "Model Systems", "item": "fibroblast reporter lines"}],
+        "sources": [
+            {"key": "pmid:42424250", "kind": "pubmed", "title": "An invented reporter paper",
+             "domain": "scientific", "shows": "the lines respond to TGF-beta"},
+            {"key": "nct:NCT09999999", "kind": "trial", "title": "An invented fibrosis trial",
+             "domain": "clinical", "shows": "the endpoint regulators accept"},
+            {"key": "patent:US99999999B2", "kind": "patent", "title": "An invented screen patent",
+             "domain": "legal", "shows": "prior screening claims"},
+        ],
+    }
+
+
+async def _seed_projects(s, *, run, now: datetime, reviewer, manager, admin) -> dict:
+    """Four invented projects on ``run`` for the projects pages' journeys: a Ready one (a
+    two-chunk posting logged as two rows, the lab's reply, four Markdown thread posts, three
+    consults in two domains with one cut off, one review and one assignment), a Not agreed
+    one with gaps and disagreements, a Not finished ``thread_timeout`` one and one still
+    researching. Returns their ids under ``projects``."""
+    from src.agent.slack_client import split_for_wire
+    from src.models import SpecialistConsult
+    from src.models.hub_project import (
+        HubProject,
+        HubProjectReview,
+        HubProjectReviewAssignment,
+    )
+    from tests import factories
+
+    base = (now - timedelta(hours=2, minutes=30)).timestamp()
+
+    def ts(offset: float) -> str:
+        return f"{base + offset:.6f}"
+
+    def at(offset: float) -> datetime:
+        return datetime.fromtimestamp(base + offset, UTC)
+
+    async def log(agent_id, sender, phase, offset, content, *, message_ts, thread_ts=None):
+        await factories.make_agent_message(
+            s, run=run, agent_id=agent_id, channel_name="general", phase=phase,
+            message_ts=message_ts, thread_ts=thread_ts, content=content, sender_name=sender,
+            posted_at=base + offset)
+
+    # Ready: the posting is long enough to go out as two Slack messages.
+    posting = (
+        "*Project for FounderBot: a fibrosis screen from your reporter lines*\n"
+        + "The plan, field by field, with the sources behind it. " * 45 + "\n"
+        + "Sources: an invented reporter paper, an invented fibrosis trial. " * 30 + "\n"
+        + "Reply in this thread with what you would change."
+    )
+    chunks = split_for_wire(posting)
+    ready = HubProject(
+        simulation_run_id=run.id, agent_id="founder", slot=1, status="ready",
+        requested_run_seconds=0.0, requested_at=at(-600),
+        title="A fibrosis screen from the reporter lines",
+        choice=_proj_choice("A fibrosis screen from the reporter lines",
+                            "Use the lab's reporter lines to rank antifibrotic compounds."),
+        posting_text=posting, posting_ts=ts(0), posted_at=at(0), reply_ts=ts(120),
+        final={
+            "plan": {**PROJ_PLAN, "readout": "collagen by second-harmonic imaging and qPCR"},
+            "tool_marks": [], "hub_position": "agree", "lab_position": "agree",
+            "gaps": ["No human tissue arm yet."], "disagreements": [],
+        },
+        finished_at=at(900),
+    )
+    s.add(ready)
+    for index, chunk in enumerate(chunks):
+        await log("blackbird", "BlackbirdBot", "hub_project", index, chunk,
+                  message_ts=ts(index), thread_ts=ts(0) if index else None)
+    await log("founder", "FounderBot", "project_reply", 120,
+              "We like it. **Two changes**:\n\n- add qPCR\n- drop the highest dose",
+              message_ts=ts(120))
+    thread = (
+        ("blackbird", "BlackbirdBot", 240, "Thanks. Is qPCR on *COL1A1* enough?"),
+        ("founder", "FounderBot", 360, "Yes, with:\n\n1. *ACTA2*\n2. *FN1*"),
+        # Long enough to be clamped, so "Show full message" has something to open.
+        ("blackbird", "BlackbirdBot", 480, "Agreed; I have updated the readout.\n\n" + "\n\n".join(
+            f"**Step {n}.** Image collagen by second-harmonic generation, then confirm it "
+            "with qPCR on the same slices." for n in range(1, 13))),
+        ("blackbird", "BlackbirdBot", 600, "**Closing:** the plan is ready."),
+    )
+    for agent_id, sender, offset, text in thread:
+        await log(agent_id, sender, "thread_reply", offset, text, message_ts=ts(offset),
+                  thread_ts=ts(120))
+    for domain, offset, truncated, concern in (
+        ("scientific", 200, False, "The reporter may saturate at high doses."),
+        ("clinical", 300, True, "The lung-slice readout is not a clinical endpoint"),
+        ("scientific", 420, False, "Saturation is addressed by the dose range."),
+    ):
+        s.add(SpecialistConsult(
+            simulation_run_id=run.id, agent_id="blackbird", subject_agent_id="founder",
+            thread_id=ts(120), domain=domain, question=f"What does the {domain} side say?",
+            verdict_signal="adequate", confidence="moderate", raw_opinion="seeded opinion",
+            truncated=truncated, concerns=[concern], established=[f"{domain} basis holds"],
+            questions_to_ask=[f"Which {domain} follow-up first?"], created_at=at(offset)))
+    await s.flush()
+    s.add(HubProjectReview(project_id=ready.id, reviewer_user_id=manager.id,
+                           reviewer_name=manager.name, rating=4, fund=True,
+                           comment="A clear, cheap first experiment."))
+    s.add(HubProjectReviewAssignment(
+        project_id=ready.id, assignee_user_id=reviewer.id, assignee_name=reviewer.name,
+        assigned_by_user_id=admin.id, assigned_by_name=admin.name))
+
+    not_agreed = HubProject(
+        simulation_run_id=run.id, agent_id="founder", slot=2, status="not_agreed",
+        requested_run_seconds=1.0, requested_at=at(1000),
+        title="A diagnostic cut-off from the reporter lines",
+        choice=_proj_choice("A diagnostic cut-off from the reporter lines",
+                            "Turn the reporter readout into a diagnostic threshold."),
+        posting_text="A diagnostic cut-off from the reporter lines.", posting_ts=ts(1100),
+        posted_at=at(1100),
+        final={"plan": dict(PROJ_PLAN), "tool_marks": [], "hub_position": "agree",
+               "lab_position": "disagree",
+               "gaps": ["No patient samples.", "No validated cut-off."],
+               "disagreements": ["The lab doubts a slice assay can set a clinical threshold."]},
+        finished_at=at(1500),
+    )
+    timed_out = HubProject(
+        simulation_run_id=run.id, agent_id="p4-wang", slot=1, status="not_finished",
+        reason_code="thread_timeout", requested_run_seconds=2.0, requested_at=at(1600),
+        title="An imaging rig for organoid fibrosis",
+        choice=_proj_choice("An imaging rig for organoid fibrosis",
+                            "Adapt the imaging rig to lung organoids."),
+        posting_text="An imaging rig for organoid fibrosis.", posting_ts=ts(1700),
+        posted_at=at(1700), finished_at=at(2400),
+    )
+    researching = HubProject(
+        simulation_run_id=run.id, agent_id="p4-wang", slot=2, status="researching",
+        requested_run_seconds=3.0, requested_at=at(2500),
+    )
+    s.add_all([not_agreed, timed_out, researching])
+    await s.flush()
+    for project in (not_agreed, timed_out):
+        await log("blackbird", "BlackbirdBot", "hub_project",
+                  (project.posted_at.timestamp() - base), project.posting_text,
+                  message_ts=project.posting_ts)
+    return {"projects": {"ready": str(ready.id), "not_agreed": str(not_agreed.id),
+                         "not_finished": str(timed_out.id),
+                         "researching": str(researching.id)}}
+
+
 async def main() -> None:
     if not os.environ.get("DATABASE_URL", "").endswith("/" + DB_NAME):
         sys.exit(f"refusing to seed: DATABASE_URL must name {DB_NAME}")
@@ -344,6 +508,8 @@ async def main() -> None:
             payload={"sentinel": "PHASE5 PRIVATE JOB"}, last_error="PHASE5 PRIVATE JOB",
         ))
         phase4 = await _seed_phase4(s)
+        projects = await _seed_projects(s, run=run, now=now, reviewer=reviewer,
+                                        manager=manager, admin=admin)
         # Research-visible scores and evidence; coverage remains a staff diagnostic.
         for score_user, raw in ((pi.id, 1.0), (pi2.id, 2.0),
                                 (uuid.UUID(phase4["p4_pi_a"]), 3.0),
@@ -402,6 +568,7 @@ async def main() -> None:
             # three rows crawl.routes unpacks.
             **phase3,
             **phase4,
+            **projects,
         }
     await get_engine().dispose()
     print(json.dumps(ids))

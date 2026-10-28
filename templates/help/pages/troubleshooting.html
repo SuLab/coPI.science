@@ -198,12 +198,41 @@ else. You can edit only your own.</p>
 
 <h2 id="projects">Projects</h2>
 
+<h3>"Review saved."</h3>
+<p><strong>What it means:</strong> your project review was saved. On the list, the card stays
+where it was, because the tab you are on still shows it, unless <strong>Not reviewed by
+me</strong> is ticked: then the card leaves the list and the page shows the next card.</p>
+<p><strong>What to do:</strong> nothing.</p>
+
+<h3>"Review saved; moved to Reviewed."</h3>
+<p><strong>What it means:</strong> you sent a <strong>Quick review</strong> from the
+<strong>Unreviewed</strong> tab. The project now has a review, so it has moved to the
+<strong>Reviewed</strong> tab, and the list shows the next card.</p>
+<p><strong>What to do:</strong> nothing; open the <strong>Reviewed</strong> tab to see
+it.</p>
+
+<h3>"You have already reviewed this project; edit your review on its page."</h3>
+<p><strong>What it means:</strong> you sent a <strong>Quick review</strong> of a project you
+had already reviewed, for example from a list opened before your first review. Each person
+keeps one review per project, so the second one was not saved.</p>
+<p><strong>What to do:</strong> to change your review, open the project with
+<strong>detail →</strong> and use <strong>Edit your review</strong> in its
+<strong>Reviews</strong> section.</p>
+
 <h3>"You have already reviewed this project; edit your review below."</h3>
 <p><strong>What it means:</strong> you already have a review of this project, usually because
 the button was pressed twice. Each person keeps one review per project, so the second one was
 not saved.</p>
 <p><strong>What to do:</strong> to change it, open <strong>Edit your review</strong> in the
 project's <strong>Reviews</strong> section.</p>
+
+{% if permissions.admin %}
+<h3>"Reviews can't be written while impersonating."</h3>
+<p><strong>What it means:</strong> while viewing the site as someone else, you cannot write,
+edit or delete a project review, so the list shows this instead of <strong>Quick
+review</strong>.</p>
+<p><strong>What to do:</strong> stop viewing as them to review as yourself.</p>
+{% endif %}
 
 <h3>"rating must be a whole number from 1 to 5"</h3>
 <p><strong>What it means:</strong> the rating sent was not one of 1 to 5.</p>
@@ -281,7 +310,8 @@ up.</p>
 
 <h3>"An answer is still being written. Wait for it to finish."</h3>
 <p><strong>What it means:</strong> you asked while the previous answer was still
-arriving.</p>
+arriving. You get one answer at a time across every assessment and project chat, so the
+answer may be arriving in another chat you have open.</p>
 <p><strong>What to do:</strong> wait for it, then ask again.</p>
 
 <h3>"The model is busy. Try again in a minute."</h3>
@@ -339,6 +369,24 @@ problem in how the chat is set up.</p>
 <h3>"Something went wrong. Try again."</h3>
 <p><strong>What it means:</strong> an unexpected error.</p>
 <p><strong>What to do:</strong> ask again. If it keeps happening, tell an admin.</p>
+
+<h2 id="project-chat">Project chat</h2>
+<p>The project chat on a project's details page shows the same messages as the assessment
+chat, listed above, and these of its own, in red under the question box.</p>
+
+<h3>"The project chat is switched off."</h3>
+<p><strong>What it means:</strong> the project chat has been turned off for everyone.</p>
+<p><strong>What to do:</strong> read the project's page instead, and try the chat later.</p>
+
+<h3>"This project no longer exists."</h3>
+<p><strong>What it means:</strong> the project was removed after you opened its page.</p>
+<p><strong>What to do:</strong> go back to the Projects page.</p>
+
+<h3>"This project is still in progress; the chat opens once it finishes."</h3>
+<p><strong>What it means:</strong> the chat answers only about finished projects (Ready, Not
+agreed or Not finished), and this one is still open.</p>
+<p><strong>What to do:</strong> come back once the project has finished; its card on the
+Projects list then shows its outcome.</p>
 
 {% if permissions.staff %}
 <h2 id="pi-pages">PI pages</h2>

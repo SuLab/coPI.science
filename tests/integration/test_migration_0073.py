@@ -1,6 +1,7 @@
 """0073: the projects prototype's four tables, the ``project_closed`` thread outcome, the
 one-project-per-slot unique constraint, the downgrade (which keeps the enum value), and what
-a pre-0073 ORM mapping does with a ``project_closed`` decision. The database is at head."""
+a pre-0073 ORM mapping does with a ``project_closed`` decision. The database is at head, so
+the downgrade test first takes 0076 and 0075 off: their foreign keys reference hub_projects."""
 import importlib.util
 import sys
 from pathlib import Path
@@ -16,18 +17,23 @@ from tests import factories
 pytestmark = pytest.mark.integration
 _VERSIONS = Path(__file__).resolve().parents[2] / "alembic" / "versions"
 TABLES = {"hub_projects", "hub_project_calls", "hub_project_clocks", "hub_project_reviews"}
+#: Matched by ``_tables``' LIKE too; created by 0075.
+LATER_TABLES = {"hub_project_review_assignments"}
+#: The revisions above 0073 that reference hub_projects, newest first.
+LATER = ("0076_project_chat.py", "0075_project_review_assignments.py")
 
 
-def _m0073():
-    spec = importlib.util.spec_from_file_location("_m0073", _VERSIONS / "0073_hub_projects.py")
+def _module(filename: str):
+    name = "_m" + filename.split("_", 1)[0]
+    spec = importlib.util.spec_from_file_location(name, _VERSIONS / filename)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
 
 
-async def _run(db_session, name: str) -> None:
-    mod = _m0073()
+async def _run(db_session, name: str, filename: str = "0073_hub_projects.py") -> None:
+    mod = _module(filename)
     conn = await db_session.connection()
 
     def _call(sync_conn):
@@ -61,7 +67,7 @@ async def _insert_project(db_session, run_id, *, agent_id="lab1", slot=1):
 
 
 async def test_upgrade_creates_the_four_tables_and_the_outcome(db_session):
-    assert await _tables(db_session) == TABLES
+    assert await _tables(db_session) == TABLES | LATER_TABLES
     assert "project_closed" in await _outcomes(db_session)
 
 
@@ -77,12 +83,17 @@ async def test_one_project_per_run_lab_and_slot(db_session):
 
 
 async def test_downgrade_drops_the_tables_keeps_the_enum_value_and_upgrade_restores(db_session):
+    for later in LATER:
+        await _run(db_session, "downgrade", later)
     await _run(db_session, "downgrade")
     assert await _tables(db_session) == set()
     assert "project_closed" in await _outcomes(db_session)
     await _run(db_session, "upgrade")
     assert await _tables(db_session) == TABLES
     assert "project_closed" in await _outcomes(db_session)
+    for later in reversed(LATER):
+        await _run(db_session, "upgrade", later)
+    assert await _tables(db_session) == TABLES | LATER_TABLES
 
 
 async def test_pre_0073_enum_mapping_cannot_read_project_closed(db_session):

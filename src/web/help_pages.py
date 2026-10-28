@@ -78,9 +78,9 @@ HELP_PAGES: tuple[HelpPage, ...] = (
              AUDIENCE_ALL, "help/pages/assessments.html",
              ("list", "cards", "detail", "chat", "reviewing", "approval-status", "assigning")),
     HelpPage("projects", "Projects",
-             "Reading BlackbirdBot's projects and reviewing them.",
+             "Reading BlackbirdBot's projects, asking about them, and reviewing them.",
              AUDIENCE_ALL, "help/pages/projects.html",
-             ("list", "detail", "reviewing", "what-labs-see")),
+             ("list", "outcomes", "detail", "reviewing", "assigning", "chat", "what-labs-see")),
     HelpPage("pis", "PIs",
              "The PI directory and a PI's page.",
              AUDIENCE_ALL, "help/pages/pis.html",
@@ -114,8 +114,8 @@ HELP_PAGES: tuple[HelpPage, ...] = (
     HelpPage("troubleshooting", "Troubleshooting",
              "Messages you may see, what they mean and what to do.",
              AUDIENCE_ALL, "help/pages/troubleshooting.html",
-             ("sign-in", "access", "assessments", "projects", "assessment-chat", "pi-pages",
-              "staff-pages")),
+             ("sign-in", "access", "assessments", "projects", "assessment-chat",
+              "project-chat", "pi-pages", "staff-pages")),
 )
 
 _REVIEWER_STEPS = (

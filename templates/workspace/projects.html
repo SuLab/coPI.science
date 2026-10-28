@@ -2,44 +2,164 @@
 {% from "help/_link.html" import help_link %}
 {% from "_run_bar.html" import run_bar as run_bar_macro %}
 {% block title %}Workspace — Projects — Blackbird{% endblock %}
+{% block extra_head %}{% include "assessments/_head.html" %}{% endblock %}
 {% block content %}
+{# Every link and form carries `list_state` (src/services/projects_view.py::project_list_state:
+   valid, non-default values only), so the details page and the review redirects return the
+   reader to the same run, tab, sort and filters. Model-written text renders autoescaped. #}
 {% set badge_class = {'ready': 'bg-green-100 text-green-700', 'not_agreed': 'bg-amber-100 text-amber-700', 'not_finished': 'bg-red-100 text-red-700', 'paused': 'bg-gray-100 text-gray-600', 'in_progress': 'bg-blue-100 text-blue-700'} %}
-<div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 mb-6"><h1 class="text-2xl font-bold text-gray-900">Projects</h1>{{ help_link(request, effective_user, 'projects', 'list') }}</div>
+{% set tile_class = {'total': 'text-gray-900', 'ready': 'text-green-700', 'not_agreed': 'text-amber-700', 'not_finished': 'text-red-700', 'in_progress': 'text-blue-700'} %}
+{% macro pi_link(lab) %}{% if lab and pi_user_ids.get(lab) %}<a class="underline text-indigo-600 hover:text-indigo-800" href="{{ page_url(request, 'workspace_pi_detail', user_id=pi_user_ids[lab]) }}">{{ lab }}</a>{% else %}{{ lab or "—" }}{% endif %}{% endmacro %}
+{% macro detail_link(p) %}<a class="project-open-link inline-flex items-center gap-1 rounded bg-indigo-600 px-2 py-1 text-sm font-medium text-white hover:bg-indigo-700 whitespace-nowrap" href="{{ page_url(request, 'workspace_project_detail', query=list_state, project_id=p.id) }}">detail →</a>{% endmacro %}
+{% macro chat_link(p) %}<a class="project-chat-link inline-flex items-center gap-1 rounded border border-indigo-300 px-2 py-1 text-sm font-medium text-indigo-700 hover:bg-indigo-50 whitespace-nowrap" href="{{ page_url(request, 'workspace_project_detail', query=list_state, fragment='chat', project_id=p.id) }}" title="Open this project and ask about it">chat</a>{% endmacro %}
+<div class="flex flex-wrap items-center justify-between mb-2 gap-4">
+    <div class="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+        <h1 class="text-2xl font-bold text-gray-900">Projects</h1>
+        {{ help_link(request, effective_user, 'projects', 'list') }}
+    </div>
+    {% if selected_run_id %}
+    <form method="get" action="{{ page_url(request, 'workspace_projects') }}" class="flex flex-wrap items-center gap-2 justify-end min-w-0 max-w-full">
+        <input type="hidden" name="run_id" value="{{ selected_run_id }}">
+        <input type="hidden" name="review" value="{{ list_state.get('review', '') }}">
+        <label for="projects-sort-select" class="text-sm text-gray-600">Sort:</label>
+        <select id="projects-sort-select" name="sort" class="text-sm border border-gray-300 rounded-md shadow-sm">{% for value, label in [('finished', 'Recently finished'), ('lab', 'Lab'), ('outcome', 'Outcome')] %}<option value="{{ value }}" {% if sort == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+        <label for="projects-assignment-select" class="text-sm text-gray-600">Assignment:</label>
+        <select id="projects-assignment-select" name="assignment" class="text-sm border border-gray-300 rounded-md shadow-sm"><option value="all" {% if assignment_filter != 'mine' %}selected{% endif %}>All</option><option value="mine" {% if assignment_filter == 'mine' %}selected{% endif %}>Assigned to me</option></select>
+        <label for="projects-lab" class="text-sm text-gray-600">Lab:</label>
+        <select id="projects-lab" name="lab" class="text-sm border border-gray-300 rounded-md shadow-sm"><option value="" {% if not lab_filter %}selected{% endif %}>All labs</option>{% for option in lab_options %}<option value="{{ option }}" {% if option == lab_filter %}selected{% endif %}>{{ option }}</option>{% endfor %}</select>
+        <label for="projects-outcome" class="text-sm text-gray-600">Outcome:</label>
+        <select id="projects-outcome" name="outcome" class="text-sm border border-gray-300 rounded-md shadow-sm">{% for value, label in [('', 'Ready and not agreed'), ('ready', 'Ready'), ('not_agreed', 'Not agreed'), ('not_finished', 'Not finished'), ('paused', 'Paused or in progress')] %}<option value="{{ value }}" {% if value == (outcome_filter or '') %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+        <span class="flex items-center gap-1"><input type="checkbox" id="projects-mine" name="mine" value="1" {% if mine %}checked{% endif %}><label for="projects-mine" class="text-sm text-gray-700">Not reviewed by me</label></span>
+        <button type="submit" class="px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">Apply</button>
+    </form>
+    {% endif %}
+</div>
 {% if not selected_run_id %}<p class="text-gray-600 text-sm">No simulation runs found.</p>{% else %}
-{{ run_bar_macro(page_url(request, 'workspace_projects'), 'projects-run-select', run_bar, selected_run_id, False, '', 'projects', ('Runs with projects', 'Runs with no projects'), 'Counts are projects requested in the run.', [('lab', lab_filter or ''), ('outcome', outcome_filter), ('mine', '1' if mine else '')]) }}
-<p class="text-sm text-gray-600 mb-4">{{ summary.counts.get('ready', 0) }} ready · {{ summary.counts.get('not_agreed', 0) }} not agreed · {{ summary.counts.get('not_finished', 0) }} not finished · {{ summary.counts.get('paused', 0) + summary.counts.get('in_progress', 0) }} paused or in progress · {{ summary.review_count }} reviews{% if summary.mean_rating is not none %} · mean rating {{ summary.mean_rating }}{% endif %}{% if summary.fund_share is not none %} · {{ (summary.fund_share * 100) | round | int }}% fund{% endif %}</p>
-<form method="get" action="{{ page_url(request, 'workspace_projects') }}" class="mb-4 flex flex-wrap items-end gap-3">
-    <input type="hidden" name="run_id" value="{{ selected_run_id }}">
-    <div>
-        <label for="projects-lab" class="block text-sm text-gray-700">Lab</label>
-        <select id="projects-lab" name="lab" class="text-sm border border-gray-300 rounded-md shadow-sm">
-            <option value="" {% if not lab_filter %}selected{% endif %}>All labs</option>
-            {% for option in lab_options %}<option value="{{ option }}" {% if option == lab_filter %}selected{% endif %}>{{ option }}</option>{% endfor %}
-        </select>
-    </div>
-    <div>
-        <label for="projects-outcome" class="block text-sm text-gray-700">Outcome</label>
-        <select id="projects-outcome" name="outcome" class="text-sm border border-gray-300 rounded-md shadow-sm">
-            {% for value, label in [('', 'Ready and not agreed'), ('ready', 'Ready'), ('not_agreed', 'Not agreed'), ('not_finished', 'Not finished'), ('paused', 'Paused or in progress')] %}<option value="{{ value }}" {% if value == outcome_filter %}selected{% endif %}>{{ label }}</option>{% endfor %}
-        </select>
-    </div>
-    <div class="flex items-center gap-2">
-        <input type="checkbox" id="projects-mine" name="mine" value="1" {% if mine %}checked{% endif %}>
-        <label for="projects-mine" class="text-sm text-gray-700">Not reviewed by me</label>
-    </div>
-    <button type="submit" class="px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">Apply</button>
-</form>
-{% for p in projects %}
-<div class="bg-white rounded-xl shadow-sm border border-gray-200 mb-3 px-4 py-3">
-    <h2 class="text-base font-medium text-gray-900"><a href="{{ page_url(request, 'workspace_project_detail', project_id=p.id) }}" class="text-indigo-700 hover:underline">{{ p.title or 'Untitled project' }}</a></h2>
-    <div class="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-gray-700">
-        <span>{{ p.lab }}</span>
-        <span class="px-2 py-0.5 rounded-full text-xs {{ badge_class.get(p.outcome_kind, 'bg-gray-100 text-gray-600') }}">{{ p.outcome_label }}</span>
-        {% if p.reason_label %}<span class="text-xs text-gray-600">{{ p.reason_label }}</span>{% endif %}
-        {% if p.finished_at %}<span class="text-xs text-gray-600">Finished {{ p.finished_at | ts }}</span>{% endif %}
-        <span class="text-xs text-gray-600">{{ p.review_count }} reviews{% if p.mean_rating is not none %} · mean rating {{ p.mean_rating }}{% endif %} · {{ p.fund_count }} fund{% if p.reviewed_by_me %} · reviewed by you{% endif %}</span>
+{{ run_bar_macro(page_url(request, 'workspace_projects'), 'projects-run-select', run_bar, selected_run_id, False, '', 'projects', ('Runs with projects', 'Runs with no projects'), 'Counts are projects requested in the run.', [('lab', list_state.get('lab', '')), ('outcome', list_state.get('outcome', '')), ('review', list_state.get('review', '')), ('sort', list_state.get('sort', '')), ('mine', list_state.get('mine', '')), ('assignment', list_state.get('assignment', ''))]) }}
+<p class="text-sm text-gray-600 mb-2">BlackbirdBot's projects: new uses of each lab's own work, researched and refined with the lab in Slack. <a class="text-indigo-700 underline-offset-2 hover:underline" href="{{ page_url(request, 'help_page', slug='projects', fragment='outcomes') }}">Help explains each outcome.</a></p>
+<nav class="project-review-tabs mb-4 flex flex-wrap items-center gap-2 border-b border-gray-200" aria-label="Review status">
+{# The pairs follow project_list_state's key order, so a tab's URL is the state it lands on. #}
+{% for value, label in [('unreviewed', 'Unreviewed'), ('reviewed', 'Reviewed'), ('all', 'All')] %}<a href="{{ page_url(request, 'workspace_projects', query=[('run_id', list_state.get('run_id')), ('lab', list_state.get('lab')), ('outcome', list_state.get('outcome')), ('review', none if value == 'unreviewed' else value), ('sort', list_state.get('sort')), ('mine', list_state.get('mine')), ('assignment', list_state.get('assignment'))]) }}"{% if review_filter == value %}aria-current="page" class="border-b-2 border-indigo-600 px-3 py-2 text-sm font-semibold text-indigo-700"{% else %}class="px-3 py-2 text-sm text-gray-600 hover:text-gray-900"{% endif %}>{{ label }} ({{ review_counts[value] }})</a>{% endfor %}
+<span class="ml-2 text-xs text-gray-600">Tab counts follow the selected run, lab, outcome and filters. Reviewed means anyone has reviewed it.</span>
+</nav>
+
+{# Counted across the whole run, never narrowed by a filter: a filtered view must not hide
+   that projects were lost. #}
+{% if not_finished_reasons %}
+{% set nf_total = not_finished_reasons | sum(attribute='count') %}
+<div class="project-not-finished rounded-xl border border-amber-300 bg-amber-50 p-4 mb-6">
+    <div class="flex items-start gap-3">
+        <span class="text-amber-700 text-xl leading-none" aria-hidden="true">&#9888;</span>
+        <div class="text-sm text-amber-900">
+            <div class="font-semibold mb-1">{{ nf_total }} project{{ '' if nf_total == 1 else 's' }} in this run did not finish:</div>
+            <ul class="list-disc list-inside space-y-0.5">
+                {% for reason in not_finished_reasons %}<li>{{ reason.label }} &times; {{ reason.count }}</li>{% endfor %}
+            </ul>
+            <div class="mt-2 text-xs text-amber-700">Counted across the whole run, whatever the filters. <a class="underline" href="{{ page_url(request, 'workspace_projects', query={'run_id': selected_run_id, 'outcome': 'not_finished', 'review': 'all'}) }}">Show not finished projects</a></div>
+        </div>
     </div>
 </div>
-{% else %}<p class="text-gray-600 text-sm">No projects match these filters in this run.</p>{% endfor %}
+{% endif %}
+
+<div class="grid grid-cols-2 sm:grid-cols-5 gap-4 mb-2">
+    {% for t in tiles %}<div class="project-tile bg-white rounded-xl border border-gray-200 p-4 text-center"><div class="project-tile-count text-3xl font-bold {{ tile_class.get(t.kind, 'text-gray-900') }}">{{ t.count }}</div><div class="text-sm text-gray-600 mt-1">{{ t.label }}</div></div>{% endfor %}
+</div>
+<p class="project-summary text-sm text-gray-600 mb-6">Across the run: {{ summary.review_count }} review{{ '' if summary.review_count == 1 else 's' }}{% if summary.mean_rating is not none %} · mean rating {{ summary.mean_rating }}{% endif %}{% if summary.fund_share is not none %} · {{ (summary.fund_share * 100) | round | int }}% said fund{% endif %}</p>
+
+{% if projects %}
+<div class="space-y-4">
+{% for p in projects %}
+{% if p.is_finished %}
+<div id="{{ p.anchor }}" class="project-card bg-white rounded-xl shadow-sm border border-gray-200 p-5 scroll-mt-16">
+    <h2 class="project-card-title text-base font-semibold text-gray-900"><a href="{{ page_url(request, 'workspace_project_detail', query=list_state, project_id=p.id) }}" class="text-indigo-700 hover:underline">{{ p.title or 'Untitled project' }}</a></h2>
+    <div class="flex items-start justify-between gap-4 flex-wrap">
+        <div class="min-w-0 text-xs text-gray-600 mt-1">
+            Lab: <span class="font-medium text-gray-700">{{ pi_link(p.lab) }}</span>{% if p.posted_at %} · posted {{ p.posted_at | ts }}{% endif %}{% if p.finished_at %} · finished {{ p.finished_at | ts }}{% endif %}
+        </div>
+        <div class="text-right shrink-0">
+            <span class="px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap {{ badge_class.get(p.outcome_kind, 'bg-gray-100 text-gray-600') }}">{{ p.outcome_label }}</span>
+            {% if p.reason_label %}<div class="text-xs text-gray-600 mt-1">{{ p.reason_label }}</div>{% endif %}
+        </div>
+    </div>
+    <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="project-card-summary rounded-lg border border-slate-200 bg-slate-50 p-3">
+            <div class="text-xs font-semibold uppercase tracking-wide text-gray-600">In one minute</div>
+            {% if p.summary %}<p class="mt-1 text-sm text-gray-800 whitespace-pre-line">{{ p.summary }}</p>{% else %}<p class="mt-1 text-sm text-gray-600">No summary recorded.</p>{% endif %}
+            <div class="project-card-open mt-3 flex flex-wrap items-center gap-2">{{ detail_link(p) }}{% if card_chat_available %}{{ chat_link(p) }}{% endif %}</div>
+        </div>
+        <div class="project-card-points rounded-lg border border-gray-200 bg-white p-3">
+            <div class="text-xs font-semibold uppercase tracking-wide text-gray-600">Key points</div>
+            <div class="mt-1 space-y-2 text-sm text-gray-700">
+                {% for kp in p.key_points %}<div><span class="font-semibold text-gray-800">{{ kp.label }}</span><p class="whitespace-pre-line">{{ kp.value }}</p></div>{% endfor %}
+                <p>Positions: BlackbirdBot {{ p.hub_position }} · The lab {{ p.lab_position }}</p>
+                <p>{{ p.gap_count }} gap{{ '' if p.gap_count == 1 else 's' }} · {{ p.disagreement_count }} disagreement{{ '' if p.disagreement_count == 1 else 's' }}</p>
+            </div>
+        </div>
+    </div>
+    <div class="mt-3 pt-3 border-t border-gray-100 flex items-center gap-x-4 gap-y-1 flex-wrap text-xs">
+        <span class="project-card-reviewers text-gray-600">Reviewed by: {% if p.reviewers %}{% for r in p.reviewers %}{{ r.name }} ({{ r.rating }}/5, {{ 'Fund' if r.fund else "Don't fund" }}){{ ', ' if not loop.last }}{% endfor %}{% else %}—{% endif %}</span>
+        {% if p.reviewed_by_me %}<span class="font-medium text-indigo-700">reviewed by you</span>{% endif %}
+        {% if p.assigned_names %}<span class="project-card-assigned text-gray-600">Assigned: {{ p.assigned_names | join(', ') }}</span>{% endif %}
+    </div>
+    {% if not can_review_projects or impersonation_banner %}
+    <p class="project-card-quickreview-off mt-3 border-t border-gray-100 pt-3 text-sm text-gray-600">Reviews can't be written while impersonating.</p>
+    {% else %}
+    {% set qr = 'qr-' ~ p.id ~ '-' %}
+    <details class="project-card-quickreview mt-3 border-t border-gray-100 pt-3"{% if not p.my_review %} open{% endif %}>
+        <summary class="cursor-pointer text-sm font-medium text-indigo-700">Quick review</summary>
+        {% if p.my_review %}
+        <p class="mt-2 text-sm text-gray-700">Your review: {{ p.my_review.rating }}/5 · {{ 'Fund' if p.my_review.fund else "Don't fund" }} · <a class="text-indigo-700 underline-offset-2 hover:underline" href="{{ page_url(request, 'workspace_project_detail', query=list_state, fragment='reviews', project_id=p.id) }}">edit it on the project's page</a></p>
+        {% else %}
+        <p class="mt-2 text-sm text-gray-600 max-w-[68ch]">Rates the project itself, not how the bots performed.</p>
+        {# `next_id` is the following card in rendered order ("" on the last): a review from
+           the Unreviewed tab takes this card off the list, so the redirect lands there. #}
+        <form method="post" action="/reviews/projects/{{ p.id }}/review" class="mt-2 space-y-2">
+            <input type="hidden" name="surface" value="projects-list">
+            {% for key, value in list_state.items() %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}
+            <input type="hidden" name="next_id" value="{{ p.next_id }}">
+            <label for="{{ qr }}rating" class="block text-sm font-medium text-gray-600 mb-1">Rating (1 = weak … 5 = strong)</label>
+            <select id="{{ qr }}rating" name="rating" required class="border rounded px-1 py-0.5 text-sm"><option value="" disabled selected>—</option>{% for n in range(1, 6) %}<option value="{{ n }}">{{ n }}</option>{% endfor %}</select>
+            <fieldset class="mt-3">
+                <legend class="text-sm font-medium text-gray-600">Funding</legend>
+                <div class="flex items-center gap-4 text-sm text-gray-700">
+                    <span><input type="radio" id="{{ qr }}fund" name="fund" value="fund" required> <label for="{{ qr }}fund">Fund</label></span>
+                    <span><input type="radio" id="{{ qr }}no-fund" name="fund" value="no_fund"> <label for="{{ qr }}no-fund">Don't fund</label></span>
+                </div>
+            </fieldset>
+            <label for="{{ qr }}comment" class="block text-sm font-medium text-gray-600 mb-1 mt-3">Comment</label>
+            <textarea id="{{ qr }}comment" name="comment" maxlength="10000" rows="2" class="w-full border rounded px-2 py-1 text-sm"></textarea>
+            <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Submit review</button>
+            <p class="text-sm text-gray-600">One review per person; you can edit yours on the project's page.</p>
+        </form>
+        {% endif %}
+    </details>
+    {% endif %}
+</div>
+{% else %}
+<div id="{{ p.anchor }}" class="project-card project-card-open bg-white rounded-xl shadow-sm border border-gray-200 px-5 py-3 scroll-mt-16">
+    <h2 class="project-card-title text-base font-semibold text-gray-900"><a href="{{ page_url(request, 'workspace_project_detail', query=list_state, project_id=p.id) }}" class="text-indigo-700 hover:underline">{{ p.title or 'Untitled project' }}</a></h2>
+    <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-600">
+        <span>Lab: <span class="font-medium text-gray-700">{{ pi_link(p.lab) }}</span></span>
+        <span class="project-stage px-2 py-0.5 rounded-full font-medium whitespace-nowrap {{ 'bg-gray-100 text-gray-600' if p.stage_paused else 'bg-blue-100 text-blue-700' }}">{% if p.stage_paused %}Paused · {% endif %}{{ p.stage_label }}</span>
+        {% if p.stage_time %}<span>{{ p.stage_time_label }} {{ p.stage_time | ts }}</span>{% endif %}
+        {% if p.assigned_names %}<span class="project-card-assigned">Assigned: {{ p.assigned_names | join(', ') }}</span>{% endif %}
+    </div>
+</div>
+{% endif %}
+{% endfor %}
+</div>
+{% else %}
+<div class="project-empty bg-white rounded-xl border border-gray-200 p-8 text-center text-gray-600">
+    {% if (summary.counts.values() | sum) == 0 %}
+    No projects in this run yet — the run menu shows each run's count.
+    {% elif review_filter == 'reviewed' %}
+    No reviewed projects match these filters — {{ review_counts.unreviewed }} still await a review on the Unreviewed tab.
+    {% elif review_filter == 'unreviewed' and review_counts.all > 0 %}
+    No unreviewed projects match these filters — all {{ review_counts.all }} have a review.
+    {% else %}
+    No projects match these filters in this run.
+    {% endif %}
+</div>
+{% endif %}
 {% endif %}
 {% endblock %}

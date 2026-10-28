@@ -9,6 +9,17 @@ session is committed and released before the model is called, so a streaming ans
 holds no pooled connection; and a browser that goes away does not cancel the answer:
 the producer finishes, persists it, and it appears the next time the drawer opens.
 
+A chat is about one subject (``ChatSubject``): an assessment, or a finished BlackbirdBot
+project (docs/specs/2026-10-27-projects-pages-redesign-design.md §8). Every public entry
+point takes ``assessment_id=`` or ``project_id=``, exactly one. The subject's kind picks
+the record loader, the system prompt, the revision (a project is always revision 1) and
+whether the record may still change (a project's never does, because only a finished
+one is asked about), and every conversation read and write filters by that kind's
+column, never by a None id: SQLAlchemy renders ``== None`` as ``IS NULL``, which matches
+every row of the other kind. The one-in-flight check, the daily question count, the
+dollar ceilings and the stale sweep read every row of every subject on purpose: the two
+chats share one answer in flight per user and one budget.
+
 Nothing here logs question or answer text, or ``str()`` of a database exception — a
 ``DBAPIError`` message carries its bound parameters, which include both (F11).
 """
@@ -50,6 +61,9 @@ from src.models.assessment_chat import (
     CHAT_STATUS_FAILED,
     CHAT_STATUS_INTERRUPTED,
     CHAT_STATUS_STREAMING,
+    CHAT_SUBJECT_ASSESSMENT,
+    CHAT_SUBJECT_PROJECT,
+    CHAT_SUBJECTS,
     ONE_STREAMING_INDEX,
     OPEN_VIAS,
     QUESTION_ORIGINS,
@@ -105,6 +119,8 @@ _SPEND_LOCK_POLL_SECONDS = 0.05
 #: Read per question: `prompts/` is bind-mounted into blackbird-app, so an edit
 #: applies to the next question. There is no in-code copy to drift.
 PROMPT_PATH = Path("prompts/assessment-chat.md")
+#: The project chat's system prompt, read the same way.
+PROJECT_PROMPT_PATH = Path("prompts/project-chat.md")
 _WINDOW = timedelta(hours=24)
 
 
@@ -116,6 +132,50 @@ class ChatError(Exception):
         self.status = status
         self.code = code
         self.extra = extra
+
+
+@dataclass(frozen=True)
+class ChatSubject:
+    """What one conversation is about: ``kind`` is one of CHAT_SUBJECTS, ``id`` that
+    row's id. Never holds a None id (see the module docstring)."""
+
+    kind: str
+    id: uuid.UUID
+
+    def __post_init__(self) -> None:
+        if self.kind not in CHAT_SUBJECTS:
+            raise ValueError(f"unknown chat subject kind {self.kind!r}")
+        if self.id is None:
+            raise ValueError("a chat subject needs an id")
+
+    @property
+    def is_project(self) -> bool:
+        return self.kind == CHAT_SUBJECT_PROJECT
+
+    @property
+    def turn_column(self) -> Any:
+        """The turns' column that names this kind of subject."""
+        if self.is_project:
+            return AssessmentChatTurn.project_id
+        return AssessmentChatTurn.assessment_id
+
+    @property
+    def label(self) -> str:
+        """The log lines' prefix: "Assessment" or "Project" (followed by " chat")."""
+        return "Project" if self.is_project else "Assessment"
+
+    def id_kwargs(self) -> dict[str, uuid.UUID]:
+        """``{"assessment_id": id}`` or ``{"project_id": id}``, for this module's own calls."""
+        return {"project_id": self.id} if self.is_project else {"assessment_id": self.id}
+
+
+def _subject(assessment_id: uuid.UUID | None, project_id: uuid.UUID | None) -> ChatSubject:
+    """The subject named by exactly one of the two ids, else ValueError."""
+    if (assessment_id is None) == (project_id is None):
+        raise ValueError("exactly one of assessment_id and project_id is required")
+    if project_id is not None:
+        return ChatSubject(CHAT_SUBJECT_PROJECT, project_id)
+    return ChatSubject(CHAT_SUBJECT_ASSESSMENT, assessment_id)
 
 
 # ---------------------------------------------------------------------------
@@ -167,10 +227,12 @@ def question_origin(raw: object) -> str | None:
     return raw if isinstance(raw, str) and raw in QUESTION_ORIGINS else None
 
 
-def load_system_prompt() -> tuple[str, str]:
-    """(prompt text, first 12 hex of its sha256), or ``ChatError(503, "prompt_missing")``."""
+def load_system_prompt(path: Path | None = None) -> tuple[str, str]:
+    """(prompt text, first 12 hex of its sha256), or ``ChatError(503, "prompt_missing")``.
+    ``path`` defaults to PROMPT_PATH, read at call time."""
+    path = PROMPT_PATH if path is None else path
     try:
-        text = PROMPT_PATH.read_text(encoding="utf-8").strip()
+        text = path.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeDecodeError):
         raise ChatError(503, "prompt_missing") from None
     if not text:
@@ -439,6 +501,39 @@ async def _assessment_revision(db: AsyncSession, assessment_id: uuid.UUID) -> in
     return int(value or 1)
 
 
+async def _subject_revision(db: AsyncSession, subject: ChatSubject) -> int:
+    """The subject's current revision: an assessment's verdict revision; a project is
+    always 1 (it is asked about only once finished, so its record never moves on)."""
+    if subject.is_project:
+        return 1
+    return await _assessment_revision(db, subject.id)
+
+
+async def _subject_may_change(db: AsyncSession, subject: ChatSubject, row: Any) -> bool:
+    """``verdict_may_change`` for an assessment; False for a (finished) project."""
+    if subject.is_project:
+        return False
+    return await verdict_may_change(db, row)
+
+
+async def _load_subject_record(
+    db: AsyncSession, subject: ChatSubject, *, tier: str
+) -> tuple[ChatRecord, Any] | None:
+    """(record, the subject's row), or None when the subject does not exist."""
+    if subject.is_project:
+        # Imported here, not at module level: project_chat_record imports projects_view,
+        # which imports project_research, which imports this module.
+        from src.services.project_chat_record import load_project_chat_record
+
+        return await load_project_chat_record(db, subject.id, tier=tier)
+    return await load_chat_record(db, subject.id, tier=tier)
+
+
+def _subject_prompt_path(subject: ChatSubject) -> Path:
+    # The module globals, read at call time (tests replace them).
+    return PROJECT_PROMPT_PATH if subject.is_project else PROMPT_PATH
+
+
 def current_revision_turns(turns: list[Any], revision: int) -> list[Any]:
     """The turns asked against ``revision`` (B6). Both sides coalesce NULL to 1,
     so a conversation whose turns predate 0054 keeps its whole history, and turns
@@ -448,12 +543,18 @@ def current_revision_turns(turns: list[Any], revision: int) -> list[Any]:
 
 
 async def _conversation(
-    db: AsyncSession, *, assessment_id: uuid.UUID, user_id: uuid.UUID, tier: str
+    db: AsyncSession,
+    *,
+    assessment_id: uuid.UUID | None = None,
+    project_id: uuid.UUID | None = None,
+    user_id: uuid.UUID,
+    tier: str,
 ) -> list[AssessmentChatTurn]:
+    subject = _subject(assessment_id, project_id)
     rows = await db.execute(
         select(AssessmentChatTurn)
         .where(
-            AssessmentChatTurn.assessment_id == assessment_id,
+            subject.turn_column == subject.id,
             AssessmentChatTurn.user_id == user_id,
             AssessmentChatTurn.context_tier == tier,
         )
@@ -476,7 +577,7 @@ class PreparedTurn:
 
     turn_id: uuid.UUID
     usage_id: uuid.UUID
-    assessment_id: uuid.UUID
+    assessment_id: uuid.UUID | None
     user_id: uuid.UUID
     tier: str
     model: str
@@ -485,11 +586,17 @@ class PreparedTurn:
     request: dict[str, Any]
     daily_limit: int
     started: float  # time.monotonic() when the question was accepted
+    project_id: uuid.UUID | None = None  # set instead of assessment_id for a project
+
+    @property
+    def subject(self) -> ChatSubject:
+        return _subject(self.assessment_id, self.project_id)
 
 
 def _new_rows(
     *,
-    assessment_id: uuid.UUID,
+    assessment_id: uuid.UUID | None = None,
+    project_id: uuid.UUID | None = None,
     user_id: uuid.UUID,
     tier: str,
     question: str,
@@ -500,9 +607,11 @@ def _new_rows(
     verdict_revision: int,
     origin: str | None = None,
 ) -> tuple[AssessmentChatTurn, AssessmentChatUsage]:
+    subject = _subject(assessment_id, project_id)
     turn = AssessmentChatTurn(
         id=uuid.uuid4(),
         assessment_id=assessment_id,
+        project_id=project_id,
         user_id=user_id,
         context_tier=tier,
         question=question,
@@ -520,6 +629,8 @@ def _new_rows(
         turn_id=turn.id,
         user_id=user_id,
         assessment_id=assessment_id,
+        project_id=project_id,
+        subject=subject.kind,
         context_tier=tier,
         model=model,
         status=CHAT_STATUS_STREAMING,
@@ -530,7 +641,7 @@ def _new_rows(
 
 
 async def _has_streaming_turn(db: AsyncSession, *, user_id: uuid.UUID) -> bool:
-    """True while this user (any assessment, any tier) already has a `streaming`
+    """True while this user (any assessment or project, any tier) already has a `streaming`
     turn — the same predicate ONE_STREAMING_INDEX enforces at insert time."""
     return bool(
         await db.scalar(
@@ -543,13 +654,20 @@ async def _has_streaming_turn(db: AsyncSession, *, user_id: uuid.UUID) -> bool:
 
 
 async def _refuse_over_caps(
-    db: AsyncSession, *, assessment_id: uuid.UUID, user_id: uuid.UUID, tier: str
+    db: AsyncSession,
+    *,
+    assessment_id: uuid.UUID | None = None,
+    project_id: uuid.UUID | None = None,
+    user_id: uuid.UUID,
+    tier: str,
 ) -> list[AssessmentChatTurn]:
-    """Raise for a full conversation (409) or a used-up daily question count (429);
-    otherwise return the conversation's current-revision turns, oldest first."""
+    """Raise for a full conversation (409) or a used-up daily question count (429, every
+    subject's questions counted); otherwise return the conversation's current-revision
+    turns, oldest first."""
     settings = get_settings()
-    turns = await _conversation(db, assessment_id=assessment_id, user_id=user_id, tier=tier)
-    turns = current_revision_turns(turns, await _assessment_revision(db, assessment_id))
+    subject = _subject(assessment_id, project_id)
+    turns = await _conversation(db, **subject.id_kwargs(), user_id=user_id, tier=tier)
+    turns = current_revision_turns(turns, await _subject_revision(db, subject))
     if len(turns) >= settings.assessment_chat_max_turns:
         raise ChatError(409, "conversation_full")
     used, oldest = await _questions_in_window(db, user_id=user_id)
@@ -579,14 +697,16 @@ async def _take_spend_lock(db: AsyncSession) -> None:
 async def prepare_turn(
     db: AsyncSession,
     *,
-    assessment_id: uuid.UUID,
+    assessment_id: uuid.UUID | None = None,
+    project_id: uuid.UUID | None = None,
     user: Any,
     question_raw: object,
     origin_raw: object = None,
 ) -> PreparedTurn:
     """§6.2 steps 2-10, cheapest first; the router has already refused impersonation,
-    a disabled chat, an unknown assessment and a non-JSON body. Raises ChatError for
-    every refusal and commits on success.
+    a disabled chat, an unknown subject, an open project and a non-JSON body. Raises
+    ChatError for every refusal, ValueError unless exactly one of ``assessment_id`` and
+    ``project_id`` is given, and commits on success.
 
     RSEC-3: every earlier release of this function serialized EVERY ask — refusals
     included — behind one unbounded advisory lock, held across the record build. A
@@ -597,12 +717,13 @@ async def prepare_turn(
     repeat click, a full conversation, the daily question count, an unknown
     assessment — is checked first, unlocked, so it can never queue on the lock at
     all."""
+    subject = _subject(assessment_id, project_id)
     settings = get_settings()
     question = validate_question(question_raw, max_chars=settings.assessment_chat_max_question_chars)
     model = settings.llm_assessment_chat_model
     if model not in PRICES:
         raise ChatError(503, "model_unpriced")
-    system_prompt, prompt_sha = load_system_prompt()
+    system_prompt, prompt_sha = load_system_prompt(_subject_prompt_path(subject))
     # Committed on its own, before anything takes the lock: an ask that took the
     # lock first could otherwise wait, through the one-in-flight partial unique
     # index, on a row THIS sweep is trying to update, and the two would deadlock.
@@ -616,8 +737,8 @@ async def prepare_turn(
     if await _has_streaming_turn(db, user_id=user_id):
         raise ChatError(409, "answer_in_progress")
     tier = tier_for(user)
-    await _refuse_over_caps(db, assessment_id=assessment_id, user_id=user_id, tier=tier)
-    loaded = await load_chat_record(db, assessment_id, tier=tier)
+    await _refuse_over_caps(db, **subject.id_kwargs(), user_id=user_id, tier=tier)
+    loaded = await _load_subject_record(db, subject, tier=tier)
     if loaded is None:
         raise ChatError(404, "not_found")
     record = loaded[0]
@@ -635,7 +756,7 @@ async def prepare_turn(
     # under the lock, before anything is inserted (R2SEC-3), and the request is built
     # from THESE turns, so a turn another request of this user committed meanwhile is
     # in the history (LC-07).
-    turns = await _refuse_over_caps(db, assessment_id=assessment_id, user_id=user_id, tier=tier)
+    turns = await _refuse_over_caps(db, **subject.id_kwargs(), user_id=user_id, tier=tier)
     request = build_request(
         model=model,
         effort=settings.assessment_chat_effort,
@@ -646,10 +767,10 @@ async def prepare_turn(
         raise ChatError(429, "daily_spend_limit")
     if await spend_24h(db) >= Decimal(str(settings.assessment_chat_daily_total_usd_limit)):
         raise ChatError(429, "global_spend_limit")
-    revision = await _assessment_revision(db, assessment_id)
+    revision = await _subject_revision(db, subject)
     created_at = datetime.now(UTC)
     turn, usage = _new_rows(
-        assessment_id=assessment_id,
+        **subject.id_kwargs(),
         user_id=user_id,
         tier=tier,
         question=question,
@@ -674,6 +795,7 @@ async def prepare_turn(
         turn_id=turn.id,
         usage_id=usage.id,
         assessment_id=assessment_id,
+        project_id=project_id,
         user_id=user_id,
         tier=tier,
         model=model,
@@ -743,8 +865,8 @@ async def _answer(prepared: PreparedTurn, emit: Emit, snapshot: UsageSnapshot) -
         )
     except anthropic.BadRequestError as exc:
         logger.error(
-            "Assessment chat: the API rejected turn %s as a bad request (request id %s)",
-            prepared.turn_id, getattr(exc, "request_id", None),
+            "%s chat: the API rejected turn %s as a bad request (request id %s)",
+            prepared.subject.label, prepared.turn_id, getattr(exc, "request_id", None),
         )
         return failure_outcome(
             error_code="upstream_bad_request", requested_model=model, snapshot=snapshot,
@@ -787,10 +909,11 @@ def _log_completion(
     prepared: PreparedTurn, outcome: StreamOutcome, latency_ms: int, sums: dict[str, int | None]
 ) -> None:
     # Ids, tier, status, models, tokens and latency — never content (§10.3).
+    subject = prepared.subject
     logger.info(
-        "Assessment chat turn %s: user=%s assessment=%s tier=%s status=%s stop=%s model=%s "
+        "%s chat turn %s: user=%s %s=%s tier=%s status=%s stop=%s model=%s "
         "served_by=%s fallback=%s input=%s output=%s cache_read=%s cache_write=%s latency_ms=%d",
-        prepared.turn_id, prepared.user_id, prepared.assessment_id, prepared.tier,
+        subject.label, prepared.turn_id, prepared.user_id, subject.kind, subject.id, prepared.tier,
         outcome.status, outcome.stop_reason, prepared.model, outcome.served_by_model,
         outcome.fallback_used, sums["input_tokens"], sums["output_tokens"],
         sums["cache_read_input_tokens"], sums["cache_creation_input_tokens"], latency_ms,
@@ -803,12 +926,13 @@ async def _persist(
     """Write one outcome (§6.3). The ledger row is ALWAYS updated — the tokens were
     billed either way. The turn is updated only while it is still `streaming`, so an
     answer never overwrites a turn that was swept to `interrupted`, and a turn that
-    CASCADEd away with its assessment stays gone.
+    CASCADEd away with its assessment or project stays gone.
 
     Returns ("ok", done-payload), ("gone", None) when the turn no longer accepts the
     answer, or ("error", None) when the database refused the write."""
     latency_ms = int((time.monotonic() - prepared.started) * 1000)
     sums = billed_sums(outcome.usage_by_model)
+    subject = prepared.subject
     payload: dict[str, Any] | None = None
     try:
         async with _own_session() as db:
@@ -860,10 +984,10 @@ async def _persist(
                     ).scalar_one()
                     conversation = current_revision_turns(
                         await _conversation(
-                            db, assessment_id=prepared.assessment_id,
+                            db, **subject.id_kwargs(),
                             user_id=prepared.user_id, tier=prepared.tier,
                         ),
-                        await _assessment_revision(db, prepared.assessment_id),
+                        await _subject_revision(db, subject),
                     )
                     in_window = row.id in {t.id for t in replay_window(conversation)}
                     payload = {
@@ -884,16 +1008,16 @@ async def _persist(
         # the SSE stream. Class name only, never the exception's str() — a
         # DBAPIError's message carries its bound parameters (F11).
         logger.error(
-            "Assessment chat: could not persist turn %s (usage %s): %s",
-            prepared.turn_id, prepared.usage_id, type(exc).__name__,
+            "%s chat: could not persist turn %s (usage %s): %s",
+            subject.label, prepared.turn_id, prepared.usage_id, type(exc).__name__,
         )
         return "error", None
     _log_completion(prepared, outcome, latency_ms, sums)
     if payload is None:
         logger.warning(
-            "Assessment chat: turn %s was swept or deleted while it was being answered; "
+            "%s chat: turn %s was swept or deleted while it was being answered; "
             "the answer is dropped and its usage is recorded",
-            prepared.turn_id,
+            subject.label, prepared.turn_id,
         )
         return "gone", None
     return "ok", payload
@@ -924,8 +1048,8 @@ async def _mark_storage_failed(prepared: PreparedTurn) -> None:
             await db.commit()
     except Exception as exc:
         logger.error(
-            "Assessment chat: could not mark turn %s failed after a storage error: %s",
-            prepared.turn_id, type(exc).__name__,
+            "%s chat: could not mark turn %s failed after a storage error: %s",
+            prepared.subject.label, prepared.turn_id, type(exc).__name__,
         )
 
 
@@ -962,8 +1086,8 @@ async def run_turn(prepared: PreparedTurn, queue: asyncio.Queue) -> None:
             raise
         except Exception as exc:  # the producer must never die without persisting
             logger.error(
-                "Assessment chat: unexpected %s while answering turn %s (at %s)",
-                type(exc).__name__, prepared.turn_id, _where(exc),
+                "%s chat: unexpected %s while answering turn %s (at %s)",
+                prepared.subject.label, type(exc).__name__, prepared.turn_id, _where(exc),
             )
             outcome = failure_outcome(
                 error_code="upstream_error", requested_model=prepared.model, snapshot=snapshot
@@ -988,13 +1112,20 @@ async def run_turn(prepared: PreparedTurn, queue: asyncio.Queue) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _own_turn_is_stale(db: AsyncSession, *, assessment_id: uuid.UUID, user_id: uuid.UUID) -> bool:
-    """Whether the caller has a `streaming` turn on this assessment older than
+async def _own_turn_is_stale(
+    db: AsyncSession,
+    *,
+    assessment_id: uuid.UUID | None = None,
+    project_id: uuid.UUID | None = None,
+    user_id: uuid.UUID,
+) -> bool:
+    """Whether the caller has a `streaming` turn on this subject older than
     STALE_AFTER_SECONDS — the one case a poll must still sweep, or the drawer would
     poll a dead answer until it is reopened."""
+    subject = _subject(assessment_id, project_id)
     count = await db.scalar(
         select(func.count(AssessmentChatTurn.id)).where(
-            AssessmentChatTurn.assessment_id == assessment_id,
+            subject.turn_column == subject.id,
             AssessmentChatTurn.user_id == user_id,
             AssessmentChatTurn.status == CHAT_STATUS_STREAMING,
             AssessmentChatTurn.created_at < _since(timedelta(seconds=STALE_AFTER_SECONDS)),
@@ -1004,23 +1135,30 @@ async def _own_turn_is_stale(db: AsyncSession, *, assessment_id: uuid.UUID, user
 
 
 async def list_history(
-    db: AsyncSession, *, assessment_id: uuid.UUID, user: Any, sweep: bool = True
+    db: AsyncSession,
+    *,
+    assessment_id: uuid.UUID | None = None,
+    project_id: uuid.UUID | None = None,
+    user: Any,
+    sweep: bool = True,
 ) -> dict[str, Any] | None:
-    """The GET shape (§6.5), or None for an unknown assessment. Sweeps first; builds
+    """The GET shape (§6.5), or None for an unknown subject. Sweeps first; builds
     the current record so each turn can say whether its record has changed.
     `sweep=False` is the drawer's 5 s poll (B-08): it skips the every-user sweep
-    unless the caller's own turn here is already stale (`_own_turn_is_stale`)."""
+    unless the caller's own turn here is already stale (`_own_turn_is_stale`).
+    A project's `verdict_revision` is always 1 and its `verdict_may_change` False."""
+    subject = _subject(assessment_id, project_id)
     settings = get_settings()
     user_id = user.id
     tier = tier_for(user)
-    if sweep or await _own_turn_is_stale(db, assessment_id=assessment_id, user_id=user_id):
+    if sweep or await _own_turn_is_stale(db, **subject.id_kwargs(), user_id=user_id):
         await sweep_stale(db)
-    loaded = await load_chat_record(db, assessment_id, tier=tier)
+    loaded = await _load_subject_record(db, subject, tier=tier)
     if loaded is None:
         return None
-    record, assessment = loaded
-    turns = await _conversation(db, assessment_id=assessment_id, user_id=user_id, tier=tier)
-    revision = await _assessment_revision(db, assessment_id)
+    record, row = loaded
+    turns = await _conversation(db, **subject.id_kwargs(), user_id=user_id, tier=tier)
+    revision = await _subject_revision(db, subject)
     window = {turn.id for turn in replay_window(current_revision_turns(turns, revision))}
     return {
         "tier": tier,
@@ -1033,23 +1171,30 @@ async def list_history(
         "daily_limit": settings.assessment_chat_daily_question_limit,
         "max_question_chars": settings.assessment_chat_max_question_chars,
         "max_turns": settings.assessment_chat_max_turns,
-        "verdict_may_change": await verdict_may_change(db, assessment),
+        "verdict_may_change": await _subject_may_change(db, subject, row),
     }
 
 
-async def clear_history(db: AsyncSession, *, assessment_id: uuid.UUID, user_id: uuid.UUID) -> int:
-    """Delete the caller's turns on this assessment, every tier (D16). Refuses while one
-    is still streaming after the sweep, and never deletes a streaming turn even if one
-    starts meanwhile. The ledger rows survive (`turn_id` SET NULL), which is why Clear
-    cannot reset the caps. Takes the spend lock first (LC-07), after committing the sweep
-    as `prepare_turn` does, so a concurrent ask cannot insert a streaming turn between
-    the check and the delete."""
+async def clear_history(
+    db: AsyncSession,
+    *,
+    assessment_id: uuid.UUID | None = None,
+    project_id: uuid.UUID | None = None,
+    user_id: uuid.UUID,
+) -> int:
+    """Delete the caller's turns on this subject, every tier (D16); other subjects'
+    turns stay. Refuses while one is still streaming on this subject after the sweep,
+    and never deletes a streaming turn even if one starts meanwhile. The ledger rows
+    survive (`turn_id` SET NULL), which is why Clear cannot reset the caps. Takes the
+    spend lock first (LC-07), after committing the sweep as `prepare_turn` does, so a
+    concurrent ask cannot insert a streaming turn between the check and the delete."""
+    subject = _subject(assessment_id, project_id)
     await sweep_stale(db)
     await db.commit()
     await _take_spend_lock(db)
     in_flight = await db.scalar(
         select(func.count(AssessmentChatTurn.id)).where(
-            AssessmentChatTurn.assessment_id == assessment_id,
+            subject.turn_column == subject.id,
             AssessmentChatTurn.user_id == user_id,
             AssessmentChatTurn.status == CHAT_STATUS_STREAMING,
         )
@@ -1060,7 +1205,7 @@ async def clear_history(db: AsyncSession, *, assessment_id: uuid.UUID, user_id: 
         await db.execute(
             delete(AssessmentChatTurn)
             .where(
-                AssessmentChatTurn.assessment_id == assessment_id,
+                subject.turn_column == subject.id,
                 AssessmentChatTurn.user_id == user_id,
                 AssessmentChatTurn.status != CHAT_STATUS_STREAMING,
             )
@@ -1073,14 +1218,23 @@ async def clear_history(db: AsyncSession, *, assessment_id: uuid.UUID, user_id: 
 
 
 async def record_open(
-    db: AsyncSession, *, assessment_id: uuid.UUID, user: Any, via_raw: object
+    db: AsyncSession,
+    *,
+    assessment_id: uuid.UUID | None = None,
+    project_id: uuid.UUID | None = None,
+    user: Any,
+    via_raw: object,
 ) -> None:
     """One content-free row per drawer opening: who (a SET NULL reference), which
-    assessment, the tier, and how it was opened (one of OPEN_VIAS, else NULL)."""
+    assessment or project and its `subject` kind, the tier, and how it was opened (one
+    of OPEN_VIAS, else NULL)."""
+    subject = _subject(assessment_id, project_id)
     db.add(
         AssessmentChatOpen(
             user_id=user.id,
             assessment_id=assessment_id,
+            project_id=project_id,
+            subject=subject.kind,
             context_tier=tier_for(user),
             opened_via=via_raw if isinstance(via_raw, str) and via_raw in OPEN_VIAS else None,
         )

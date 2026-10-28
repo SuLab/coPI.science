@@ -9,41 +9,107 @@ chooses one, and posts it in Slack to that lab with an <strong>opening plan</str
 agent replies, and the two refine the plan together in a Slack thread until both agree or
 BlackbirdBot closes it. The
 <a href="{{ page_url(request, 'workspace_projects') }}">Projects</a> page lists them, and
-each project has a details page, where you record your own review. For how projects
+each project has a details page. You can record your review on either. For how projects
 fit with the rest of Blackbird, see
 <a href="{{ page_url(request, 'help_page', slug='how-it-works', fragment='projects') }}">How Blackbird works</a>.
 Unfamiliar terms are in the <a href="{{ page_url(request, 'help_page', slug='glossary') }}">Glossary</a>.</p>
 <p>Projects are not interviews. BlackbirdBot does not score a project, writes no assessment
-for it and posts no headline, and projects do not appear on the Assessments pages.</p>
+for it and posts no headline, and projects do not appear on the Assessments pages. No
+project page shows a score, a recommendation, or a specialist's signal or confidence.</p>
 
 <h2 id="list">The Projects list</h2>
 <p>The page is headed <strong>Projects</strong>. It shows one run at a time; there is no
-option for all runs. It opens on the newest run that has a project.</p>
+option for all runs. It opens on the newest run that has a project, on the
+<strong>Unreviewed</strong> tab. The line under the run bar says what a project is, and its
+link "Help explains each outcome." opens the outcomes below.</p>
 <h3>The run bar</h3>
 <p>The run bar under the heading works as it does on the Assessments page (see
 <a href="{{ page_url(request, 'help_page', slug='assessments', fragment='list') }}">The Assessments list</a>
-for its status words). Its menu lists <strong>Runs with projects</strong> first, then
-<strong>Runs with no projects</strong>; the count beside each run is the projects requested in
-it. Pick a run and press <strong>Show</strong>.</p>
-<h3>Filters</h3>
+for its status words), but names no rubric version, because projects are not scored. Its menu
+lists <strong>Runs with projects</strong> first, then <strong>Runs with no projects</strong>;
+the count beside each run is the projects requested in it. Pick a run and press
+<strong>Show</strong>.</p>
+<h3>Sort and filters</h3>
+<p>Beside the heading are the sort and the filters. They apply when you press
+<strong>Apply</strong>, and they are kept when you open a project and come back.</p>
 <ul>
+    <li><strong>Sort</strong>: <strong>Recently finished</strong>, the default, puts finished
+    projects first, the most recently finished at the top, then the projects still open,
+    newest first. <strong>Lab</strong> groups the projects by lab, each lab's in that same
+    order. <strong>Outcome</strong> lists Ready, then Not agreed, then Not finished, then the
+    projects still open, each group in the default order.</li>
+    <li><strong>Assignment</strong>: <strong>All</strong>, or <strong>Assigned to me</strong>
+    for only the projects assigned to you (see <a href="#assigning">Assigning projects</a>).</li>
     <li><strong>Lab</strong>: a single lab's projects, or <strong>All labs</strong>.</li>
     <li><strong>Outcome</strong>: <strong>Ready and not agreed</strong>, the default, lists the
     projects that reached a close. <strong>Ready</strong>, <strong>Not agreed</strong> and
     <strong>Not finished</strong> list one outcome each, and <strong>Paused or in
     progress</strong> lists the projects still open.</li>
-    <li><strong>Not reviewed by me</strong>: only the projects you have not reviewed yet.</li>
+    <li><strong>Not reviewed by me</strong>: only the projects you have not reviewed yet.
+    Because one review moves a project off everyone's Unreviewed tab, this is how you find the
+    projects that still lack your own review.</li>
 </ul>
-<p>The filters apply when you press <strong>Apply</strong>.</p>
-<h3>The summary and the cards</h3>
-<p>A summary line above the list covers the selected run: how many projects ended each way,
-how many reviews they have, the mean rating and the share of reviews that said fund.</p>
-<p>Each project is a card with its title, which opens its details page, the lab, an outcome
-badge with its reason, when it finished, and its reviews: how many, the mean rating, how many
-said fund and, once you have reviewed it, "reviewed by you". Finished projects come first, the most recently finished at the top; projects
-still open follow, newest first. When nothing matches, the page says "No projects match these
-filters in this run."</p>
-<h3>Outcomes</h3>
+<h3>The review tabs</h3>
+<p><strong>Unreviewed</strong>, <strong>Reviewed</strong> and <strong>All</strong> split the
+list by whether anyone has reviewed the project. "Reviewed" means at least one person has
+written a review of it, not necessarily you. Being assigned does not make a project reviewed.
+Each tab shows its count, and the counts follow the selected run, lab, outcome and
+filters.</p>
+<h3>The not-finished banner</h3>
+<p>When projects of the run ended <strong>Not finished</strong>, an amber banner says how
+many did not finish and lists each reason with its count. It counts the whole run, whatever
+the filters, so a project it counts may not be in the list below it. <strong>Show not
+finished projects</strong> sets the Outcome filter to Not finished.</p>
+<h3>The count boxes and the summary line</h3>
+<p>Boxes above the cards count the projects: <strong>Total</strong>, <strong>Ready</strong>,
+<strong>Not agreed</strong>, <strong>Not finished</strong> and <strong>In progress</strong>
+(which includes paused projects). They follow the lab, the tab and the other filters, but not
+the Outcome filter, so they still show how the projects you are looking at ended. The line
+under them covers the whole run: how many reviews its projects have, the mean rating and the
+share of reviews that said fund.</p>
+<h3>Cards of finished projects</h3>
+<p>Each finished project (Ready, Not agreed or Not finished) is a card:</p>
+<ul>
+    <li><strong>Header</strong>: the project's title; <strong>Lab:</strong> with the lab, a
+    link to the PI's page when Blackbird knows it; when it was posted and when it finished;
+    and on the right the outcome badge with its reason.</li>
+    <li><strong>In one minute</strong>: BlackbirdBot's summary of the idea.</li>
+    <li><strong>Key points</strong>: the plan's Indication, Target or mechanism, and Time and
+    budget (from the final plan, or the opening plan when there was no close);
+    <strong>Positions:</strong> where BlackbirdBot and the lab each stood at the close (see
+    <a href="#detail">Positions</a> below); and how many gaps and disagreements the close
+    recorded.</li>
+    <li><strong>detail →</strong> opens the project's details page.</li>
+    <li><strong>Footer</strong>: <strong>Reviewed by:</strong> each reviewer with their rating
+    and Fund or Don't fund, or "—" when there is none; "reviewed by you" once you have reviewed
+    it; and <strong>Assigned:</strong> with the people it is assigned to, when there are
+    any.</li>
+    <li><strong>Quick review</strong>: a short review form (see
+    <a href="#reviewing">Recording your review</a>).</li>
+</ul>
+<h3>Cards of open projects</h3>
+<p>A project still open gets a smaller card with no review controls: its title (or
+"Untitled project" before BlackbirdBot has chosen one), the lab, and a stage badge with a
+time:</p>
+<ul>
+    <li><strong>Waiting for research</strong>: the project was requested and its research has
+    not started; the time is when it was requested.</li>
+    <li><strong>Researching</strong>: the research is under way; the time is its last
+    activity.</li>
+    <li><strong>Ready to post</strong>: the research is done and the posting is waiting to go
+    out in Slack; the time is its last activity.</li>
+    <li><strong>Posted</strong>: the posting is in Slack and the lab has not replied yet; the
+    time is when it was posted.</li>
+    <li><strong>Refining</strong>: the lab has replied and the two are refining the plan in the
+    thread; the time is when the lab replied.</li>
+</ul>
+<p>"Paused" before the stage means the project's run is stopped or held.</p>
+<h3>When nothing is listed</h3>
+<p>When the run has no project yet, the page says so ("No projects in this run yet"). On the
+Reviewed tab it says how many projects still await a review on the Unreviewed tab, and on the
+Unreviewed tab, when every project has a review, it says so. Otherwise it says "No projects
+match these filters in this run."</p>
+<h3 id="outcomes">Outcomes</h3>
 <ul>
     <li><strong>Ready</strong>: the lab and BlackbirdBot both agreed the final plan, and every
     field of it is filled.</li>
@@ -76,69 +142,204 @@ filters in this run."</p>
 </ul>
 
 <h2 id="detail">The details page</h2>
-<p>The heading is the project's title. The page has these sections, in this order:</p>
-<ul>
-    <li><strong>Outcome</strong>: the outcome with its reason, the lab, the run, when the
-    project was requested, posted and finished, and the idea's summary.</li>
-    <li><strong>Plan</strong>: the final plan, or the opening plan when the project never
-    reached a close. Its fields are Indication, Target or mechanism, Model, Positive control,
-    Negative control, Standard of care, Readout, Design, Time and budget, and The lab's tools
-    and models used. Under <strong>The lab's tools and models</strong>, each one is marked "in
-    the lab's profile" or "not found in the lab's profile", depending on whether it matches an
-    item of the lab's public profile.</li>
-    <li><strong>Positions</strong>: where BlackbirdBot and the lab each stood at the close,
-    <strong>Agreed</strong> or <strong>Not agreed</strong> ("No close recorded" when there was
-    none), and, under <strong>Gaps</strong> and
-    <strong>Disagreements</strong>, what was left open or disputed. A missing field or a missing
-    agreement is listed as a gap.</li>
-    <li><strong>Why this use</strong>: why BlackbirdBot chose this use, and under <strong>Also
-    considered</strong> the other uses it weighed, each with a note.</li>
-    <li><strong>Built on</strong>: the items of the lab's profile the project builds on, its
-    <strong>anchors</strong>, each with the profile section it comes from.</li>
-    <li><strong>Research</strong>: the sources the research relied on, each with its
-    identifier, its title and the specialist that found it. A PubMed paper links to PubMed and a clinical trial to
-    ClinicalTrials.gov; a patent is listed by its number and title, without a link.</li>
-    <li><strong>Opening plan</strong>: the plan as BlackbirdBot first posted it, to compare with
-    the final plan.</li>
-    <li><strong>Conversation</strong>: the posting, the lab's reply and the thread that
-    followed, in order. Under <strong>Specialist consults</strong>, each consult shows its
-    field, the question and what the specialist found: <strong>Established</strong>,
-    <strong>Concerns</strong> and <strong>Questions to ask</strong>. Unlike an assessment, a
-    project never shows a specialist's signal or confidence.</li>
-    <li><strong>Reviews</strong>: everyone's reviews, and the form for yours (below).</li>
-</ul>
-<p>The plan, the replies and the consults are written by the AI agents, so check them
-against the sources before relying on them.</p>
+<p>Open a project with <strong>detail →</strong> on its card. The page is headed
+<strong>Project detail</strong>; <strong>← Projects</strong> at the top takes you back to the
+list with your filters kept.</p>
+<h3>On this page, Expand all</h3>
+<p>The <strong>On this page</strong> bar stays in view as you scroll. Its links jump to
+<strong>Brief</strong>, <strong>Evidence</strong>, <strong>Plan</strong>,
+<strong>Positions</strong>, <strong>Research</strong>, <strong>Reviews</strong> and
+<strong>Conversation</strong>. <strong>Expand all</strong> and <strong>Collapse all</strong>
+open or close every collapsible section at once.</p>
+<h3>The sections, in page order</h3>
+<dl>
+    <dt>Brief</dt>
+    <dd>The project's title, then <strong>Lab:</strong> (a link to the PI's page when Blackbird
+    knows it), when the run started, when the project was posted and when it finished, and the
+    outcome badge with its reason. <strong>In one minute</strong> is BlackbirdBot's summary of
+    the idea, and <strong>Why this use</strong> is why it chose this use. <strong>Key
+    points</strong> gives both positions, <strong>Built on</strong> (the items of the lab's
+    profile the project builds on, its <strong>anchors</strong>, each after the profile
+    section it comes from), and how many sources, specialist consults, posts and other uses
+    considered the project has; each count jumps to its section.</dd>
+    <dt>Evidence summary</dt>
+    <dd>Always open. What BlackbirdBot's specialists said while the plan was refined, in
+    boxes: <strong>Established</strong>, <strong>Concerns</strong> and <strong>Questions to
+    ask</strong>. Each box has a row for every specialist field that has something in it,
+    taken from the latest consult in that field: the first point, and "show" to open the full
+    list. When a field was consulted more than once, the row says the earlier consults are in
+    the conversation. "reply cut off" marks a specialist reply that stopped before it finished.
+    The rows are grouped only by field; nothing is ranked or coloured by how serious a
+    specialist judged it. When no specialist was consulted, the box says "No specialist was
+    consulted in this project's thread."</dd>
+    <dt>Plan</dt>
+    <dd>Headed <strong>Plan</strong> when the project reached a close: the final plan. Headed
+    <strong>Plan (as posted)</strong> when it did not: the opening plan. Its fields are
+    Indication, Target or mechanism, Model, Positive control, Negative control, Standard of
+    care, Readout, Design, and Time and budget. In the final plan, a field that differs from
+    the opening plan is marked "changed since posting", and <strong>As first posted</strong>
+    under it opens the opening plan's text. Then <strong>The lab's tools and models</strong>
+    lists the tools, models and data the plan uses, each marked "in the lab's profile" or
+    "stated by the lab" (see below).</dd>
+    <dt>Positions</dt>
+    <dd>Where BlackbirdBot and the lab each stood at the close: <strong>Agreed</strong>,
+    <strong>Not agreed</strong> or <strong>No position stated</strong>, or <strong>No close
+    recorded</strong> when there was no close. On a Not agreed project, an amber box lists
+    <strong>Gaps</strong> (a field left open or a missing agreement) and
+    <strong>Disagreements</strong> (what was disputed). On a Ready project, the same list is
+    headed <strong>Acknowledged limits</strong>: points the close recorded as limits of a plan
+    both sides agreed, shown in a neutral box, with <strong>Disagreements</strong> when any
+    were recorded. With no close, the card says "No close recorded."</dd>
+    <dt>Also considered</dt>
+    <dd>Closed until you open it; the heading gives the count. The other uses BlackbirdBot
+    weighed before choosing this one, each with a note.</dd>
+    <dt>Research</dt>
+    <dd>The sources the research relied on, with their count in the heading, grouped under
+    Papers, Clinical trials, Patents and Other sources. Each shows its identifier, its title
+    and the specialist that found it. A PubMed paper links to PubMed and a clinical trial to
+    ClinicalTrials.gov; a patent is listed by its number and title, without a link.</dd>
+    <dt>Reviews</dt>
+    <dd>Everyone's reviews, the people the project is assigned to, and the form for yours. See
+    <a href="#reviewing">Recording your review</a>.</dd>
+    <dt>Conversation</dt>
+    <dd>Closed until you open it. The posting, the lab's reply and the thread in Slack, in
+    order, with each specialist consult placed at the time it was made. The posting is shown
+    as plain text; if part of it may not have reached Slack, it says so, and if it was not
+    kept, the section says "Posting unavailable." Replies and thread posts are shown formatted;
+    long ones are cut short, and <strong>Show full message</strong> shows the rest.
+    BlackbirdBot's last post on a closed project is marked "closed the thread". Each consult is
+    indented, with the specialist's field, how many concerns it raised, the question it was
+    asked and what it found: Established, Concerns and Questions to ask. A consult marked
+    "reply cut off" is partial. If the thread's posts were not kept, the section says "Thread
+    messages unavailable."</dd>
+</dl>
+<h3>What counts as "in the lab's profile"</h3>
+<p>A tool, model or dataset is marked "in the lab's profile" when its name contains, as
+whole words, a method or model listed in the lab's current public profile, or one of the
+project's anchors; the mark names the item it matched ("matches: …"). Only profile items with
+names of more than one word count, and a target or a keyword alone never does. Anything else
+is marked "stated by the lab": the plan names it, but the lab's profile does not show it. That
+does not mean the lab lacks it; check the conversation for what the lab said.</p>
+<p>The plan, the replies and the consults are written by AI agents, so check them against the
+sources before relying on them.</p>
+<h3>Printing</h3>
+<p>Use your browser's print command. Every collapsed section opens for printing and returns
+to how you left it afterwards.</p>
 
 <h2 id="reviewing">Recording your review</h2>
 <p>Your review rates the project itself: whether the idea and its plan are worth pursuing,
 not how well the bots performed. Admins, managers and reviewers can each write one review per
-project. Until you have reviewed it, the <strong>Reviews</strong> section ends with a
-<strong>Your review</strong> form:</p>
+project, on the list or on the details page. A review has:</p>
 <ul>
-    <li><strong>Rating (1–5)</strong>, required: a whole number from 1 (weak) to 5
-    (strong);</li>
-    <li><strong>Comment</strong>, optional, to explain your rating;</li>
+    <li><strong>Rating</strong>, required: a whole number from 1 (weak) to 5 (strong). The
+    menu starts on "—", so you must choose one.</li>
     <li><strong>Funding</strong>: <strong>Fund</strong> or <strong>Don't fund</strong>,
     required: whether you would fund the project as planned.</li>
+    <li><strong>Comment</strong>, optional, up to 10,000 characters, to explain your
+    rating.</li>
 </ul>
-<p>Press <strong>Save review</strong>; the page says "Review saved." Each review in the list
-shows who wrote it, the rating, Fund or Don't fund, the date and the comment. If the same
-review is sent twice, the page says "You have already reviewed this project; edit your review
-below." and keeps the first.</p>
 {% call careful() %}
 <p>A review is saved under your name, and everyone who can open the project can read it. You
 can edit your own review; only an admin can delete a review.</p>
 {% endcall %}
+<h3>Quick review, on the list</h3>
+<p>Each finished project's card ends with <strong>Quick review</strong>, open until you have
+reviewed the project. Choose the rating and Fund or Don't fund, add a comment if you like, and
+press <strong>Submit review</strong>. "One review per person; you can edit yours on the
+project's page."</p>
+<ul>
+    <li>On the <strong>Unreviewed</strong> tab, the project now has a review, so it moves to
+    <strong>Reviewed</strong>: the page says "Review saved; moved to Reviewed." and takes you to
+    the next card.</li>
+    <li>On the other tabs the page says "Review saved." and the card stays, unless
+    <strong>Not reviewed by me</strong> is ticked: the card then leaves the list, and the page
+    takes you to the next card.</li>
+    <li>If you had already reviewed the project, nothing is saved and the page says "You have
+    already reviewed this project; edit your review on its page."</li>
+</ul>
+<p>Once you have reviewed a project, its card shows <strong>Your review:</strong> with your
+rating and Fund or Don't fund, and a link to edit it on the project's page.{% if permissions.admin %}
+While an admin is viewing the site as someone else, the card says "Reviews can't be written
+while impersonating." instead.{% endif %}</p>
+<h3>On the details page</h3>
+<p>Until you have reviewed the project, the <strong>Reviews</strong> section ends with a
+<strong>Your review</strong> form with the same fields. Press <strong>Save review</strong>;
+the page says "Review saved." If the same review is sent twice, the page says "You have
+already reviewed this project; edit your review below." and keeps the first.</p>
+<p>Each review in the list shows who wrote it, the rating, Fund or Don't fund, the date and
+the comment; an edited review is marked "(edited)".</p>
 <h3>Editing</h3>
-<p><strong>Edit your review</strong>, under your own review, opens the same fields.
-<strong>Save</strong> replaces your rating, comment and fund choice, and the page says
-"Review updated." Nobody can edit someone else's review.</p>
+<p><strong>Edit your review</strong>, under your own review on the details page, opens the
+same fields. <strong>Save</strong> replaces your rating, comment and fund choice, and the page
+says "Review updated." Nobody can edit someone else's review.</p>
 {% call note("Project reviews are separate") %}
 <p>Project reviews are kept apart from assessment feedback. They do not count as reviews of
 any assessment, they have no Learn mode, and nothing sends them to the prompt-suggestion bot
 or to any AI agent.</p>
 {% endcall %}
+
+<h2 id="assigning">Assigning projects</h2>
+{% if permissions.staff %}
+<p>The <strong>Reviews</strong> section of a project's details page shows who the project is
+assigned to under <strong>Assigned</strong>, with the count, or "No one assigned."; everyone
+can see it, and each card on the list shows the same names after <strong>Assigned:</strong>.
+Managers and admins also get an <strong>Assign to</strong> menu with
+<strong>Assign</strong>, and <strong>Remove</strong> next to each person assigned. The list
+has no assign controls.</p>
+<p>The menu lists every reviewer, manager and admin whose access is allowed. Assigning someone
+who is already assigned changes nothing.</p>
+{% call careful() %}
+<p><strong>Assign</strong> adds the person to the project's <strong>Assigned</strong> list,
+which everyone can see, and to their <strong>Assigned to me</strong> filter.
+<strong>Remove</strong> undoes it.</p>
+{% endcall %}
+{% call note() %}
+<p>Assignments are workflow labels only. They never grant or limit access: every reviewer can
+open and review every project, assigned or not, and being assigned does not make a project
+reviewed.</p>
+{% endcall %}
+{% if permissions.admin %}
+<p>While an admin is viewing the site as someone else, the assign and remove controls are
+hidden.</p>
+{% endif %}
+{% else %}
+<p>A manager can assign you projects; they appear under <strong>Assigned to me</strong>. An
+assignment does not limit what you can see: every reviewer can open and review every
+project.</p>
+{% endif %}
+
+<h2 id="chat">Asking about a project</h2>
+<p>The project chat answers questions about one finished project (Ready, Not agreed or Not
+finished), from what its details page shows: the brief, the plan with its changes, the
+positions, the other uses considered, the conversation, the specialist consults, the
+research and the reviews. It never sees a specialist's label or confidence, or any cost. It
+does not rate the project, recommend whether to fund it, or write your review: that is yours
+to do.</p>
+<p>The chat is off unless an admin switches it on. When it is off, or the project is still
+open, no chat buttons appear.{% if permissions.admin %} While an admin is viewing the site as
+someone else, the page shows "Chat unavailable while impersonating" instead.{% endif %}</p>
+<h3>Opening it</h3>
+<ul>
+    <li>the round speech-bubble button at the bottom right of the details page, <strong>Ask
+    about this project</strong>;</li>
+    <li><strong>chat</strong> on a finished project's card in the list, which opens the details
+    page with the chat already open;</li>
+    <li>an <strong>Ask:</strong> button at the end of the Brief, Evidence summary, Plan and
+    Positions sections. It opens the chat and sends that question straight away.</li>
+</ul>
+<h3>Using it</h3>
+<p>It works like the assessment chat (see
+<a href="{{ page_url(request, 'help_page', slug='assessments', fragment='chat') }}">Asking the assessment chat</a>):
+type a question and press <strong>Ask</strong>, or click one of the opening questions, which
+are built from the page's own sections. <strong>Sources</strong> under an answer lists the
+parts of the page it cites, and <strong>Show in page</strong> scrolls to one.
+<strong>Clear conversation</strong> deletes your conversation on this project only.</p>
+<p>The project chat and the assessment chat share one set of daily limits: a question asked in
+either counts toward both. The bottom of the chat shows how long your question is against the
+limit and how many of today's questions you have used.</p>
+<p>Conversations are saved for you, and administrators with database access can read them.
+The chat's messages are listed in
+<a href="{{ page_url(request, 'help_page', slug='troubleshooting', fragment='project-chat') }}">Troubleshooting</a>.</p>
 
 <h2 id="what-labs-see">What labs see in Slack</h2>
 <p>BlackbirdBot posts each project in Slack's general channel as its own post, headed

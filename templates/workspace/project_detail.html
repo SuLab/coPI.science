@@ -1,158 +1,393 @@
 {% extends "base.html" %}
 {% from "help/_link.html" import help_link %}
 {% block title %}Workspace — Project — Blackbird{% endblock %}
-{% block content %}
-{# Model-written text (the posting, the replies, the plan, the consults) renders autoescaped,
-   never `| safe`. The only links that are not routes are each source's `url` (PubMed or
-   ClinicalTrials.gov, built by src/services/projects_view.py) and the admin's `calls_url`.
-   Review forms post to literal /reviews/ paths (src/routers/reviews.py). #}
+{% block extra_head %}{% include "assessments/_head.html" %}{% endblock %}
+{% block content %}<div class="max-w-5xl mx-auto">
+{# Model-written text (the posting, the plan, the consults, the close) renders autoescaped,
+   never `| safe`. The thread's replies render through the shared markdown sanitizer
+   (`data-markdown` inside `md-content`), whose link allowlist governs their links. The only
+   other links that are not routes are each source's `url` (PubMed or ClinicalTrials.gov,
+   built by src/services/projects_view.py) and the admin's `calls_url`. Review and assignment
+   forms post to literal /reviews/ paths (src/routers/reviews.py) with `surface=project-detail`
+   and the list's state, so the redirect returns here at #reviews. No specialist signal,
+   confidence or raw opinion reaches this page (D55). #}
 {% set badge_class = {'ready': 'bg-green-100 text-green-700', 'not_agreed': 'bg-amber-100 text-amber-700', 'not_finished': 'bg-red-100 text-red-700', 'paused': 'bg-gray-100 text-gray-600', 'in_progress': 'bg-blue-100 text-blue-700'} %}
+{% macro position_chip(label) %}<span class="project-position px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap {% if label == 'Agreed' %}bg-green-100 text-green-700{% elif label == 'Not agreed' %}bg-amber-100 text-amber-700{% else %}bg-gray-100 text-gray-600{% endif %}">{{ label }}</span>{% endmacro %}
+{% macro state_fields(state) %}<input type="hidden" name="surface" value="project-detail">{% for key, value in state.items() %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}{% endmacro %}
 {% macro review_fields(prefix, review) %}
+<div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1">
 <div>
-    <label for="{{ prefix }}rating" class="block text-sm font-medium text-gray-700">Rating (1–5)</label>
+    <label for="{{ prefix }}rating" class="block text-sm font-medium text-gray-700">Rating (1 = weak … 5 = strong)</label>
     <select id="{{ prefix }}rating" name="rating" required class="text-sm border border-gray-300 rounded-md shadow-sm">
+        {% if not review %}<option value="" disabled selected>—</option>{% endif %}
         {% for n in range(1, 6) %}<option value="{{ n }}" {% if review and review.rating == n %}selected{% endif %}>{{ n }}</option>{% endfor %}
     </select>
 </div>
-<div class="mt-2">
-    <label for="{{ prefix }}comment" class="block text-sm font-medium text-gray-700">Comment</label>
-    <textarea id="{{ prefix }}comment" name="comment" rows="4" maxlength="10000" class="w-full text-sm border border-gray-300 rounded-md shadow-sm">{{ review.comment if review else '' }}</textarea>
-</div>
-<fieldset class="mt-2">
+<fieldset>
     <legend class="text-sm font-medium text-gray-700">Funding</legend>
     <div class="flex items-center gap-4 text-sm text-gray-700">
         <span><input type="radio" id="{{ prefix }}fund" name="fund" value="fund" required {% if review and review.fund %}checked{% endif %}> <label for="{{ prefix }}fund">Fund</label></span>
         <span><input type="radio" id="{{ prefix }}no-fund" name="fund" value="no_fund" {% if review and not review.fund %}checked{% endif %}> <label for="{{ prefix }}no-fund">Don't fund</label></span>
     </div>
 </fieldset>
+</div>
+<div class="mt-2">
+    <label for="{{ prefix }}comment" class="block text-sm font-medium text-gray-700">Comment</label>
+    <textarea id="{{ prefix }}comment" name="comment" rows="4" maxlength="10000" class="w-full text-sm border border-gray-300 rounded-md shadow-sm">{{ review.comment if review else '' }}</textarea>
+</div>
 {% endmacro %}
-<p class="mb-2 text-sm"><a href="{{ page_url(request, 'workspace_projects') }}" class="text-indigo-700 hover:underline">Back to Projects</a></p>
-<div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 mb-6"><h1 class="text-2xl font-bold text-gray-900">{{ project.title or 'Untitled project' }}</h1>{{ help_link(request, effective_user, 'projects', 'detail') }}</div>
-
-<section class="mb-6">
-    <h2 class="text-lg font-semibold text-gray-900 mb-2">Outcome</h2>
-    <p class="text-sm text-gray-700"><span class="px-2 py-0.5 rounded-full text-xs {{ badge_class.get(project.outcome_kind, 'bg-gray-100 text-gray-600') }}">{{ project.outcome_label }}</span>{% if project.reason_label %} <span class="text-gray-600">{{ project.reason_label }}</span>{% endif %}</p>
-    <dl class="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-sm text-gray-700">
-        <div><dt class="inline text-gray-600">Lab:</dt> <dd class="inline">{{ project.lab }}</dd></div>
-        <div><dt class="inline text-gray-600">Run:</dt> <dd class="inline">{{ project.run_id }}</dd></div>
-        <div><dt class="inline text-gray-600">Requested:</dt> <dd class="inline">{{ project.requested_at | ts }}</dd></div>
-        <div><dt class="inline text-gray-600">Posted:</dt> <dd class="inline">{{ project.posted_at | ts }}</dd></div>
-        <div><dt class="inline text-gray-600">Finished:</dt> <dd class="inline">{{ project.finished_at | ts }}</dd></div>
-    </dl>
-    {% if project.summary %}<p class="mt-2 text-sm text-gray-800 whitespace-pre-line">{{ project.summary }}</p>{% endif %}
-    {% if project.research_cost_usd is defined %}
-    <p class="mt-2 text-sm text-gray-700">Cost: research ${{ '%.2f' | format(project.research_cost_usd) }}, refinement ${{ '%.2f' | format(project.refinement_cost_usd) }}{% if project.calls_url %} · <a href="{{ project.calls_url }}" class="text-indigo-700 hover:underline">Model calls</a>{% endif %}</p>
+{# Inline asks: the opening questions whose home is this section, rendered only where the
+   drawer is, since a click opens it and sends the question (static/js/assessment_chat.js
+   drives `data-chat-ask`). Passed in explicitly: a macro does not see top-level `set`s. #}
+{% macro chat_asks(section, available, suggestions) %}
+{% if available %}
+{% set asks = (suggestions or []) | selectattr('section', 'equalto', section) | list %}
+{% if asks %}
+<div class="chat-asks print:hidden mt-4 flex flex-wrap gap-2">
+    {% for s in asks %}
+    <button type="button" data-chat-ask data-chat-question="{{ s.text }}" data-chat-origin="inline_{{ s.kind }}"
+            title="Ask the project chat (sends this question)"
+            class="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-left text-sm text-indigo-800 hover:bg-indigo-100"><span class="font-semibold">Ask:</span> {{ s.text }}</button>
+    {% endfor %}
+</div>
+{% endif %}
+{% endif %}
+{% endmacro %}
+{# One box of the evidence summary: every domain whose latest consult has items under `key`.
+   Grouped by content and domain only; nothing here is ordered or coloured by a specialist's
+   signal or confidence (D55). #}
+{% macro evidence_box(entries, key, title, box_class, title_class, empty) %}
+{% set rows = entries | selectattr(key) | list %}
+<section class="project-evidence-{{ key | replace('_', '-') }} rounded-lg border {{ box_class }} px-4 py-3">
+    <div class="text-sm font-semibold {{ title_class }}">{{ title }}</div>
+    {% if rows %}
+    <ul class="mt-1 text-base leading-relaxed text-gray-700">
+        {% for e in rows %}
+        {% set items = e[key] %}
+        <li class="project-evidence-row py-1.5 border-t border-gray-100 first:border-t-0">
+            <details class="group">
+                <summary class="cursor-pointer list-none [&::-webkit-details-marker]:hidden flex flex-wrap items-baseline gap-x-2 gap-y-0.5 min-w-0">
+                    <span><span class="font-semibold">{{ e.domain }}</span>{% if key == 'concerns' %} &mdash; {{ items | length }} concern{{ '' if items | length == 1 else 's' }}{% endif %}</span>
+                    {% if e.truncated %}<span class="project-cut-off px-2 py-0.5 rounded-full text-xs font-medium bg-gray-200 text-gray-700">reply cut off</span>{% endif %}
+                    <span class="ml-auto text-sm text-gray-600 select-none"><span class="group-open:hidden">show</span><span class="hidden group-open:inline">hide</span></span>
+                    <span class="basis-full line-clamp-2 text-sm text-gray-600 group-open:hidden">{{ items[0] }}</span>
+                </summary>
+                <ul class="mt-1 ml-6 space-y-1 list-disc list-outside pl-5">
+                    {% for line in items %}<li>{{ line }}</li>{% endfor %}
+                </ul>
+            </details>
+            {% if e.earlier_count %}<p class="text-sm text-gray-600 mt-1">{{ e.earlier_count }} earlier consult{{ ' in this domain is' if e.earlier_count == 1 else 's in this domain are' }} in the conversation.</p>{% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p class="mt-1 text-sm text-gray-600">{{ empty }}</p>
     {% endif %}
 </section>
+{% endmacro %}
+{% macro item_list(items) %}<ul class="list-disc list-inside text-base leading-relaxed text-gray-700 space-y-1 max-w-[68ch]">{% for item in items %}<li>{{ item }}</li>{% endfor %}</ul>{% endmacro %}
+{% set p = project %}
+{% set pi_lab %}{% if p.pi_user_id %}<a class="underline text-indigo-600 hover:text-indigo-800" href="{{ page_url(request, 'workspace_pi_detail', user_id=p.pi_user_id) }}">{{ p.lab }}</a>{% else %}{{ p.lab or "—" }}{% endif %}{% endset %}
 
-<section class="mb-6">
-    <h2 class="text-lg font-semibold text-gray-900 mb-2">Plan</h2>
-    <dl class="space-y-1 text-sm">
-        {% for row in project.plan_rows %}<div><dt class="inline font-medium text-gray-700">{{ row.label }}:</dt> <dd class="inline text-gray-800">{{ row.value or '—' }}</dd></div>{% endfor %}
+<a href="{{ page_url(request, 'workspace_projects', query=list_state) }}" class="text-sm text-indigo-700 hover:underline">← Projects</a>
+<div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 mt-1 mb-4"><h1 class="text-2xl font-bold text-gray-900">Project detail</h1>{{ help_link(request, effective_user, 'projects', 'detail') }}</div>
+{% if p.research_cost_usd is defined or p.calls_url %}
+<div class="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1">
+    {% if p.calls_url %}<a href="{{ p.calls_url }}" class="inline-flex items-center px-3 py-1.5 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700">Model calls for this project</a>{% endif %}
+    {% if p.research_cost_usd is defined %}<span class="project-cost text-sm text-gray-700">Cost: research ${{ '%.2f' | format(p.research_cost_usd or 0) }}, refinement ${{ '%.2f' | format(p.refinement_cost_usd or 0) }}</span>{% endif %}
+</div>
+{% endif %}
+
+<nav aria-label="On this page" class="assessment-jump-nav sticky top-0 z-10 -mx-2 mb-4 flex flex-wrap gap-x-4 gap-y-1 bg-white/95 px-2 py-2 text-sm text-gray-600 backdrop-blur border-b border-gray-100">
+    <a class="text-indigo-700 underline-offset-2 hover:underline" href="#brief">Brief</a>
+    <a class="text-indigo-700 underline-offset-2 hover:underline" href="#evidence">Evidence</a>
+    <a class="text-indigo-700 underline-offset-2 hover:underline" href="#plan">Plan</a>
+    <a class="text-indigo-700 underline-offset-2 hover:underline" href="#positions">Positions</a>
+    <a class="text-indigo-700 underline-offset-2 hover:underline" href="#research">Research</a>
+    <a class="text-indigo-700 underline-offset-2 hover:underline" href="#reviews">Reviews</a>
+    <a class="text-indigo-700 underline-offset-2 hover:underline" href="#timeline" data-open-details="timeline">Conversation</a>
+    <button type="button" data-details-toggle="open" class="ml-auto rounded border border-indigo-300 px-2 py-0.5 text-sm text-indigo-700 hover:bg-indigo-50">Expand all</button>
+    <button type="button" data-details-toggle="close" class="rounded border border-indigo-300 px-2 py-0.5 text-sm text-indigo-700 hover:bg-indigo-50">Collapse all</button>
+    {# The feature is on but this session may not use it: every chat route refuses impersonation. #}
+    {% if chat_enabled and impersonation_banner %}<span class="text-sm text-gray-600">Chat unavailable while impersonating</span>{% endif %}
+</nav>
+
+<div id="brief" class="project-brief scroll-mt-16 max-md:scroll-mt-28 bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+    <div class="flex items-start justify-between gap-4 flex-wrap">
+        <div class="min-w-0">
+            <p class="assessment-headline text-2xl font-semibold text-gray-900">{{ p.title or 'Untitled project' }}</p>
+            <div class="project-meta text-sm text-gray-600 mt-1">Lab: <span class="font-medium text-gray-700">{{ pi_lab }}</span>{% if p.run_started_at %} · run started {{ p.run_started_at | ts }}{% endif %}{% if p.posted_at %} · posted {{ p.posted_at | ts }}{% endif %}{% if p.finished_at %} · finished {{ p.finished_at | ts }}{% endif %}</div>
+        </div>
+        <div class="text-right shrink-0">
+            <span class="px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap {{ badge_class.get(p.outcome_kind, 'bg-gray-100 text-gray-600') }}">{{ p.outcome_label }}</span>
+            {% if p.reason_label %}<div class="text-sm text-gray-600 mt-1">{{ p.reason_label }}</div>{% endif %}
+        </div>
+    </div>
+    <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div class="assessment-brief-pitch">
+            <div class="text-sm font-semibold text-gray-600">In one minute</div>
+            {% if p.summary %}<div class="assessment-prose max-w-none mt-1"><p class="project-summary whitespace-pre-line">{{ p.summary }}</p></div>{% else %}<p class="mt-1 text-sm text-gray-600">No summary recorded.</p>{% endif %}
+            {% if p.why_chosen %}
+            <div class="project-why rounded-lg border border-amber-200 bg-amber-50 p-3 mt-4">
+                <div class="text-sm font-semibold text-amber-900">Why this use</div>
+                <div class="assessment-prose max-w-none mt-1"><p class="whitespace-pre-line">{{ p.why_chosen }}</p></div>
+            </div>
+            {% endif %}
+        </div>
+        <div class="assessment-brief-keypoints">
+            <div class="text-sm font-semibold text-gray-600">Key points</div>
+            <div class="assessment-prose max-w-none mt-1 space-y-2">
+                <p>Positions: BlackbirdBot {{ position_chip(p.hub_position) }} · The lab {{ position_chip(p.lab_position) }}</p>
+                {% if p.anchors %}
+                <div><span class="font-semibold">Built on</span>
+                    <ul class="list-disc list-inside">{% for anchor in p.anchors %}<li>{{ anchor.section }}: {{ anchor.item }}</li>{% endfor %}</ul>
+                </div>
+                {% endif %}
+                {% set c = p.counts %}
+                <p class="project-counts"><a class="text-indigo-700 underline-offset-2 hover:underline" href="#research">{{ c.sources }} source{{ '' if c.sources == 1 else 's' }}</a> · <a class="text-indigo-700 underline-offset-2 hover:underline" href="#evidence">{{ c.consults }} specialist consult{{ '' if c.consults == 1 else 's' }}</a> · <a class="text-indigo-700 underline-offset-2 hover:underline" href="#timeline" data-open-details="timeline">{{ c.posts }} post{{ '' if c.posts == 1 else 's' }}</a> · <a class="text-indigo-700 underline-offset-2 hover:underline" href="#others" data-open-details="others">{{ c.others }} other use{{ '' if c.others == 1 else 's' }} considered</a></p>
+            </div>
+        </div>
+    </div>
+    {{ chat_asks('brief', chat_available, chat_suggestions) }}
+</div>
+
+<div id="evidence" class="project-evidence scroll-mt-16 max-md:scroll-mt-28 bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-3">Evidence summary</h2>
+    {% if p.evidence %}
+    <div class="space-y-3">
+        {{ evidence_box(p.evidence, 'established', 'Established', 'border-green-200 bg-green-50', 'text-green-900', 'Nothing recorded as established.') }}
+        {{ evidence_box(p.evidence, 'concerns', 'Concerns', 'border-slate-200 bg-slate-50', 'text-slate-900', 'No concerns recorded.') }}
+        {{ evidence_box(p.evidence, 'questions_to_ask', 'Questions to ask', 'border-slate-200 bg-slate-50', 'text-slate-900', 'No questions recorded.') }}
+    </div>
+    <p class="project-evidence-legend text-base leading-relaxed text-gray-600 mt-3 max-w-[68ch]">Each row is the latest consult in that specialist's domain; “show” opens its full text.</p>
+    {% else %}
+    <p class="text-sm text-gray-600">No specialist was consulted in this project's thread.</p>
+    {% endif %}
+    <p class="project-evidence-provenance text-base leading-relaxed text-gray-600 mt-1 max-w-[68ch]">Quoted from the specialists' stored replies; the specialists are AI personas BlackbirdBot consulted while refining the plan.</p>
+    {{ chat_asks('evidence', chat_available, chat_suggestions) }}
+</div>
+
+<div id="plan" class="project-plan scroll-mt-16 max-md:scroll-mt-28 bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-3">{{ p.plan_title }}</h2>
+    {% if p.plan_rows %}
+    <dl class="space-y-3">
+        {% for row in p.plan_rows %}
+        <div class="project-plan-row flex flex-wrap sm:flex-nowrap items-start gap-x-4 gap-y-1">
+            <dt class="w-full sm:w-56 sm:shrink-0 text-sm font-semibold text-gray-700">{{ row.label }}{% if row.changed %} <span class="project-changed ml-1 px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-indigo-100 text-indigo-700">changed since posting</span>{% endif %}</dt>
+            <dd class="assessment-prose min-w-0">
+                {% if row.value %}<p class="whitespace-pre-line">{{ row.value }}</p>{% else %}<p class="text-sm text-gray-600">—</p>{% endif %}
+                {% if row.changed %}
+                <details class="mt-1">
+                    <summary class="cursor-pointer text-sm text-gray-600">As first posted</summary>
+                    <p class="mt-1 whitespace-pre-line text-gray-700">{{ row.opening_value or '—' }}</p>
+                </details>
+                {% endif %}
+            </dd>
+        </div>
+        {% endfor %}
     </dl>
-    {% if project.tool_rows %}
-    <h3 class="mt-3 text-sm font-semibold text-gray-900">The lab's tools and models</h3>
+    {% else %}
+    <p class="text-sm text-gray-600">No plan recorded.</p>
+    {% endif %}
+    <h3 class="mt-4 text-sm font-semibold text-gray-900">The lab's tools and models</h3>
+    {% if p.tool_rows %}
+    <ul class="mt-1 space-y-1 text-base leading-relaxed text-gray-700 max-w-[68ch]">
+        {% for tool in p.tool_rows %}<li class="project-tool">{{ tool.item }} {% if tool.in_profile %}<span class="project-tool-in-profile px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-green-100 text-green-700">in the lab's profile</span>{% if tool.matched %} <span class="text-sm text-gray-600">matches: {{ tool.matched }}</span>{% endif %}{% else %}<span class="project-tool-stated px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-gray-100 text-gray-600">stated by the lab</span>{% endif %}</li>{% endfor %}
+    </ul>
+    {% else %}
+    <p class="mt-1 text-sm text-gray-600">None listed.</p>
+    {% endif %}
+    {{ chat_asks('plan', chat_available, chat_suggestions) }}
+</div>
+
+<div id="positions" class="project-positions scroll-mt-16 max-md:scroll-mt-28 bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-3">Positions</h2>
+    <p class="text-sm text-gray-700">BlackbirdBot {{ position_chip(p.hub_position) }} · The lab {{ position_chip(p.lab_position) }}</p>
+    {% if not p.has_close %}
+    <p class="mt-3 text-sm text-gray-600">No close recorded.</p>
+    {% elif p.outcome_kind == 'not_agreed' %}
+    <div class="project-unresolved mt-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+        <h3 class="text-sm font-semibold text-amber-900">Gaps</h3>
+        {% if p.gaps %}{{ item_list(p.gaps) }}{% else %}<p class="text-sm text-gray-600">None recorded.</p>{% endif %}
+        <h3 class="mt-3 text-sm font-semibold text-amber-900">Disagreements</h3>
+        {% if p.disagreements %}{{ item_list(p.disagreements) }}{% else %}<p class="text-sm text-gray-600">None recorded.</p>{% endif %}
+    </div>
+    {% elif p.gaps or p.disagreements %}
+    <div class="project-limits mt-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+        {% if p.gaps %}<h3 class="text-sm font-semibold text-slate-900">{{ 'Acknowledged limits' if p.outcome_kind == 'ready' else 'Gaps' }}</h3>{{ item_list(p.gaps) }}{% endif %}
+        {% if p.disagreements %}<h3 class="{% if p.gaps %}mt-3 {% endif %}text-sm font-semibold text-slate-900">Disagreements</h3>{{ item_list(p.disagreements) }}{% endif %}
+    </div>
+    {% endif %}
+    {{ chat_asks('positions', chat_available, chat_suggestions) }}
+</div>
+
+<details id="others" class="project-others scroll-mt-16 max-md:scroll-mt-28 mb-6 bg-white rounded-xl shadow-sm border border-gray-200">
+<summary class="cursor-pointer px-5 py-4"><h2 class="inline text-lg font-semibold text-gray-900">Also considered ({{ p.others | length }})</h2></summary>
+<div class="px-5 pb-5">
+    {% if p.others %}
+    <ul class="list-disc list-inside text-base leading-relaxed text-gray-700 space-y-1 max-w-[68ch]">{% for other in p.others %}<li>{{ other.use }}{% if other.note %} &mdash; {{ other.note }}{% endif %}</li>{% endfor %}</ul>
+    {% else %}
+    <p class="text-sm text-gray-600">No other uses recorded.</p>
+    {% endif %}
+</div>
+</details>
+
+<div id="research" class="project-research scroll-mt-16 max-md:scroll-mt-28 bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-3">Research ({{ p.counts.sources }} source{{ '' if p.counts.sources == 1 else 's' }})</h2>
+    {% if p.sources_by_kind %}
+    {% for group in p.sources_by_kind %}
+    <h3 class="{% if not loop.first %}mt-4 {% endif %}text-sm font-semibold text-gray-900">{{ group.label }}</h3>
     <ul class="mt-1 space-y-1 text-sm text-gray-800">
-        {% for tool in project.tool_rows %}<li>{{ tool.item }} — {% if tool.in_profile %}<span class="text-green-700">in the lab's profile</span>{% else %}<span class="text-amber-700">not found in the lab's profile</span>{% endif %}</li>{% endfor %}
+        {% for source in group['items'] %}<li>{% if source.url %}<a href="{{ source.url }}" class="text-indigo-700 hover:underline" rel="noopener noreferrer" target="_blank">{{ source.ident }}</a>{% else %}{{ source.ident }}{% endif %} &mdash; {{ source.title }}{% if source.specialist %} <span class="text-xs text-gray-600">found by the {{ source.specialist }} specialist</span>{% endif %}</li>{% endfor %}
     </ul>
+    {% endfor %}
+    {% else %}
+    <p class="text-sm text-gray-600">No sources recorded.</p>
     {% endif %}
-</section>
+</div>
 
-<section class="mb-6">
-    <h2 class="text-lg font-semibold text-gray-900 mb-2">Positions</h2>
-    <p class="text-sm text-gray-700">BlackbirdBot: {{ project.hub_position or 'No close recorded' }} · The lab: {{ project.lab_position or 'No close recorded' }}</p>
-    {% if project.gaps %}
-    <h3 class="mt-3 text-sm font-semibold text-gray-900">Gaps</h3>
-    <ul class="list-disc list-inside text-sm text-gray-800">{% for gap in project.gaps %}<li>{{ gap }}</li>{% endfor %}</ul>
-    {% endif %}
-    {% if project.disagreements %}
-    <h3 class="mt-3 text-sm font-semibold text-gray-900">Disagreements</h3>
-    <ul class="list-disc list-inside text-sm text-gray-800">{% for item in project.disagreements %}<li>{{ item }}</li>{% endfor %}</ul>
-    {% endif %}
-</section>
-
-<section class="mb-6">
-    <h2 class="text-lg font-semibold text-gray-900 mb-2">Why this use</h2>
-    {% if project.why_chosen %}<p class="text-sm text-gray-800 whitespace-pre-line">{{ project.why_chosen }}</p>{% else %}<p class="text-sm text-gray-600">No reason recorded.</p>{% endif %}
-    {% if project.others %}
-    <h3 class="mt-3 text-sm font-semibold text-gray-900">Also considered</h3>
-    <ul class="list-disc list-inside text-sm text-gray-800">{% for other in project.others %}<li>{{ other.use }}{% if other.note %} — {{ other.note }}{% endif %}</li>{% endfor %}</ul>
-    {% endif %}
-</section>
-
-<section class="mb-6">
-    <h2 class="text-lg font-semibold text-gray-900 mb-2">Built on</h2>
-    {% if project.anchors %}
-    <ul class="list-disc list-inside text-sm text-gray-800">{% for anchor in project.anchors %}<li><span class="text-gray-600">{{ anchor.section }}:</span> {{ anchor.item }}</li>{% endfor %}</ul>
-    {% else %}<p class="text-sm text-gray-600">No anchors recorded.</p>{% endif %}
-</section>
-
-<section class="mb-6">
-    <h2 class="text-lg font-semibold text-gray-900 mb-2">Research</h2>
-    {% if project.sources %}
-    <ul class="space-y-1 text-sm text-gray-800">
-        {% for source in project.sources %}<li>{% if source.url %}<a href="{{ source.url }}" class="text-indigo-700 hover:underline" rel="noopener noreferrer" target="_blank">{{ source.ident }}</a>{% else %}{{ source.ident }}{% endif %} — {{ source.title }}{% if source.specialist %} <span class="text-xs text-gray-600">found by the {{ source.specialist }} specialist</span>{% endif %}</li>{% endfor %}
-    </ul>
-    {% else %}<p class="text-sm text-gray-600">No sources recorded.</p>{% endif %}
-</section>
-
-<section class="mb-6">
-    <h2 class="text-lg font-semibold text-gray-900 mb-2">Opening plan</h2>
-    <dl class="space-y-1 text-sm">
-        {% for row in project.opening_rows %}<div><dt class="inline font-medium text-gray-700">{{ row.label }}:</dt> <dd class="inline text-gray-800">{{ row.value or '—' }}</dd></div>{% endfor %}
-    </dl>
-</section>
-
-<section class="mb-6">
-    <h2 class="text-lg font-semibold text-gray-900 mb-2">Conversation</h2>
-    {% if project.timeline %}
-    <ol class="space-y-3 list-none">
-        {% for post in project.timeline %}<li class="bg-white rounded-xl shadow-sm border border-gray-200 px-4 py-3"><p class="text-xs text-gray-600">{{ post.speaker }} · {{ post.at | ts }}{% if post.kind == 'posting' %} · posting{% endif %}</p><p class="mt-1 text-sm text-gray-800 whitespace-pre-line">{{ post.text }}</p></li>{% endfor %}
-    </ol>
-    {% else %}<p class="text-sm text-gray-600">Nothing has been posted yet.</p>{% endif %}
-    {% if project.consults %}
-    <h3 class="mt-4 text-sm font-semibold text-gray-900">Specialist consults</h3>
-    <ul class="mt-1 space-y-2 text-sm text-gray-800">
-        {% for consult in project.consults %}<li class="bg-white rounded-xl border border-gray-200 px-4 py-2">
-            <p><span class="font-medium">{{ consult.domain }}</span>: {{ consult.question }}</p>
-            {% if consult.established %}<p class="mt-1 text-gray-600">Established:</p><ul class="list-disc list-inside">{% for line in consult.established %}<li>{{ line }}</li>{% endfor %}</ul>{% endif %}
-            {% if consult.concerns %}<p class="mt-1 text-gray-600">Concerns:</p><ul class="list-disc list-inside">{% for line in consult.concerns %}<li>{{ line }}</li>{% endfor %}</ul>{% endif %}
-            {% if consult.questions_to_ask %}<p class="mt-1 text-gray-600">Questions to ask:</p><ul class="list-disc list-inside">{% for line in consult.questions_to_ask %}<li>{{ line }}</li>{% endfor %}</ul>{% endif %}
-        </li>{% endfor %}
-    </ul>
-    {% endif %}
-</section>
-
-<section class="mb-6">
-    <h2 id="reviews" class="text-lg font-semibold text-gray-900 mb-2">Reviews</h2>
-    {% if project.reviews %}
+<div id="reviews" class="project-reviews scroll-mt-16 max-md:scroll-mt-28 bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-2">Reviews</h2>
+    <p class="text-base leading-relaxed text-gray-600 mb-3 max-w-[68ch]">Your review rates the project itself: whether the idea and its plan are worth pursuing, not how well the bots performed. Rate it from 1 (weak) to 5 (strong), and say whether you would fund the project as planned.</p>
+    {% if p.reviews %}
     <ul class="space-y-2">
-        {% for review in project.reviews %}<li class="bg-white rounded-xl border border-gray-200 px-4 py-2 text-sm text-gray-800">
-            <p><span class="font-medium">{{ review.reviewer_name }}</span> · {{ review.rating }}/5 · {{ 'Fund' if review.fund else "Don't fund" }} · <span class="text-xs text-gray-600">{{ review.created_at | ts }}</span></p>
+        {% for review in p.reviews %}<li class="project-review rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-800">
+            <p><span class="font-medium">{{ review.reviewer_name }}</span> · {{ review.rating }}/5 · <span class="px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap {{ 'bg-green-100 text-green-700' if review.fund else 'bg-gray-100 text-gray-600' }}">{{ 'Fund' if review.fund else "Don't fund" }}</span> · <span class="text-xs text-gray-600">{{ review.created_at | ts }}{% if review.edited %} (edited){% endif %}</span></p>
             {% if review.comment %}<p class="mt-1 whitespace-pre-line">{{ review.comment }}</p>{% endif %}
-            {% if review.can_edit %}
+            {% if review.can_edit and not impersonation_banner %}
             <details class="mt-2">
                 <summary class="cursor-pointer text-sm text-indigo-700">Edit your review</summary>
                 <form method="post" action="/reviews/project-reviews/{{ review.id }}/edit" class="mt-2">
-                    {{ review_fields('edit-', review) }}
+                    {{ state_fields(list_state) }}
+                    {{ review_fields('edit-' ~ review.id ~ '-', review) }}
                     <button type="submit" class="mt-2 text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Save</button>
                 </form>
             </details>
             {% endif %}
             {% if permissions.admin and not impersonation_banner %}
             <form method="post" action="/reviews/project-reviews/{{ review.id }}/delete" class="mt-1" data-confirm="Delete this review? This cannot be undone.">
+                {{ state_fields(list_state) }}
                 <button type="submit" class="text-sm text-red-600 hover:text-red-800">Delete</button>
             </form>
             {% endif %}
         </li>{% endfor %}
     </ul>
     {% else %}<p class="text-sm text-gray-600">No reviews yet.</p>{% endif %}
-    {% if project.can_review_projects and not project.my_review %}
-    <form method="post" action="/reviews/projects/{{ project.id }}/review" class="mt-4 bg-white rounded-xl border border-gray-200 px-4 py-3">
+    {% if p.can_review_projects and not p.my_review and not impersonation_banner %}
+    <form method="post" action="/reviews/projects/{{ p.id }}/review" class="mt-4 rounded-lg border border-gray-200 px-4 py-3">
         <h3 class="text-sm font-semibold text-gray-900 mb-2">Your review</h3>
+        {{ state_fields(list_state) }}
         {{ review_fields('new-', none) }}
         <button type="submit" class="mt-2 text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Save review</button>
     </form>
     {% endif %}
-</section>
-{% endblock %}
+    {# Assignments: read by everyone who sees the page; assign and remove are staff-only
+       and refused under impersonation (src/routers/reviews.py). #}
+    {% set assignments = p.assignments or [] %}
+    {% set can_assign = permissions.staff and not impersonation_banner %}
+    <div class="project-assignments mt-4 border-t border-gray-100 pt-4">
+        <h3 class="text-sm font-semibold text-gray-700">Assigned{% if assignments %} ({{ assignments | length }}){% endif %}</h3>
+        {% if assignments %}
+        <ul class="project-assignments-list mt-1 space-y-1 text-sm">
+            {% for assigned in assignments %}
+            <li class="flex items-center gap-2">
+                <span class="text-gray-700">{{ assigned.assignee_name }}</span>
+                {% if can_assign %}
+                <form method="post" action="/reviews/projects/{{ p.id }}/unassign" class="inline">
+                    {{ state_fields(list_state) }}
+                    <input type="hidden" name="assignee_user_id" value="{{ assigned.assignee_user_id }}">
+                    <button type="submit" class="text-sm text-red-600 hover:text-red-800" aria-label="Remove {{ assigned.assignee_name }}">Remove</button>
+                </form>
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p class="text-sm text-gray-600 mt-1">No one assigned.</p>
+        {% endif %}
+        {% if can_assign and p.review_capable_users %}
+        <form method="post" action="/reviews/projects/{{ p.id }}/assign" class="mt-2 flex items-center gap-2">
+            {{ state_fields(list_state) }}
+            <label for="assign-user" class="text-sm text-gray-700">Assign to</label>
+            <select id="assign-user" name="assignee_user_id" class="border rounded px-1 py-0.5 text-sm">
+                {% for u in p.review_capable_users %}<option value="{{ u.id }}">{{ u.name }}</option>{% endfor %}
+            </select>
+            <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Assign</button>
+        </form>
+        {% endif %}
+    </div>
+</div>
+
+<details id="timeline" class="project-timeline scroll-mt-16 max-md:scroll-mt-28 mb-6 bg-white rounded-xl shadow-sm border border-gray-200">
+<summary class="cursor-pointer px-5 py-4"><h2 class="inline text-lg font-semibold text-gray-900">Conversation</h2></summary>
+<div class="px-5 pb-5">
+    <p class="text-base leading-relaxed text-gray-600 mb-4 max-w-[68ch]">The posting, the lab's reply and the thread in Slack, in order, with each specialist consult at the time it was made.</p>
+    {% set has_posting = p.timeline | selectattr('kind', 'equalto', 'posting') | list | length > 0 %}
+    {% if not has_posting %}
+    <p class="project-posting-missing mb-3 text-sm text-gray-600">{{ 'Posting unavailable.' if p.posted_at else 'Nothing has been posted yet.' }}</p>
+    {% endif %}
+    {% if p.timeline %}
+    <div class="space-y-3">
+    {% for e in p.timeline %}
+        {% if e.kind == 'posting' %}
+        <div id="{{ e.anchor }}" class="project-posting scroll-mt-16 max-md:scroll-mt-28 rounded-lg border border-gray-200 bg-white p-3">
+            <div class="flex items-center gap-2 text-sm text-gray-600 mb-1"><span class="font-semibold text-gray-700">{{ e.speaker }}</span> · {{ e.at | ts }} · posting</div>
+            {# The posting is shown as stored, plain: it is the text BlackbirdBot sent. #}
+            <div class="text-base leading-relaxed text-gray-800 whitespace-pre-line max-w-[68ch]">{{ e.text }}</div>
+            {% if e.partial %}<p class="mt-1 text-sm text-amber-700">Part of this posting may not have reached Slack.</p>{% endif %}
+        </div>
+        {% elif e.kind == 'post' %}
+        <div id="{{ e.anchor }}" class="project-post scroll-mt-16 max-md:scroll-mt-28 rounded-lg border border-gray-200 bg-gray-50 p-3">
+            <div class="flex items-center gap-2 text-sm text-gray-600 mb-1">
+                <span class="font-semibold text-gray-700">{{ e.speaker }}</span>
+                <span>{{ e.at | ts }}</span>
+                {% if e.closed_thread %}<span class="px-2 py-0.5 rounded-full text-xs bg-indigo-100 text-indigo-700 font-medium">closed the thread</span>{% endif %}
+            </div>
+            <div class="timeline-message-clamp relative max-h-64 overflow-hidden max-w-[68ch]" data-clamp>
+                <div class="md-content text-base leading-relaxed text-gray-800" data-markdown="{{ e.text | e }}"></div>
+                <div class="timeline-message-fade pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-white"></div>
+            </div>
+            <button type="button" class="timeline-message-toggle mt-1 text-sm text-indigo-700 underline-offset-2 hover:underline" data-unclamp>Show full message</button>
+        </div>
+        {% elif e.kind == 'consult' %}
+        <div id="{{ e.anchor }}" class="project-consult scroll-mt-16 max-md:scroll-mt-28 rounded-lg border border-dashed border-gray-300 bg-white p-3 ml-6">
+            <div class="flex flex-wrap items-center gap-2 text-sm mb-1">
+                <span class="font-semibold text-gray-700">specialist · {{ e.domain }}</span>
+                <span class="text-gray-600">{{ e.concern_count }} concern{{ '' if e.concern_count == 1 else 's' }}</span>
+                {% if e.at %}<span class="text-gray-600">{{ e.at | ts }}</span>{% endif %}
+                {% if e.truncated %}<span class="project-cut-off px-2 py-0.5 rounded-full text-xs font-medium bg-gray-200 text-gray-700">reply cut off</span>{% endif %}
+            </div>
+            {% if e.truncated %}<p class="text-sm text-gray-600 mb-1">This specialist's reply stopped before it finished, so what follows is partial.</p>{% endif %}
+            {% if e.question %}<div class="text-base leading-relaxed text-gray-600 mb-1 max-w-[68ch]"><span class="font-medium">Asked:</span> {{ e.question }}</div>{% endif %}
+            {% for key, title in [('established', 'Established'), ('concerns', 'Concerns'), ('questions_to_ask', 'Questions to ask')] %}
+            {% if e[key] %}
+            <div class="text-base leading-relaxed text-gray-700 mt-1 max-w-[68ch]">
+                <span class="font-medium text-gray-600">{{ title }}:</span>
+                <ul class="list-disc list-inside">{% for line in e[key] %}<li>{{ line }}</li>{% endfor %}</ul>
+            </div>
+            {% endif %}
+            {% endfor %}
+        </div>
+        {% endif %}
+    {% endfor %}
+    </div>
+    {% endif %}
+    {% if p.thread_unavailable %}
+    <div class="project-thread-unavailable mt-3 rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600">Thread messages unavailable. The posts of this project's thread are not in the message log.</div>
+    {% endif %}
+</div>
+</details>
+
+{% if permissions.admin and p.raw_choice is defined %}
+<details class="project-raw bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <summary class="cursor-pointer text-sm font-semibold text-gray-700 uppercase">Raw choice and close</summary>
+    <h3 class="mt-3 text-sm font-semibold text-gray-900">Choice</h3>
+    <pre class="raw-choice mt-1 text-sm bg-gray-50 p-3 rounded-lg overflow-x-auto max-h-96 overflow-y-auto whitespace-pre-wrap">{{ p.raw_choice | tojson(indent=2) }}</pre>
+    <h3 class="mt-3 text-sm font-semibold text-gray-900">Close</h3>
+    <pre class="raw-final mt-1 text-sm bg-gray-50 p-3 rounded-lg overflow-x-auto max-h-96 overflow-y-auto whitespace-pre-wrap">{{ p.raw_final | tojson(indent=2) }}</pre>
+</details>
+{% endif %}
+
+<script src="/static/js/assessment_timeline.js"></script>
+{% if chat_available %}{% set chat_kind = "project" %}{% set chat_subject_id = project.id %}{% include "assessments/_chat_drawer.html" %}{% endif %}
+</div>{% endblock %}
