@@ -26,6 +26,14 @@ class ThreadState:
     # post writes no log row and so never advances message_count toward the
     # max_thread_messages close either.
     suppressed_post_count: int = 0
+    # Consecutive project-thread turns whose model call produced nothing AND reported a
+    # refusal or a truncation. Distinct from empty_response_count (the model produced
+    # nothing with no such signal) and suppressed_post_count (it produced text and the
+    # POST was dropped): a refusal is the model declining, not the thread going wrong, so
+    # it backs the turn off on its own counter and abandons the thread only at
+    # PROJECT_REFUSALS_MAX. Cleared by a landed post. Not persisted: a restart rebuilds
+    # the thread at 0, so a permanently refusing thread outlives the restart.
+    refusal_count: int = 0
     # S1-04: consecutive reply LLM calls on this thread that raised, and the
     # wall-clock time before which `_pending_reply_pairs` skips it
     # (60 s x 4^(n-1), capped at 30 min). Zero on the normal path.

@@ -1,5 +1,10 @@
 """The pure rules of BlackbirdBot's projects (``src/services/project_plan.py``) and the
-profile reader they take their items from (``persona_sections.section_items``)."""
+profile reader they take their items from (``persona_sections.section_items``).
+
+The outcome tests pin the owner's rule of 2026-10-29 (D68–D73): a close is Ready on the plan
+alone — every blocking field filled and no live scientific disagreement — and never on either
+bot's ✅/⚠️ marker. Run d54d7386 is what the disagreement and placeholder cases are drawn from.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +14,7 @@ from src.agent.persona_sections import section_items
 from src.agent.slack_client import split_for_wire
 from src.models.hub_project import STATUS_NOT_AGREED, STATUS_READY
 from src.services.project_plan import (
+    BLOCKING_FIELDS,
     POSTING_HEADER,
     POSTING_MAX_CHARS,
     POSTING_MAX_MESSAGES,
@@ -264,30 +270,208 @@ def test_position_marker_forms():
     assert position_marker("I agree ✅") is None
 
 
-def test_project_outcome_rules():
-    agreed = {"position": "agree", "plan": FULL_PLAN, "gaps": [], "disagreements": []}
-    assert project_outcome(lab_position="agree", hub_marker="agree", close=agreed) == (
-        STATUS_READY,
-        [],
-    )
+#: Run d54d7386's coyne close: both markers ✅, every field filled, and one disagreement entry
+#: that says there is none and then records what refinement settled. It graded not_agreed.
+COYNE_DISAGREEMENT = (
+    "None outstanding on the science. Resolved during refinement, recorded for context: SIM "
+    "versus confocal as the Phase 1 section readout (lab corrected Blackbird - confocal, SIM "
+    "unvalidated on thick sarcomeric tissue); isolated nuclei versus fixed sections as primary "
+    "(moved to sections after the prep-induced artefact)."
+)
 
-    no_design = {**agreed, "plan": {**FULL_PLAN, "design": ""}}
-    status, gaps = project_outcome(lab_position="agree", hub_marker="agree", close=no_design)
+
+def _close(plan=None, **extra):
+    """A close whose plan is complete, with no gaps and no disagreement, unless overridden."""
+    return {"position": "agree", "plan": FULL_PLAN if plan is None else plan,
+            "gaps": [], "disagreements": [], **extra}
+
+
+def test_project_outcome_rules():
+    assert project_outcome(close=_close()) == (STATUS_READY, [], [])
+
+    status, gaps, _live = project_outcome(close=_close({**FULL_PLAN, "design": ""}))
     assert status == STATUS_NOT_AGREED
     assert "Design is not filled" in gaps
 
-    status, gaps = project_outcome(
-        lab_position=position_marker("⚠️ we cannot run it"), hub_marker="agree", close=agreed
-    )
+    status, _gaps, live = project_outcome(close=_close(disagreements=["the model"]))
     assert status == STATUS_NOT_AGREED
-    assert "The lab did not agree" in gaps
+    assert live == ["the model"]
 
-    split = {**agreed, "disagreements": ["the model"]}
-    status, _gaps = project_outcome(lab_position="agree", hub_marker="agree", close=split)
-    assert status == STATUS_NOT_AGREED
-
-    broken = {"position": "agree", "plan": {"design": 3}, "gaps": "a string"}
-    status, gaps = project_outcome(lab_position="agree", hub_marker="agree", close=broken)
+    broken = {"position": "agree", "plan": {"design": 3}, "gaps": "a string",
+              "disagreements": []}
+    status, gaps, _live = project_outcome(close=broken)
     assert status == STATUS_NOT_AGREED
     assert "Design is not filled" in gaps
     assert "a string" not in gaps
+
+
+def test_a_disagreement_that_says_only_none_is_not_a_disagreement():
+    """F3: a close whose only disagreement entry says there is none must not lose Ready."""
+    status, gaps, live = project_outcome(close=_close(disagreements=["None."]))
+    assert status == STATUS_READY
+    assert live == []
+
+
+def test_other_no_disagreement_phrasings_drop():
+    for entry in ("No disagreements remain.", "Nothing outstanding on the science.",
+                  "None known.", "None remaining.", "(none)", "None", "Nil", "Zero",
+                  "No scientific disagreements remain between us.",
+                  "No live disagreement on the science."):
+        status, _gaps, live = project_outcome(close=_close(disagreements=[entry]))
+        assert status == STATUS_READY, entry
+        assert live == [], entry
+
+
+def test_a_dispute_whose_first_word_is_a_negation_survives():
+    """The first SENTENCE decides, and only when it says nothing but "there is none". A
+    colon, a hyphen or a dash must not cut an entry down to a bare negation: splitting on
+    them dropped "Disagreement: …" and "No-go …" and graded a disputed project ready."""
+    for entry in (
+        "None of the proposed controls is feasible in our hands",
+        "Disagreement: the lab will not run the NHP arm.",
+        "Open: whether the knockout is the right model",
+        "Remains open — the lab disputes the negative control.",
+        "Outstanding - no agreement on the readout",
+        "No-go on the mouse arm",
+        "No, the lab disputes the dose.",
+    ):
+        status, _gaps, live = project_outcome(close=_close(disagreements=[entry]))
+        assert status == STATUS_NOT_AGREED, entry
+        assert live == [entry], entry
+
+
+def test_a_non_string_disagreement_entry_is_kept():
+    """A list whose entries are objects is still the hub naming a dispute: it must not read
+    as agreement, and the text must not vanish from the record."""
+    status, _gaps, live = project_outcome(
+        close=_close(disagreements=[{"issue": "the lab cannot run the NHP arm"}])
+    )
+    assert status == STATUS_NOT_AGREED
+    assert live and "NHP arm" in live[0]
+
+
+def test_a_negated_resolution_is_a_disagreement():
+    """The inversion to guard against: "not" is not a no-disagreement negation, and a verb
+    of resolution is not a filler word. With either, "Not agreed" would read as "there is
+    no disagreement" and grade a disputed project ready."""
+    for entry in ("Not agreed", "Nothing is settled", "Not resolved", "No change agreed",
+                  "Not all issues raised with the lab are resolved",
+                  "Not every change is agreed"):
+        status, _gaps, live = project_outcome(close=_close(disagreements=[entry]))
+        assert status == STATUS_NOT_AGREED, entry
+        assert live == [entry], entry
+
+
+def test_dropped_entries_are_recorded_once():
+    status, gaps, _live = project_outcome(close=_close(disagreements=["None.", "None."]))
+    assert status == STATUS_READY
+    assert len([g for g in gaps if g.startswith("The close recorded")]) == 1
+
+
+def test_an_empty_non_string_entry_is_not_a_disagreement():
+    status, _gaps, live = project_outcome(close=_close(disagreements=[0, {}, None, []]))
+    assert (status, live) == (STATUS_READY, [])
+
+
+def test_a_note_that_opens_none_and_then_names_a_dispute_is_a_disagreement():
+    """The hiding case the whole-entry rule exists for: an entry that says there is none
+    and then names one must not grade Ready."""
+    entry = "No disagreement on the science. The lab will not run the NHP arm at any dose."
+    status, _gaps, live = project_outcome(close=_close(disagreements=[entry]))
+    assert (status, live) == (STATUS_NOT_AGREED, [entry])
+
+
+def test_a_dropped_entry_is_still_recorded_as_a_gap():
+    """A bare "none" entry does not block, and is still written down: the sidecar is
+    stripped before posting, so `final` is the only place it survives."""
+    status, gaps, live = project_outcome(close=_close(disagreements=["None."]))
+    assert (status, live) == (STATUS_READY, [])
+    assert any(gap.endswith("None.") for gap in gaps)
+
+
+def test_a_long_unreadable_disagreements_value_is_kept_whole():
+    """The sidecar is stripped before posting, so this gap is the only copy of what the
+    close wrote; it is collapsed to one line but never truncated."""
+    text = "The lab refuses the NHP arm. " * 60
+    status, gaps, _live = project_outcome(close=_close(disagreements=text))
+    assert status == STATUS_NOT_AGREED
+    [recorded] = [gap for gap in gaps if gap.startswith("The close's disagreements field")]
+    assert recorded.endswith(text.strip()) and "\n" not in recorded
+
+
+def test_a_close_that_did_not_answer_is_not_agreed():
+    """D73: silence is not "there are none". It is a verdict on the plan, not an unreadable
+    close — the block parsed — so the project stays counted and a repeatable formatting slip
+    cannot walk the session into its failure stop. Whatever was written survives in the gaps."""
+    text = "the lab cannot run the NHP arm"
+    status, gaps, live = project_outcome(close=_close(disagreements=text))
+    assert status == STATUS_NOT_AGREED
+    assert "The close did not say whether a scientific disagreement remains" in gaps
+    assert any(text in gap for gap in gaps)
+    assert live == []
+
+    silent = {"position": "agree", "plan": FULL_PLAN, "gaps": []}
+    status, gaps, live = project_outcome(close=silent)
+    assert status == STATUS_NOT_AGREED
+    assert "The close did not say whether a scientific disagreement remains" in gaps
+    assert live == []
+
+
+def test_the_markers_no_longer_decide():
+    for position in ("agree", "disagree", None, "⚠️ we cannot run it"):
+        status, gaps, _live = project_outcome(close=_close(position=position))
+        assert status == STATUS_READY, position
+        assert gaps == []
+
+
+def test_time_and_budget_does_not_block():
+    status, gaps, _live = project_outcome(
+        close=_close({**FULL_PLAN, "time_and_budget": "to settle with the lab"})
+    )
+    assert status == STATUS_READY
+    assert "Time and budget is not filled" not in gaps
+
+
+def test_a_blocking_field_placeholder_is_not_agreed():
+    status, gaps, _live = project_outcome(
+        close=_close({**FULL_PLAN, "positive_control": "to settle with the lab"})
+    )
+    assert status == STATUS_NOT_AGREED
+    assert "Positive control is not filled" in gaps
+
+
+def test_placeholder_rule():
+    for value in ("none exists, because no drug is approved", "None-the-less we will", "tbdx",
+                  "unknown aetiology, so the model is …"):
+        assert field_filled(value), value
+    for value in ("To settle with the lab (likely $150K)", "TBD — pending the quote", "none",
+                  "to settle with the lab"):
+        assert not field_filled(value), value
+
+
+def test_missing_fields_takes_a_field_set():
+    assert missing_fields(FULL_PLAN) == []
+    blocking = missing_fields({}, BLOCKING_FIELDS)
+    assert len(blocking) == 9
+    assert "Time and budget" not in blocking
+
+
+def test_a_close_whose_gaps_are_the_institutions_does_not_lose_ready():
+    """D71: a gap only staff or the institution can close never blocks."""
+    close = _close(gaps=["The indirect rate is the institution's to state"])
+    status, gaps, live = project_outcome(close=close)
+    assert (status, gaps, live) == (
+        STATUS_READY, ["The indirect rate is the institution's to state"], []
+    )
+
+
+def test_run_d54d7386_coyne_keeps_its_note_as_a_disagreement():
+    """coyne's entry opens "None outstanding on the science." and then writes two more
+    sentences. A note that says there is none and a note that hides one ("No disagreement
+    on the science. The lab will not run the NHP arm.") are the same shape, and no reading
+    of the text separates them — so anything beyond a bare "none" is kept, and the verdict
+    is Not agreed with the hub's own words in front of the reader. The close prompt now
+    asks for `[]`, so a close of this shape is a close that did not follow it."""
+    status, _gaps, live = project_outcome(close=_close(disagreements=[COYNE_DISAGREEMENT]))
+    assert status == STATUS_NOT_AGREED
+    assert live == [COYNE_DISAGREEMENT]

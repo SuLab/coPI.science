@@ -44,10 +44,9 @@ from src.models.hub_project import (
 from src.services.interview_posts import merge_chunks
 from src.services.profile_publish import persona_file_text
 from src.services.project_plan import (
-    METHOD_MODEL_SECTIONS,
     TEMPLATE_FIELDS,
     display_id,
-    normalize_item,
+    tool_marks,
 )
 from src.services.project_research import ledger_row_cost
 from src.services.project_reviews import project_assignments
@@ -79,7 +78,7 @@ REASON_LABELS = {
     "reply_failed": "The lab's reply could not be posted",
     "thread_timeout": "The thread ended without a close",
     "thread_abandoned": "The thread was abandoned",
-    "close_unreadable": "BlackbirdBot's close could not be recorded",
+    "close_unreadable": "BlackbirdBot's close could not be read in full",
     "run_finalized": "The run was finalized first",
     "stopped": "Projects were stopped",
 }
@@ -669,43 +668,32 @@ def display_tool_marks(
 ) -> list[dict]:
     """``{"item", "in_profile", "matched"}`` per string tool, in order.
 
-    Candidates are the profile's items in ``METHOD_MODEL_SECTIONS`` and the project's
-    anchors from those sections (targets and keywords never mark a tool), normalised with
-    ``normalize_item`` and kept when at least two words long. A tool is in the profile when
-    its normalised text contains a candidate as whole words; the longest such candidate is
-    ``matched`` (its original text). Otherwise ``in_profile`` is False and ``matched`` None.
+    A thin delegation to ``project_plan.tool_marks``, which holds the one marking rule the
+    close and the page share: candidates are the profile's ``METHOD_MODEL_SECTIONS`` items
+    and the project's anchors from those sections, normalised and kept when at least two
+    words; a tool matches when its normalised text contains a candidate as whole words, and
+    the longest such candidate is ``matched``.
     """
-    texts: list[object] = [
-        item for section in METHOD_MODEL_SECTIONS for item in profile_items.get(section, ())
-    ]
-    texts += [
-        a.get("item")
-        for a in anchors
-        if isinstance(a, Mapping) and a.get("section") in METHOD_MODEL_SECTIONS
-    ]
-    candidates: dict[str, str] = {}
-    for text in texts:
-        if not isinstance(text, str):
-            continue
-        normalised = normalize_item(text)
-        if len(normalised.split()) >= 2:
-            candidates.setdefault(normalised, text)
-    # Longest first; a stable sort keeps the first-seen candidate among equal lengths.
-    patterns = [
-        (re.compile(r"(?<!\w)" + re.escape(normalised) + r"(?!\w)"), original)
-        for normalised, original in sorted(candidates.items(), key=lambda kv: -len(kv[0]))
-    ]
-    marks = []
-    for tool in tools:
-        if not isinstance(tool, str):
-            continue
-        normalised_tool = normalize_item(tool)
-        matched = next(
-            (original for pattern, original in patterns if pattern.search(normalised_tool)),
-            None,
-        )
-        marks.append({"item": tool, "in_profile": matched is not None, "matched": matched})
-    return marks
+    return tool_marks(tools, profile_items, anchors)
+
+
+def _stored_tool_marks(final: Mapping) -> list[dict] | None:
+    """The close's own ``tool_marks``, when they are the ones the page should show.
+
+    One computation at the close is what every reader sees, so the stored list wins — but
+    only when it can be trusted. A pre-change close stored marks without a ``matched`` key,
+    and a close written with no profile in memory (``tool_profile_seen`` false) stored an
+    all-unmarked list; both are recomputed from the live profile instead, so the page is
+    never frozen to marks that say nothing.
+    """
+    if not final.get("tool_profile_seen"):
+        return None
+    stored = final.get("tool_marks")
+    if not isinstance(stored, list) or not stored:
+        return None
+    if not all(isinstance(m, Mapping) and "matched" in m for m in stored):
+        return None
+    return list(stored)
 
 
 def _source_url(key: str) -> str | None:
@@ -1054,7 +1042,10 @@ async def build_project_detail(
 
     tools_plan = final_plan if final_plan is not None else opening
     tools = _strings(tools_plan.get("lab_tools"))
-    profile_items = section_items(persona_file_text(project.agent_id)) if tools else {}
+    tool_rows = _stored_tool_marks(final)
+    if tool_rows is None:
+        profile_items = section_items(persona_file_text(project.agent_id)) if tools else {}
+        tool_rows = display_tool_marks(tools, profile_items, anchors)
 
     posting = await _posting_entry(db, project)
     posts, thread_unavailable = await _thread_posts(db, project)
@@ -1128,7 +1119,7 @@ async def build_project_detail(
         "anchors": anchors,
         "plan_title": "Plan" if final_plan is not None else "Plan (as posted)",
         "plan_rows": _plan_rows(opening, final_plan),
-        "tool_rows": display_tool_marks(tools, profile_items, anchors),
+        "tool_rows": tool_rows,
         "hub_position": _position_label(project.final, "hub_position"),
         "lab_position": _position_label(project.final, "lab_position"),
         "gaps": _strings(final.get("gaps")),

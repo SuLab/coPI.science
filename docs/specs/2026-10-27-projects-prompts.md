@@ -305,6 +305,8 @@ Message {message_count} of at most 12 — {turn}
 indication; target (or mechanism); model; positive_control; negative_control; standard_of_care; readout;
 design; time_and_budget (within 6–12 months and $100K–$300K); lab_tools (the lab's tools and models used).
 
+Do not spend turns pursuing an item neither of you controls — name it once as a gap and move on.
+
 ## Closing
 
 You close only on your last turn, or earlier when the lab's latest reply starts with ✅ and you agree. To close,
@@ -317,8 +319,14 @@ final plan. Then, after the `</slack_message>` tag, add exactly one block:
 "lab_tools": []}, "gaps": [], "disagreements": []}
 </project_json>
 
-Use "disagree" for a ⚠️ close. Write "to settle with the lab" for any field still open and list what is
-missing as gaps; list anything the two of you still dispute as disagreements.
+Use "disagree" for a ⚠️ close. Fill every field. If a field genuinely has no answer, say so in the field
+itself and why ("none exists, because …"). List as gaps what is still open, each naming who must close it;
+leave out anything settled earlier in this thread or deferred to a later tranche. `disagreements` must
+always be present: `[]` when no scientific disagreement remains, otherwise one entry per live dispute.
+Never write a note saying there are none.
+
+From your second-to-last turn, add no new required control, endpoint or analysis: confirm what is agreed
+and close.
 
 Write the visible reply inside <slack_message> tags.
 ````
@@ -362,6 +370,11 @@ Message {message_count} of at most 12 — {turn}
 - Propose concrete changes: a model or sample your lab has used, a different readout or control.
 - Never close or leave the thread, never start a reply with ⏸️, and do not propose working with any other lab.
 - Start a reply with ✅ only when you agree the plan as it now stands is feasible and complete.
+- Complete means every field of the plan is filled and you would run it as written. An item Blackbird has
+  said it will source, a figure only your institution can confirm, a vendor's terms, or a decision that
+  belongs to your PI is a gap to record, not a reason to withhold ✅. Time and budget is settled later by
+  Blackbird's staff.
+- Do not spend turns pursuing an item neither of you controls — name it once as a gap and move on.
 - Do not commit your PI to anything, and do not use "@".
 
 Write your reply inside <slack_message> tags.

@@ -26,6 +26,8 @@ from src.agent.engine.sidecar import (
 )
 from src.agent.message_log import group_posts
 from src.agent.project_guidance import (
+    PROJECT_REFUSAL_BACKOFF_CAP_S,
+    PROJECT_REFUSALS_MAX,
     THREAD_KIND_INTERVIEW,
     THREAD_KIND_PROJECT,
     ProjectTurn,
@@ -1161,7 +1163,9 @@ class ReplyLane:
         self, agent: Agent, thread: ThreadState, response_text: str,
     ) -> str | None:
         """Post a thread reply (interview or project) with the landed check, and keep the
-        thread's counters: on success the reply counts and the thread owes nothing; a
+        thread's counters: on success the reply counts, the thread owes nothing and its
+        empty, suppressed and refused streaks all clear (a landed post is the only thing
+        that clears a project thread's ``refusal_count``); a
         suppressed post counts nothing, and the second suppressed post in a row backs the
         thread off and closes it as abandoned. Returns the posted id, or None when nothing
         was posted."""
@@ -1210,6 +1214,7 @@ class ReplyLane:
         thread.has_pending_reply = False
         thread.empty_response_count = 0
         thread.suppressed_post_count = 0
+        thread.refusal_count = 0
         return posted
 
     async def _reply_to_project_thread(
@@ -1268,6 +1273,10 @@ class ReplyLane:
             return
         agent.record_api_call(already_reserved=True)
         stop_reasons: list[str] = []
+        # The refusal category and the model that served the turn, as `_reply_to_thread`
+        # collects them: a refused project turn backs off on its own counter rather than
+        # spending an empty-reply strike.
+        provenance: list[dict] = []
         try:
             raw_response = await deps.generate_with_tools(
                 system_prompt=system_prompt,
@@ -1288,6 +1297,7 @@ class ReplyLane:
                 },
                 on_retry=agent.record_api_call,
                 on_stop_reason=stop_reasons.append,
+                on_provenance=provenance.append,
                 should_continue=lambda: self._running,
             )
         except Exception as exc:  # noqa: BLE001 — back off, never spin (as _reply_to_thread)
@@ -1296,7 +1306,7 @@ class ReplyLane:
         self._note_reply_success(thread)
         try:
             await self._handle_project_reply_response(
-                agent, thread, raw_response, stop_reasons, turn
+                agent, thread, raw_response, stop_reasons, turn, provenance
             )
         except Exception as exc:
             logger.error(
@@ -1306,11 +1316,19 @@ class ReplyLane:
 
     async def _handle_project_reply_response(
         self, agent: Agent, thread: ThreadState, raw_response: str,
-        stop_reasons: list[str], turn: ProjectTurn,
+        stop_reasons: list[str], turn: ProjectTurn, provenance: list[dict],
     ) -> None:
         """Act on a project-thread reply: back off on an empty one (the second closes the
         thread as abandoned), mark a truncated one, post it, and for the hub decide the
-        close. A hub reply closes the project in its close band (``turn.must_close``),
+        close.
+
+        A turn that produced nothing AND reported a refusal or a truncation is counted on
+        ``ThreadState.refusal_count`` instead, and abandons the thread only at
+        ``PROJECT_REFUSALS_MAX``: in run d54d7386 antiochos lost two consecutive turns to
+        refusals at ordinal 8 of 12 and the thread was abandoned three turns from its
+        close. An empty reply with neither signal keeps the two-strike rule.
+
+        A hub reply closes the project in its close band (``turn.must_close``),
         or earlier when it carries a ``<project_json>`` block and the lab's latest reply
         agreed (``turn.may_close_early``); any other block is stripped by
         `_post_message` and ignored. The project's outcome is recorded before the thread's
@@ -1319,6 +1337,35 @@ class ReplyLane:
         decline."""
         response_text = _extract_slack_message(raw_response)
         if not response_text or not response_text.strip():
+            refusal = _last_refusal_category(provenance)
+            if _was_truncated(stop_reasons) or refusal is not None:
+                thread.refusal_count += 1
+                logger.warning(
+                    "[%s] Project thread %s: the turn produced nothing — refusal "
+                    "category %s (%s), refusal %d of %d",
+                    agent.agent_id, thread.thread_id, refusal or "none given",
+                    ", ".join(stop_reasons) or "?",
+                    thread.refusal_count, PROJECT_REFUSALS_MAX,
+                )
+                # From refusal_count, not failed_call_count: `_note_reply_success` ran
+                # between the call and this handler and zeroed that one. Capped well under
+                # the interview backoff: these four waits are the tail a Projects wind-down
+                # has to sit through before `_end_refining_projects` can reach the project,
+                # and a refusal is deterministic, so waiting half an hour buys nothing.
+                thread.retry_after = deps.time.time() + min(
+                    reply_backoff_seconds(thread.refusal_count), PROJECT_REFUSAL_BACKOFF_CAP_S
+                )
+                if thread.refusal_count >= PROJECT_REFUSALS_MAX:
+                    # As the empty-reply branch below: nothing re-queues the pair, so the
+                    # thread is closed rather than leaked, and `_end_refining_projects`
+                    # can reach the project as `thread_abandoned` for a wind-down to drain.
+                    thread.has_pending_reply = False
+                    logger.info(
+                        "[%s] Project thread %s: abandoning after %d refused turns",
+                        agent.agent_id, thread.thread_id, thread.refusal_count,
+                    )
+                    await self._close_thread(agent, thread, ABANDONED_OUTCOME)
+                return
             thread.empty_response_count += 1
             logger.warning(
                 "[%s] Project thread %s: empty/unparseable response (count=%d), skipping",
@@ -1346,7 +1393,9 @@ class ReplyLane:
             return
         close = _extract_project_json(raw_response)
         if turn.must_close or (close is not None and turn.may_close_early):
-            await self._projects._record_project_close(agent, thread, raw_response, posted)
+            await self._projects._record_project_close(
+                agent, thread, raw_response, posted, truncated=_was_truncated(stop_reasons),
+            )
             await self._close_thread(
                 agent, thread, THREAD_OUTCOME_PROJECT_CLOSED, closed_by_role=agent.role
             )

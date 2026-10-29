@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from src.agent.agent import Agent
 from src.agent.claim_check import PROJECT_REPLY_THREAD_KEY, feedback_text
 from src.agent.engine import deps
+from src.agent.engine.constants import TRUNCATION_NOTICE
 from src.agent.message_log import PHASE_HUB_PROJECT, PHASE_PROJECT_REPLY, LogEntry
 from src.agent.role_capabilities import hub_role_names, spoke_role_names
 from src.agent.sessions import (
@@ -57,7 +58,12 @@ from src.models.hub_project import (
     HubProjectClock,
 )
 from src.services import project_research
-from src.services.project_plan import REPLY_HEADER, TEMPLATE_FIELDS, posting_head
+from src.services.project_plan import (
+    REPLY_HEADER,
+    TEMPLATE_FIELDS,
+    fits_one_message,
+    posting_head,
+)
 from tests.fakes import FakeSlackClient
 from tests.integration.test_hub_assessment_capture_gate import _delete_run, _new_run
 
@@ -75,6 +81,16 @@ POSTING = (
     "Summary of the idea.\nOpening plan:\n• Model: organoids"
 )
 REPLY_BODY = "We would use our CRISPR screen; we cannot run the mouse arm."
+#: A lab reply long enough to clear ``REPLY_MIN_CHARS``, so a cut-off call that produced a
+#: real answer is posted rather than counted as a failure.
+LONG_REPLY_BODY = REPLY_BODY + " " + (
+    "The screen runs in our own iPSC-derived lines, with the arrayed library we built for "
+    "the published work and the same imaging readout; we have the reagents in hand and no "
+    "new capability is needed. What we cannot do is the in vivo arm: no animal facility "
+    "allocation, no surgical capacity, and no IACUC protocol covering this model. The "
+    "readout we would propose instead is the plate-based one from our own published work, "
+    "which we can run at the scale the plan asks for without buying anything new."
+)
 #: A Projects session with no count and no runtime.
 NO_LIMITS = Limits()
 
@@ -750,11 +766,13 @@ async def test_offer_reply_counts_only_posting_failures(engine, monkeypatch, pro
     try:
         project_id = await _seed(factory, run_id, status=STATUS_POSTED)
         _script_lab(monkeypatch, lab, [
-            (_reply(), "max_tokens"), _reply(), _reply(),
+            ("", "end_turn"), _reply(), _reply(),
         ])
 
         assert await sim._offer_project_reply(lab) is False
-        assert (await _project(factory, project_id)).reply_failures == 0, "truncated: not counted"
+        assert (await _project(factory, project_id)).reply_failures == 0, (
+            "an empty answer with no refusal or cut: not counted outside a drain"
+        )
 
         original = sim.slack_io._post_message
         suppress = [True]
@@ -789,7 +807,7 @@ async def test_uncounted_reply_failures_let_the_own_pitch_run(engine, monkeypatc
     try:
         project_id = await _seed(factory, run_id, status=STATUS_POSTED)
         calls, _ = _script_lab(monkeypatch, lab, [
-            (_reply(), "refusal"), RuntimeError("overloaded"),
+            ("", "end_turn"), RuntimeError("overloaded"),
         ])
 
         assert await sim._offer_project_reply(lab) is False
@@ -801,6 +819,150 @@ async def test_uncounted_reply_failures_let_the_own_pitch_run(engine, monkeypatc
         project = await _project(factory, project_id)
         assert (project.reply_failures, project.reply_claimed_at) == (0, None)
         assert project.status == STATUS_POSTED
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_lab_reply_with_usable_text_is_posted(engine, monkeypatch, profiles):
+    # F7: run d54d7386's jbailey wrote a well-formed reply six times and every one was
+    # discarded because the call reported `refusal`. The text is what matters.
+    sim, factory, run_id = await _build(engine, monkeypatch, profiles)
+    lab = sim.agents["gray"]
+    try:
+        project_id = await _seed(factory, run_id, status=STATUS_POSTED)
+        _script_lab(monkeypatch, lab, [(_reply(LONG_REPLY_BODY), "refusal")])
+
+        assert await sim._offer_project_reply(lab) is True
+
+        project = await _project(factory, project_id)
+        assert (project.status, project.reply_failures) == (STATUS_REFINING, 0)
+        [root] = await _messages(factory, run_id, phase=PHASE_PROJECT_REPLY)
+        assert REPLY_BODY in root.content
+        assert root.content.endswith(TRUNCATION_NOTICE)
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_cut_off_reply_without_a_tag_pair_is_not_posted(engine, monkeypatch, profiles):
+    """A cut that leaves no opening tag makes `_extract_slack_message` fall back to preamble
+    stripping, which would put the model's own reasoning on Slack as the lab's one reply.
+    A stray closing tag inside that reasoning must not be mistaken for a real message."""
+    sim, factory, run_id = await _build(engine, monkeypatch, profiles)
+    lab = sim.agents["gray"]
+    try:
+        project_id = await _seed(factory, run_id, status=STATUS_POSTED)
+        reasoning = (
+            "I should answer in one block and end it with </slack_message>. "
+            + LONG_REPLY_BODY
+        )
+        _script_lab(monkeypatch, lab, [(reasoning, "refusal")])
+
+        assert await sim._offer_project_reply(lab) is True
+
+        project = await _project(factory, project_id)
+        assert (project.status, project.reply_failures) == (STATUS_POSTED, 1)
+        assert await _messages(factory, run_id, phase=PHASE_PROJECT_REPLY) == []
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_cut_off_reply_that_left_a_fragment_is_counted_not_posted(
+    engine, monkeypatch, profiles
+):
+    """The lab answers a posting once and that reply roots the thread, so a fragment cannot
+    be replaced: below ``REPLY_MIN_CHARS`` the attempt counts instead of spending the
+    project on half a sentence."""
+    sim, factory, run_id = await _build(engine, monkeypatch, profiles)
+    lab = sim.agents["gray"]
+    try:
+        project_id = await _seed(factory, run_id, status=STATUS_POSTED)
+        _script_lab(monkeypatch, lab, [(_reply("We "), "refusal")])
+
+        assert await sim._offer_project_reply(lab) is True
+
+        project = await _project(factory, project_id)
+        assert (project.status, project.reply_failures) == (STATUS_POSTED, 1)
+        assert await _messages(factory, run_id, phase=PHASE_PROJECT_REPLY) == []
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_the_notice_is_dropped_rather_than_the_reply(engine, monkeypatch, profiles):
+    sim, factory, run_id = await _build(engine, monkeypatch, profiles)
+    lab = sim.agents["gray"]
+    try:
+        project_id = await _seed(factory, run_id, status=STATUS_POSTED)
+        head = REPLY_HEADER.format(title=TITLE) + "\n"
+        body = ("word " * 900).strip()
+        while not fits_one_message(head + body):
+            body = body[:-5].strip()
+        assert not fits_one_message(head + body + TRUNCATION_NOTICE), "only the notice overruns"
+        _script_lab(monkeypatch, lab, [(_reply(body), "max_tokens")])
+
+        assert await sim._offer_project_reply(lab) is True
+
+        project = await _project(factory, project_id)
+        assert (project.status, project.reply_failures) == (STATUS_REFINING, 0)
+        [root] = await _messages(factory, run_id, phase=PHASE_PROJECT_REPLY)
+        assert "cut off before it finished" not in root.content
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_lab_reply_with_no_text_counts_outside_a_drain(
+    engine, monkeypatch, profiles,
+):
+    sim, factory, run_id = await _build(engine, monkeypatch, profiles)
+    lab = sim.agents["gray"]
+    try:
+        project_id = await _seed(factory, run_id, status=STATUS_POSTED)
+        _script_lab(monkeypatch, lab, [("", "refusal")])
+
+        assert await sim._offer_project_reply(lab) is True, "the turn is spent on the project"
+
+        project = await _project(factory, project_id)
+        assert (project.status, project.reply_failures) == (STATUS_POSTED, 1)
+        assert project.reply_claimed_at is None
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_two_such_attempts_end_the_project(engine, monkeypatch, profiles):
+    sim, factory, run_id = await _build(engine, monkeypatch, profiles)
+    lab = sim.agents["gray"]
+    try:
+        project_id = await _seed(factory, run_id, status=STATUS_POSTED)
+        _script_lab(monkeypatch, lab, [("", "refusal"), ("", "max_tokens")])
+
+        assert await sim._offer_project_reply(lab) is True
+        assert await sim._offer_project_reply(lab) is True
+
+        project = await _project(factory, project_id)
+        assert (project.status, project.reason_code) == (STATUS_NOT_FINISHED, REASON_REPLY_FAILED)
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_model_exception_still_counts_nothing_outside_a_drain(
+    engine, monkeypatch, profiles,
+):
+    sim, factory, run_id = await _build(engine, monkeypatch, profiles)
+    lab = sim.agents["gray"]
+    try:
+        project_id = await _seed(factory, run_id, status=STATUS_POSTED)
+        _script_lab(monkeypatch, lab, [RuntimeError("overloaded")])
+
+        assert await sim._offer_project_reply(lab) is False
+
+        project = await _project(factory, project_id)
+        assert (project.status, project.reply_failures) == (STATUS_POSTED, 0)
     finally:
         await _delete_run(factory, run_id)
 
@@ -863,7 +1025,7 @@ async def test_failed_attempts_count_while_projects_wind_down(engine, monkeypatc
         project_id = await _seed(factory, run_id, status=STATUS_POSTED)
         second = await _seed(factory, run_id, status=STATUS_POSTED, slot=2)
         sim.ctx.sessions.wind_down(PROJECTS, WIND_DOWN, datetime.now(UTC))
-        _script_lab(monkeypatch, lab, [(_reply(), "max_tokens"), (_reply(), "max_tokens")])
+        _script_lab(monkeypatch, lab, [("", "end_turn"), ("", "end_turn")])
 
         assert await sim._offer_project_reply(lab) is True
         assert (await _project(factory, project_id)).reply_failures == 1
@@ -1142,22 +1304,37 @@ def _log(sim, ts, sender, content, *, root=None, phase=None):
     ))
 
 
-def _close_block(position="agree", disagreements=()):
+def _close_plan(**overrides):
+    """A complete close plan: every template field filled, two lab tools (the first is in
+    ``PERSONA``'s Key Methods, the second is not)."""
     plan = {key: f"{label} settled" for key, label in TEMPLATE_FIELDS if key != "lab_tools"}
     plan["lab_tools"] = ["CRISPR screening", "A cryo-EM pipeline"]
-    block = {"position": position, "plan": plan, "gaps": [],
-             "disagreements": list(disagreements)}
+    plan.update(overrides)
+    return plan
+
+
+def _close_block(position="agree", disagreements=(), plan=None):
+    block = {"position": position, "plan": _close_plan() if plan is None else plan,
+             "gaps": [], "disagreements": list(disagreements)}
     return f"<slack_message>✅ Agreed.</slack_message>\n<project_json>{json.dumps(block)}</project_json>"
 
 
 @pytest.mark.asyncio
 async def test_record_close_ready_and_not_agreed(engine, monkeypatch, profiles):
+    """D69: the close alone decides. The same complete close is ready whatever the lab's
+    last message said; a close that leaves a blocking field open is not agreed."""
     sim, factory, run_id = await _build(engine, monkeypatch, profiles)
     hub = sim.agents[HUB]
+    open_field = _close_plan(readout="to settle with the lab")
     try:
-        cases = (("1700000801.000000", "✅ Agreed on this plan.", STATUS_READY),
-                 ("1700000901.000000", "⚠️ We still cannot run the mouse arm.", STATUS_NOT_AGREED))
-        for slot, (root, lab_text, _) in enumerate(cases, start=1):
+        cases = (
+            ("1700000801.000000", "✅ Agreed on this plan.", _close_block(), STATUS_READY),
+            ("1700000901.000000", "⚠️ We still cannot run the mouse arm.", _close_block(),
+             STATUS_READY),
+            ("1700001001.000000", "✅ Agreed on this plan.", _close_block(plan=open_field),
+             STATUS_NOT_AGREED),
+        )
+        for slot, (root, lab_text, _, _expected) in enumerate(cases, start=1):
             await _seed(factory, run_id, status=STATUS_REFINING, slot=slot, reply_ts=root,
                         reply_claimed_at=datetime.now(UTC))
             base = float(root)
@@ -1166,27 +1343,71 @@ async def test_record_close_ready_and_not_agreed(engine, monkeypatch, profiles):
             _log(sim, f"{base + 2:.6f}", "gray", lab_text, root=root)
             _log(sim, f"{base + 3:.6f}", HUB, "✅ Agreed.", root=root)
 
-        for root, _, expected in cases:
+        for root, _, raw, expected in cases:
             thread = ThreadState(thread_id=root, channel="general", other_agent_id="gray")
             posted = f"{float(root) + 3:.6f}"
-            assert await sim._record_project_close(hub, thread, _close_block(), posted) == expected
+            assert await sim._record_project_close(hub, thread, raw, posted) == expected
 
         rows = {r.reply_ts: r for r in await _projects(factory, run_id)}
         ready = rows[cases[0][0]]
         assert ready.final["hub_position"] == "agree" and ready.final["lab_position"] == "agree"
         assert ready.final["tool_marks"] == [
-            {"item": "CRISPR screening", "in_profile": True},
-            {"item": "A cryo-EM pipeline", "in_profile": False},
+            {"item": "CRISPR screening", "in_profile": True, "matched": "CRISPR screening"},
+            {"item": "A cryo-EM pipeline", "in_profile": False, "matched": None},
         ]
+        assert ready.final["tool_profile_seen"] is True
+        assert ready.final["truncated"] is False
+        assert (ready.final["gaps"], ready.final["disagreements"]) == ([], [])
         assert ready.finished_at is not None
-        not_agreed = rows[cases[1][0]]
-        assert not_agreed.final["lab_position"] == "disagree"
-        assert "The lab did not agree" in not_agreed.final["gaps"]
+        warned = rows[cases[1][0]]
+        assert warned.final["lab_position"] == "disagree", "recorded, and it decides nothing"
+        not_agreed = rows[cases[2][0]]
+        assert not_agreed.final["gaps"] == ["Readout is not filled"]
 
         thread = ThreadState(thread_id=cases[0][0], channel="general", other_agent_id="gray")
-        assert await sim._record_project_close(hub, thread, _close_block(), None) is None, (
-            "a finished project is not written twice"
+        assert await sim._record_project_close(
+            hub, thread, _close_block(plan=_close_plan(design="Rewritten")), None,
+        ) is None, "a finished project is not written twice"
+        again = {r.reply_ts: r for r in await _projects(factory, run_id)}[cases[0][0]]
+        assert again.status == STATUS_READY
+        assert again.final["plan"]["design"] == "Design settled", (
+            "a second close never overwrites the first (Task 6's final IS NULL)"
         )
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_the_close_marks_the_tools_with_the_projects_anchors(
+    engine, monkeypatch, profiles,
+):
+    # The anchor is the only two-word candidate: PERSONA's Model Systems holds the
+    # one-word "Organoids", which the two-word floor drops.
+    sim, factory, run_id = await _build(engine, monkeypatch, profiles)
+    root = "1700001101.000000"
+    try:
+        project_id = await _seed(
+            factory, run_id, status=STATUS_REFINING, reply_ts=root,
+            reply_claimed_at=datetime.now(UTC),
+            choice={"title": TITLE, "summary": "Summary of the idea.", "plan": {},
+                    "anchors": [{"section": "Model Systems",
+                                 "item": "patient-derived organoids"}],
+                    "sources": [], "why_chosen": "It fits."},
+        )
+        _log(sim, root, "gray", "✅ We would use our screen.", phase=PHASE_PROJECT_REPLY)
+        thread = ThreadState(thread_id=root, channel="general", other_agent_id="gray")
+        plan = _close_plan(lab_tools=["patient-derived organoids (contingent on supply)"])
+
+        assert await sim._record_project_close(
+            sim.agents[HUB], thread, _close_block(plan=plan), None,
+        ) == STATUS_READY
+
+        project = await _project(factory, project_id)
+        assert project.final["tool_marks"] == [{
+            "item": "patient-derived organoids (contingent on supply)",
+            "in_profile": True, "matched": "patient-derived organoids",
+        }]
+        assert project.final["tool_profile_seen"] is True
     finally:
         await _delete_run(factory, run_id)
 

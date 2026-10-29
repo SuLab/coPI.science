@@ -28,6 +28,11 @@ Message {message_count} of at most 12 — {turn}
 - Propose concrete changes: a model or sample your lab has used, a different readout or control.
 - Never close or leave the thread, never start a reply with ⏸️, and do not propose working with any other lab.
 - Start a reply with ✅ only when you agree the plan as it now stands is feasible and complete.
+- Complete means every field of the plan is filled and you would run it as written. An item Blackbird has
+  said it will source, a figure only your institution can confirm, a vendor's terms, or a decision that
+  belongs to your PI is a gap to record, not a reason to withhold ✅. Time and budget is settled later by
+  Blackbird's staff.
+- Do not spend turns pursuing an item neither of you controls — name it once as a gap and move on.
 - Do not commit your PI to anything, and do not use "@".
 
 Write your reply inside <slack_message> tags.

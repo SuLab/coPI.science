@@ -8,22 +8,29 @@ drop, decline, headline, panel note) happens there. Driven through the real
 """
 
 import json
+import logging
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.agent.agent import Agent
 from src.agent.engine import reply_lane
+from src.agent.engine.constants import TRUNCATION_NOTICE
 from src.agent.message_log import LogEntry
+from src.agent.project_guidance import PROJECT_REFUSALS_MAX
 from src.agent.sessions import PROJECTS
 from src.agent.simulation import SimulationEngine
 from src.agent.state import ThreadState
 from src.models import SpecialistConsult
 from src.models.hub_project import (
     REASON_CLOSE_UNREADABLE,
+    REASON_STOPPED,
+    REASON_THREAD_ABANDONED,
+    STATUS_NOT_AGREED,
     STATUS_NOT_FINISHED,
     STATUS_POSTED,
     STATUS_READY,
@@ -73,9 +80,42 @@ CHOICE = {
 }
 
 
-def _close_block(position: str = "agree", plan: dict | None = None) -> str:
-    body = {"position": position, "plan": plan or PLAN, "gaps": [], "disagreements": []}
+def _close_block(
+    position: str | None = "agree", plan: dict | None = None,
+    disagreements: list[str] | None = (),
+) -> str:
+    """The hub's ``<project_json>`` close. ``disagreements=None`` leaves the key out
+    altogether: the close did not answer the question BlackbirdBot must answer (D73).
+    ``position=None`` leaves that key out, a close that stated no position."""
+    body: dict = {"plan": plan or PLAN, "gaps": []}
+    if position is not None:
+        body["position"] = position
+    if disagreements is not None:
+        body["disagreements"] = list(disagreements)
     return f"<project_json>{json.dumps(body)}</project_json>"
+
+
+def _scripted(*turns):
+    """A ``generate`` for ``_drive_project``: one ``(raw, stop_reason, refusal_category)``
+    per turn, each reported through the callbacks the real call uses. The last turn repeats
+    once the script runs out."""
+    remaining = list(turns)
+
+    async def _generate(**kwargs):
+        raw, stop, category = remaining.pop(0) if len(remaining) > 1 else remaining[0]
+        if stop is not None:
+            kwargs["on_stop_reason"](stop)
+        if category is not None:
+            kwargs["on_provenance"]({"refusal_category": category})
+        return raw
+
+    return _generate
+
+
+def _refused(category: str | None = "bio", stop: str | None = None):
+    """A turn that produced nothing and reported a refusal (or ``stop``, e.g.
+    ``max_tokens``)."""
+    return _scripted(("", stop, category))
 
 
 def _history(count: int, *, lab_latest: str = "We have used that model.",
@@ -638,5 +678,286 @@ async def test_project_thread_recognised_with_projects_not_running(engine, monke
         assert await _drops(factory, run_id) == []
         assert await _declines(factory, run_id) == []
         assert await _decisions(factory, run_id) == []
+    finally:
+        await _delete_run(factory, run_id)
+
+
+# ---------------------------------------------------------------------------
+# The close is recorded from the close (D68–D73)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_truncated_but_complete_close_is_graded(engine, monkeypatch):
+    # A cut landing after </project_json>: the block parses and every blocking field is
+    # filled, so the close is graded and the partial visible text is posted and marked.
+    raw = "<slack_message>✅ We agree. Final plan: two ar</slack_message>\n" + _close_block()
+    sim, _agent, thread, _calls, factory, run_id = await _drive_project(
+        engine, monkeypatch, None, history=_history(11, lab_latest="✅ Agreed."),
+        generate=_scripted((raw, "max_tokens", None)),
+    )
+    try:
+        [project] = await _projects(factory, run_id)
+        assert (project.status, project.reason_code) == (STATUS_READY, None)
+        assert project.final["truncated"] is True
+        assert thread.status == "closed"
+        [post] = _thread_posts(sim)
+        assert post["text"].endswith(TRUNCATION_NOTICE)
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_truncated_close_missing_a_blocking_field_is_unreadable(engine, monkeypatch):
+    plan = {**PLAN, "positive_control": "to settle with the lab"}
+    raw = ("<slack_message>✅ We agree. Final pl</slack_message>\n" + _close_block(plan=plan))
+    sim, _agent, thread, _calls, factory, run_id = await _drive_project(
+        engine, monkeypatch, None, history=_history(11, lab_latest="✅ Agreed."),
+        generate=_scripted((raw, "max_tokens", None)),
+    )
+    try:
+        [project] = await _projects(factory, run_id)
+        assert (project.status, project.reason_code) == (
+            STATUS_NOT_FINISHED, REASON_CLOSE_UNREADABLE
+        )
+        assert project.final["plan"] == plan, "the text is kept even so"
+        assert "Positive control is not filled" in project.final["gaps"]
+        assert thread.status == "closed"
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_close_with_no_disagreements_key_is_not_agreed(engine, monkeypatch):
+    # D73: silence is not the answer "there are none". It is a verdict on the plan, not an
+    # unreadable close, so the project stays counted and out of the failure streak.
+    raw = ("<slack_message>✅ We agree.</slack_message>\n"
+           + _close_block(disagreements=None))
+    sim, _agent, thread, _calls, factory, run_id = await _drive_project(
+        engine, monkeypatch, raw, history=_history(11, lab_latest="✅ Agreed."),
+    )
+    try:
+        [project] = await _projects(factory, run_id)
+        assert (project.status, project.reason_code) == (STATUS_NOT_AGREED, None)
+        assert project.final is not None
+        assert project.final["plan"] == PLAN
+        assert (
+            "The close did not say whether a scientific disagreement remains"
+            in project.final["gaps"]
+        )
+        assert project.final["disagreements"] == []
+        assert thread.status == "closed"
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_ready_close_stores_no_disagreements(engine, monkeypatch):
+    # F3: an entry that says there is none must not cost the Ready verdict, and must not
+    # render a Disagreements box — but it is still written down, because the sidecar is
+    # stripped before posting and `final` is the only copy.
+    said_none = "None."
+    raw = ("<slack_message>✅ We agree.</slack_message>\n"
+           + _close_block(disagreements=[said_none]))
+    sim, _agent, thread, _calls, factory, run_id = await _drive_project(
+        engine, monkeypatch, raw, history=_history(11, lab_latest="✅ Agreed."),
+    )
+    try:
+        [project] = await _projects(factory, run_id)
+        assert project.status == STATUS_READY
+        assert project.final["disagreements"] == []
+        assert any(g.endswith(said_none) for g in project.final["gaps"])
+        assert thread.status == "closed"
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_lab_that_closed_with_a_warning_is_still_ready(engine, monkeypatch):
+    # D70: the markers are commentary. The lab's ⚠️ is recorded and decides nothing.
+    raw = "<slack_message>✅ We agree. Final plan below.</slack_message>\n" + _close_block()
+    sim, _agent, thread, _calls, factory, run_id = await _drive_project(
+        engine, monkeypatch, raw,
+        history=_history(11, lab_latest="⚠️ The vendor quote is still not ours to give."),
+    )
+    try:
+        [project] = await _projects(factory, run_id)
+        assert project.status == STATUS_READY
+        assert project.final["lab_position"] == "disagree"
+        assert thread.status == "closed"
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("position", "stored"),
+    # Case and the past tense read as agreement, and the stated disagree words as
+    # disagreement. Anything else — a hedge, or no position at all — stores None, which
+    # renders "No position stated": the page reports what each side said, so it must not
+    # put a word in BlackbirdBot's mouth.
+    [("Agree", "agree"), ("agreed", "agree"), ("disagree", "disagree"),
+     ("agree with caveats", None), (None, None)],
+)
+async def test_hub_position_is_normalised(engine, monkeypatch, position, stored):
+    raw = ("<slack_message>✅ We agree.</slack_message>\n" + _close_block(position=position))
+    sim, _agent, _thread, _calls, factory, run_id = await _drive_project(
+        engine, monkeypatch, raw, history=_history(11, lab_latest="✅ Agreed."),
+    )
+    try:
+        [project] = await _projects(factory, run_id)
+        assert project.final["hub_position"] == stored
+        assert project.status == STATUS_READY, "the position decides nothing (D70)"
+    finally:
+        await _delete_run(factory, run_id)
+
+
+# ---------------------------------------------------------------------------
+# A refused turn backs off on its own counter (M12)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_refused_hub_turn_does_not_spend_a_strike(engine, monkeypatch):
+    sim, agent, thread, calls, factory, run_id = await _drive_project(
+        engine, monkeypatch, None, history=_history(5), generate=_refused(),
+    )
+    try:
+        await sim._reply_to_thread(agent, thread)
+        assert len(calls) == 2
+        assert thread.status == "active" and thread.has_pending_reply is True
+        assert thread.empty_response_count == 0
+        assert thread.refusal_count == 2
+        assert thread.retry_after > time.time()
+        [project] = await _projects(factory, run_id)
+        assert project.status == STATUS_REFINING
+        assert await _decisions(factory, run_id) == []
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_thread_refused_to_the_cap_is_abandoned(engine, monkeypatch):
+    sim, agent, thread, calls, factory, run_id = await _drive_project(
+        engine, monkeypatch, None, history=_history(5), generate=_refused(stop="refusal"),
+    )
+    try:
+        for _ in range(PROJECT_REFUSALS_MAX - 1):
+            await sim._reply_to_thread(agent, thread)
+        assert len(calls) == PROJECT_REFUSALS_MAX
+        assert thread.refusal_count == PROJECT_REFUSALS_MAX
+        assert thread.status == "closed" and thread.has_pending_reply is False
+        assert [d.outcome for d in await _decisions(factory, run_id)] == ["abandoned"]
+
+        async with factory() as db:
+            await sim._end_refining_projects(db)
+        [project] = await _projects(factory, run_id)
+        assert (project.status, project.reason_code) == (
+            STATUS_NOT_FINISHED, REASON_THREAD_ABANDONED
+        )
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_then_a_good_reply_clears_the_counter(engine, monkeypatch):
+    sim, agent, thread, _calls, factory, run_id = await _drive_project(
+        engine, monkeypatch, None, history=_history(5),
+        generate=_scripted(
+            ("", None, "bio"),
+            ("<slack_message>Which positive control would you use?</slack_message>", None, None),
+        ),
+    )
+    try:
+        assert thread.refusal_count == 1
+        await sim._reply_to_thread(agent, thread)
+        assert thread.refusal_count == 0
+        assert thread.status == "active"
+        assert [p["text"] for p in _thread_posts(sim)] == [
+            "Which positive control would you use?"
+        ]
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_plain_empty_reply_still_abandons_after_two(engine, monkeypatch):
+    sim, agent, thread, _calls, factory, run_id = await _drive_project(
+        engine, monkeypatch, "", history=_history(5),
+    )
+    try:
+        assert (thread.empty_response_count, thread.refusal_count) == (1, 0)
+        assert thread.status == "active"
+        await sim._reply_to_thread(agent, thread)
+        assert thread.empty_response_count == 2
+        assert thread.status == "closed" and thread.has_pending_reply is False
+        assert [d.outcome for d in await _decisions(factory, run_id)] == ["abandoned"]
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_category_is_logged(engine, monkeypatch, caplog):
+    with caplog.at_level(logging.WARNING, logger="src.agent.simulation"):
+        sim, _agent, thread, _calls, factory, run_id = await _drive_project(
+            engine, monkeypatch, None, history=_history(5), generate=_refused("bio"),
+        )
+    try:
+        assert thread.refusal_count == 1
+        assert any("bio" in record.getMessage() and "refusal 1 of" in record.getMessage()
+                   for record in caplog.records)
+    finally:
+        await _delete_run(factory, run_id)
+
+
+# ---------------------------------------------------------------------------
+# A posted close is never lost (F10)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_close_landing_after_the_row_was_stopped_is_kept(engine, monkeypatch):
+    # An operator's Stop now landed while the hub was writing its close.
+    sim, agent, thread, _calls, factory, run_id = await _drive_project(
+        engine, monkeypatch, "<slack_message>Hello.</slack_message>",
+        history=_history(11), project_status=STATUS_NOT_FINISHED,
+    )
+    try:
+        async with factory() as db:
+            await db.execute(
+                update(HubProject)
+                .where(HubProject.simulation_run_id == run_id)
+                .values(reason_code=REASON_STOPPED)
+            )
+            await db.commit()
+        raw = "<slack_message>✅ We agree. Final plan below.</slack_message>\n" + _close_block()
+
+        assert await sim._record_project_close(agent, thread, raw, None) is None
+
+        [project] = await _projects(factory, run_id)
+        assert (project.status, project.reason_code) == (STATUS_NOT_FINISHED, REASON_STOPPED)
+        assert project.finished_at is None, "the other writer's columns are untouched"
+        assert project.final["plan"] == PLAN
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_second_close_does_not_overwrite_the_first(engine, monkeypatch):
+    raw = "<slack_message>✅ We agree. Final plan below.</slack_message>\n" + _close_block()
+    sim, agent, thread, _calls, factory, run_id = await _drive_project(
+        engine, monkeypatch, raw, history=_history(11, lab_latest="✅ Agreed."),
+    )
+    try:
+        [project] = await _projects(factory, run_id)
+        assert project.status == STATUS_READY and project.final["plan"] == PLAN
+
+        second = ("<slack_message>✅ Closing again.</slack_message>\n"
+                  + _close_block(plan={**PLAN, "readout": "Something else entirely"}))
+        assert await sim._record_project_close(agent, thread, second, None) is None
+
+        [project] = await _projects(factory, run_id)
+        assert project.status == STATUS_READY
+        assert project.final["plan"] == PLAN
     finally:
         await _delete_run(factory, run_id)

@@ -20,13 +20,13 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, or_, select, true, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from src.agent.agent import Agent
 from src.agent.claim_check import PROJECT_REPLY_THREAD_KEY, feedback_text
 from src.agent.engine import deps
-from src.agent.engine.constants import STOPPED_OUTCOME
+from src.agent.engine.constants import STOPPED_OUTCOME, TRUNCATION_NOTICE
 from src.agent.engine.context import EngineContext, via
 from src.agent.engine.helpers import _was_truncated
 from src.agent.engine.sidecar import _extract_project_json, _extract_slack_message
@@ -61,8 +61,11 @@ from src.models.hub_project import (
     HubProjectClock,
 )
 from src.services.project_plan import (
+    BLOCKING_FIELDS,
+    METHOD_MODEL_SECTIONS,
     REPLY_HEADER,
     fits_one_message,
+    missing_fields,
     position_marker,
     posting_head,
     project_outcome,
@@ -87,6 +90,10 @@ CLOCK_STEP_MAX_SECONDS = 900.0
 ORPHAN_GRACE_SECONDS = 600.0
 #: The counted reply failure that ends a project ``not_finished`` / ``reply_failed``.
 REPLY_FAILURES_MAX = 2
+#: The shortest cut-off lab reply worth posting. The lab answers a posting once, and that
+#: reply roots the project thread, so a fragment cannot be replaced and would spend the
+#: project on nothing; below this the attempt counts as a failure instead.
+REPLY_MIN_CHARS = 400
 #: Postings and lab replies go to this channel.
 PROJECT_CHANNEL = "general"
 #: The finished statuses a Projects session's count counts.
@@ -104,6 +111,35 @@ FAILURE_REASONS = (
     REASON_THREAD_ABANDONED,
     REASON_CLOSE_UNREADABLE,
 )
+
+
+def _has_slack_message(response: str | None) -> bool:
+    """Whether ``response`` really carries a ``<slack_message>`` PAIR, in the order
+    ``_extract_slack_message`` reads them. Testing the closing tag alone is not enough: a
+    reply whose reasoning quotes it would pass, the extractor would fall back to preamble
+    stripping, and the model's own reasoning would be posted as the lab's one reply."""
+    text = response or ""
+    close = text.rfind("</slack_message>")
+    return close >= 0 and text.rfind("<slack_message>", 0, close) >= 0
+
+
+#: What the close's ``position`` may say, read as agreement and as disagreement. Anything
+#: else — "conditional", "agree with caveats", a missing field — is None, "No position
+#: stated": the page reports what each side said, so it must not put a word in its mouth.
+_AGREE_WORDS = frozenset({"agree", "agreed", "agrees", "yes", "✅"})
+_DISAGREE_WORDS = frozenset({"disagree", "disagreed", "disagrees", "not agreed", "no", "⚠️"})
+
+
+def _hub_position(value: object) -> str | None:
+    """BlackbirdBot's own position as the close stated it: ``"agree"``, ``"disagree"``, or
+    None when it stated none or said something neither. Commentary the page renders (D70),
+    never a verdict."""
+    if not isinstance(value, str):
+        return None
+    normalized = " ".join(value.split()).casefold()
+    if normalized in _AGREE_WORDS:
+        return "agree"
+    return "disagree" if normalized in _DISAGREE_WORDS else None
 
 
 class Projects:
@@ -762,14 +798,21 @@ class Projects:
         False with no model call when Projects is not active, there is no database, the lab
         has no posted project without a claim or reply, or its open partnered threads of active
         systems reach ``active_thread_threshold``. A refused rate reservation is False and
-        counts nothing. A model exception, a truncated or refused answer or an empty one is
+        counts nothing.
+
+        A cut-off or refused answer that still carries usable text is posted, with
+        ``TRUNCATION_NOTICE`` appended only while the result still fits one Slack message
+        (the notice is dropped, never the reply). A cut-off answer that yields no text
+        counts a failure and returns True whether or not Projects is winding down: in run
+        d54d7386 jbailey's project held a lab slot for four hours over six refused replies
+        that nothing counted. A model exception or an empty answer with no such signal is
         False and uncounted (tried again at the lab's next turn, while its own pitch still
-        runs) unless Projects is winding down, when each counts and returns True: the wind-down
-        waits for this reply, so a reply that cannot succeed must not hold it open. A post too
-        long for one message, a suppressed or blocked post, or one that raised counts and
-        returns True. The second counted failure ends the project ``not_finished`` /
-        ``reply_failed``. Never changes ``consecutive_phase5_skips`` or
-        ``last_phase5_action_time``."""
+        runs) unless Projects is winding down, when it counts and returns True: the
+        wind-down waits for this reply, so a reply that cannot succeed must not hold it
+        open. A post too long for one message, a suppressed or blocked post, or one that
+        raised counts and returns True. The ``REPLY_FAILURES_MAX``-th counted failure ends
+        the project ``not_finished`` / ``reply_failed``. Never changes
+        ``consecutive_phase5_skips`` or ``last_phase5_action_time``."""
         sessions = self.ctx.sessions
         if not sessions.active(PROJECTS) or not self.session_factory or not self.simulation_run_id:
             return False
@@ -787,13 +830,15 @@ class Projects:
             return False
         agent.record_api_call(already_reserved=True)
         title = project.title or ""
-        text = await self._compose_project_reply(agent, project, settings)
+        text, cut_off = await self._compose_project_reply(agent, project, settings)
         if text is None:
-            if not draining:
+            if not cut_off and not draining:
                 return False
             await self._count_project_reply_failure(project.id)
             return True
         post_text = REPLY_HEADER.format(title=title) + "\n" + text
+        if cut_off and fits_one_message(post_text + TRUNCATION_NOTICE):
+            post_text += TRUNCATION_NOTICE
         if not fits_one_message(post_text):
             logger.warning(
                 "[%s] Projects: the reply to project %s would not fit one Slack message",
@@ -838,9 +883,18 @@ class Projects:
                            agent_id, exc_info=True)
             return None
 
-    async def _compose_project_reply(self, agent: Agent, project, settings) -> str | None:
-        """One model call for the lab's reply; the reply text, or None after an exception, a
-        truncated or refused answer, or an empty one."""
+    async def _compose_project_reply(
+        self, agent: Agent, project, settings
+    ) -> tuple[str | None, bool]:
+        """One model call for the lab's reply: ``(text, was cut off)``.
+
+        ``text`` is the extracted ``<slack_message>``, or None after an exception or an
+        empty extraction. The second element is ``_was_truncated(stop_reasons)``, true for
+        a refusal as well as a ``max_tokens`` cut, and it is reported whatever text came
+        with it: the caller posts a cut-off reply that is usable rather than discarding
+        it, because in run d54d7386 jbailey's lab wrote a well-formed reply six times over
+        four hours and this method threw every one away. An exception is ``(None, False)``,
+        since nothing is known about how the call would have ended."""
         claim_reason = self.ctx.claim_feedback.get(agent.agent_id, PROJECT_REPLY_THREAD_KEY)
         stop_reasons: list[str] = []
         try:
@@ -866,18 +920,34 @@ class Projects:
             )
         except Exception as exc:
             logger.warning("[%s] Projects: the reply call failed: %s", agent.agent_id, exc)
-            return None
-        if _was_truncated(stop_reasons):
+            return None, False
+        cut_off = _was_truncated(stop_reasons)
+        text = _extract_slack_message(response or "").strip()
+        # A cut-off call's text is the lab's ONE reply and roots the project thread, so it
+        # cannot be replaced. Two things must hold before one is posted. The closing tag:
+        # without it `_extract_slack_message` falls back to preamble stripping, which would
+        # put the model's own reasoning on Slack as the lab's reply. And a length: a fragment
+        # spends the project on half a sentence, and the notice that would mark it partial is
+        # itself dropped when the message is already at Slack's limit.
+        if cut_off and (not _has_slack_message(response) or len(text) < REPLY_MIN_CHARS):
             logger.warning(
-                "[%s] Projects: the reply was TRUNCATED (%s); not posted",
+                "[%s] Projects: the cut-off reply left no usable message (%d characters, "
+                "tagged=%s); not posted",
+                agent.agent_id, len(text), _has_slack_message(response),
+            )
+            return None, True
+        if not text:
+            logger.warning(
+                "[%s] Projects: the reply yielded no text (%s); not posted",
+                agent.agent_id, ", ".join(stop_reasons) or "empty",
+            )
+            return None, cut_off
+        if cut_off:
+            logger.warning(
+                "[%s] Projects: the reply was TRUNCATED (%s); posting the partial text",
                 agent.agent_id, ", ".join(stop_reasons) or "?",
             )
-            return None
-        text = _extract_slack_message(response or "").strip()
-        if not text:
-            logger.warning("[%s] Projects: the reply was empty; not posted", agent.agent_id)
-            return None
-        return text
+        return text, cut_off
 
     async def _post_project_reply(self, agent: Agent, project_id: uuid.UUID, post_text: str) -> None:
         """Claim, post and link the lab's reply. A post that raises (nothing was logged: the
@@ -1044,27 +1114,67 @@ class Projects:
 
     async def _record_project_close(
         self, agent: Agent, thread: ThreadState, raw_response: str, posted_ts: str | None,
+        *, truncated: bool = False,
     ) -> str | None:
         """Record BlackbirdBot's close of a project thread (spec §5.9), from ``refining``.
 
-        No readable ``<project_json>`` block: ``not_finished`` / ``close_unreadable``. Else
-        ``project_outcome`` decides ``ready`` or ``not_agreed`` from the lab's latest position,
-        the marker the close opens with as logged, and the block; ``final`` holds the plan,
-        the plan's lab tools marked against the lab's profile, both positions, the gaps and
-        the disagreements. Returns the status written, None when nothing was written."""
+        No readable ``<project_json>`` block: ``not_finished`` / ``close_unreadable``, with
+        no ``final``. Otherwise the block alone decides the outcome (``_close_values``), and
+        ``final`` is written on every one of those paths, unreadable ones included.
+        ``posted_ts`` is the id the close was posted under, kept for the log line: the hub's
+        own ✅/⚠️ marker stopped deciding anything under owner decision D70.
+
+        The project's ``id``, ``choice`` and ``status`` are read in this same session (the
+        tool matcher needs the project's anchors). On a zero-row compare-and-set — the row
+        moved while the close was being written, typically an operator's Stop now — the
+        close is still kept: a second statement writes ``final`` alone, by id and only
+        ``WHERE final IS NULL``, so a row that already carries a close is never overwritten
+        and ``status``, ``reason_code``, ``finished_at`` and ``finished_run_seconds`` stay
+        as the other writer left them. Three readers then see that ``final``:
+        ``projects_view.build_project_detail``'s ``has_close``, ``project_chat_record`` and
+        ``projects_report``.
+
+        Returns the status written, None when no status was written (the kept-``final``
+        path included)."""
         if not self.session_factory or not self.simulation_run_id:
             return None
         close = _extract_project_json(raw_response)
-        values: dict[str, Any]
-        if close is None:
-            values = {"status": STATUS_NOT_FINISHED, "reason_code": REASON_CLOSE_UNREADABLE}
-        else:
-            values = self._close_values(thread, close, posted_ts)
         try:
             async with self.session_factory() as db:
+                row = (await db.execute(
+                    # Ordered by status so the refining row — the one the compare-and-set
+                    # below updates — wins if a repair or a resume ever leaves two rows on
+                    # one reply_ts (ix_hub_projects_run_reply is not unique).
+                    select(HubProject.id, HubProject.choice, HubProject.status).where(
+                        HubProject.simulation_run_id == self.simulation_run_id,
+                        HubProject.reply_ts == thread.thread_id,
+                    ).order_by(
+                        (HubProject.status == STATUS_REFINING).desc(),
+                        HubProject.requested_at.desc(),
+                    ).limit(1)
+                )).first()
+                choice = row.choice if row is not None and isinstance(row.choice, dict) else {}
+                anchors = choice.get("anchors")
+                lab = self.agents.get(thread.other_agent_id)
+                items = section_items(lab.public_profile if lab else None)
+                values: dict[str, Any]
+                if close is None:
+                    values = {
+                        "status": STATUS_NOT_FINISHED, "reason_code": REASON_CLOSE_UNREADABLE,
+                    }
+                else:
+                    values = self._close_values(
+                        thread, close,
+                        anchors=anchors if isinstance(anchors, list) else [],
+                        truncated=truncated,
+                        profile_seen=any(items.get(s) for s in METHOD_MODEL_SECTIONS),
+                    )
                 result = await db.execute(
                     update(HubProject)
                     .where(
+                        # By id when the read found a row: ix_hub_projects_run_reply is not
+                        # unique, and two rows on one reply_ts must not take one close.
+                        HubProject.id == row.id if row is not None else true(),
                         HubProject.simulation_run_id == self.simulation_run_id,
                         HubProject.reply_ts == thread.thread_id,
                         HubProject.status == STATUS_REFINING,
@@ -1076,43 +1186,83 @@ class Projects:
                     .execution_options(synchronize_session=False)
                 )
                 await db.commit()
+                if not result.rowcount:
+                    # The row moved while the close was being written. Keep the close:
+                    # `final` alone, by id, only while the row carries none.
+                    final = values.get("final")
+                    kept = 0
+                    if row is not None and final is not None:
+                        kept = (await db.execute(
+                            update(HubProject)
+                            .where(HubProject.id == row.id, HubProject.final.is_(None))
+                            .values(final=final, updated_at=func.now())
+                            .execution_options(synchronize_session=False)
+                        )).rowcount
+                        await db.commit()
+                    logger.warning(
+                        "[%s] Projects: no refining project for thread %s (it is %s); %s",
+                        agent.agent_id, thread.thread_id,
+                        row.status if row is not None else "missing",
+                        "the close was kept as its final" if kept
+                        else "the close was not recorded",
+                    )
+                    return None
         except Exception:
             logger.warning("[%s] Projects: recording the close of thread %s failed",
                            agent.agent_id, thread.thread_id, exc_info=True)
             return None
-        if not result.rowcount:
-            logger.warning("[%s] Projects: no refining project for thread %s; close not recorded",
-                           agent.agent_id, thread.thread_id)
-            return None
-        logger.info("[%s] Projects: thread %s closed as %s",
-                    agent.agent_id, thread.thread_id, values["status"])
+        logger.info("[%s] Projects: thread %s closed as %s (posted %s)",
+                    agent.agent_id, thread.thread_id, values["status"], posted_ts or "?")
         return values["status"]
 
-    def _close_values(self, thread: ThreadState, close: dict, posted_ts: str | None) -> dict:
-        """The columns a readable close writes: the status and ``final``."""
-        lab_position = self._latest_lab_position(thread.thread_id, thread.other_agent_id)
-        logged = self.message_log.get_entry(posted_ts) if posted_ts else None
-        hub_marker = position_marker(logged.content if logged is not None else None)
-        status, gaps = project_outcome(
-            lab_position=lab_position, hub_marker=hub_marker, close=close,
-        )
+    def _close_values(
+        self, thread: ThreadState, close: dict, *,
+        anchors: list, truncated: bool, profile_seen: bool,
+    ) -> dict:
+        """The columns a readable close writes: the status, its reason code and ``final``.
+
+        Only the close decides the status (``project_outcome``, owner decisions D69–D73):
+        whether its plan fills every ``BLOCKING_FIELDS`` field, and whether it records a
+        live scientific disagreement. ``final`` carries the plan, its lab tools marked
+        against the lab's profile and the project's anchors, both positions, and the gaps
+        and disagreements ``project_outcome`` returned. A ready close carries no
+        disagreements; it may still carry gaps — the close's own, and a line for each entry
+        that said there was none. The positions are commentary the page shows: ``"agree"``,
+        ``"disagree"``, or None when that side stated none, which ``_position_label``
+        renders as "No position stated".
+
+        ``close_unreadable`` covers one case only: a close whose turn was cut off
+        (``truncated``) and whose plan is short of a blocking field, so the missing field is
+        the ceiling's doing rather than the lab's. A close that parsed but did not answer the
+        disagreement question is ``not_agreed`` with that gap, not an unreadable close: the
+        plan is there to read, the project stays counted, and a formatting slip the same
+        prompt could repeat cannot walk the session into its failure stop. ``final`` is
+        written either way, so the text survives for a reader.
+
+        ``profile_seen`` records whether the lab's profile yielded any
+        ``METHOD_MODEL_SECTIONS`` item in this process: without it the page cannot tell an
+        honestly unmarked tool list from one written with no profile in memory."""
+        status, gaps, disagreements = project_outcome(close=close)
         plan = close.get("plan") if isinstance(close.get("plan"), dict) else {}
         lab_tools = plan.get("lab_tools")
         lab_tools = [t for t in lab_tools if isinstance(t, str)] if isinstance(lab_tools, list) else []
         lab = self.agents.get(thread.other_agent_id)
-        disagreements = close.get("disagreements")
         final = {
             "plan": plan,
-            "tool_marks": tool_marks(lab_tools, section_items(lab.public_profile if lab else None)),
-            "hub_position": (
-                "agree" if hub_marker == "agree" and close.get("position") == "agree"
-                else "disagree"
+            "tool_marks": tool_marks(
+                lab_tools, section_items(lab.public_profile if lab else None), anchors,
             ),
-            "lab_position": lab_position,
+            # None when the close stated no position at all: `_position_label` renders that
+            # as "No position stated", and a close that simply omitted the field must not
+            # read as BlackbirdBot disagreeing.
+            "hub_position": _hub_position(close.get("position")),
+            "lab_position": self._latest_lab_position(thread.thread_id, thread.other_agent_id),
             "gaps": gaps,
-            "disagreements": (
-                [d for d in disagreements if isinstance(d, str)]
-                if isinstance(disagreements, list) else []
-            ),
+            "disagreements": disagreements,
+            "truncated": bool(truncated),
+            "tool_profile_seen": bool(profile_seen),
         }
-        return {"status": status, "reason_code": None, "final": final}
+        reason = None
+        if truncated and missing_fields(plan, BLOCKING_FIELDS):
+            status, reason = STATUS_NOT_FINISHED, REASON_CLOSE_UNREADABLE
+        return {"status": status, "reason_code": reason, "final": final}

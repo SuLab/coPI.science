@@ -791,6 +791,59 @@ refines with it in a Slack thread. Staff and reviewers read and review the resul
   A project thread whose project is missing or already finished (a resume reopening it, or a
   reply linked after the project ended) is closed as abandoned at its next turn, with no model
   call.
+- **The outcome, and what does not decide it** (2026-10-29). `project_outcome`
+  (`src/services/project_plan.py`) reads two things from the close and nothing else: whether
+  every blocking plan field is filled (`BLOCKING_FIELDS`, which is `TEMPLATE_FIELDS` without
+  `time_and_budget`), and whether a live scientific disagreement is recorded. Both clean is
+  `ready`; otherwise `not_agreed`, with one gap per unfilled field beside the close's own gaps.
+  Time and budget is recorded and shown but never blocks: Blackbird's staff settle it. The
+  ✅/⚠️ markers, and the stored `hub_position` and `lab_position` the Positions card renders,
+  are commentary — they decide nothing. A field counts unfilled when its value *starts* with a
+  deferral phrase (`DEFERRALS`: "to settle with the lab", "tbd", …) and when it exactly equals
+  a null phrase (`NULLS`: "none", "n/a", …), so "none exists, because …" stays filled.
+  `disagreements` must be present and a list: absent or any other type means the close did not
+  answer, which is `not_agreed` with that gap — not an unreadable close, so the project stays
+  counted and a repeatable formatting slip cannot walk the session into its failure stop — and
+  whatever the field held is written into the gaps rather than dropped. An entry is read as
+  "there is none" only when the whole of it says so and nothing else ("None.", "(none)",
+  "No disagreements remain."): any comma, colon, dash or further sentence makes it a
+  disagreement, because a note that says there is none and a note that hides one are the
+  same shape. A non-string entry is kept as one. Every dropped entry is written into the
+  gaps, since the sidecar is stripped before posting and `final` is the only copy. A close whose turn was cut off is graded when its blocking
+  fields are filled, and `close_unreadable` only when the block is missing, unreadable or short
+  of one of them. A `ready` project therefore stores no disagreements and renders no
+  Disagreements box.
+- **A refusal does not destroy a project** (2026-10-29). A refused lab reply
+  (`_compose_project_reply`, `src/agent/engine/projects.py`) is treated like a refused thread
+  reply: when the call yields usable text it is posted with `TRUNCATION_NOTICE` appended, and
+  the notice is dropped rather than the reply when the two together would not fit one Slack
+  message. A cut-off call that yields nothing counts a reply failure whether or not Projects is
+  winding down, so `REPLY_FAILURES_MAX` (2) such attempts end the project `not_finished` /
+  `reply_failed` instead of holding the lab's one slot until the operator stops the run. In a
+  thread, a hub turn whose call yields nothing and reports a refusal or a truncation spends no
+  empty-reply strike: it increments `ThreadState.refusal_count` (not persisted — a restart
+  rebuilds the thread at 0) and backs the turn off on that count, and at
+  `PROJECT_REFUSALS_MAX` (4, `src/agent/project_guidance.py`) the thread is abandoned so
+  `_end_refining_projects` still reaches `thread_abandoned` and a wind-down still drains. A
+  landed post clears the counter. An empty reply with neither signal keeps the old two-strike
+  rule.
+- **One tool matcher** (2026-10-29). `project_plan.tool_marks` is the single implementation —
+  a tool marks in profile when its normalised text contains a profile item or anchor of the
+  method and model sections as whole words, longest match winning — and
+  `projects_view.display_tool_marks` delegates to it. The close stores the marks it computed
+  with the project's own anchors, each carrying `matched`, plus `tool_profile_seen`: whether
+  the profile yielded any such item. `build_project_detail` shows the stored marks only when
+  every entry carries `matched` and `tool_profile_seen` is true, and otherwise recomputes, so
+  neither a pre-change close nor one written with an empty profile in memory freezes an
+  all-unmarked list onto the page. `match_anchor` keeps its full-string equality, which is
+  right where the model was told to copy an anchor verbatim.
+- **A posted close is never lost** (2026-10-29). `_record_project_close` still updates the
+  `refining` row by `reply_ts`; when that matches nothing — an operator's Stop now landing
+  during the hub's close call — a second statement writes `final` by the project's id with
+  `final IS NULL` in its WHERE and warns. `status`, `reason_code` and the finish timestamps are
+  left as the stopping path set them, a second close never overwrites a first, and the readers
+  of `final` (the details page's close section, the project chat record and
+  `scripts/projects_report.py`) see the close that was posted to Slack.
 - **Reading a project's calls.** Replies in a project thread are logged with phase
   `project_thread` and `thread_phase` `project_open`, `project_refine`, `project_final` or
   `project_close`; consults keep `consult_<domain>`. The details page's admin-only "Model calls"

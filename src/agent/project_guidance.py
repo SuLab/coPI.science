@@ -26,6 +26,15 @@ OPEN_UNTIL = 4
 HUB_CLOSE_FROM = 11
 #: The first ordinal of the lab's final-word band.
 LAB_FINAL_FROM = 9
+#: Consecutive turns that produced nothing and reported a refusal or a truncation before a
+#: project thread is abandoned (``ThreadState.refusal_count``). Four, not the empty reply's
+#: two: in run d54d7386 antiochos lost two consecutive turns to refusals at ordinal 8 of 12
+#: and the thread was abandoned three turns from its close.
+PROJECT_REFUSALS_MAX = 4
+#: The longest a refused project turn waits before its retry. The four waits are the tail a
+#: Projects wind-down sits through before the thread abandons, and a refusal is deterministic,
+#: so the interview lane's half-hour ceiling buys nothing here.
+PROJECT_REFUSAL_BACKOFF_CAP_S = 300.0
 
 _HUB_EARLY_CLOSE = (
     "The lab's latest reply starts with ✅: it agrees the plan as it stands is feasible and "

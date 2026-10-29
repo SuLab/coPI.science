@@ -12,6 +12,7 @@ only ``persona_sections`` and ``slack_client.split_for_wire``.
 
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
@@ -48,10 +49,54 @@ ANCHOR_SECTIONS = (
 )
 #: A kept candidate needs at least one anchor from one of these.
 METHOD_MODEL_SECTIONS = ("Key Methods and Technologies", "Model Systems")
-#: Normalised values that leave a plan field unfilled.
-PLACEHOLDERS = frozenset(
-    {"to settle with the lab", "tbd", "to be determined", "unknown", "n/a", "none", "-", "?"}
+#: The template fields a close must fill for a project to be ready. Time and budget is left
+#: out: staff settle it afterwards, so it never blocks (owner decision D72, 2026-10-29).
+BLOCKING_FIELDS: tuple[tuple[str, str], ...] = tuple(
+    pair for pair in TEMPLATE_FIELDS if pair[0] != "time_and_budget"
 )
+#: A field whose value STARTS with one of these is unfilled, whatever follows: the writer
+#: deferred the answer rather than giving one ("to settle with the lab (likely $150K)").
+DEFERRALS = frozenset(
+    {"to settle with the lab", "to be settled with the lab", "tbd", "to be determined"}
+)
+#: A field equal to one of these is unfilled. Prefix matching would be wrong here: §5.5 of
+#: the projects design makes "none exists, because …" a real answer for Target and Standard
+#: of care, and "unknown aetiology, so the model is …" is an answer too.
+NULLS = frozenset({"none", "n/a", "unknown", "-", "?"})
+#: Normalised values that leave a plan field unfilled.
+PLACEHOLDERS = DEFERRALS | NULLS
+#: ``live_disagreements`` reads a disagreement entry as "there is none" when its first
+#: SENTENCE carries one of these negations and nothing else. Both halves matter: without the
+#: negation "Disputed" would drop, and without "nothing else" a real dispute that opens with
+#: "None of the proposed controls …" would.
+#: "not" is deliberately NOT here. With it, "Not agreed", "Not resolved" and "Nothing is
+#: settled" read as "there is no disagreement" and grade a disputed project ready — the
+#: inversion this whole field exists to prevent.
+_NO_DISAGREEMENT_NEGATIONS = frozenset({"none", "no", "nothing", "nil", "zero"})
+#: The other words such a sentence may contain. Anything outside this set is content, so the
+#: entry is a disagreement. Erring here keeps an entry that could have dropped, which costs a
+#: Ready verdict a reader can see and correct — the opposite error hides a dispute.
+#: Only words that cannot themselves carry a dispute. A verb of resolution ("agreed",
+#: "resolved", "settled") or a noun a dispute can be about ("lab", "change") must stay out:
+#: with them, "No change agreed" and "Nothing settled" would drop.
+_NO_DISAGREEMENT_TOKENS = _NO_DISAGREEMENT_NEGATIONS | {
+    "outstanding", "remaining", "remain", "remains", "known", "left", "open", "further",
+    "disagreement", "disagreements", "dispute", "disputes", "issue", "issues", "item",
+    "items", "on", "the", "science", "scientific", "side", "sides", "both", "between",
+    "us", "our", "at", "this", "stage", "live", "there", "are", "is",
+    "were", "was", "major", "substantive", "material", "anything", "any",
+}
+#: Punctuation that means an entry carries more than a bare "there is none", so it is a
+#: disagreement whatever its words. Erasing it instead made "No - issues remain open on both
+#: sides" indistinguishable from "no issues remain", and "No disagreement on the science. The
+#: lab will not run the NHP arm." drop on its first sentence.
+_STRUCTURED_RE = re.compile(r"[,:;.\-]")
+#: Brackets and quotes around a whole entry are not structure: "(none)" is "none".
+_WRAPPER_CHARS = "()[]{}\"'“”‘’ "
+#: What ``live_disagreements`` treats as an empty entry. Narrower than ``NULLS``: "unknown"
+#: and "?" assert ignorance, not absence, and D73 must not grade a hub that does not know
+#: better than one that stayed silent.
+_NO_DISAGREEMENT_NULLS = frozenset({"none", "n/a", "-"})
 
 #: A posting may take this many Slack messages (owner, 2026-10-27: a long project posts as
 #: two rather than failing); the second continues in the first one's Slack thread.
@@ -227,30 +272,154 @@ def posting_head(text: str) -> str:
     return chunks[0] if chunks else text
 
 
-def field_filled(value: object) -> bool:
-    """A list is filled when any item is filled; a string when ``normalize_item(value)`` is
-    non-empty and not in ``PLACEHOLDERS``; anything else is unfilled."""
-    if isinstance(value, list):
-        return any(field_filled(item) for item in value)
-    if isinstance(value, str):
-        normalized = normalize_item(value)
-        return bool(normalized) and normalized not in PLACEHOLDERS
+def _is_placeholder(value: str) -> bool:
+    """Whether ``value`` defers the answer instead of giving one: a ``NULLS`` phrase exactly,
+    or a ``DEFERRALS`` phrase the value starts with, ended by anything that is not a letter or
+    a digit. "none exists, because no drug is approved" is an answer; "none" is not."""
+    normalized = normalize_item(value)
+    if not normalized:
+        return True
+    if normalized in NULLS:
+        return True
+    for phrase in DEFERRALS:
+        if normalized == phrase:
+            return True
+        if normalized.startswith(phrase) and not normalized[len(phrase)].isalnum():
+            return True
     return False
 
 
-def missing_fields(plan: Mapping[str, object]) -> list[str]:
-    """Labels of the unfilled template fields, in template order."""
-    return [label for key, label in TEMPLATE_FIELDS if not field_filled(plan.get(key))]
+def field_filled(value: object) -> bool:
+    """A list is filled when any item is filled; a string when it is neither empty nor a
+    placeholder (``_is_placeholder``); anything else is unfilled."""
+    if isinstance(value, list):
+        return any(field_filled(item) for item in value)
+    if isinstance(value, str):
+        return not _is_placeholder(value)
+    return False
 
 
-def tool_marks(lab_tools: Sequence[str], items: Mapping[str, Sequence[str]]) -> list[dict]:
-    """``{"item": text, "in_profile": bool}`` per tool, ``in_profile`` true when
-    ``match_anchor`` finds it. A non-string entry is left out."""
-    return [
-        {"item": tool, "in_profile": match_anchor(tool, items) is not None}
-        for tool in lab_tools
-        if isinstance(tool, str)
+def missing_fields(
+    plan: Mapping[str, object], fields: Sequence[tuple[str, str]] = TEMPLATE_FIELDS
+) -> list[str]:
+    """Labels of ``fields`` the plan leaves unfilled, in the order given. ``BLOCKING_FIELDS``
+    is what decides an outcome (D72); the default lists every template field, for display."""
+    return [label for key, label in fields if not field_filled(plan.get(key))]
+
+
+def _one_line(value: object) -> str:
+    """``value`` as one line, for a gap a reader will see. Not clipped: the close block is
+    the only copy once the sidecar is stripped from the posted reply."""
+    return " ".join(str(value).split())
+
+
+def _says_no_disagreement(entry: str) -> bool:
+    """Whether the WHOLE of ``entry`` says there is no disagreement and says nothing else.
+
+    Two tests, and both must hold. The entry may carry no sentence or clause punctuation
+    (``_STRUCTURED_RE``), because anything that punctuates says more than "there is none" —
+    this is what keeps "No - issues remain open on both sides" and "No disagreement on the
+    science. The lab will not run the NHP arm." as the disagreements they are. And every
+    word of it must be in ``_NO_DISAGREEMENT_TOKENS``, at least one of them a negation, so
+    "No agreement on the dose" stays a disagreement on "agreement" and "dose".
+
+    The error this leans away from is deliberate: an unrecognised way of writing "there is
+    none" costs a visible Not agreed that a reader can correct, while the opposite error
+    hides a dispute behind Ready. The close prompt asks for ``[]`` and nothing else, so what
+    reaches here is a close that did not follow it.
+    """
+    normalized = normalize_item(entry).strip(_WRAPPER_CHARS)
+    if not normalized or _STRUCTURED_RE.search(normalized):
+        return False
+    words = normalized.split()
+    return bool(words) and all(word in _NO_DISAGREEMENT_TOKENS for word in words) and any(
+        word in _NO_DISAGREEMENT_NEGATIONS for word in words
+    )
+
+
+def live_disagreements(value: object) -> list[str] | None:
+    """The close's entries that name a live dispute, or None when the close did not answer
+    the question at all — the key is absent or is not a list, which D73 makes "the hub did
+    not say" rather than "there are none".
+
+    An entry is dropped only when it is empty, is a ``NULLS`` phrase, or says there is no
+    disagreement (``_says_no_disagreement``). Run d54d7386's coyne close recorded "None
+    outstanding on the science. Resolved during refinement, recorded for context: …" and lost
+    a Ready verdict to it; ``project_outcome`` keeps every dropped entry as a gap, so nothing
+    the hub wrote leaves the record. A non-string entry is kept — it is content the hub
+    wrote, so it must not read as agreement — rendered as JSON when it is a mapping or a
+    list, and skipped only when it is empty or false.
+    """
+    if not isinstance(value, list):
+        return None
+    kept: list[str] = []
+    for entry in value:
+        if not isinstance(entry, str):
+            if not entry:
+                continue
+            kept.append(
+                json.dumps(entry, default=str) if isinstance(entry, Mapping | list)
+                else str(entry)
+            )
+            continue
+        normalized = normalize_item(entry)
+        if (
+            not normalized
+            or normalized in _NO_DISAGREEMENT_NULLS
+            or _says_no_disagreement(entry)
+        ):
+            continue
+        kept.append(entry)
+    return kept
+
+
+def tool_marks(
+    lab_tools: Sequence[str],
+    items: Mapping[str, Sequence[str]],
+    anchors: Sequence[Mapping] = (),
+) -> list[dict]:
+    """``{"item", "in_profile", "matched"}`` per string tool, in order.
+
+    Candidates are the profile's ``METHOD_MODEL_SECTIONS`` items and the project's anchors
+    from those sections (targets and keywords never mark a tool), normalised and kept when at
+    least two words long. A tool is in the profile when its normalised text contains a
+    candidate as whole words; the longest such candidate is ``matched`` (its original text),
+    else ``in_profile`` is False and ``matched`` None. A non-string tool is left out.
+
+    Containment, not equality: the close writes a tool as prose ("pan-expansion microscopy
+    (pan-ExM) … (contingent, requires re-training)"), and the close prompt never asks for a
+    verbatim copy. ``match_anchor``'s equality stays right for §5.3 anchors, which the model
+    picks from a list.
+    """
+    candidates: dict[str, str] = {}
+    texts: list[object] = [item for section in METHOD_MODEL_SECTIONS
+                           for item in items.get(section, ())]
+    texts += [
+        anchor.get("item") for anchor in anchors
+        if isinstance(anchor, Mapping) and anchor.get("section") in METHOD_MODEL_SECTIONS
     ]
+    for text in texts:
+        if not isinstance(text, str):
+            continue
+        normalized = normalize_item(text)
+        if len(normalized.split()) >= 2:
+            candidates.setdefault(normalized, text)
+    # Longest first; a stable sort keeps the first-seen candidate among equal lengths.
+    patterns = [
+        (re.compile(r"(?<!\w)" + re.escape(normalized) + r"(?!\w)"), original)
+        for normalized, original in sorted(candidates.items(), key=lambda kv: -len(kv[0]))
+    ]
+    marks = []
+    for tool in lab_tools:
+        if not isinstance(tool, str):
+            continue
+        normalized_tool = normalize_item(tool)
+        matched = next(
+            (original for pattern, original in patterns if pattern.search(normalized_tool)),
+            None,
+        )
+        marks.append({"item": tool, "in_profile": matched is not None, "matched": matched})
+    return marks
 
 
 class NameEntry(NamedTuple):
@@ -415,36 +584,54 @@ def position_marker(text: str | None) -> str | None:
     return None
 
 
-def project_outcome(
-    *,
-    lab_position: str | None,
-    hub_marker: str | None,
-    close: Mapping[str, object],
-) -> tuple[str, list[str]]:
-    """``(STATUS_READY, gaps)`` or ``(STATUS_NOT_AGREED, gaps)`` for a readable close.
+def project_outcome(*, close: Mapping[str, object]) -> tuple[str, list[str], list[str]]:
+    """``(status, gaps, disagreements)`` for a close whose ``<project_json>`` block parsed.
 
-    A close field that is missing or of the wrong type counts as empty (a non-string plan
-    value is unfilled; non-list ``gaps``/``disagreements`` are ``[]``, non-string items
-    dropped). Ready only when ``lab_position == "agree"``, ``hub_marker == "agree"``,
-    ``close["position"] == "agree"``, ``missing_fields(close["plan"]) == []`` and
-    ``close["disagreements"]`` is empty. ``gaps`` is the close's own gaps (strings) plus, in
-    this order: ``"<label> is not filled"`` per missing field, ``"The lab did not agree"`` when
-    the lab's position is not agree, ``"BlackbirdBot did not agree"`` when either hub signal is
-    not agree."""
+    Only two things decide the status (owner decisions D69–D73, 2026-10-29): whether the
+    close filled every ``BLOCKING_FIELDS`` field, and whether it records a live scientific
+    disagreement. Neither bot's ✅/⚠️ marker, nor ``close["position"]``, nor the lab's last
+    position enters it — they are commentary the page shows.
+
+    * ``STATUS_NOT_AGREED`` when ``live_disagreements`` returns None: the close did not
+      answer the disagreement question (D73), so silence cannot read as "there are none".
+      It is still a verdict on the plan rather than an unreadable close — the block parsed
+      and the plan is there — which keeps the project counted and keeps a formatting slip
+      out of the session's failure streak. Whatever the field held is written into ``gaps``
+      so the text survives, and the returned disagreements are empty.
+    * ``STATUS_READY`` when no blocking field is missing and no live disagreement remains.
+    * ``STATUS_NOT_AGREED`` otherwise.
+
+    A close field of the wrong type counts as empty (a non-string plan value is unfilled;
+    non-list ``gaps`` is ``[]``, non-string items dropped). ``gaps`` is the close's own gaps
+    plus ``"<label> is not filled"`` per missing blocking field.
+    """
     plan = close.get("plan")
-    missing = missing_fields(plan if isinstance(plan, Mapping) else {})
+    missing = missing_fields(plan if isinstance(plan, Mapping) else {}, BLOCKING_FIELDS)
     gaps = _strings(close.get("gaps"))
-    disagreements = _strings(close.get("disagreements"))
-    lab_agrees = lab_position == "agree"
-    hub_agrees = hub_marker == "agree" and close.get("position") == "agree"
     gaps.extend(f"{label} is not filled" for label in missing)
-    if not lab_agrees:
-        gaps.append("The lab did not agree")
-    if not hub_agrees:
-        gaps.append("BlackbirdBot did not agree")
-    if lab_agrees and hub_agrees and not missing and not disagreements:
-        return STATUS_READY, gaps
-    return STATUS_NOT_AGREED, gaps
+    raw = close.get("disagreements")
+    disagreements = live_disagreements(raw)
+    if disagreements is None:
+        gaps.append("The close did not say whether a scientific disagreement remains")
+        # Whole, as the dropped-entry lines below are: the sidecar is stripped before
+        # posting, so `final` is the only place this text survives for a reader.
+        if raw is not None and str(raw).strip():
+            gaps.append(f"The close's disagreements field read: {_one_line(raw)}")
+        return STATUS_NOT_AGREED, gaps, []
+    # An entry live_disagreements dropped said there was no disagreement, but it may carry a
+    # second sentence that does not. Recording it as a gap keeps every word the hub wrote in
+    # front of a reader without letting the sentence that says "none" block a ready verdict.
+    # Whole, not clipped: the sidecar is stripped before posting, so `final` is the only
+    # place a dropped entry survives, and the close block already bounds its length.
+    recorded: list[str] = []
+    for entry in _strings(raw):
+        line = f"The close recorded, as no disagreement: {entry}"
+        if entry not in disagreements and normalize_item(entry) and line not in recorded:
+            recorded.append(line)
+    gaps.extend(recorded)
+    if not missing and not disagreements:
+        return STATUS_READY, gaps, disagreements
+    return STATUS_NOT_AGREED, gaps, disagreements
 
 
 def _strings(value: object) -> list[str]:

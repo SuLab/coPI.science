@@ -443,6 +443,8 @@ A field is filled when, after trimming, it is not empty and is not just a placeh
 "TBD", "to be determined", "unknown", "n/a", "none", "-", "?"; "none exists, because …" is filled). A plan is
 complete when every field is filled.
 
+Amended 2026-10-29 (D68–D74; `docs/plans/2026-10-29-projects-outcomes-and-refusals-plan.md`): the placeholder screen splits in two — a deferral phrase ("to settle with the lab", "to be settled with the lab", "tbd", "to be determined") leaves a field unfilled when the value *starts* with it, while a null phrase ("none", "n/a", "unknown", "-", "?") does so only on exact equality, so "none exists, because …" stays filled; Time and budget is exempt from the completeness check (D72) — it is recorded and shown, and staff settle it, so the other nine fields are the blocking ones; and a tool or model is marked "in the lab's profile" when its text *contains* a profile item or anchor of the method and model sections as whole words (longest match winning), not only when it equals one.
+
 ### 5.6 Posting (D49)
 
 - **What is posted.** Code assembles the text from the checked fields when the choice passes its checks, and the
@@ -508,6 +510,12 @@ by the system, and its science is not checked. Bracketed parts would come from t
   reached), an API error, a truncated or refused answer and an empty answer count too, because the drain waits
   for the reply and a reply that cannot succeed must not hold the run open; a rate-limit deferral never counts.
   A second counted failure ends the project as not finished ("the lab's reply could not be posted").
+
+  Amended 2026-10-29 (D68–D74; `docs/plans/2026-10-29-projects-outcomes-and-refusals-plan.md`): a refused or
+  otherwise cut-off reply is no longer thrown away — when the call yields usable text it is posted with the
+  truncation notice appended (the notice is dropped, never the reply, when the two would not fit one Slack
+  message), and when it yields nothing it counts a failure whether or not the run is draining, so two such
+  attempts end the project ("the lab's reply could not be posted") instead of retrying for the life of the run.
 - **Its own pitch stays free** (my call, confirmed). `get_agent_top_level_posts` leaves out `project_reply` posts, so
   the daily cap does not count them and the lab's Phase-5 prompt does not list them; `_rehydrate_proposal_count`
   never counts them (they are not `new_post`), so they do not count toward `--max-proposals`. One top-level post per
@@ -575,6 +583,8 @@ by the system, and its science is not checked. Bracketed parts would come from t
   and each consult is still recorded, but no panel note is posted into a project thread, and its replies say what a
   specialist found without quoting a `blocking`, `gap` or `adequate` label or a confidence level.
 
+Amended 2026-10-29 (D68–D74; `docs/plans/2026-10-29-projects-outcomes-and-refusals-plan.md`): a hub turn whose model call yields nothing and reports a refusal or a truncation spends no empty-reply strike — it increments the thread's own refusal counter and backs the turn off on it, and the thread is abandoned only at `PROJECT_REFUSALS_MAX` (4), so a wind-down still drains; a landed post clears the counter, and an empty reply with neither signal keeps the two-strike rule. Threads stay at twelve turns (D74), and BlackbirdBot's close prompt freezes the scope from its second-to-last turn: no new required control, endpoint or analysis, confirm what is agreed and close. Neither bot pursues an item neither controls (D71) — work Blackbird has taken on, a figure only the lab's institution can confirm, a vendor's terms, a decision belonging to the PI — it is named once as a gap.
+
 ### 5.9 Outcome (D45, D47)
 
 Decided by the engine at the close, from the close and the lab's last position:
@@ -591,6 +601,8 @@ Decided by the engine at the close, from the close and the lab's last position:
   finalized first.
 
 A stopped or held run keeps its open projects, shown as "paused" until the run resumes or is finalized.
+
+Amended 2026-10-29 (D68–D74; `docs/plans/2026-10-29-projects-outcomes-and-refusals-plan.md`): the outcome reads the plan's fields and the recorded disagreements only — **ready** when every blocking field (§5.5, so not Time and budget) is filled and no live scientific disagreement is recorded, **not agreed** otherwise, with one gap per unfilled field beside the close's own. The ✅/⚠️ markers and the lab's last position are commentary, displayed under Positions and deciding nothing (D70), so no "did not agree" line is written as a gap. BlackbirdBot must answer the disagreement question outright (D73): `disagreements` absent or not a list means the close did not answer, which is **not agreed** with that gap and the field's text kept beside it — not an unreadable close, so the project stays counted and a repeatable formatting slip cannot reach the failure stop — while an entry counts as “there is none” only when the whole of it says so and nothing else, so any comma, colon, dash or further sentence leaves it a disagreement (a note that says there is none and a note that hides one are the same shape); a non-string entry is kept as one, and every dropped entry is recorded in the gaps.
 
 ### 5.10 The Projects page (D42, D47, D52)
 

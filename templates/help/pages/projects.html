@@ -111,12 +111,15 @@ Unreviewed tab, when every project has a review, it says so. Otherwise it says "
 match these filters in this run."</p>
 <h3 id="outcomes">Outcomes</h3>
 <ul>
-    <li><strong>Ready</strong>: the lab and BlackbirdBot both agreed the final plan, and every
-    field of it is filled.</li>
-    <li><strong>Not agreed</strong>: BlackbirdBot closed the thread, but one of them did not
-    agree, a field of the plan was left open, or a disagreement was recorded. The details page
-    lists the gaps and disagreements.</li>
-    <li><strong>Not finished</strong>: the project ended before a close could be recorded.</li>
+    <li><strong>Ready</strong>: every field of the final plan is filled, apart from time and
+    budget, and the close records no scientific disagreement. Time and budget is settled
+    afterwards by Blackbird's staff.</li>
+    <li><strong>Not agreed</strong>: BlackbirdBot closed the thread, but a field of the plan
+    was left open, a scientific disagreement was recorded, or the close did not say whether
+    one remains. The details page lists the gaps and disagreements.</li>
+    <li><strong>Not finished</strong>: the project ended before a close could be recorded, or
+    its close was cut off before it filled the plan. When a close was posted, the details page
+    still shows it.</li>
     <li><strong>Paused</strong>: the project is still open, and its run is stopped or held. It
     carries on if the run is resumed.</li>
     <li><strong>In progress</strong>: the project is still open in the live run. While projects
@@ -135,7 +138,7 @@ match these filters in this run."</p>
     <li><strong>The thread ended without a close</strong>: the thread ran out before
     BlackbirdBot closed it.</li>
     <li><strong>The thread was abandoned</strong>.</li>
-    <li><strong>BlackbirdBot's close could not be recorded</strong>.</li>
+    <li><strong>BlackbirdBot's close could not be read in full</strong>.</li>
     <li><strong>The run was finalized first</strong>: the project was still open when its run
     was finalized.</li>
     <li><strong>Projects were stopped</strong>: an admin stopped projects while it was open.</li>
@@ -182,14 +185,15 @@ open or close every collapsible section at once.</p>
     lists the tools, models and data the plan uses, each marked "in the lab's profile" or
     "stated by the lab" (see below).</dd>
     <dt>Positions</dt>
-    <dd>Where BlackbirdBot and the lab each stood at the close: <strong>Agreed</strong>,
+    <dd>What BlackbirdBot and the lab each said at the close: <strong>Agreed</strong>,
     <strong>Not agreed</strong> or <strong>No position stated</strong>, or <strong>No close
-    recorded</strong> when there was no close. On a Not agreed project, an amber box lists
-    <strong>Gaps</strong> (a field left open or a missing agreement) and
-    <strong>Disagreements</strong> (what was disputed). On a Ready project, the same list is
-    headed <strong>Acknowledged limits</strong>: points the close recorded as limits of a plan
-    both sides agreed, shown in a neutral box, with <strong>Disagreements</strong> when any
-    were recorded. With no close, the card says "No close recorded."</dd>
+    recorded</strong> when there was no close. The two positions are shown for what they say;
+    they do not decide the outcome. On a Not agreed project, an amber box lists
+    <strong>Gaps</strong> (what is still open, including items Blackbird or the lab's
+    institution must close) and <strong>Disagreements</strong> (what was disputed). On a Ready
+    project, the same list is headed <strong>Acknowledged limits</strong>: points the close
+    recorded as limits of a plan that is ready as it stands, shown in a neutral box. With no
+    close, the card says "No close recorded."</dd>
     <dt>Also considered</dt>
     <dd>Closed until you open it; the heading gives the count. The other uses BlackbirdBot
     weighed before choosing this one, each with a note.</dd>

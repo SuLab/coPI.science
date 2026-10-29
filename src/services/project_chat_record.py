@@ -82,10 +82,18 @@ LEGENDS = {
         " hub, chose a new use of a lab's work from published research, posted it with an"
         " opening plan, and refined the plan with the lab's AI agent in a Slack thread. A"
         " close, when recorded, holds the final plan and each side's stated position:"
-        " 'Agreed', 'Not agreed' or 'No position stated'. A plan field revised after"
+        " 'Agreed', 'Not agreed' or 'No position stated'. The positions are what each side"
+        " said and decide nothing. The outcome is Ready when the plan's fields are filled"
+        " (time and budget aside, which staff settle) and the close records no scientific"
+        " disagreement; Not agreed when a field was left open, a disagreement was recorded,"
+        " or the close did not say whether one remains; and Not finished when the project"
+        " never reached a recorded close, or the close was cut off before it filled a field."
+        " The project states which reason applies. A plan field revised after"
         " posting is marked as changed, and its value as first posted is quoted in a block"
         " of its own. A tool or model 'in the lab's profile' matches an item of the lab's"
-        " current public profile; 'stated by the lab' found no such item." + LEGEND_TAIL
+        " public profile — the profile as it stood at the close where the close recorded"
+        " the marks, otherwise today's; 'stated by the lab' found no such item."
+        + LEGEND_TAIL
     ),
     DOC_CONVERSATION: (
         "The project's posting and its Slack thread, between AI agents: BlackbirdBot posted"

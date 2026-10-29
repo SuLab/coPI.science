@@ -555,3 +555,81 @@ async def test_posting_logged_as_one_row_is_not_partial(db_session, monkeypatch)
     await _message(db_session, run, agent="blackbird", phase="hub_project", ts="100.000100",
                    at=100, content="A\nB", sender="BlackbirdBot")
     assert (await _detail(db_session, project))["timeline"][0]["partial"] is False
+
+
+#: A persona whose Key Methods section marks the first tool of ``_TOOLED_PLAN`` and
+#: nothing else, so a recompute is visible against a stored list that says otherwise.
+_PROFILE = "## Key Methods and Technologies\n- Rosetta protein design\n\n## Model Systems\n"
+_TOOLED_PLAN = {**PLAN, "lab_tools": ["Rosetta protein design, relaxed constraints", "PyMOL"]}
+
+
+def _profile_reads(monkeypatch, text=_PROFILE):
+    """Serve ``text`` as every lab's persona file and count the reads."""
+    reads = []
+    monkeypatch.setattr(projects_view, "persona_file_text",
+                        lambda agent_id: reads.append(agent_id) or text)
+    return reads
+
+
+async def test_the_page_shows_the_stored_marks(db_session, monkeypatch):
+    """One computation at the close is what every reader sees: a close carrying ``matched``
+    and ``tool_profile_seen`` is rendered as stored, without reading the profile."""
+    reads = _profile_reads(monkeypatch)
+    stored = [
+        {"item": "Rosetta protein design, relaxed constraints", "in_profile": False,
+         "matched": None},
+        {"item": "PyMOL", "in_profile": True, "matched": "molecular graphics"},
+    ]
+    run = await _run(db_session)
+    project = await _project(
+        db_session, run, "T-stored", status="not_agreed", finished=T0, choice=CHOICE,
+        final={"plan": _TOOLED_PLAN, "tool_marks": stored, "tool_profile_seen": True},
+    )
+    detail = await _detail(db_session, project)
+    assert detail["tool_rows"] == stored
+    assert reads == []
+
+
+async def test_a_pre_change_close_is_recomputed(db_session, monkeypatch):
+    """Marks stored before the ``matched`` key existed cannot be rendered, so the page
+    recomputes them from the live profile."""
+    _profile_reads(monkeypatch)
+    run = await _run(db_session)
+    project = await _project(
+        db_session, run, "T-pre-change", status="not_agreed", finished=T0, choice=CHOICE,
+        final={
+            "plan": _TOOLED_PLAN,
+            "tool_marks": [{"item": "Rosetta protein design, relaxed constraints",
+                            "in_profile": False},
+                           {"item": "PyMOL", "in_profile": False}],
+            "tool_profile_seen": True,
+        },
+    )
+    detail = await _detail(db_session, project)
+    assert detail["tool_rows"] == [
+        {"item": "Rosetta protein design, relaxed constraints", "in_profile": True,
+         "matched": "Rosetta protein design"},
+        {"item": "PyMOL", "in_profile": False, "matched": None},
+    ]
+
+
+async def test_a_close_with_no_profile_seen_is_recomputed(db_session, monkeypatch):
+    """A close written with no profile in memory stored an all-unmarked list; the page
+    must not freeze it, and marks the in-profile tool from the live profile."""
+    _profile_reads(monkeypatch)
+    run = await _run(db_session)
+    project = await _project(
+        db_session, run, "T-no-profile-seen", status="not_agreed", finished=T0, choice=CHOICE,
+        final={
+            "plan": _TOOLED_PLAN,
+            "tool_marks": [{"item": "Rosetta protein design, relaxed constraints",
+                            "in_profile": False, "matched": None},
+                           {"item": "PyMOL", "in_profile": False, "matched": None}],
+            "tool_profile_seen": False,
+        },
+    )
+    detail = await _detail(db_session, project)
+    assert [(r["item"], r["in_profile"]) for r in detail["tool_rows"]] == [
+        ("Rosetta protein design, relaxed constraints", True),
+        ("PyMOL", False),
+    ]

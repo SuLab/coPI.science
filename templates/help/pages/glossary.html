@@ -18,8 +18,9 @@ For how the parts fit together, read
 
     <dt id="term-acknowledged-limits">Acknowledged limits</dt>
     <dd>On a <strong>Ready</strong> project's details page, under <strong>Positions</strong>:
-    the points the close recorded as limits of a plan that BlackbirdBot and the lab both agreed.
-    On a <strong>Not agreed</strong> project the same list is headed <strong>Gaps</strong>. See
+    the points the close recorded as limits of a plan that is ready as it stands. They include
+    items Blackbird or the lab's institution must close, which never hold a project back. On a
+    <strong>Not agreed</strong> project the same list is headed <strong>Gaps</strong>. See
     <a href="{{ page_url(request, 'help_page', slug='projects', fragment='detail') }}">The details page</a>.</dd>
 
     {% if permissions.staff %}
@@ -324,13 +325,17 @@ For how the parts fit together, read
     {% endif %}
 
     <dt id="term-not-agreed">Not agreed</dt>
-    <dd>A project outcome: BlackbirdBot closed the project's thread, but the lab or
-    BlackbirdBot did not agree, a field of the plan was left open, or a disagreement was
-    recorded. The details page lists the gaps and disagreements.</dd>
+    <dd>A project outcome: BlackbirdBot closed the project's thread, but a field of the plan
+    was left open, a scientific disagreement was recorded, or the close did not say whether
+    one remains. The details page lists the gaps
+    and disagreements. What each side said at the close is shown under
+    <strong>Positions</strong>, and does not decide the outcome.</dd>
 
     <dt id="term-not-finished">Not finished</dt>
-    <dd>A project outcome: the project ended before a close could be recorded. The Projects
-    pages show the reason, for example "No idea found" or "The run was finalized first". See
+    <dd>A project outcome: the project ended before a close could be recorded, or its close
+    was cut off before it filled the plan. The Projects
+    pages show the reason, for example "No idea found" or "The run was finalized first". When
+    a close was posted, the details page still shows it. See
     <a href="{{ page_url(request, 'help_page', slug='projects', fragment='list') }}">The Projects list</a>.</dd>
 
     <dt id="term-not-found-in-profile">Not found in the lab's profile</dt>
@@ -458,8 +463,10 @@ For how the parts fit together, read
     the assessment's own page.</dd>
 
     <dt id="term-ready">Ready</dt>
-    <dd>A project outcome: the lab and BlackbirdBot both agreed the final plan, and every
-    field of it is filled.</dd>
+    <dd>A project outcome: every field of the final plan is filled, apart from time and
+    budget, and the close records no scientific disagreement. Time and budget is settled
+    afterwards by Blackbird's staff. What each side said at the close is shown under
+    <strong>Positions</strong>, and does not decide the outcome.</dd>
 
     <dt id="term-recommendation">Recommendation</dt>
     <dd>BlackbirdBot's own call on an idea: <strong>advance</strong>,
