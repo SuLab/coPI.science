@@ -88,7 +88,11 @@ LEGENDS = {
         " disagreement; Not agreed when a field was left open, a disagreement was recorded,"
         " or the close did not say whether one remains; and Not finished when the project"
         " never reached a recorded close, or the close was cut off before it filled a field."
-        " The project states which reason applies. A plan field revised after"
+        " The close answers the disagreement question yes or no and adds one sentence saying"
+        " what the dispute is or why none remains; that sentence is shown under 'On"
+        " disagreement' and is the only record of it. Gaps are what the close left open,"
+        " each naming who must close it; they are a record and decide nothing, so a Ready"
+        " project can carry them. The project states which reason applies. A plan field revised after"
         " posting is marked as changed, and its value as first posted is quoted in a block"
         " of its own. A tool or model 'in the lab's profile' matches an item of the lab's"
         " public profile — the profile as it stood at the close where the close recorded"
@@ -239,7 +243,8 @@ def _plan_section(doc: _Doc, p: Mapping[str, Any]) -> None:
 
 
 def _positions_section(doc: _Doc, p: Mapping[str, Any]) -> None:
-    """Positions, then gaps or acknowledged limits, then disagreements."""
+    """Positions, then gaps or acknowledged limits, then disagreements, then the close's own
+    sentence on the disagreement question (D75) when it wrote one."""
     if not p.get("has_close"):
         doc.add("Positions — no close recorded", anchor="positions")
         return
@@ -259,6 +264,9 @@ def _positions_section(doc: _Doc, p: Mapping[str, Any]) -> None:
             [item],
             anchor="positions",
         )
+    note = p.get("disagreement_note")
+    if isinstance(note, str) and note.strip():
+        doc.add("On disagreement — the close's own words", [note.strip()], anchor="positions")
 
 
 def _project_doc(p: Mapping[str, Any]) -> _Doc:

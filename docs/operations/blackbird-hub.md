@@ -801,18 +801,35 @@ refines with it in a Slack thread. Staff and reviewers read and review the resul
   are commentary — they decide nothing. A field counts unfilled when its value *starts* with a
   deferral phrase (`DEFERRALS`: "to settle with the lab", "tbd", …) and when it exactly equals
   a null phrase (`NULLS`: "none", "n/a", …), so "none exists, because …" stays filled.
-  `disagreements` must be present and a list: absent or any other type means the close did not
-  answer, which is `not_agreed` with that gap — not an unreadable close, so the project stays
-  counted and a repeatable formatting slip cannot walk the session into its failure stop — and
-  whatever the field held is written into the gaps rather than dropped. An entry is read as
-  "there is none" only when the whole of it says so and nothing else ("None.", "(none)",
-  "No disagreements remain."): any comma, colon, dash or further sentence makes it a
-  disagreement, because a note that says there is none and a note that hides one are the
-  same shape. A non-string entry is kept as one. Every dropped entry is written into the
-  gaps, since the sidecar is stripped before posting and `final` is the only copy. A close whose turn was cut off is graded when its blocking
+  `disagreements` is an object, not a list (D75, 2026-10-29):
+  `{"remaining": true|false, "note": "…"}`, with `"items"` naming each live dispute when
+  `remaining` is true. The boolean decides and nothing is read from prose. Absent, or a
+  `remaining` that is not a boolean, means the close did not answer, which is `not_agreed`
+  with that gap — not an unreadable close, so the project stays counted and a repeatable
+  formatting slip cannot walk the session into its failure stop — and whatever the field
+  held is written into the gaps rather than dropped. `remaining: true` with no usable
+  `items` falls back to the note: "a disagreement remains" can never render as none. The
+  note is stored as `final["disagreement_note"]` and shown under *On disagreement*; it is
+  evidence, not the answer, so a close that sets the boolean and omits it is still a close.
+  Run b70d0cff wrote a bare `"disagreements": []` in all twenty of its closes because the
+  prompt's own skeleton supplied it, which is why the skeleton now carries `true`: a block
+  copied without deciding reads as a live disagreement rather than passing silently. A list
+  is the legacy shape, graded as D73 left it (an entry is dropped only when the whole of it
+  says there is none) and reachable only from an older agent image mid-deploy.
+  `gaps` must name at least one open item with its owner (D76), but that is a prompt
+  requirement only: an empty list still reads as nothing open and never changes a verdict,
+  so gaps decide nothing, as D70 has it. A close whose turn was cut off is graded when its blocking
   fields are filled, and `close_unreadable` only when the block is missing, unreadable or short
   of one of them. A `ready` project therefore stores no disagreements and renders no
   Disagreements box.
+- **BlackbirdBot cannot close in the first turns on one ✅** (D77, 2026-10-29).
+  `project_turn` grants `may_close_early` only from `HUB_EARLY_CLOSE_FROM` (8), or earlier
+  when the lab opened ✅ on its two most recent posts (`Projects._lab_agreed_before`, read
+  per post over the lab's own posts, so BlackbirdBot's replies between them do not break
+  the run). When the lab agrees but the gate holds, the hub's guidance says so and names
+  what to spend the turn on: run b70d0cff closed at a median ordinal of 6 of 12 on a single
+  ✅, and plan depth tracked the close turn (~5,700 characters at ordinal 4, ~10,200 at 8).
+  The must-close turn (`HUB_CLOSE_FROM`) is unchanged.
 - **A refusal does not destroy a project** (2026-10-29). A refused lab reply
   (`_compose_project_reply`, `src/agent/engine/projects.py`) is treated like a refused thread
   reply: when the call yields usable text it is posted with `TRUNCATION_NOTICE` appended, and

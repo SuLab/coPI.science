@@ -337,19 +337,59 @@ def _says_no_disagreement(entry: str) -> bool:
     )
 
 
-def live_disagreements(value: object) -> list[str] | None:
-    """The close's entries that name a live dispute, or None when the close did not answer
-    the question at all — the key is absent or is not a list, which D73 makes "the hub did
-    not say" rather than "there are none".
+def disagreement_note(value: object) -> str | None:
+    """The close's one-sentence note on the disagreement question, or None when it wrote
+    none (owner decision D75, 2026-10-29).
 
-    An entry is dropped only when it is empty, is a ``NULLS`` phrase, or says there is no
-    disagreement (``_says_no_disagreement``). Run d54d7386's coyne close recorded "None
-    outstanding on the science. Resolved during refinement, recorded for context: …" and lost
-    a Ready verdict to it; ``project_outcome`` keeps every dropped entry as a gap, so nothing
-    the hub wrote leaves the record. A non-string entry is kept — it is content the hub
-    wrote, so it must not read as agreement — rendered as JSON when it is a mapping or a
-    list, and skipped only when it is empty or false.
+    The note is evidence, not the answer: ``remaining`` alone decides the verdict (M18), so
+    a close that sets the boolean and forgets the note is still a close. Stored as
+    ``final["disagreement_note"]`` rather than folded into the gaps (M22) — the gaps answer
+    what is open, this answers why there is, or is not, a dispute.
     """
+    if not isinstance(value, Mapping):
+        return None
+    note = value.get("note")
+    return _one_line(note) if isinstance(note, str) and note.strip() else None
+
+
+def live_disagreements(value: object) -> list[str] | None:
+    """The close's live scientific disputes, or None when it did not answer the question at
+    all, which D73 makes "the hub did not say" rather than "there are none".
+
+    The answer BlackbirdBot writes is a boolean (D75, 2026-10-29)::
+
+        "disagreements": {"remaining": false, "note": "…"}
+        "disagreements": {"remaining": true, "note": "…", "items": ["…"]}
+
+    ``remaining`` decides, and nothing is read from prose. Run b70d0cff wrote a bare
+    ``"disagreements": []`` in all twenty closes because the prompt's own skeleton supplied
+    it: an empty array is a template default, not an answer, and no amount of care in the
+    reader can tell the two apart. A boolean cannot be defaulted into — the prompt's skeleton
+    now carries ``true`` (M20), so a close that copies it whole is Not agreed rather than
+    silently Ready.
+
+    ``remaining: true`` with no usable ``items`` falls back to the note, and to a fixed line
+    when there is no note either (M19): "a disagreement remains" can never render as none.
+
+    A list is the legacy shape (M21), kept for a close written by an older agent image during
+    a mismatched deploy and graded exactly as D73 left it: an entry is dropped only when it is
+    empty, is a ``NULLS`` phrase, or says there is no disagreement
+    (``_says_no_disagreement``), and ``project_outcome`` keeps every dropped entry as a gap.
+    A non-string entry is kept — it is content the hub wrote, so it must not read as
+    agreement — rendered as JSON when it is a mapping or a list, and skipped only when it is
+    empty or false. Under the current prompt this branch is unreachable.
+    """
+    if isinstance(value, Mapping):
+        remaining = value.get("remaining")
+        if not isinstance(remaining, bool):
+            return None
+        if not remaining:
+            return []
+        items = [entry for entry in _strings(value.get("items")) if normalize_item(entry)]
+        if items:
+            return items
+        note = disagreement_note(value)
+        return [note] if note else ["The close recorded a disagreement without naming it"]
     if not isinstance(value, list):
         return None
     kept: list[str] = []
@@ -593,7 +633,8 @@ def project_outcome(*, close: Mapping[str, object]) -> tuple[str, list[str], lis
     position enters it — they are commentary the page shows.
 
     * ``STATUS_NOT_AGREED`` when ``live_disagreements`` returns None: the close did not
-      answer the disagreement question (D73), so silence cannot read as "there are none".
+      answer the disagreement question (D73) — it omitted the key, or its ``remaining`` is
+      not a boolean (D75) — so silence cannot read as "there are none".
       It is still a verdict on the plan rather than an unreadable close — the block parsed
       and the plan is there — which keeps the project counted and keeps a formatting slip
       out of the session's failure streak. Whatever the field held is written into ``gaps``
@@ -604,6 +645,11 @@ def project_outcome(*, close: Mapping[str, object]) -> tuple[str, list[str], lis
     A close field of the wrong type counts as empty (a non-string plan value is unfilled;
     non-list ``gaps`` is ``[]``, non-string items dropped). ``gaps`` is the close's own gaps
     plus ``"<label> is not filled"`` per missing blocking field.
+
+    ``gaps`` never decides anything, D76 (2026-10-29) included: the prompt requires at least
+    one open item with an owner, but an empty list still reads as "nothing open" and leaves
+    the verdict alone. Enforcing it here would make a formatting slip a verdict and would
+    pressure the hub into inventing a gap to pass, which is worse than an honest blank.
     """
     plan = close.get("plan")
     missing = missing_fields(plan if isinstance(plan, Mapping) else {}, BLOCKING_FIELDS)

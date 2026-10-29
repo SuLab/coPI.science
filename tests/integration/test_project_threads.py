@@ -82,15 +82,19 @@ CHOICE = {
 
 def _close_block(
     position: str | None = "agree", plan: dict | None = None,
-    disagreements: list[str] | None = (),
+    disagreements: list[str] | dict | None = (),
 ) -> str:
     """The hub's ``<project_json>`` close. ``disagreements=None`` leaves the key out
-    altogether: the close did not answer the question BlackbirdBot must answer (D73).
-    ``position=None`` leaves that key out, a close that stated no position."""
+    altogether: the close did not answer the question BlackbirdBot must answer (D73). A
+    list is the legacy shape kept for an older agent image (M21); the shape the prompt now
+    asks for is the object ``{"remaining": …, "note": …}`` (D75). ``position=None`` leaves
+    that key out, a close that stated no position."""
     body: dict = {"plan": plan or PLAN, "gaps": []}
     if position is not None:
         body["position"] = position
-    if disagreements is not None:
+    if isinstance(disagreements, dict):
+        body["disagreements"] = disagreements
+    elif disagreements is not None:
         body["disagreements"] = list(disagreements)
     return f"<project_json>{json.dumps(body)}</project_json>"
 
@@ -119,10 +123,12 @@ def _refused(category: str | None = "bio", stop: str | None = None):
 
 
 def _history(count: int, *, lab_latest: str = "We have used that model.",
+             lab_previous: str | None = None,
              split_at: int | None = None) -> list[tuple[str, str]]:
     """``count`` log entries, the root first: the lab and the hub alternate from the
     root; ``split_at`` repeats the lab at that index (a reply split into two chunks).
-    The lab's last entry carries ``lab_latest``."""
+    The lab's last entry carries ``lab_latest``, and its one before that ``lab_previous``
+    when given — what D77 reads to decide whether the lab has agreed twice running."""
     senders: list[str] = []
     for i in range(count):
         if split_at is not None and i == split_at:
@@ -130,13 +136,17 @@ def _history(count: int, *, lab_latest: str = "We have used that model.",
             continue
         previous = senders[-1] if senders else None
         senders.append("gordy" if previous in (None, "blackbird") else "blackbird")
-    last_lab = max(i for i, s in enumerate(senders) if s == "gordy")
+    lab_indices = [i for i, s in enumerate(senders) if s == "gordy"]
+    last_lab = lab_indices[-1]
+    previous_lab = lab_indices[-2] if len(lab_indices) > 1 else None
     entries = []
     for i, sender in enumerate(senders):
         if i == 0:
             text = f":test_tube: *Blackbird project:* {TITLE}\nWe would use our ApoE-/- mice."
         elif i == last_lab:
             text = lab_latest
+        elif lab_previous is not None and i == previous_lab:
+            text = lab_previous
         else:
             text = f"project message {i} from {sender}"
         entries.append((sender, text))
@@ -439,10 +449,13 @@ async def test_an_early_close_one_brace_short_is_recorded(engine, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_early_close_after_lab_agreement(engine, monkeypatch):
+async def test_early_close_after_two_lab_agreements(engine, monkeypatch):
+    """D77: before ordinal 8 the lab must have opened ✅ on its two most recent posts."""
     raw = "<slack_message>✅ Then we are done: final plan below.</slack_message>\n" + _close_block()
     sim, _agent, thread, calls, factory, run_id = await _drive_project(
-        engine, monkeypatch, raw, history=_history(5, lab_latest="✅ This plan works for us."),
+        engine, monkeypatch, raw,
+        history=_history(5, lab_latest="✅ This plan works for us.",
+                         lab_previous="✅ The design is right now."),
     )
     try:
         assert calls[0]["log_meta"]["message_ordinal"] == 6
@@ -452,6 +465,83 @@ async def test_early_close_after_lab_agreement(engine, monkeypatch):
         assert project.status == STATUS_READY
         [decision] = await _decisions(factory, run_id)
         assert decision.outcome == "project_closed"
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_one_lab_agreement_before_the_gate_does_not_close(engine, monkeypatch):
+    """D77: run b70d0cff closed half its threads at ordinal 6 on a single ✅. The block is
+    stripped and the thread carries on, and the hub is told what to spend the turn on."""
+    raw = "<slack_message>✅ Then we are done: final plan below.</slack_message>\n" + _close_block()
+    sim, _agent, thread, calls, factory, run_id = await _drive_project(
+        engine, monkeypatch, raw, history=_history(5, lab_latest="✅ This plan works for us."),
+    )
+    try:
+        assert calls[0]["log_meta"]["message_ordinal"] == 6
+        system = calls[0]["messages"][0]["content"]
+        assert "it is too early to close and you have turns left" in system
+        assert "The lab's latest reply starts with ✅: it agrees" not in system
+        assert thread.status == "active"
+        [project] = await _projects(factory, run_id)
+        assert project.status == STATUS_REFINING
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_the_close_stores_its_disagreement_note(engine, monkeypatch):
+    """D75/M22: the boolean decides, and the close's own sentence is kept beside it. On a
+    ready project `final["disagreement_note"]` is the only record of why none remains."""
+    block = _close_block(disagreements={
+        "remaining": False, "note": "The NHP arm was dropped on turn six.",
+    })
+    raw = "<slack_message>✅ Final plan below.</slack_message>\n" + block
+    sim, _agent, _thread, _calls, factory, run_id = await _drive_project(
+        engine, monkeypatch, raw, history=_history(11),
+    )
+    try:
+        [project] = await _projects(factory, run_id)
+        assert project.status == STATUS_READY
+        assert project.final["disagreements"] == []
+        assert project.final["disagreement_note"] == "The NHP arm was dropped on turn six."
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_close_that_leaves_remaining_undecided_is_not_agreed(engine, monkeypatch):
+    """M20: the prompt's skeleton carries `true`, so a block copied without deciding is a
+    live disagreement rather than a silent Ready."""
+    block = _close_block(disagreements={
+        "remaining": True, "note": "<one sentence: the dispute, or why none remains>",
+    })
+    raw = "<slack_message>⚠️ Final plan below.</slack_message>\n" + block
+    sim, _agent, _thread, _calls, factory, run_id = await _drive_project(
+        engine, monkeypatch, raw, history=_history(11),
+    )
+    try:
+        [project] = await _projects(factory, run_id)
+        assert project.status == STATUS_NOT_AGREED
+        assert project.final["disagreements"] == [
+            "<one sentence: the dispute, or why none remains>"
+        ]
+    finally:
+        await _delete_run(factory, run_id)
+
+
+@pytest.mark.asyncio
+async def test_one_lab_agreement_closes_from_the_gate(engine, monkeypatch):
+    raw = "<slack_message>✅ Then we are done: final plan below.</slack_message>\n" + _close_block()
+    sim, _agent, thread, calls, factory, run_id = await _drive_project(
+        engine, monkeypatch, raw, history=_history(7, lab_latest="✅ This plan works for us."),
+    )
+    try:
+        assert calls[0]["log_meta"]["message_ordinal"] == 8
+        assert "The lab's latest reply starts with ✅: it agrees" in calls[0]["messages"][0]["content"]
+        assert thread.status == "closed"
+        [project] = await _projects(factory, run_id)
+        assert project.status == STATUS_READY
     finally:
         await _delete_run(factory, run_id)
 

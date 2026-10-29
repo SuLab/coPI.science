@@ -62,6 +62,7 @@ def _detail(**overrides):
         "lab_position": "Not agreed",
         "gaps": ["GAP TEXT"],
         "disagreements": ["DISAGREEMENT TEXT"],
+        "disagreement_note": "NOTE TEXT",
         "sources_by_kind": [
             {"kind": "papers", "label": "Papers", "items": [
                 {"ident": "PMID 31500698", "title": "PAPER TITLE", "url": PUBMED,
@@ -151,6 +152,7 @@ def test_project_document_content():
     text = "\n".join(_blocks(build_project_chat_record(_detail(), tier="staff"), 0))
     for quoted in ("PROJECT TITLE", "WHY TEXT", "OTHER USE", "OTHER NOTE", "ANCHOR ITEM",
                    "FINAL INDICATION", "OPENING INDICATION", "GAP TEXT", "DISAGREEMENT TEXT",
+                   "NOTE TEXT", "On disagreement — the close's own words",
                    "> in the lab's profile", "> matches: Rosetta protein design",
                    "> stated by the lab"):
         assert quoted in text, quoted

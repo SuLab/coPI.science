@@ -4,6 +4,7 @@ import pytest
 
 from src.agent.project_guidance import (
     HUB_CLOSE_FROM,
+    HUB_EARLY_CLOSE_FROM,
     LAB_FINAL_FROM,
     OPEN_UNTIL,
     THREAD_KIND_INTERVIEW,
@@ -13,7 +14,8 @@ from src.agent.project_guidance import (
 
 HUB = "scout_hub"
 LAB = "pi_lab"
-EARLY_CLOSE = "The lab's latest reply starts with ✅"
+EARLY_CLOSE = "The lab's latest reply starts with ✅: it agrees"
+HOLD_CLOSE = "it is too early to close and you have turns left"
 
 _HUB_BANDS = {
     2: ("open", "OPEN", "project_open"),
@@ -40,6 +42,7 @@ _LAB_BANDS = {
 def test_constants():
     assert (THREAD_KIND_INTERVIEW, THREAD_KIND_PROJECT) == ("interview", "project")
     assert (OPEN_UNTIL, HUB_CLOSE_FROM, LAB_FINAL_FROM) == (4, 11, 9)
+    assert HUB_EARLY_CLOSE_FROM == 8
 
 
 @pytest.mark.parametrize("ordinal", sorted(_HUB_BANDS))
@@ -80,8 +83,8 @@ def test_exact_strings():
     )
 
 
-@pytest.mark.parametrize("ordinal", [2, 4, 5, 8, 10])
-def test_hub_may_close_early_only_after_the_lab_agrees(ordinal):
+@pytest.mark.parametrize("ordinal", [8, 10])
+def test_hub_may_close_early_from_the_gate_on_one_agreement(ordinal):
     agreed = project_turn(HUB, ordinal, lab_agrees=True)
     plain = project_turn(HUB, ordinal, lab_agrees=False)
     assert agreed.may_close_early is True
@@ -89,6 +92,41 @@ def test_hub_may_close_early_only_after_the_lab_agrees(ordinal):
     assert EARLY_CLOSE in agreed.guidance
     assert EARLY_CLOSE not in plain.guidance
     assert agreed.guidance.startswith(plain.guidance)
+
+
+@pytest.mark.parametrize("ordinal", [2, 4, 5, 7])
+def test_before_the_gate_one_agreement_is_not_enough(ordinal):
+    """D77: the lab's single ✅ holds the close, and the hub is told what to spend the turn
+    on. Run b70d0cff closed at a median ordinal of 6 of 12 on exactly this signal."""
+    once = project_turn(HUB, ordinal, lab_agrees=True)
+    assert once.may_close_early is False
+    assert EARLY_CLOSE not in once.guidance
+    assert HOLD_CLOSE in once.guidance
+
+
+@pytest.mark.parametrize("ordinal", [2, 4, 5, 7])
+def test_before_the_gate_two_agreements_in_a_row_are(ordinal):
+    twice = project_turn(HUB, ordinal, lab_agrees=True, lab_agreed_before=True)
+    assert twice.may_close_early is True
+    assert EARLY_CLOSE in twice.guidance
+    assert HOLD_CLOSE not in twice.guidance
+
+
+@pytest.mark.parametrize("ordinal", [2, 7, 8, 12])
+def test_a_second_agreement_without_a_latest_one_closes_nothing(ordinal):
+    """``lab_agreed_before`` is never the whole answer: the lab's latest post decides."""
+    turn = project_turn(HUB, ordinal, lab_agrees=False, lab_agreed_before=True)
+    assert turn.may_close_early is False
+    assert EARLY_CLOSE not in turn.guidance
+    assert HOLD_CLOSE not in turn.guidance
+
+
+@pytest.mark.parametrize("ordinal", sorted(_LAB_BANDS))
+def test_the_lab_never_closes_early_however_it_agreed(ordinal):
+    turn = project_turn(LAB, ordinal, lab_agrees=True, lab_agreed_before=True)
+    assert turn.may_close_early is False
+    assert EARLY_CLOSE not in turn.guidance
+    assert HOLD_CLOSE not in turn.guidance
 
 
 @pytest.mark.parametrize("ordinal", [11, 12])

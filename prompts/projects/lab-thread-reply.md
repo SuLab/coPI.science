@@ -33,6 +33,9 @@ Message {message_count} of at most 12 — {turn}
   belongs to your PI is a gap to record, not a reason to withhold ✅. Time and budget is settled later by
   Blackbird's staff.
 - Do not spend turns pursuing an item neither of you controls — name it once as a gap and move on.
+- An early ✅ ends the project sooner, not better. While turns remain, use them: a control you would run
+  differently, a number in the design that is not yet pinned down, a readout that will not answer the
+  question as written. Withhold ✅ while a field of the plan still reads as a placeholder.
 - Do not commit your PI to anything, and do not use "@".
 
 Write your reply inside <slack_message> tags.

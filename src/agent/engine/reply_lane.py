@@ -26,6 +26,7 @@ from src.agent.engine.sidecar import (
 )
 from src.agent.message_log import group_posts
 from src.agent.project_guidance import (
+    HUB_EARLY_CLOSE_FROM,
     PROJECT_REFUSAL_BACKOFF_CAP_S,
     PROJECT_REFUSALS_MAX,
     THREAD_KIND_INTERVIEW,
@@ -1246,10 +1247,20 @@ class ReplyLane:
         other_name = other_agent.bot_name if other_agent else thread.other_agent_id
         other_lab = other_agent.pi_name if other_agent else "Unknown"
         ordinal = thread.message_count + 1
-        lab_agrees = agent.role in hub_role_names() and self._projects._latest_lab_position(
+        is_hub = agent.role in hub_role_names()
+        lab_agrees = is_hub and self._projects._latest_lab_position(
             thread.thread_id, thread.other_agent_id
         ) == "agree"
-        turn = project_turn(agent.role, ordinal, lab_agrees=lab_agrees)
+        # Only asked when it can change the answer: before HUB_EARLY_CLOSE_FROM a second
+        # consecutive ✅ is what lets the hub close early (D77), and from there one is enough.
+        lab_agreed_before = (
+            lab_agrees
+            and ordinal < HUB_EARLY_CLOSE_FROM
+            and self._projects._lab_agreed_before(thread.thread_id, thread.other_agent_id)
+        )
+        turn = project_turn(
+            agent.role, ordinal, lab_agrees=lab_agrees, lab_agreed_before=lab_agreed_before,
+        )
         claim_reason = self.ctx.claim_feedback.get(agent.agent_id, thread.thread_id)
         system_prompt, messages = agent.build_project_thread_prompt(
             thread=thread,

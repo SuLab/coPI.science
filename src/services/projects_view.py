@@ -1124,6 +1124,13 @@ async def build_project_detail(
         "lab_position": _position_label(project.final, "lab_position"),
         "gaps": _strings(final.get("gaps")),
         "disagreements": _strings(final.get("disagreements")),
+        # The close's own sentence on the disagreement question (D75). On a ready project it
+        # is the only record of why none remains; None for every close written before D75.
+        "disagreement_note": (
+            note.strip()
+            if isinstance(note := final.get("disagreement_note"), str) and note.strip()
+            else None
+        ),
         "sources_by_kind": sources_by_kind,
         "evidence": _evidence(consults),
         "timeline": timeline,

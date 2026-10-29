@@ -60,6 +60,7 @@ FINAL = {
     "lab_position": "disagree",
     "gaps": ["GAP TEXT"],
     "disagreements": ["DISAGREEMENT TEXT"],
+    "disagreement_note": "NOTE TEXT",
 }
 
 
@@ -350,7 +351,7 @@ async def test_detail_shows_plan_positions_gaps_sources_and_reviews(client, db_s
     assert "Rosetta" in plan and "PyMOL" in plan
     positions = _section(html, "positions")
     for text in ("Agreed", "Not agreed", "Gaps", "GAP TEXT", "Disagreements",
-                 "DISAGREEMENT TEXT"):
+                 "DISAGREEMENT TEXT", "NOTE TEXT"):
         assert text in positions, text
     others = _section(html, "others")
     assert "Also considered (1)" in others
@@ -718,6 +719,8 @@ async def test_positions_labels(client, db_session):
     positions = _section(await _detail(client, headers, ready), "positions")
     assert "No position stated" in positions and "No close recorded" not in positions
     assert "Acknowledged limits" in positions and "GAP TEXT" in positions
+    # D75: a ready project still shows why no disagreement remains — the only record of it.
+    assert "On disagreement" in positions and "NOTE TEXT" in positions
 
     open_project = await _project(db_session, run, "T-open", status="posted", choice=CHOICE)
     positions = _section(await _detail(client, headers, open_project), "positions")

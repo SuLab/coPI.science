@@ -26,6 +26,11 @@ OPEN_UNTIL = 4
 HUB_CLOSE_FROM = 11
 #: The first ordinal of the lab's final-word band.
 LAB_FINAL_FROM = 9
+#: The first ordinal at which one ✅ from the lab lets BlackbirdBot close early. Before it,
+#: the lab must have opened ✅ on its two most recent consecutive posts (owner decision D77,
+#: 2026-10-29). Run b70d0cff closed at a median ordinal of 6 of 12 on a single ✅, and plan
+#: depth tracked the close turn: ~5,700 characters at ordinal 4 against ~10,200 at 8.
+HUB_EARLY_CLOSE_FROM = 8
 #: Consecutive turns that produced nothing and reported a refusal or a truncation before a
 #: project thread is abandoned (``ThreadState.refusal_count``). Four, not the empty reply's
 #: two: in run d54d7386 antiochos lost two consecutive turns to refusals at ordinal 8 of 12
@@ -40,6 +45,14 @@ _HUB_EARLY_CLOSE = (
     "The lab's latest reply starts with ✅: it agrees the plan as it stands is feasible and "
     "complete. If you agree too, close now: start with ✅, state the final plan and add the "
     "<project_json> block. If you do not, say what is still missing and carry on."
+)
+#: Shown when the lab agrees but D77 holds the close. A ✅ with no instruction attached is how
+#: run b70d0cff closed half its threads at ordinal 6: the hub read agreement as permission.
+_HUB_HOLD_CLOSE = (
+    "The lab's latest reply starts with ✅, but it is too early to close and you have turns "
+    "left. Spend this one on the science: test a control, the readout, the analysis or a "
+    "number in the design that has not been pinned down yet. Close only once the lab has "
+    "agreed twice running, or from your eighth turn."
 )
 
 
@@ -58,7 +71,7 @@ class ProjectTurn:
     log_phase: str
 
 
-def _hub_turn(ordinal: int, lab_agrees: bool) -> ProjectTurn:
+def _hub_turn(ordinal: int, lab_agrees: bool, lab_agreed_before: bool) -> ProjectTurn:
     if ordinal >= HUB_CLOSE_FROM:
         return ProjectTurn(
             band="close",
@@ -91,11 +104,16 @@ def _hub_turn(ordinal: int, lab_agrees: bool) -> ProjectTurn:
             "standard of care if you have not yet."
         )
         instructions = "Write a reply that settles the next open field or disagreement."
-    if lab_agrees:
+    may_close_early = lab_agrees and (
+        ordinal >= HUB_EARLY_CLOSE_FROM or lab_agreed_before
+    )
+    if may_close_early:
         guidance += "\n\n" + _HUB_EARLY_CLOSE
+    elif lab_agrees:
+        guidance += "\n\n" + _HUB_HOLD_CLOSE
     return ProjectTurn(
         band=band, label=label, guidance=guidance, instructions=instructions,
-        must_close=False, may_close_early=lab_agrees, log_phase=log_phase,
+        must_close=False, may_close_early=may_close_early, log_phase=log_phase,
     )
 
 
@@ -133,11 +151,17 @@ def _lab_turn(ordinal: int) -> ProjectTurn:
     )
 
 
-def project_turn(role: str, ordinal: int, *, lab_agrees: bool) -> ProjectTurn:
+def project_turn(
+    role: str, ordinal: int, *, lab_agrees: bool, lab_agreed_before: bool = False,
+) -> ProjectTurn:
     """The band of the message ``ordinal`` (1-based, the reply about to be written) that an
     agent of ``role`` writes in a project thread. A role in ``hub_role_names()`` is
     BlackbirdBot; any other is the lab. ``lab_agrees`` (the lab's latest reply starts with
-    ✅) matters only to the hub's open and refine bands."""
+    ✅) and ``lab_agreed_before`` (the post before that one did too) matter only to the hub's
+    open and refine bands, where together they decide whether it may close early (D77).
+
+    ``lab_agreed_before`` defaults to False so a caller that only wants ``log_phase``, which
+    no position changes, need not read the thread twice."""
     if role in hub_role_names():
-        return _hub_turn(ordinal, lab_agrees)
+        return _hub_turn(ordinal, lab_agrees, lab_agreed_before)
     return _lab_turn(ordinal)

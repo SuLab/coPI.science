@@ -250,6 +250,7 @@ EXPECTED_METHOD_OWNER: dict[str, str] = {
     "_rehydrate_projects": "projects", "_projects_tick": "projects",
     "_offer_project_reply": "projects",
     "_project_thread_context": "projects", "_unresolved_reply_claim": "projects", "_latest_lab_position": "projects",
+    "_lab_agreed_before": "projects",
     "_record_project_close": "projects",
     "_resolve_project_claims": "projects", "_advance_clock": "projects",
     "_end_stale_projects": "projects", "_request_due_labs": "projects",

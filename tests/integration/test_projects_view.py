@@ -39,6 +39,7 @@ FINAL = {
     "lab_position": "disagree",
     "gaps": ["GAP TEXT"],
     "disagreements": ["DISAGREEMENT TEXT"],
+    "disagreement_note": "NOTE TEXT",
 }
 
 

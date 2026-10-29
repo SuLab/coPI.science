@@ -211,11 +211,13 @@
         {% if p.gaps %}{{ item_list(p.gaps) }}{% else %}<p class="text-sm text-gray-600">None recorded.</p>{% endif %}
         <h3 class="mt-3 text-sm font-semibold text-amber-900">Disagreements</h3>
         {% if p.disagreements %}{{ item_list(p.disagreements) }}{% else %}<p class="text-sm text-gray-600">None recorded.</p>{% endif %}
+        {% if p.disagreement_note %}<p class="mt-2 text-sm text-amber-900">{{ p.disagreement_note }}</p>{% endif %}
     </div>
-    {% elif p.gaps or p.disagreements %}
+    {% elif p.gaps or p.disagreements or p.disagreement_note %}
     <div class="project-limits mt-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
         {% if p.gaps %}<h3 class="text-sm font-semibold text-slate-900">{{ 'Acknowledged limits' if p.outcome_kind == 'ready' else 'Gaps' }}</h3>{{ item_list(p.gaps) }}{% endif %}
         {% if p.disagreements %}<h3 class="{% if p.gaps %}mt-3 {% endif %}text-sm font-semibold text-slate-900">Disagreements</h3>{{ item_list(p.disagreements) }}{% endif %}
+        {% if p.disagreement_note %}<h3 class="{% if p.gaps or p.disagreements %}mt-3 {% endif %}text-sm font-semibold text-slate-900">On disagreement</h3><p class="text-sm text-gray-700">{{ p.disagreement_note }}</p>{% endif %}
     </div>
     {% endif %}
     {{ chat_asks('positions', chat_available, chat_suggestions) }}

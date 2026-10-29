@@ -64,6 +64,7 @@ from src.services.project_plan import (
     BLOCKING_FIELDS,
     METHOD_MODEL_SECTIONS,
     REPLY_HEADER,
+    disagreement_note,
     fits_one_message,
     missing_fields,
     position_marker,
@@ -1112,6 +1113,25 @@ class Projects:
             return position_marker(post[0].content)
         return None
 
+    def _lab_agreed_before(self, thread_id: str, lab_agent_id: str) -> bool:
+        """Whether the lab opened ✅ on the post before its latest one (owner decision D77).
+
+        Counted over the lab's own posts, so BlackbirdBot's replies between them do not
+        break the run: D77 asks whether the lab has agreed twice running, not whether the
+        thread has. Read per post like ``_latest_lab_position``, and the thread root is not
+        one of the lab's posts — a thread with only one lab reply has no "before", which is
+        the answer D77 wants there anyway."""
+        seen = 0
+        for post in reversed(group_posts(self.message_log.get_thread_history(thread_id))):
+            if post[0].sender_agent_id != lab_agent_id:
+                continue
+            if any(entry.ts == thread_id for entry in post):
+                return False
+            seen += 1
+            if seen == 2:
+                return position_marker(post[0].content) == "agree"
+        return False
+
     async def _record_project_close(
         self, agent: Agent, thread: ThreadState, raw_response: str, posted_ts: str | None,
         *, truncated: bool = False,
@@ -1224,8 +1244,9 @@ class Projects:
         Only the close decides the status (``project_outcome``, owner decisions D69–D73):
         whether its plan fills every ``BLOCKING_FIELDS`` field, and whether it records a
         live scientific disagreement. ``final`` carries the plan, its lab tools marked
-        against the lab's profile and the project's anchors, both positions, and the gaps
-        and disagreements ``project_outcome`` returned. A ready close carries no
+        against the lab's profile and the project's anchors, both positions, the gaps
+        and disagreements ``project_outcome`` returned, and the close's own note on the
+        disagreement question (D75). A ready close carries no
         disagreements; it may still carry gaps — the close's own, and a line for each entry
         that said there was none. The positions are commentary the page shows: ``"agree"``,
         ``"disagree"``, or None when that side stated none, which ``_position_label``
@@ -1259,6 +1280,10 @@ class Projects:
             "lab_position": self._latest_lab_position(thread.thread_id, thread.other_agent_id),
             "gaps": gaps,
             "disagreements": disagreements,
+            # The close's own sentence on the disagreement question (D75), kept whether or
+            # not a disagreement remains: on a ready project it is the only record of why
+            # none does. None when the close wrote no note, which M18 leaves a close.
+            "disagreement_note": disagreement_note(close.get("disagreements")),
             "truncated": bool(truncated),
             "tool_profile_seen": bool(profile_seen),
         }

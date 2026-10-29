@@ -23,6 +23,7 @@ from src.services.project_plan import (
     NameEntry,
     assemble_posting,
     check_anchors,
+    disagreement_note,
     display_id,
     field_filled,
     fits_one_message,
@@ -303,6 +304,77 @@ def test_project_outcome_rules():
     assert status == STATUS_NOT_AGREED
     assert "Design is not filled" in gaps
     assert "a string" not in gaps
+
+
+def test_the_close_answers_the_disagreement_question_with_a_boolean():
+    """D75: the shape BlackbirdBot writes now. `remaining` decides; no prose is read."""
+    status, _gaps, live = project_outcome(
+        close=_close(disagreements={"remaining": False, "note": "The NHP arm was dropped."})
+    )
+    assert (status, live) == (STATUS_READY, [])
+
+    status, _gaps, live = project_outcome(
+        close=_close(disagreements={
+            "remaining": True,
+            "note": "One dispute is left.",
+            "items": ["The lab will not run the NHP arm."],
+        })
+    )
+    assert status == STATUS_NOT_AGREED
+    assert live == ["The lab will not run the NHP arm."]
+
+
+def test_a_remaining_disagreement_with_no_items_falls_back_to_the_note():
+    """M19: "a disagreement remains" can never render as none, however thin the block."""
+    status, _gaps, live = project_outcome(
+        close=_close(disagreements={"remaining": True, "note": "The endpoint is disputed."})
+    )
+    assert (status, live) == (STATUS_NOT_AGREED, ["The endpoint is disputed."])
+
+    status, _gaps, live = project_outcome(
+        close=_close(disagreements={"remaining": True, "items": []})
+    )
+    assert status == STATUS_NOT_AGREED
+    assert live == ["The close recorded a disagreement without naming it"]
+
+
+def test_a_block_copied_without_deciding_remaining_is_not_agreed():
+    """M20: the prompt's skeleton carries `true`, so a verbatim copy fails loudly. Run
+    b70d0cff wrote a bare `[]` in all twenty closes because the skeleton supplied it."""
+    status, _gaps, live = project_outcome(
+        close=_close(disagreements={
+            "remaining": True,
+            "note": "<one sentence: the dispute, or why none remains>",
+        })
+    )
+    assert status == STATUS_NOT_AGREED
+    assert live == ["<one sentence: the dispute, or why none remains>"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [{}, {"note": "none"}, {"remaining": "false"}, {"remaining": None}, {"remaining": 0}],
+)
+def test_an_object_without_a_boolean_remaining_has_not_answered(value):
+    """A mapping is only an answer when `remaining` is a real boolean; 0 and "false" are
+    the near-misses that must not read as "there are none"."""
+    status, gaps, live = project_outcome(close=_close(disagreements=value))
+    assert (status, live) == (STATUS_NOT_AGREED, [])
+    assert "The close did not say whether a scientific disagreement remains" in gaps
+
+
+def test_the_disagreement_note_is_kept_whatever_the_answer():
+    """M18/M22: the note is evidence, stored on its own, and never decides the verdict."""
+    assert disagreement_note({"remaining": False, "note": " Settled on turn six. "}) == (
+        "Settled on turn six."
+    )
+    assert disagreement_note({"remaining": True, "note": "The endpoint."}) == "The endpoint."
+    for value in ({"remaining": False}, {"remaining": False, "note": "  "},
+                  {"remaining": False, "note": 3}, ["None."], None, "none"):
+        assert disagreement_note(value) is None
+    # A missing note is still a close: `remaining` alone answered the question.
+    status, _gaps, live = project_outcome(close=_close(disagreements={"remaining": False}))
+    assert (status, live) == (STATUS_READY, [])
 
 
 def test_a_disagreement_that_says_only_none_is_not_a_disagreement():

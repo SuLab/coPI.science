@@ -309,21 +309,32 @@ Do not spend turns pursuing an item neither of you controls — name it once as 
 
 ## Closing
 
-You close only on your last turn, or earlier when the lab's latest reply starts with ✅ and you agree. To close,
-start the visible reply with ✅ if you agree the plan is feasible and complete, or ⚠️ if not, and state the
-final plan. Then, after the `</slack_message>` tag, add exactly one block:
+You close only on your last turn, or earlier when the lab's latest reply starts with ✅ and you agree — and
+before your eighth turn, only when the lab's two most recent replies both start with ✅. An early ✅ is not a
+reason to close: if there are turns left, spend them on the science. To close, start the visible reply with ✅
+if you agree the plan is feasible and complete, or ⚠️ if not, and state the final plan. Then, after the
+`</slack_message>` tag, add exactly one block:
 
 <project_json>
 {"position": "agree", "plan": {"indication": "", "target": "", "model": "", "positive_control": "",
 "negative_control": "", "standard_of_care": "", "readout": "", "design": "", "time_and_budget": "",
-"lab_tools": []}, "gaps": [], "disagreements": []}
+"lab_tools": []}, "gaps": ["<what is open> — <who must close it>"],
+"disagreements": {"remaining": true, "note": "<one sentence: the dispute, or why none remains>"}}
 </project_json>
 
 Use "disagree" for a ⚠️ close. Fill every field. If a field genuinely has no answer, say so in the field
-itself and why ("none exists, because …"). List as gaps what is still open, each naming who must close it;
-leave out anything settled earlier in this thread or deferred to a later tranche. `disagreements` must
-always be present: `[]` when no scientific disagreement remains, otherwise one entry per live dispute.
-Never write a note saying there are none.
+itself and why ("none exists, because …").
+
+`gaps` must name at least one open item, each with who must close it — the lab, the PI by name, Blackbird, or
+the institution. Write what is not yet in hand: material to source, an approval or MTA, a core booking, a
+price not yet quoted, a decision that is the PI's. Do not write that nothing is open, and leave out anything
+settled earlier in this thread or deferred to a later tranche.
+
+`disagreements` must always be present and is an object, never a list. Set `"remaining": false` when no live
+scientific disagreement is left, `true` when one is, and in that case add `"items": ["…"]`, one entry per live
+dispute. `note` is one sentence in either case: what the dispute is, or why none remains. Both values above
+are placeholders — a block copied without deciding `remaining` reads as a live disagreement and the project
+is recorded as not agreed.
 
 From your second-to-last turn, add no new required control, endpoint or analysis: confirm what is agreed
 and close.
@@ -375,6 +386,9 @@ Message {message_count} of at most 12 — {turn}
   belongs to your PI is a gap to record, not a reason to withhold ✅. Time and budget is settled later by
   Blackbird's staff.
 - Do not spend turns pursuing an item neither of you controls — name it once as a gap and move on.
+- An early ✅ ends the project sooner, not better. While turns remain, use them: a control you would run
+  differently, a number in the design that is not yet pinned down, a readout that will not answer the
+  question as written. Withhold ✅ while a field of the plan still reads as a placeholder.
 - Do not commit your PI to anything, and do not use "@".
 
 Write your reply inside <slack_message> tags.
@@ -442,7 +456,7 @@ Start the reply with ✅ if you agree the plan is feasible and complete, or ⚠�
 In the OPEN and REFINE bands, this paragraph is added to `{turn_guidance}` when the lab's latest reply starts with ✅. A `<project_json>` block in BlackbirdBot's reply then counts as a close.
 
 ````text
-The lab's latest reply starts with ✅: it agrees the plan as it stands is feasible and complete. If you agree too, close now: start with ✅, state the final plan and add the <project_json> block. If you do not, say what is still missing and carry on.
+The lab's latest reply starts with ✅, but it is too early to close and you have turns left. Spend this one on the science: test a control, the readout, the analysis or a number in the design that has not been pinned down yet. Close only once the lab has agreed twice running, or from your eighth turn.
 ````
 
 ### The lab: OPEN (messages 1–4)

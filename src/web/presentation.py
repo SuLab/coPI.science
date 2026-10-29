@@ -2,6 +2,13 @@
 
 Service read models remain unchanged for business and chat callers. This adapter
 copies only display fields, recursively; adding a database column does not expose it.
+
+A key missing from the allowlist is dropped silently — no error, no log — and the
+template renders it as Jinja Undefined, which is the empty string. A new field on a
+read model therefore has to be added to the list below in the same change, or the page
+simply never shows it. Two such fields went unnoticed until 2026-10-15
+(`PiGrant.tenure_filter_mode`, `PublicationCandidate.stages`) and one until 2026-10-29
+(`disagreement_note`).
 """
 
 from collections.abc import Mapping
@@ -225,7 +232,7 @@ VIEW_FIELDS = frozenset(
         "run_bar is_live is_current held_at decline_listed interviews interview_total unanswered_count outcome_label outcome_kind band lines speaker panel "
         "projects project_total outcome_filter mine review_count mean_rating fund_count fund_share "
         "reviewed_by_me reason_label finished_at posted_at project plan_rows opening_rows tool_rows item "
-        "in_profile hub_position lab_position gaps disagreements why_chosen others use sources ident fund "
+        "in_profile hub_position lab_position gaps disagreements disagreement_note why_chosen others use sources ident fund "
         "can_edit my_review can_review_projects research_cost_usd refinement_cost_usd calls_url "
         "list_state review_filter assignment_filter tiles not_finished_reasons is_finished next_id "
         "stage stage_label stage_paused stage_time stage_time_label gap_count disagreement_count "
