@@ -1662,7 +1662,8 @@ async def run_regression(db_factory, epoch_id) -> bool
     # verdict ≥ 85% of the 30 pairs, labels unscored; S9 recommendation ≥ 80%, gates ≥ 90%, scores ±1 ≥ 90%
     # (S6-S9 against the active epoch's stored outputs); expert items ≥ the active epoch's agreement. A touched
     # stage with no items fails (an S6 or S9 set frozen empty is broken), except pair, similarity and expert items,
-    # which a small active cut or an expert-less quarter legitimately lacks.
+    # which a small active cut or an expert-less quarter legitimately lacks; a run whose change touches kinds but
+    # checks none of them is held too (L28), while a change touching no kind (S8 labels alone) passes.
     # With no active epoch, only the S2-S4 items are checked, against the bake-off references (D65); a candidate
     # created before any set version exists is judged on the first one, the bake-off's
 ```

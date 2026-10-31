@@ -325,6 +325,10 @@ async def test_a_gzip_body_stops_at_the_cap_without_decoding_it_all(monkeypatch)
         def unconsumed_tail(self):
             return self.inner.unconsumed_tail
 
+        @property
+        def eof(self):
+            return self.inner.eof
+
         def decompress(self, data, max_length=0):
             out = self.inner.decompress(data, max_length)
             decoded.append(len(out))
@@ -406,6 +410,43 @@ async def test_a_redirect_on_an_open_route_is_followed_unread(monkeypatch):
     assert (result.basis, result.route) == ("full_text", "pmc")
     assert any(r.url.path == "/moved.xml" for r in requests)
     assert body_read == []
+    # Every request, the redirected one included, offers only the codings the decoder reads.
+    assert {r.headers["accept-encoding"] for r in requests} == {"gzip, deflate"}
+
+
+async def test_a_redirect_to_an_unparsable_location_yields_no_text_unretried(monkeypatch):
+    requests = _install(monkeypatch, _pmc_xml_answered_by(
+        lambda request: httpx.Response(302, headers={"Location": "https://[invented"})
+    ))
+    result = await fulltext.fetch_full_text(_doc(doi=None))
+    assert (result.basis, result.route) == ("summary", None)
+    assert len([r for r in requests if r.url.path == XML_PATH]) == 1
+
+
+async def test_a_truncated_gzip_body_yields_no_text(monkeypatch):
+    whole = gzip.compress(JATS.encode())
+    _install(monkeypatch, _pmc_xml_answered_by(lambda request: httpx.Response(
+        200, content=_streamed(whole[:-12]), headers={"Content-Encoding": "gzip"},
+    )))
+    result = await fulltext.fetch_full_text(_doc(doi=None))
+    assert (result.basis, result.route) == ("summary", None)
+
+
+async def test_a_plaintext_preprint_url_is_not_fetched(monkeypatch):
+    plain = JATS_URL.replace("https://", "http://")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.biorxiv.org" and "/details/biorxiv/" in request.url.path:
+            return httpx.Response(200, json={"collection": [
+                {"license": "cc_by", "jatsxml": plain}]})
+        if request.url.host.endswith("biorxiv.org"):
+            return httpx.Response(200, text=JATS)
+        return httpx.Response(404)
+
+    requests = _install(monkeypatch, handler)
+    result = await fulltext.fetch_full_text(_doc(pmcid=None, doi=PREPRINT_DOI))
+    assert result.route is None
+    assert not [r for r in requests if r.url.scheme == "http"]
 
 
 async def test_a_redirect_chain_past_the_limit_yields_no_text(monkeypatch):

@@ -561,21 +561,41 @@ async def test_empty_expert_kind_does_not_fail_the_gate(db_factory, models):
 
 async def test_empty_pair_and_similarity_kinds_do_not_hold_a_candidate(db_factory, models):
     """A small active cut (K = 1) answers no comparison and records no related pair, so a set
-    frozen from it holds no ``pair`` or ``similarity`` items: a change touching S7 and S8 passes
-    those stages rather than being held for them."""
+    frozen from it holds no ``pair`` or ``similarity`` items: a change touching S7, S8 and S9
+    is judged on its S9 items and not held for the missing pairs."""
     await _epoch(db_factory, status="active")
     await _seed_set(db_factory, _screen_items(5) + _final_items(5))
-    epoch_id = await _epoch(db_factory, changed=["rerank", "similarity"])
+    epoch_id = await _epoch(db_factory, changed=["rerank", "similarity", "final"])
+    models.routes["final"] = lambda model, user: _verdict()
 
     assert await regression.run_regression(db_factory, epoch_id) is True
 
-    assert models.calls == []
+    assert models.stages() == {"final"}
     epoch = await _epoch_row(db_factory, epoch_id)
     assert epoch.status == "candidate"
     async with db_factory() as db:
         run = await db.get(LandscapeRegressionRun, epoch.regression_run_id)
     assert run.status == "passed"
-    assert set(run.results["kinds"]) == {"pair", "similarity"}
+    assert {"pair", "similarity", "final"} <= set(run.results["kinds"])
+    assert set(run.results["stages"]) == {"final"}
+
+
+async def test_change_with_nothing_to_check_is_held(db_factory, models):
+    """A change of S7 and S8 alone against a set with no pairs checks nothing: it is held for
+    an admin (L28), never passed unchecked."""
+    await _epoch(db_factory, status="active")
+    await _seed_set(db_factory, _screen_items(5) + _final_items(5))
+    epoch_id = await _epoch(db_factory, changed=["rerank", "similarity"])
+
+    assert await regression.run_regression(db_factory, epoch_id) is False
+
+    assert models.calls == []
+    epoch = await _epoch_row(db_factory, epoch_id)
+    assert epoch.status == "held"
+    assert "no item of pair, similarity to check" in epoch.hold_reason
+    async with db_factory() as db:
+        run = await db.get(LandscapeRegressionRun, epoch.regression_run_id)
+    assert run.status == "failed"
     assert run.results["stages"] == {}
 
 

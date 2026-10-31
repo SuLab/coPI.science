@@ -16,12 +16,13 @@ transport failure, still failing after 3 retries) on a route makes the result
 ``fetch_failed`` unless a later route yields full text, so a failed fetch is never recorded
 as "summary only" (D41).
 
-Every response body is read up to `MAX_BODY_BYTES` and dropped past it, counted after a
-bounded decode of its ``gzip`` or ``deflate`` coding (any other coding is not read).
-Redirects are followed by hand, at most `_MAX_REDIRECTS`, only to ``https`` URLs and never
-reading a redirect's body; the preprint JATS fetch, whose URL comes from the ``details``
-record, follows them only to `_PREPRINT_HOSTS`. A dropped body, a refused redirect or a
-request httpx cannot make (a bad URL or coding) leaves the route with nothing.
+Every request accepts only ``gzip`` and ``deflate``, and every response body is read up to
+`MAX_BODY_BYTES` and dropped past it, counted after a bounded decode of that coding (any other
+coding, or a truncated compressed body, is not read). Redirects are followed by hand, at most
+`_MAX_REDIRECTS`, only to ``https`` URLs and never reading a redirect's body; the preprint JATS
+fetch, whose URL comes from the ``details`` record, must itself be ``https`` and follows
+redirects only to `_PREPRINT_HOSTS`. A dropped body, a refused redirect or a request httpx
+cannot make (a bad URL, a bad redirect ``Location`` or coding) leaves the route with nothing.
 """
 from __future__ import annotations
 
@@ -72,6 +73,9 @@ _MAX_REDIRECTS = 5
 _CODINGS: dict[str, int | None] = {
     "identity": None, "gzip": 16 + zlib.MAX_WBITS, "deflate": zlib.MAX_WBITS,
 }
+#: The codings a request accepts: those `_BoundedDecoder` reads. httpx's default also offers
+#: ``br`` and ``zstd`` when their decoders are installed, which would then be refused.
+_ACCEPT_ENCODING = "gzip, deflate"
 #: httpx errors that mean this request cannot be made or read, whatever the retry: the route
 #: has nothing. Transient transport errors (`evidence.RETRYABLE_TRANSPORT`) are not here.
 _UNREADABLE = (
@@ -149,6 +153,16 @@ def _allowed(host: str, hosts: tuple[str, ...]) -> bool:
     return any(host == h or host.endswith("." + h) for h in hosts)
 
 
+def _https_host(url: Any) -> str:
+    """``url``'s host when it is an ``https`` URL, else "" (no host is allowlisted)."""
+    if not isinstance(url, str) or not url.startswith("https://"):
+        return ""
+    try:
+        return httpx.URL(url).host
+    except httpx.InvalidURL:
+        return ""
+
+
 class _BoundedDecoder:
     """Decodes one body's content coding from its raw bytes, never holding more than
     `MAX_BODY_BYTES` of output: zlib's ``max_length`` stops each step one byte past what is
@@ -198,7 +212,14 @@ class _BoundedDecoder:
         return out
 
     def flush(self) -> bytes:
-        return b"" if self.inflater is None else self._keep(self.inflater.flush())
+        """The decoder's last bytes; `_Unread` for a compressed body that ended before its
+        stream did (truncated). A gzip body's later members are ignored, as httpx does."""
+        if self.inflater is None:
+            return b""
+        out = self._keep(self.inflater.flush())
+        if self.started and not self.inflater.eof:
+            raise _Unread(f"truncated {self.coding} body from {self.url}")
+        return out
 
 
 async def _read_capped(resp: httpx.Response) -> httpx.Response:
@@ -235,9 +256,18 @@ async def _fetch(client: httpx.AsyncClient, url: str, params: dict[str, str] | N
     each only to an ``https`` URL and, with ``hosts``, only to a host in ``hosts``; a
     redirect's body is never read. `_Unread` for a refused redirect, before any request to
     its target, or past the redirect limit."""
-    request = client.build_request("GET", url, params=params)
+    request = client.build_request(
+        "GET", url, params=params, headers={"Accept-Encoding": _ACCEPT_ENCODING},
+    )
     for _ in range(_MAX_REDIRECTS + 1):
-        resp = await client.send(request, stream=True, follow_redirects=False)
+        try:
+            resp = await client.send(request, stream=True, follow_redirects=False)
+        except httpx.RemoteProtocolError as exc:
+            # httpx parses a redirect's Location even when not following it; a Location it
+            # cannot parse will never parse, so it is not retried like a transport error.
+            if str(exc).startswith("Invalid URL in location header"):
+                raise _Unread(f"redirect from {url} to an invalid URL") from exc
+            raise
         target = resp.next_request
         if target is None:
             return await _read_capped(resp)
@@ -599,8 +629,7 @@ async def _preprint_text(client: httpx.AsyncClient, doc: Any, record: dict) -> F
     if license not in COMMERCIAL_LICENSES:
         return _summary(doc, "summary", license)
     url = record.get("jatsxml")
-    host = httpx.URL(url).host if isinstance(url, str) and url.startswith("http") else ""
-    if not _allowed(host, _PREPRINT_HOSTS):
+    if not _allowed(_https_host(url), _PREPRINT_HOSTS):
         return None
     resp = await _get(client, url, _BIORXIV_PACER, hosts=_PREPRINT_HOSTS)
     pairs = sections_from_jats(resp.text) if resp is not None else []

@@ -18,7 +18,8 @@ compare with (``expected``). Item kinds and the stages whose change runs them:
 **The gate** (``run_regression``) asks the candidate epoch's own prompts, models and rubric
 (``epochs.epoch_inputs``) for each item of the stages its change touches, and holds the epoch
 when any stage misses its threshold or has no item to check (expert, pair and similarity items
-excepted: ``EMPTY_ALLOWED_KINDS``). With no active epoch only the S2-S4 items are checked (D65).
+excepted: ``EMPTY_ALLOWED_KINDS``), or when its change touches stages but no item of any of them
+was checked. With no active epoch only the S2-S4 items are checked (D65).
 The candidate is judged on the set version current when it was created, or the first version
 when it predates every version.
 
@@ -93,7 +94,8 @@ FIRST_EPOCH_KINDS = ("screen", "extract", "triage")
 #: judgment is a normal state (§10.6), and ``pair`` and ``similarity`` items exist only when
 #: the active cut produced comparisons or related pairs, which a small active landscape (K = 1)
 #: never does. Any other touched kind with no items (S2-S4, ``deep``, ``final``) fails its
-#: stage, so an unchecked change is held for an admin (L28) rather than passed.
+#: stage, so an unchecked change is held for an admin (L28) rather than passed; and a run whose
+#: touched kinds are all allowed-empty and all empty checked nothing, so it is held too.
 EMPTY_ALLOWED_KINDS = frozenset({"expert", "pair", "similarity"})
 
 # The §10.4 pass rule for S6-S9 (S2-S4 use the §10.1 thresholds in ``eval.bakeoff``).
@@ -681,7 +683,9 @@ async def run_regression(db_factory, epoch_id: uuid.UUID) -> bool:
     gates and scores ±1 ≥ 90%; expert items at least as often as the active epoch. A touched
     kind the version holds no items of fails its stage (``{"items": 0, "checks": {"items":
     False}, "passed": False}``), except an ``EMPTY_ALLOWED_KINDS`` one (expert, pair,
-    similarity), which is skipped.
+    similarity), which is skipped; but a run that touches kinds and checks none of them fails
+    (a change of S7 or S8 alone against a set with no pairs is held, never passed unchecked).
+    A change that touches no kind (S8 labels alone, which are never scored) passes.
 
     Records a ``LandscapeRegressionRun`` with the per-stage results and stamps the epoch's
     ``regression_set_version`` and ``regression_run_id``. On a failure the epoch is held
@@ -721,7 +725,8 @@ async def run_regression(db_factory, epoch_id: uuid.UUID) -> bool:
             )
         elif kind not in EMPTY_ALLOWED_KINDS:
             results[kind] = {"items": 0, "checks": {"items": False}, "passed": False}
-    passed = all(result["passed"] for result in results.values())
+    checked_nothing = bool(kinds) and not results
+    passed = not checked_nothing and all(result["passed"] for result in results.values())
     run_id = uuid.uuid4()
     async with db_factory() as db:
         db.add(LandscapeRegressionRun(
@@ -738,6 +743,8 @@ async def run_regression(db_factory, epoch_id: uuid.UUID) -> bool:
         await db.commit()
         if not passed:
             failing = ", ".join(kind for kind, result in results.items() if not result["passed"])
+            if checked_nothing:
+                failing = f"no item of {', '.join(kinds)} to check"
             await epochs.hold(
                 db, epoch_id, f"regression failed on set version {version}: {failing}"
             )
