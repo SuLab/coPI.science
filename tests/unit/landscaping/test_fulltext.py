@@ -392,7 +392,7 @@ async def test_a_redirect_off_https_yields_no_text(monkeypatch, location):
     assert not [r for r in requests if r.url.scheme != "https"]
 
 
-async def test_a_redirect_on_an_open_route_is_followed_unread(monkeypatch):
+async def test_a_redirect_within_the_routes_hosts_is_followed_unread(monkeypatch):
     body_read: list[bool] = []
 
     async def body():
@@ -461,3 +461,48 @@ async def test_a_redirect_chain_past_the_limit_yields_no_text(monkeypatch):
     result = await fulltext.fetch_full_text(_doc(doi=None))
     assert (result.basis, result.route) == ("summary", None)
     assert len([r for r in requests if r.url.path == XML_PATH]) == fulltext._MAX_REDIRECTS + 1
+
+
+@pytest.mark.parametrize("location", [
+    "https://invented-elsewhere.example/moved.xml", "https://10.0.0.1:8443/moved.xml",
+])
+async def test_a_redirect_off_the_routes_hosts_is_not_followed(monkeypatch, location):
+    requests = _install(monkeypatch, _pmc_xml_answered_by(
+        lambda request: httpx.Response(302, headers={"Location": location})
+    ))
+    result = await fulltext.fetch_full_text(_doc(doi=None))
+    assert (result.basis, result.route) == ("summary", None)
+    assert not [r for r in requests if r.url.path == "/moved.xml"]
+
+
+async def test_a_host_that_is_not_valid_idna_yields_no_text(monkeypatch):
+    requests = _install(monkeypatch, _pmc_xml_answered_by(
+        lambda request: httpx.Response(302, headers={"Location": "https://xn--a-/moved.xml"})
+    ))
+    result = await fulltext.fetch_full_text(_doc(doi=None))
+    assert (result.basis, result.route) == ("summary", None)
+    assert len([r for r in requests if r.url.path == XML_PATH]) == 1
+
+    def details(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.biorxiv.org" and "/details/biorxiv/" in request.url.path:
+            return httpx.Response(200, json={"collection": [
+                {"license": "cc_by", "jatsxml": "https://xn--a-.biorxiv.org/x.xml"}]})
+        return httpx.Response(404)
+
+    requests = _install(monkeypatch, details)
+    result = await fulltext.fetch_full_text(_doc(pmcid=None, doi=PREPRINT_DOI))
+    assert (result.basis, result.route) == ("summary", None)
+    assert not [r for r in requests if r.url.path == "/x.xml"]
+
+
+@pytest.mark.parametrize("coding, body", [
+    ("gzip", gzip.compress(JATS.encode())[:-12]), ("br", b"\x00"),
+], ids=["truncated-gzip", "unread-coding"])
+async def test_a_transient_error_is_retried_whatever_its_body(monkeypatch, coding, body):
+    requests = _install(monkeypatch, _pmc_xml_answered_by(lambda request: httpx.Response(
+        503, content=_streamed(body), headers={"Content-Encoding": coding},
+    )))
+    result = await fulltext.fetch_full_text(_doc(doi=None))
+    assert result.basis == "fetch_failed"
+    # The first try and 3 retries (D41): the body the decoder would refuse is never read.
+    assert len([r for r in requests if r.url.path == XML_PATH]) == 4

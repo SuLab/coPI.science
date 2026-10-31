@@ -18,11 +18,13 @@ as "summary only" (D41).
 
 Every request accepts only ``gzip`` and ``deflate``, and every response body is read up to
 `MAX_BODY_BYTES` and dropped past it, counted after a bounded decode of that coding (any other
-coding, or a truncated compressed body, is not read). Redirects are followed by hand, at most
-`_MAX_REDIRECTS`, only to ``https`` URLs and never reading a redirect's body; the preprint JATS
-fetch, whose URL comes from the ``details`` record, must itself be ``https`` and follows
-redirects only to `_PREPRINT_HOSTS`. A dropped body, a refused redirect or a request httpx
-cannot make (a bad URL, a bad redirect ``Location`` or coding) leaves the route with nothing.
+coding, or a truncated compressed body, is not read); an error status's body is never read,
+so only the status decides. Redirects are followed by hand, at most `_MAX_REDIRECTS`, only to
+``https`` URLs on the route's own hosts, never reading a redirect's body; the preprint JATS
+fetch, whose URL comes from the ``details`` record, must itself be ``https`` on
+`_PREPRINT_HOSTS`. A dropped body, a refused redirect or a request httpx cannot make (a bad
+URL, a host that is not valid IDNA, a bad redirect ``Location`` or coding) leaves the route
+with nothing.
 """
 from __future__ import annotations
 
@@ -62,6 +64,10 @@ BIOC_URL = (
 EUROPEPMC_SEARCH_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 EUROPEPMC_TEXT_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML"
 BIORXIV_DETAILS_URL = "https://api.biorxiv.org/details/{server}/{doi}"
+#: The hosts each route may be redirected to (`_allowed`: the host or a subdomain of it).
+_PMC_HOSTS = ("pmc-oa-opendata.s3.amazonaws.com",)
+_BIOC_HOSTS = ("ncbi.nlm.nih.gov",)
+_EUROPEPMC_HOSTS = ("ebi.ac.uk",)
 _PREPRINT_HOSTS = ("biorxiv.org", "medrxiv.org")
 #: Most bytes of one response body read, both as received and after content decoding; a
 #: longer body is dropped. JATS or BioC markup carrying `MAX_CHARS` of text is a small
@@ -76,10 +82,13 @@ _CODINGS: dict[str, int | None] = {
 #: The codings a request accepts: those `_BoundedDecoder` reads. httpx's default also offers
 #: ``br`` and ``zstd`` when their decoders are installed, which would then be refused.
 _ACCEPT_ENCODING = "gzip, deflate"
-#: httpx errors that mean this request cannot be made or read, whatever the retry: the route
-#: has nothing. Transient transport errors (`evidence.RETRYABLE_TRANSPORT`) are not here.
+#: Errors that mean this request cannot be made or read, whatever the retry: the route has
+#: nothing. ``UnicodeError`` is idna's ``IDNAError``, which httpx raises reading a host that
+#: is not valid IDNA (a redirect to ``https://xn--a-/``). Transient transport errors
+#: (`evidence.RETRYABLE_TRANSPORT`) are not here.
 _UNREADABLE = (
     httpx.UnsupportedProtocol, httpx.TooManyRedirects, httpx.DecodingError, httpx.InvalidURL,
+    UnicodeError,
 )
 #: Headers describing the transferred body, not the decoded bytes a capped read keeps.
 _TRANSFER_HEADERS = frozenset({"content-encoding", "content-length", "transfer-encoding"})
@@ -118,7 +127,7 @@ class _TransientFetch(Exception):
 
 class _Unread(Exception):
     """A response not read: a body over `MAX_BODY_BYTES` or in an unread or corrupt coding,
-    or a redirect refused (not ``https``, off the allowlist, or past `_MAX_REDIRECTS`)."""
+    or a redirect refused (not ``https``, off the route's hosts, or past `_MAX_REDIRECTS`)."""
 
 
 def _make_client() -> httpx.AsyncClient:
@@ -159,7 +168,7 @@ def _https_host(url: Any) -> str:
         return ""
     try:
         return httpx.URL(url).host
-    except httpx.InvalidURL:
+    except (httpx.InvalidURL, UnicodeError):
         return ""
 
 
@@ -251,11 +260,11 @@ async def _read_capped(resp: httpx.Response) -> httpx.Response:
 
 
 async def _fetch(client: httpx.AsyncClient, url: str, params: dict[str, str] | None,
-                 hosts: tuple[str, ...] | None) -> httpx.Response:
+                 hosts: tuple[str, ...]) -> httpx.Response:
     """One GET with its body capped. Up to `_MAX_REDIRECTS` redirects are followed by hand,
-    each only to an ``https`` URL and, with ``hosts``, only to a host in ``hosts``; a
-    redirect's body is never read. `_Unread` for a refused redirect, before any request to
-    its target, or past the redirect limit."""
+    each only to an ``https`` URL on a host in ``hosts``; a redirect's body is never read. An
+    error status returns with an empty body, unread. `_Unread` for a refused redirect, before
+    any request to its target, or past the redirect limit."""
     request = client.build_request(
         "GET", url, params=params, headers={"Accept-Encoding": _ACCEPT_ENCODING},
     )
@@ -270,11 +279,16 @@ async def _fetch(client: httpx.AsyncClient, url: str, params: dict[str, str] | N
             raise
         target = resp.next_request
         if target is None:
+            if resp.status_code >= 400:
+                # Only the status is used (a retry, else nothing), so a body the decoder would
+                # refuse cannot turn a transient error into "no text" (D41).
+                await resp.aclose()
+                return httpx.Response(resp.status_code, request=resp.request)
             return await _read_capped(resp)
         await resp.aclose()
         if target.url.scheme != "https":
             raise _Unread(f"redirect from {url} to a {target.url.scheme} URL")
-        if hosts is not None and not _allowed(target.url.host, hosts):
+        if not _allowed(target.url.host, hosts):
             raise _Unread(f"redirect from {url} off the allowlist to {target.url.host}")
         request = target
     raise _Unread(f"more than {_MAX_REDIRECTS} redirects from {url}")
@@ -282,7 +296,7 @@ async def _fetch(client: httpx.AsyncClient, url: str, params: dict[str, str] | N
 
 async def _get(client: httpx.AsyncClient, url: str, pacer: Pacer,
                params: dict[str, str] | None = None, *,
-               hosts: tuple[str, ...] | None = None) -> httpx.Response | None:
+               hosts: tuple[str, ...]) -> httpx.Response | None:
     """GET, paced and retried, its body read up to `MAX_BODY_BYTES`. None for a
     non-transient error status, a body `_fetch` or `_read_capped` refuses, or an
     `_UNREADABLE` httpx error: the route has nothing. `_TransientFetch` when the retries end
@@ -530,7 +544,8 @@ def _s3_https(url: Any) -> str | None:
 async def _pmc_metadata(client: httpx.AsyncClient, pmcid: str) -> dict | None:
     """The newest version's metadata JSON, found by listing ``metadata/<pmcid>.``."""
     listing = await _get(client, f"{PMC_BUCKET_URL}/", _S3_PACER,
-                         params={"list-type": "2", "prefix": f"metadata/{pmcid}."})
+                         params={"list-type": "2", "prefix": f"metadata/{pmcid}."},
+                         hosts=_PMC_HOSTS)
     if listing is None:
         return None
     versions = [int(v) for v in
@@ -538,7 +553,7 @@ async def _pmc_metadata(client: httpx.AsyncClient, pmcid: str) -> dict | None:
     if not versions:
         return None
     meta = _json(await _get(client, f"{PMC_BUCKET_URL}/metadata/{pmcid}.{max(versions)}.json",
-                            _S3_PACER))
+                            _S3_PACER, hosts=_PMC_HOSTS))
     return meta if isinstance(meta, dict) else None
 
 
@@ -550,13 +565,13 @@ async def _pmc_pairs(client: httpx.AsyncClient, meta: dict, pmcid: str) -> list[
     url = _s3_https(meta.get("xml_url"))
     if url is not None:
         try:
-            resp = await _get(client, url, _S3_PACER)
+            resp = await _get(client, url, _S3_PACER, hosts=_PMC_HOSTS)
             pairs = sections_from_jats(resp.text) if resp is not None else []
         except _TransientFetch as exc:
             cloud_error = exc
     if not pairs:
-        pairs = _sections_from_bioc(
-            _json(await _get(client, BIOC_URL.format(pmcid=pmcid), _BIOC_PACER)))
+        pairs = _sections_from_bioc(_json(await _get(
+            client, BIOC_URL.format(pmcid=pmcid), _BIOC_PACER, hosts=_BIOC_HOSTS)))
     if not pairs and cloud_error is not None:
         raise cloud_error
     return pairs
@@ -598,7 +613,8 @@ async def _europepmc_route(client: httpx.AsyncClient, doc: Any) -> FullText | No
     if query is None:
         return None
     data = _json(await _get(client, EUROPEPMC_SEARCH_URL, _EUROPEPMC_PACER, params={
-        "query": query, "resultType": "core", "format": "json", "pageSize": "1"}))
+        "query": query, "resultType": "core", "format": "json", "pageSize": "1"},
+        hosts=_EUROPEPMC_HOSTS))
     result_list = data.get("resultList") if isinstance(data, dict) else None
     results = (result_list.get("result") or []) if isinstance(result_list, dict) else []
     if not results:
@@ -611,7 +627,8 @@ async def _europepmc_route(client: httpx.AsyncClient, doc: Any) -> FullText | No
     if license is None or pmcid is None or record.get("inEPMC") != "Y" \
             or record.get("isOpenAccess") != "Y":
         return None
-    resp = await _get(client, EUROPEPMC_TEXT_URL.format(pmcid=pmcid), _EUROPEPMC_PACER)
+    resp = await _get(client, EUROPEPMC_TEXT_URL.format(pmcid=pmcid), _EUROPEPMC_PACER,
+                      hosts=_EUROPEPMC_HOSTS)
     pairs = sections_from_jats(resp.text) if resp is not None else []
     return _full_text(pairs, "europepmc", license) if pairs else None
 
@@ -642,7 +659,7 @@ async def _preprint_route(client: httpx.AsyncClient, doc: Any) -> FullText | Non
         return None
     for server in ("biorxiv", "medrxiv"):
         data = _json(await _get(client, BIORXIV_DETAILS_URL.format(
-            server=server, doi=quote(doi, safe="/")), _BIORXIV_PACER))
+            server=server, doi=quote(doi, safe="/")), _BIORXIV_PACER, hosts=_PREPRINT_HOSTS))
         records = (data.get("collection") or []) if isinstance(data, dict) else []
         if records:
             # The details endpoint lists versions oldest first.
