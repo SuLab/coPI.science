@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from src.config import get_settings
-from src.landscaping import epochs
+from src.landscaping import epochs, panel
 from src.landscaping.criteria import load_criteria
 from src.landscaping.epochs import (
     STAGE_INPUTS,
@@ -166,6 +166,65 @@ async def test_first_epoch_is_candidate(db_session, components):
     assert tuple(epoch.changed_stages) == ALL_STAGES
     assert epoch.built_from_epoch_id is None
     assert epoch.prompt_set_version and epoch.criteria_version
+    # The first epoch stores its judging inputs too.
+    assert epoch.snapshot == epochs.build_snapshot()
+    assert epoch.prompt_set_version == epoch.snapshot["prompt_set_version"]
+
+
+async def test_epoch_inputs_use_the_snapshot_not_the_files(
+    db_session, components, tmp_path, monkeypatch
+):
+    work = tmp_path / "landscaping"
+    shutil.copytree(PROMPT_DIR, work)
+    monkeypatch.setattr(epochs, "load_prompt_set", lambda: load_prompt_set(work))
+    stored_model = get_settings().landscape_screen_model
+    epoch = await ensure_candidate(db_session)
+    original = load_prompt_set(work).files["screen.md"]
+
+    # The judging prompt and the stage model change after the epoch was created.
+    screen_md = work / "screen.md"
+    screen_md.write_text(original + "\nAn invented later instruction.\n", encoding="utf-8")
+    stamp("invented-later-version", work)
+    assert "An invented later instruction." in load_prompt_set(work).files["screen.md"]
+    monkeypatch.setattr(get_settings(), "landscape_screen_model", "claude-invented-later")
+
+    inputs = await epochs.epoch_inputs(db_session, epoch.id)
+    assert inputs.ps.files["screen.md"] == original
+    assert inputs.ps.judging_hashes == load_prompt_set(PROMPT_DIR).judging_hashes
+    assert "An invented later instruction." not in inputs.system("screen")
+    assert inputs.model("screen") == stored_model
+    assert inputs.model("deep_extract") == inputs.model("deep")
+    assert inputs.criteria.judging_hash == load_criteria().judging_hash
+    assert inputs.rubric.content_hash == epochs.load_rubric().content_hash
+    assert await epochs.epoch_inputs(db_session, epoch.id) is inputs
+
+    bare = await _epoch(db_session, "candidate", _components(**{"final.md": "invented-2"}))
+    with pytest.raises(LookupError):
+        await epochs.epoch_inputs(db_session, bare.id)
+
+
+async def test_personas_are_an_epoch_input(db_session, monkeypatch):
+    assert changed_stages(BASE, _components(personas="invented-2")) == (
+        "deep", "rerank", "similarity", "label", "final"
+    )
+    base = epochs.current_components()
+    epoch = await ensure_candidate(db_session)
+    composed = {domain: panel.compose_persona(domain) for domain in panel.PANEL_CHEMISTRY}
+    assert epoch.snapshot["personas"] == composed
+
+    # A persona edit after the epoch was created changes only the personas component, and the
+    # epoch keeps judging with the personas it stored.
+    original = panel.compose_persona
+    monkeypatch.setattr(
+        panel, "compose_persona", lambda domain: original(domain) + "\nAn invented later line.\n"
+    )
+    later = epochs.current_components()
+    assert {key for key in base if base[key] != later[key]} == {"personas"}
+    inputs = await epochs.epoch_inputs(db_session, epoch.id)
+    for domain in panel.PANEL_CHEMISTRY:
+        assert inputs.persona(domain) == composed[domain]
+    with pytest.raises(KeyError):
+        inputs.persona("invented-domain")
 
 
 async def test_no_change_no_candidate(db_session, components):
@@ -409,6 +468,54 @@ async def test_unchanged_upstream_rows_copied_forward(db_session, components):
     assert cut.ordered_idea_ids == [str(idea.id)]
     assert await _count(db_session, LandscapeDeep, LandscapeDeep.epoch_id == candidate.id) == 0
     assert await _count(db_session, LandscapeRanking, LandscapeRanking.epoch_id == candidate.id) == 0
+
+
+async def test_copy_forward_remaps_fold_ids(db_session, components):
+    active = await _epoch(db_session, "active")
+    rows = await _judged_rows(db_session, active)
+    keeper = rows["idea"]
+    folded = LandscapeIdea(
+        epoch_id=active.id, idea_key="bio:HGNC:0002|inhibit|MONDO:0001", idea_type="biology",
+        version_hash="v1",
+    )
+    db_session.add(folded)
+    await db_session.flush()
+    cut = (await db_session.execute(
+        select(LandscapeCut).where(LandscapeCut.epoch_id == active.id)
+    )).scalar_one()
+    cut.folds = {
+        "folded": {str(keeper.id): [str(folded.id)]},
+        "tie_class": {
+            "ids": [str(keeper.id), str(folded.id)],
+            "versions": {str(keeper.id): "v1", str(folded.id): "v1"},
+        },
+    }
+    await db_session.flush()
+    source_folds = dict(cut.folds)
+
+    components["value"] = _components(**{"deep.md": "invented-2"})
+    candidate = await ensure_candidate(db_session)
+    unchanged = tuple(s for s in ALL_STAGES if s not in candidate.changed_stages)
+    await copy_forward(db_session, from_epoch=active.id, to_epoch=candidate.id, stages=unchanged)
+
+    new_ids = {
+        idea.idea_key: str(idea.id) for idea in (await db_session.execute(
+            select(LandscapeIdea).where(LandscapeIdea.epoch_id == candidate.id)
+        )).scalars()
+    }
+    new_keeper, new_folded = new_ids[keeper.idea_key], new_ids[folded.idea_key]
+    copied = (await db_session.execute(
+        select(LandscapeCut).where(LandscapeCut.epoch_id == candidate.id)
+    )).scalar_one()
+    assert copied.folds == {
+        "folded": {new_keeper: [new_folded]},
+        "tie_class": {
+            "ids": [new_keeper, new_folded],
+            "versions": {new_keeper: "v1", new_folded: "v1"},
+        },
+    }
+    await db_session.refresh(cut)
+    assert cut.folds == source_folds
 
 
 async def test_rerank_model_change_marks_cut():

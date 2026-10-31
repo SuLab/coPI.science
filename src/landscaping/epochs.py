@@ -2,26 +2,47 @@
 candidate appears, and how it is held, overridden, built and activated.
 
 An epoch is identified only by its *components* (``current_components``): the eight judging
-prompt hashes, the criteria file's judging hash, the rubric and BlackbirdBot extract hashes, and
-the eight stage model settings. A change marks the stages that read the changed component, plus
+prompt hashes, the criteria file's judging hash, the rubric and BlackbirdBot extract hashes, the
+hash of S6's composed specialist personas, and the eight stage model settings. A change marks the stages that read the changed component, plus
 every stage downstream of them (``changed_stages``); the other stages are copied forward from the
 epoch the candidate was built from (``copy_forward``). Nothing here writes a row of the active
 epoch: a candidate only ever inserts its own rows (§7.11 step 3).
+
+Each epoch also stores the inputs themselves (``snapshot``, from ``build_snapshot``), and its
+stage runners judge with those (``epoch_inputs``), never with the files on disk or the current
+settings: the active epoch keeps serving unchanged while a candidate is built (§7.11).
 
 Every function that writes commits its own transaction.
 """
 from __future__ import annotations
 
+import hashlib
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 from sqlalchemy import ColumnElement, Table, and_, exists, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import get_settings
-from src.landscaping.criteria import load_criteria
-from src.landscaping.prompt_set import JUDGING_FILES, load_blackbird_extracts, load_prompt_set
+from src.landscaping import panel
+from src.landscaping.criteria import (
+    CRITERIA_PATH,
+    Criteria,
+    CriteriaError,
+    load_criteria,
+    parse_criteria,
+)
+from src.landscaping.llm_client import STAGE_SPECS
+from src.landscaping.prompt_set import (
+    JUDGING_FILES,
+    BlackbirdExtracts,
+    PromptSet,
+    load_blackbird_extracts,
+    load_prompt_set,
+    prompt_set_from_texts,
+    system_prompt,
+)
 from src.models import AppSetting
 from src.models.landscape import (
     LandscapeCandidateGrouping,
@@ -42,7 +63,12 @@ from src.models.landscape import (
     LandscapeSimilarity,
     LandscapeTriage,
 )
-from src.services.blackbird_rubric import load_rubric
+from src.services.blackbird_rubric import (
+    Rubric,
+    load_rubric,
+    loaded_rubric_bytes,
+    parse_rubric_bytes,
+)
 
 # The judged stages in pipeline order; ``changed_stages`` returns them in this order.
 _STAGES = ("screen", "extract", "triage", "cut", "deep", "rerank", "similarity", "label", "final")
@@ -62,6 +88,7 @@ STAGE_INPUTS: dict[str, tuple[str, ...]] = {
     "criteria": ("screen", "extract", "triage", "deep", "final"),
     "rubric": ("extract", "triage", "deep", "final"),
     "extracts": ("triage", "deep", "final"),
+    "personas": ("deep",),
     "landscape_screen_model": ("screen",),
     "landscape_extract_model": ("extract",),
     "landscape_triage_model": ("triage",),
@@ -107,9 +134,131 @@ def current_components() -> dict:
     components["criteria"] = load_criteria().judging_hash
     components["rubric"] = load_rubric().content_hash
     components["extracts"] = load_blackbird_extracts().content_hash
+    components["personas"] = _personas_hash(_composed_personas())
     for name in _MODEL_SETTINGS:
         components[name] = getattr(settings, name)
     return components
+
+
+def _composed_personas() -> dict[str, str]:
+    """Each panel domain's persona as S6 consults it (``panel.compose_persona``), keyed in
+    ``panel.PANEL_CHEMISTRY`` order (the biology panel is a subset)."""
+    return {domain: panel.compose_persona(domain) for domain in panel.PANEL_CHEMISTRY}
+
+
+def _personas_hash(personas: dict[str, str]) -> str:
+    """sha256 over the composed personas in ``panel.PANEL_CHEMISTRY`` order, each preceded by
+    its domain, every part NUL-terminated."""
+    digest = hashlib.sha256()
+    for domain in panel.PANEL_CHEMISTRY:
+        for part in (domain, personas[domain]):
+            digest.update(part.encode("utf-8"))
+            digest.update(b"\0")
+    return digest.hexdigest()
+
+
+#: The stages whose model an epoch stores (``build_snapshot``); S6's full-text re-extraction
+#: (``deep_extract``) runs on the deep model.
+_SNAPSHOT_MODEL_STAGES = (
+    "screen", "extract", "triage", "deep", "rerank", "similarity", "label", "final",
+)
+_MODEL_ALIASES = {"deep_extract": "deep"}
+
+
+def build_snapshot() -> dict:
+    """The judging inputs on disk and in settings, as stored on a new epoch (spec §7.11).
+
+    Keys: ``prompt_set_version``; ``prompt_files`` (each ``JUDGING_FILES`` name -> text);
+    ``criteria`` (the criteria file's text); ``extracts`` (the ``BlackbirdExtracts`` fields);
+    ``rubric`` (the loaded rubric document's text); ``personas`` (each ``panel.PANEL_CHEMISTRY``
+    domain -> its composed persona, ``panel.compose_persona``); ``models`` (stage -> model, for
+    the eight judged model stages). Raises what the loaders raise (``CriteriaError`` for an
+    unreadable criteria file).
+    """
+    settings = get_settings()
+    prompt_set = load_prompt_set()
+    try:
+        criteria_text = CRITERIA_PATH.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise CriteriaError(f"criteria file unreadable at {CRITERIA_PATH}: {exc}") from exc
+    return {
+        "prompt_set_version": prompt_set.version,
+        "prompt_files": {name: prompt_set.files[name] for name in JUDGING_FILES},
+        "criteria": criteria_text,
+        "extracts": asdict(load_blackbird_extracts()),
+        "rubric": loaded_rubric_bytes().decode("utf-8"),
+        "personas": _composed_personas(),
+        "models": {
+            stage: getattr(settings, STAGE_SPECS[stage].model_setting)
+            for stage in _SNAPSHOT_MODEL_STAGES
+        },
+    }
+
+
+@dataclass(frozen=True)
+class EpochInputs:
+    """One epoch's judging inputs, rebuilt from its stored snapshot (``epoch_inputs``)."""
+
+    epoch_id: uuid.UUID
+    ps: PromptSet
+    ex: BlackbirdExtracts
+    criteria: Criteria
+    rubric: Rubric
+    #: Stage -> model, the ``build_snapshot`` keys.
+    models: dict[str, str]
+    #: Panel domain -> composed persona, as ``build_snapshot`` stored it.
+    personas: dict[str, str]
+
+    def system(self, stage: str) -> str:
+        """``stage``'s system prompt from these inputs (``prompt_set.system_prompt``)."""
+        return system_prompt(
+            stage, ps=self.ps, ex=self.ex, criteria=self.criteria, rubric=self.rubric
+        )
+
+    def model(self, stage: str) -> str:
+        """``stage``'s model; ``deep_extract`` takes the deep model. ``KeyError`` for a stage
+        the snapshot holds no model for."""
+        return self.models[_MODEL_ALIASES.get(stage, stage)]
+
+    def persona(self, domain: str) -> str:
+        """``domain``'s composed specialist persona, the S6 consult's system prompt. ``KeyError``
+        for a domain outside ``panel.PANEL_CHEMISTRY``."""
+        return self.personas[domain]
+
+
+# Snapshots never change once written, so an epoch's inputs are built once per process.
+_INPUTS_CACHE: dict[uuid.UUID, EpochInputs] = {}
+
+
+async def epoch_inputs(db: AsyncSession, epoch_id: uuid.UUID) -> EpochInputs:
+    """The judging inputs stored on ``epoch_id`` (spec §7.11), cached per epoch in-process.
+
+    Raises ``LookupError`` when the epoch does not exist or has no snapshot (``KeyError``, a
+    ``LookupError``, when the snapshot lacks an input such as ``personas``), and the parsers'
+    errors (``CriteriaError``, ``RubricError``, ``PromptSetError``) for a defective one.
+    """
+    cached = _INPUTS_CACHE.get(epoch_id)
+    if cached is not None:
+        return cached
+    snapshot = await db.scalar(
+        select(LandscapeEpoch.snapshot).where(LandscapeEpoch.id == epoch_id)
+    )
+    if not snapshot:
+        raise LookupError(
+            f"epoch {epoch_id} has no stored snapshot of its judging inputs; "
+            "its stage runners cannot judge with it"
+        )
+    inputs = EpochInputs(
+        epoch_id=epoch_id,
+        ps=prompt_set_from_texts(snapshot["prompt_set_version"], snapshot["prompt_files"]),
+        ex=BlackbirdExtracts(**snapshot["extracts"]),
+        criteria=parse_criteria(snapshot["criteria"], f"epoch {epoch_id} snapshot"),
+        rubric=parse_rubric_bytes(snapshot["rubric"].encode("utf-8"), "epoch snapshot"),
+        models=dict(snapshot["models"]),
+        personas=dict(snapshot["personas"]),
+    )
+    _INPUTS_CACHE[epoch_id] = inputs
+    return inputs
 
 
 def changed_stages(old: dict, new: dict) -> tuple[str, ...]:
@@ -196,8 +345,8 @@ async def ensure_candidate(db: AsyncSession) -> LandscapeEpoch | None:
     stale and is retired. Returns the existing unactivated epoch (candidate or held) whose
     components match, retiring any other. Otherwise retires every unactivated epoch and creates a
     candidate built from the active epoch, or, while none is active, from the replaced candidate's
-    unchanged stages; with nothing to build from it re-judges every stage. Never writes the active
-    epoch.
+    unchanged stages; with nothing to build from it re-judges every stage. Every epoch it creates
+    stores ``build_snapshot()``. Never writes the active epoch.
     """
     components = current_components()
     active = await active_epoch(db)
@@ -213,11 +362,13 @@ async def ensure_candidate(db: AsyncSession) -> LandscapeEpoch | None:
         return matching[0]
     source, stages = await _build_source(db, active, pending, components)
     await _retire(db, pending)
-    prompt_set_version, criteria_version = load_prompt_set().version, load_criteria().version
+    snapshot = build_snapshot()
+    criteria_version = parse_criteria(snapshot["criteria"], str(CRITERIA_PATH)).version
     candidate = LandscapeEpoch(
         status="candidate",
         components=components,
-        prompt_set_version=prompt_set_version,
+        snapshot=snapshot,
+        prompt_set_version=snapshot["prompt_set_version"],
         criteria_version=criteria_version,
         changed_stages=list(stages),
         built_from_epoch_id=source.id if source is not None else None,
@@ -420,20 +571,44 @@ async def _copy_comparisons(db, src, dst, maps: _IdMaps, basis: str) -> None:
 
 async def _copy_cut(db, src, dst, maps: _IdMaps, stages: set[str]) -> None:
     """S5: complete cuts (a ``boundary_pending`` one waits on the source's own batch) and the
-    tie-break comparisons."""
+    tie-break comparisons. A cut's idea ids (``ordered_idea_ids``, and in ``folds`` the
+    keepers, the folded ids and the tie class's ``ids`` and ``versions`` keys) are repointed at
+    the copied ideas."""
     cut = LandscapeCut.__table__
     by_str = {str(old): str(new) for old, new in maps.ideas.items()}
 
+    def _id(value):
+        return by_str.get(str(value), value)
+
     def _cut(values: dict) -> None:
         if values.get("ordered_idea_ids"):
-            values["ordered_idea_ids"] = [
-                by_str.get(str(i), i) for i in values["ordered_idea_ids"]
-            ]
+            values["ordered_idea_ids"] = [_id(i) for i in values["ordered_idea_ids"]]
+        if values.get("folds"):
+            values["folds"] = _remap_folds(values["folds"], _id)
 
     maps.cuts.update(await _copy_rows(
         db, cut, and_(cut.c.epoch_id == src, cut.c.status == "complete"), dst, adjust=_cut
     ))
     await _copy_comparisons(db, src, dst, maps, "triage")
+
+
+def _remap_folds(folds: dict, remap: Callable) -> dict:
+    """``folds`` (``stages.cut``'s shape) with every idea id passed through ``remap``."""
+    out = dict(folds)
+    if isinstance(folds.get("folded"), dict):
+        out["folded"] = {
+            remap(keeper): [remap(i) for i in folded]
+            for keeper, folded in folds["folded"].items()
+        }
+    tie = folds.get("tie_class")
+    if isinstance(tie, dict):
+        tie = dict(tie)
+        if isinstance(tie.get("ids"), list):
+            tie["ids"] = [remap(i) for i in tie["ids"]]
+        if isinstance(tie.get("versions"), dict):
+            tie["versions"] = {remap(i): v for i, v in tie["versions"].items()}
+        out["tie_class"] = tie
+    return out
 
 
 async def _copy_deep(db, src, dst, maps: _IdMaps, stages: set[str]) -> None:
@@ -510,8 +685,9 @@ async def copy_forward(
 
     ``stages`` must be closed upstream (the complement of ``changed_stages``); ``final`` copies
     nothing. Copied rows get new ids, with their references to copied ideas, extractions, cuts
-    and deep records repointed; a row still owed work is copied as ``pending``. JSON contents,
-    and references to shared inputs (documents, batches), are copied verbatim. Only inserts:
+    and deep records repointed (a cut's idea ids inside its JSON too); a row still owed work is
+    copied as ``pending``. Other JSON contents, and references to shared inputs (documents,
+    batches), are copied verbatim. Only inserts:
     ``from_epoch``'s rows are never written. Raises ValueError for an unknown or not
     upstream-closed stage set, or when ``to_epoch`` is not a ``candidate``.
 

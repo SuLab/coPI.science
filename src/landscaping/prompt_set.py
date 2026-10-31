@@ -155,6 +155,22 @@ def load_prompt_set(dir: Path = PROMPT_DIR) -> PromptSet:
     )
 
 
+def prompt_set_from_texts(version: str, files: dict[str, str]) -> PromptSet:
+    """A ``PromptSet`` over stored texts (an epoch's snapshot, spec §7.11), with the hashes
+    ``load_prompt_set`` would give the same texts read from disk (sha256 of the UTF-8 bytes).
+    Raises ``PromptSetError`` when a ``JUDGING_FILES`` entry is absent."""
+    absent = [n for n in JUDGING_FILES if n not in files]
+    if absent:
+        raise PromptSetError(f"stored prompt set {version!r} lacks judging files {absent}")
+    hashes = {name: _sha256(text.encode("utf-8")) for name, text in files.items()}
+    return PromptSet(
+        version=version,
+        content_hash=_content_hash(hashes),
+        files=dict(sorted(files.items())),
+        judging_hashes={n: hashes[n] for n in JUDGING_FILES},
+    )
+
+
 def chat_prompt_matches(dir: Path = PROMPT_DIR) -> bool:
     """Whether ``chat.md`` matches its recorded hash. False on any read or record
     failure, so the chat refuses rather than answers on an unrecorded edit (spec §8.1)."""

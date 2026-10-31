@@ -305,6 +305,7 @@ def _create_batches_and_epochs() -> None:
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("status", sa.String(20), nullable=False, server_default="candidate"),
         sa.Column("components", postgresql.JSONB(none_as_null=True), nullable=True),
+        sa.Column("snapshot", postgresql.JSONB(none_as_null=True), nullable=True),
         sa.Column("prompt_set_version", sa.String(40), nullable=True),
         sa.Column("criteria_version", sa.String(40), nullable=True),
         sa.Column("changed_stages", postgresql.JSONB(none_as_null=True), nullable=True),
@@ -811,6 +812,7 @@ def _create_triage_cuts_and_deep() -> None:
         sa.Column("dimension_rationales", postgresql.JSONB(none_as_null=True), nullable=True),
         sa.Column("provisional_weighted_score", sa.Float(), nullable=True),
         sa.Column("outside_group_count", sa.Integer(), nullable=True),
+        sa.Column("summary", sa.Text(), nullable=True),
         sa.Column("search_transcript", postgresql.JSONB(none_as_null=True), nullable=True),
         sa.Column(
             "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now(),

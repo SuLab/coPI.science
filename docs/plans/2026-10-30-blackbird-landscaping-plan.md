@@ -80,6 +80,9 @@ tests are the pin moves named in a task.
 - No `temperature`, `top_p` or `top_k`.
 - Model JSON is parsed only with `src.services.json_extract.extract_json`.
 - Stored error text goes through `src.services.job_queue.job_error_text`.
+- Stage runners take each request's system prompt and model from
+  `epochs.epoch_inputs(db, epoch_id)`, never from the files on disk or the current settings,
+  so an epoch's judgments are never mixed (spec §7.11).
 
 **Keys:**
 - The OpenAlex key is read only through `src.services.openalex_auth`, the NCBI key only
@@ -285,7 +288,11 @@ Other shapes:
 - `LandscapeIdea` holds the assembled evidence summary, the data flags,
   `evidence_assembled_at`, and `evidence_status`: JSONB `{source: {"status": "pending" | "done"
   | "failed", "attempts": int}}`, one entry per evidence source (spec §7.4 step 5).
-- `LandscapeEpoch` carries `rejudge_started_at` and `drained_at` (spec §7.11 step 4).
+- `LandscapeEpoch` carries `rejudge_started_at` and `drained_at` (spec §7.11 step 4), and
+  `snapshot` (JSONB, nullable): the judging inputs themselves, stored when the epoch is created
+  (Task 2.3's `build_snapshot`), which its stage runners read (spec §7.11).
+- `LandscapeDeep` carries `summary` (text, nullable): S6's free-text summary, which the S7
+  comparator reads when present.
   `LandscapeCandidateGrouping` and `LandscapeOpportunityVersion` carry the `cut_id` they were
   grouped from.
 - `LandscapeReport.kind` is one of `bakeoff`, `bakeoff_request`, `probes`, `pilot`,
@@ -683,11 +690,15 @@ def transition(kind: str, *, attempts: int, truncated_once: bool, model: str) ->
     # the first time, then "failed:errored" or "failed:expired"; canceled → "pending"; truncated → "pending" with
     # truncated_once=True (the next request is built with retry=True), then "failed:truncated"; refusal →
     # "pending" with fallback_from=model
-@dataclass(frozen=True) class FallbackAdapter: stage: str; row_model: type; build: Callable[[Any], dict];
+@dataclass(frozen=True) class FallbackAdapter: stage: str; row_model: type;
+    build: Callable[[AsyncSession, Any], Awaitable[dict]];
     on_success: Callable[[AsyncSession, Any, CallResult], Awaitable[None]]
+    # build(db, row) rebuilds the row's request from the database (its document or stored dossier, and its
+    # epoch's inputs, Task 2.3's epoch_inputs) in a read session closed before the call.
     # each batched stage module exports FALLBACKS: tuple[FallbackAdapter, ...] (Tasks 4.4, 4.5, 4.6, 5.4, 5.5, 6.2)
 async def run_fallbacks(db_factory, adapter: FallbackAdapter) -> int
-    # pending rows with fallback_from set: call_sync(adapter.stage, adapter.build(row), skip_models={row.fallback_from});
+    # pending rows with fallback_from set: call_sync(adapter.stage, await adapter.build(db, row),
+    # skip_models={row.fallback_from});
     # success → adapter.on_success and the row's completion in one transaction; an exhausted chain → "refused".
     # Batch submission never selects a row with fallback_from set.
 async def reconcile_orphans(db_factory, *, may_submit: bool) -> int
@@ -744,6 +755,8 @@ async def reconcile_orphans(db_factory, *, may_submit: bool) -> int
   - `load_blackbird_extracts().content_hash`;
   - `load_prompt_set().judging_hashes` and `.version`;
   - `load_criteria().judging_hash` and `.version`;
+  - `parse_criteria(text, source)`, `prompt_set_from_texts(version, files)`,
+    `blackbird_rubric.loaded_rubric_bytes()` and `parse_rubric_bytes(raw, source)`;
   - stage model settings;
   - `LandscapeEpoch`.
 - **Produces:**
@@ -755,16 +768,32 @@ STAGE_INPUTS: dict[str, tuple[str, ...]]
     # cluster_label.md → label; final.md → final; criteria → screen, extract, triage, deep, final;
     # rubric → extract, triage, deep, final; extracts → triage, deep, final; each stage model → its stage, and the
     # rerank model → cut and rerank (it also judges the S5 tie-break)
+    # personas (the composed specialist personas, panel.compose_persona over PANEL_CHEMISTRY) → deep
 DOWNSTREAM: dict[str, tuple[str, ...]]  # screen → extract → triage → cut → deep → rerank, similarity, label; label → final; deep → final
 def current_components() -> dict
     # the identifying components (D61): judging hashes, the criteria judging hash, the rubric and extract hashes,
+    # "personas" (sha256 over the composed specialist personas in PANEL_CHEMISTRY order, read by S6),
     # and the eight stage model settings, never the fallback chain, the audit model or the chat model.
     # The set and criteria versions are recorded, not compared.
+def build_snapshot() -> dict
+    # the judging inputs on disk and in settings: {"prompt_set_version", "prompt_files": {each JUDGING_FILES name: text},
+    # "criteria": criteria.toml text, "extracts": {standards, practice, contract, scout_hub_version, content_hash},
+    # "rubric": the loaded rubric document's text, "models": {screen, extract, triage, deep, rerank, similarity,
+    # label, final: model}, "personas": {each panel.PANEL_CHEMISTRY domain: panel.compose_persona(domain)}}
+@dataclass(frozen=True) class EpochInputs: epoch_id: uuid.UUID; ps: PromptSet; ex: BlackbirdExtracts;
+    criteria: Criteria; rubric: Rubric; models: dict[str, str]; personas: dict[str, str]
+    def system(self, stage: str) -> str  # prompt_set.system_prompt(stage, ps=, ex=, criteria=, rubric=)
+    def model(self, stage: str) -> str   # deep_extract takes the deep model
+    def persona(self, domain: str) -> str  # the composed specialist persona S6 consults with (KeyError if unknown)
+async def epoch_inputs(db, epoch_id) -> EpochInputs
+    # rebuilt from the epoch's snapshot, never the files or settings (§7.11); cached per epoch in-process;
+    # LookupError for an epoch with no snapshot
 async def active_epoch(db) -> LandscapeEpoch | None
 async def ensure_candidate(db) -> LandscapeEpoch | None
     # creates a "candidate" when the identifying components differ from the active epoch's, or when none is active;
     # an unactivated candidate with other components is retired first; the new one is built from the active epoch,
-    # or, while none is active, from the retired candidate's unchanged stages (D65)
+    # or, while none is active, from the retired candidate's unchanged stages (D65). Every epoch it creates, the
+    # first included, stores build_snapshot().
 def changed_stages(old: dict, new: dict) -> tuple[str, ...]  # STAGE_INPUTS of each changed component, plus DOWNSTREAM
 async def hold(db, epoch_id, reason: str) -> None
 async def override(db, epoch_id, *, actor_id, reason: str) -> None
@@ -772,7 +801,8 @@ async def activate(db, epoch_id, *, on_activate: Callable[[AsyncSession, uuid.UU
     # one transaction: on_activate(db, old_active_id, epoch_id) (Task 5.4's activate_groupings, passed by the
     # worker), then candidate → active and old active → retired; on_activate raising rolls the whole switch back
 async def copy_forward(db, *, from_epoch, to_epoch, stages: tuple[str, ...]) -> None
-    # copies rows of unchanged upstream stages into the candidate (§7.11 step 2) and stamps its rejudge_started_at
+    # copies rows of unchanged upstream stages into the candidate (§7.11 step 2) and stamps its rejudge_started_at;
+    # a copied cut's idea ids (ordered_idea_ids, and the folds' keepers, folded ids and tie class) are repointed
 async def mark_drained(db, *, epoch_id) -> bool
     # acts only in phase "continuous": sets drained_at once no S2, S3, S4 or evidence-assembly work is pending for
     # any item created before rejudge_started_at. At the D69 flip the worker sets the current candidate's
@@ -797,6 +827,9 @@ async def mark_drained(db, *, epoch_id) -> bool
   - `test_rerank_model_change_marks_cut`.
   - `test_copy_forward_never_writes_active_rows`: `copy_forward` and `ensure_candidate` leave
     every active-epoch row unchanged. The full re-judge test is Task 6.5's (X1).
+  - `test_epoch_inputs_use_the_snapshot_not_the_files`: a judging prompt edited after the epoch
+    was created leaves `epoch_inputs(...).system(stage)` on the stored text.
+  - `test_copy_forward_remaps_fold_ids`.
 - [ ] **Step 2: Implement.**
 - [ ] **Step 3: Commit** `feat(landscaping): judgment epochs`.
 

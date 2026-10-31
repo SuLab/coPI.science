@@ -123,12 +123,34 @@ def load_criteria(path: Path = CRITERIA_PATH) -> Criteria:
     """Read and validate the criteria file at ``path``; raises ``CriteriaError``."""
     try:
         raw = path.read_bytes()
-        data = tomllib.loads(raw.decode("utf-8"))
     except OSError as exc:
         raise CriteriaError(f"criteria file unreadable at {path}: {exc}") from exc
-    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
         raise CriteriaError(f"criteria file is not valid TOML ({path}): {exc}") from exc
+    return _parse(raw, text, str(path))
 
+
+def parse_criteria(text: str, source: str = "criteria.toml") -> Criteria:
+    """Validate criteria-file ``text`` (an epoch's stored copy, say); ``source`` names it in
+    errors. ``content_hash`` is taken over the text's UTF-8 bytes. Raises ``CriteriaError``."""
+    return _parse(text.encode("utf-8"), text, source)
+
+
+def _parse(raw: bytes, text: str, source: str) -> Criteria:
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise CriteriaError(f"criteria file is not valid TOML ({source}): {exc}") from exc
+    try:
+        return _validated(raw, data)
+    except CriteriaError as exc:
+        # The validators name the field; this names which copy (the file or a snapshot).
+        raise CriteriaError(f"{exc} ({source})") from None
+
+
+def _validated(raw: bytes, data: dict) -> Criteria:
     meta = _table(data, "meta")
     _str_list(meta.get("changelog"), "[meta].changelog")
     vocab = _table(data, "vocab")

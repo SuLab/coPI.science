@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from src.landscaping.criteria import CRITERIA_PATH, CriteriaError, load_criteria
+from src.landscaping.criteria import CRITERIA_PATH, CriteriaError, load_criteria, parse_criteria
 from tests.unit.test_doc_prompt_sync import _FORBIDDEN
 
 
@@ -68,3 +68,14 @@ def test_criteria_has_no_forbidden_phrases():
 def test_invalid_criteria_raise(tmp_path, old, new):
     with pytest.raises(CriteriaError):
         load_criteria(_variant(tmp_path, old, new))
+
+
+def test_parse_criteria_matches_the_loader():
+    """An epoch's stored criteria text parses to what the file loads to (spec §7.11)."""
+    text = CRITERIA_PATH.read_bytes().decode("utf-8")
+    assert parse_criteria(text) == load_criteria()
+    with pytest.raises(CriteriaError, match="invented snapshot"):
+        parse_criteria(text.replace("dimension_share = 0.8", "dimension_share = 1.5"),
+                       "invented snapshot")
+    with pytest.raises(CriteriaError, match="not valid TOML"):
+        parse_criteria("[meta\n", "invented snapshot")

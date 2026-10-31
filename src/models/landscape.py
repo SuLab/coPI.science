@@ -432,6 +432,10 @@ class LandscapeEpoch(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="candidate")
     #: The identifying components (D61): judging hashes, criteria and rubric hashes, models.
     components: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    #: The judging inputs themselves, stored when the epoch is created (``epochs.build_snapshot``):
+    #: prompt and criteria texts, BlackbirdBot extracts, rubric text and stage models. Its stage
+    #: runners read these, never the files on disk or the current settings (§7.11).
+    snapshot: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     #: Recorded for people to read; does not identify.
     prompt_set_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
     #: Recorded for people to read; does not identify.
@@ -987,6 +991,8 @@ class LandscapeDeep(Base):
     )
     provisional_weighted_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     outside_group_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: S6's free-text summary of the record; what the S7 comparator reads when present.
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     #: The retrieved source ids of the search loop.
     search_transcript: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(

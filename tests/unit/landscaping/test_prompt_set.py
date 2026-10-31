@@ -18,6 +18,7 @@ from src.landscaping.prompt_set import (
     chat_prompt_matches,
     load_blackbird_extracts,
     load_prompt_set,
+    prompt_set_from_texts,
     stamp,
     system_prompt,
 )
@@ -198,3 +199,15 @@ def test_system_prompt_fills_placeholders_and_appends_extracts(tmp_path):
     assert ex.practice not in screen
     with pytest.raises(PromptSetError):
         system_prompt("nonexistent", ps=ps, ex=ex, criteria=criteria, rubric=load_rubric())
+
+
+def test_prompt_set_from_texts_hashes_like_the_loader(tmp_path):
+    """A set rebuilt from an epoch's stored texts carries the hashes the files gave (§7.11)."""
+    loaded = load_prompt_set(_make_set(tmp_path, screen="An invented screen prompt.\n"))
+    texts = {name: loaded.files[name] for name in JUDGING_FILES}
+    rebuilt = prompt_set_from_texts(loaded.version, texts)
+    assert rebuilt.version == "1.0.0"
+    assert rebuilt.judging_hashes == loaded.judging_hashes
+    assert rebuilt.files == texts
+    with pytest.raises(PromptSetError):
+        prompt_set_from_texts("1.0.0", {k: v for k, v in texts.items() if k != "final.md"})

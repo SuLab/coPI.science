@@ -686,14 +686,16 @@ def transition(kind: str, *, attempts: int, truncated_once: bool, model: str) ->
 class FallbackAdapter:
     """How one batched stage re-runs a refused row synchronously (D42).
 
-    ``build(row)`` returns the stage's request for the row; ``on_success(db, row, result)``
-    writes the stage's result rows in ``run_fallbacks``' transaction. Each batched stage
-    module exports ``FALLBACKS: tuple[FallbackAdapter, ...]``.
+    ``await build(db, row)`` rebuilds the stage's request for the row from the database (its
+    document or stored dossier, and its epoch's own inputs, ``epochs.epoch_inputs``), in a
+    read session that closes before the call; ``on_success(db, row, result)`` writes the
+    stage's result rows in ``run_fallbacks``' transaction. Each batched stage module exports
+    ``FALLBACKS: tuple[FallbackAdapter, ...]``.
     """
 
     stage: str
     row_model: type
-    build: Callable[[Any], dict]
+    build: Callable[[AsyncSession, Any], Awaitable[dict]]
     on_success: Callable[[AsyncSession, Any, CallResult], Awaitable[None]]
 
 
@@ -701,12 +703,13 @@ async def run_fallbacks(db_factory, adapter: FallbackAdapter) -> int:
     """Re-run every ``pending`` row with ``fallback_from`` set through ``call_sync``, skipping
     the model that refused, so it is never billed again (D42).
 
-    A success sets the row ``done`` with ``served_by_model``, then calls
-    ``adapter.on_success``, in one transaction; ``on_success`` may override the status. An
-    exhausted chain gives ``refused`` (with the last refusal category), a second truncation
-    ``failed:truncated``. Any other failure keeps the row ``pending`` once (``attempts + 1``),
-    then gives ``failed:errored``. A row changed since it was read is left alone. Returns the
-    number completed.
+    Each row's request comes from ``adapter.build`` in a session of its own, closed before the
+    synchronous call, so no transaction stays open across it. A success sets the row ``done``
+    with ``served_by_model``, then calls ``adapter.on_success``, in one transaction;
+    ``on_success`` may override the status. An exhausted chain gives ``refused`` (with the last
+    refusal category), a second truncation ``failed:truncated``. Any other failure keeps the
+    row ``pending`` once (``attempts + 1``), then gives ``failed:errored``. A row changed since
+    it was read is left alone. Returns the number completed.
     """
     model = adapter.row_model
     async with db_factory() as db:
@@ -723,8 +726,10 @@ async def run_fallbacks(db_factory, adapter: FallbackAdapter) -> int:
 
 async def _run_one_fallback(db_factory, adapter: FallbackAdapter, row: Any) -> int:
     refused_by = row.fallback_from
+    async with db_factory() as db:
+        request = await adapter.build(db, row)
     result = await call_sync(
-        adapter.stage, adapter.build(row), db_factory=db_factory,
+        adapter.stage, request, db_factory=db_factory,
         item_ref=f"{adapter.row_model.__tablename__}:{row.id}",
         skip_models=frozenset({refused_by}),
     )

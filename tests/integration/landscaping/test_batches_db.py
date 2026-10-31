@@ -567,10 +567,12 @@ async def test_replayed_errored_or_refused_outcome_fires_once(db_factory, fake, 
     async def on_success(db, row, result):
         row.decision = "yes"
 
+    async def build(db, row):
+        return _request()
+
     monkeypatch.setattr(batches, "call_sync", fake_call_sync)
     adapter = batches.FallbackAdapter(
-        stage="screen", row_model=LandscapeScreen, build=lambda row: _request(),
-        on_success=on_success,
+        stage="screen", row_model=LandscapeScreen, build=build, on_success=on_success,
     )
     assert await batches.run_fallbacks(db_factory, adapter) == 1
     assert await batches.run_fallbacks(db_factory, adapter) == 0
@@ -581,6 +583,47 @@ async def test_replayed_errored_or_refused_outcome_fires_once(db_factory, fake, 
     assert rows[refused_id].decision == "yes"
     # The errored row is resubmitted by its stage, never by the fallback chain.
     assert rows[errored_id].status == "pending"
+
+
+async def test_fallback_build_gets_a_session(db_factory, fake, monkeypatch):
+    """``build`` reads the row's document in a session of its own, closed before the call."""
+    [row_id] = await _screens(db_factory, 1)
+    async with db_factory() as db:
+        await db.execute(
+            update(LandscapeScreen).where(LandscapeScreen.id == row_id)
+            .values(fallback_from=MODEL)
+        )
+        await db.commit()
+    built: list = []
+
+    async def build(db, row):
+        assert isinstance(db, AsyncSession)
+        doc = await db.get(LandscapeDocument, row.document_id)
+        built.append((row.id, doc.canonical_external_id))
+        request = _request()
+        request["messages"][0]["content"] = doc.canonical_external_id
+        return request
+
+    async def fake_call_sync(stage, request, *, db_factory, item_ref, skip_models=frozenset(),
+                             ledger_stage=None):
+        assert built, "the request was not built before the call"
+        assert request["messages"][0]["content"] == built[0][1]
+        return CallResult(
+            message=_message(), text="{}", stop_reason="end_turn", refusal_category=None,
+            served_by="claude-opus-5", usage={}, error=None,
+        )
+
+    async def on_success(db, row, result):
+        row.decision = "yes"
+
+    monkeypatch.setattr(batches, "call_sync", fake_call_sync)
+    adapter = batches.FallbackAdapter(
+        stage="screen", row_model=LandscapeScreen, build=build, on_success=on_success,
+    )
+    assert await batches.run_fallbacks(db_factory, adapter) == 1
+    assert [row for row, _ in built] == [row_id]
+    assert built[0][1].startswith("doi:10.9999/invented-")
+    assert (await _rows(db_factory, [row_id]))[row_id].status == "done"
 
 
 async def test_ingested_batch_not_read_again(db_factory, fake):
