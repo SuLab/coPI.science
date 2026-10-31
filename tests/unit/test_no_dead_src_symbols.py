@@ -140,53 +140,593 @@ ALLOWLIST: dict[str, str] = {
     # "Dead-code guard"): the package has no live root until the worker (Task 6.5) and the
     # routes (Phase 7). Each phase's verification step adds an entry naming the task that
     # brings the caller and removes the ones reported stale; none remains after Phase 7.
-    "src.landscaping.criteria:load_criteria": (
-        "Caller lands in Task 6.5: the landscaping worker (Task 6.5) is the first live root, and loads the criteria at start."
-    ),
-    "src.landscaping.criteria:_table": (
-        "Helper of load_criteria; live once the landscaping worker (Task 6.5) is the first live root."
-    ),
-    "src.landscaping.criteria:_str": (
-        "Helper of load_criteria; live once the landscaping worker (Task 6.5) is the first live root."
-    ),
-    "src.landscaping.criteria:_str_list": (
-        "Helper of load_criteria; live once the landscaping worker (Task 6.5) is the first live root."
-    ),
-    "src.landscaping.criteria:_deal_breakers": (
-        "Helper of load_criteria; live once the landscaping worker (Task 6.5) is the first live root."
-    ),
-    "src.landscaping.criteria:_dimension_share": (
-        "Helper of load_criteria; live once the landscaping worker (Task 6.5) is the first live root."
-    ),
-    "src.landscaping.criteria:_judging_hash": (
-        "Helper of load_criteria; live once the landscaping worker (Task 6.5) is the first live root."
-    ),
-    "src.landscaping.institutions:is_baltimore_affiliation": (
-        "Caller lands in Task 3.5 (S1 qualification); live once the landscaping worker (Task 6.5) is the first live root."
-    ),
-    "src.landscaping.institutions:qualifies_openalex": (
-        "Caller lands in Task 3.1 (the OpenAlex source); live once the landscaping worker (Task 6.5) is the first live root."
-    ),
     "src.landscaping.prompt_set:system_prompt": (
         "Caller lands in Task 4.4 (stage runners); live once the landscaping worker (Task 6.5) is the first live root."
     ),
-    "src.landscaping.prompt_set:load_blackbird_extracts": (
-        "Caller lands in Task 6.5: the landscaping worker (Task 6.5) is the first live root, and loads the extracts at start."
+    "src.landscaping.batches:_Reconciler.rearm": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:_adopt": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:_advance": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:_all_ended": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:_arm_startup_scan": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:_batches_client": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:_close": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:_create": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:_custom_id": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:_first_seq": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:_ingest": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:_list_candidates": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:_list_since": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:_mark_ended": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:_match_prefixes": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:_move_stage_rows": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:_outcome_kind": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:_parse_custom_id": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:_record_chunk": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:_record_fallback_failure": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:_resolve_row": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:_run_one_fallback": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:_store_created": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:_take": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:_touch": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:_uuid_array": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:apply_result": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:mark_ingested": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:poll": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:reconcile_orphans": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:run_fallbacks": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:submit": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.batches:transition": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.epochs:_build_source": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.epochs:_copy_idea_evidence": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.epochs:_epoch_id": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.epochs:_old_document": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.epochs:_old_idea": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.epochs:_ordered": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.epochs:_phase": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.epochs:_retire": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.epochs:_set_unactivated": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.epochs:_unactivated": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.epochs:_upstream_closed": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.epochs:_work_pending": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.epochs:activate": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.epochs:active_epoch": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.epochs:changed_stages": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.epochs:copy_forward": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.epochs:current_components": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.epochs:ensure_candidate": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.epochs:hold": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.epochs:mark_drained": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.epochs:override": (
+        "Caller lands in Task 7.3 (the epoch override route)."
+    ),
+    "src.landscaping.intake:_apply_fields": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_apply_ids": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_apply_qualification": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_apply_summary": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_backfill_slices": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_clean_ids": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_continuous_slices": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_fiscal_year": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_from_openalex": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_hash": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_institution": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_jsonable": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_link": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_link_preprint": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_live": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_matching_rows": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_merge_fields": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_merged_type": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_month_bounds": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_month_slices": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_ncbi_off_peak": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_norm_title": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_openalex_control": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_parse_controls": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_pilot_anchor": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_precedence": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_pubmed_control": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_qualified_by": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_qualifying_authorships": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_quarter_of": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_range_fetch": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_ratio": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_record_from_row": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_refresh_grant_pmids": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_refresh_s1": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_repoint_links": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_rerun_judgments": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_resolve_lab": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_row_ids": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_senior_name": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_setting": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_settled": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_store_rows": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_take_qualification": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_title_expr": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_update_fetch": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:_window_months": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:canonical_id": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:ensure_sources": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:find_document": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:ingest_positive_controls": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:link_datasets": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:link_grants": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:merge_documents": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:pilot_slices": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:run_slice": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:schedule_due": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:slice_fetcher": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:summary_of": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.intake:upsert_document": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.ledger:over_daily_cap": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.ledger:spend_today": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.llm_client:build_request": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.datacite:_day": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.datacite:_make_client": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.datacite:_published": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.datacite:_query": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.datacite:_related": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.datacite:_summary": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.datacite:fetch_datacite": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.datacite:to_document": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.geo:_pdat": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.geo:_search": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.geo:_summaries": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.geo:fetch_geo": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.geo:term": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.geo:to_document": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.jhtv:_author": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.jhtv:_case_id": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.jhtv:_child": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.jhtv:_local": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.jhtv:_make_client": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.jhtv:_pub_date": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.jhtv:_text": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.jhtv:fetch_rss": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.jhtv:parse_rss": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.jhtv:to_document": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.nsf:_make_client": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.nsf:_mdy": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.nsf:_pi_display_name": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.nsf:fetch_nsf": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.nsf:to_document": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.odp_patents:_api_key": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.odp_patents:_assignees": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.odp_patents:_day": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.odp_patents:_inventors": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.odp_patents:_is_apl": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.odp_patents:_make_client": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.odp_patents:_names": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.odp_patents:_quarter": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.odp_patents:fetch_quarter": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.odp_patents:to_document": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.openalex_works:_bare_id": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.openalex_works:_complete": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.openalex_works:_extra": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.openalex_works:_ids": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.openalex_works:_license": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.openalex_works:_pmcid": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.openalex_works:_published": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.openalex_works:_senior": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.openalex_works:fetch_slice": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.openalex_works:to_document": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.pubmed_works:_date_range": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.pubmed_works:_doc_type": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.pubmed_works:_fetch_term": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.pubmed_works:_qualify": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.pubmed_works:_senior_names": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.pubmed_works:fetch_edat": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.pubmed_works:fetch_month": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.pubmed_works:to_document": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.reporter:_day": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.reporter:_pi_display_name": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.reporter:_pis": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.reporter:_primary": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.reporter:_reported_total": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.reporter:_senior": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.reporter:fetch_fiscal_year": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.landscaping.sources.reporter:to_document": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.services.openalex:_contact_params": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.services.openalex:fetch_work": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.services.openalex:iter_works": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.services.pubmed:_article_extras": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.services.pubmed:_element_date": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.services.pubmed:_last_individual_author": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.services.pubmed:_month_number": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.services.pubmed:_published": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.services.pubmed:esearch_page": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.services.pubmed:fetch_pubmed_xml": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.services.pubmed:parse_pubmed_extras": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
+    ),
+    "src.services.pubmed:set_min_interval": (
+        "Caller lands in Task 6.5: the landscaping worker is the package's first live root."
     ),
     "src.landscaping.prompt_set:chat_prompt_matches": (
         "Caller lands in Task 7.4 (the landscaping chat router)."
-    ),
-    "src.landscaping.prompt_set:_line_start": (
-        "Helper of load_blackbird_extracts; caller lands in Task 6.5."
-    ),
-    "src.landscaping.prompt_set:_paragraph": (
-        "Helper of load_blackbird_extracts; caller lands in Task 6.5."
-    ),
-    "src.landscaping.prompt_set:_standards": (
-        "Helper of load_blackbird_extracts; caller lands in Task 6.5."
-    ),
-    "src.landscaping.prompt_set:_contract": (
-        "Helper of load_blackbird_extracts; caller lands in Task 6.5."
     ),
     "src.landscaping.prompt_set:_criteria_vocab": (
         "Helper of system_prompt; caller lands in Task 4.4, live with Task 6.5."
@@ -202,9 +742,6 @@ ALLOWLIST: dict[str, str] = {
     ),
     "src.services.advisory_locks:landscape_rerank_lock_key": (
         "Caller lands in Task 5.3 (S7 insertion); live once the landscaping worker (Task 6.5) is the first live root."
-    ),
-    "src.services.llm_pricing:cost_for_request": (
-        "Caller lands in Task 2.1 (the landscaping ledger); live once the landscaping worker (Task 6.5) is the first live root."
     ),
 }
 

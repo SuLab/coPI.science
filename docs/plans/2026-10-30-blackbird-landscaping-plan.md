@@ -895,7 +895,9 @@ def to_document(record: dict, extras: dict) -> DocumentRecord     # role_basis "
 
 **Interfaces:** produces `async def fetch_fiscal_year(fy: int) -> SliceResult`. It uses
 `nih_reporter.search_projects({"org_names_exact_match": list(REPORTER_ORGS), "fiscal_years":
-[fy]}, PROJECT_FIELDS + ["AbstractText", "PrefTerms"], max_total=5000)`, paging by offset at
+[fy]}, PROJECT_FIELDS + ["AbstractText", "PrefTerms", "ApplId"], max_total=5000)` (RePORTER returns
+`appl_id`, the §6.1 upsert key, only when asked), with `expected` from RePORTER's own `meta.total`
+(one 1-row request), paging by offset at
 ≤ 500 rows, paced by `nih_reporter`'s own module pacer, unchanged. It also produces `async def fetch_nsf(date_from, date_to) ->
 SliceResult` and `to_document` for each (`role_basis` `grant_pi`).
 
