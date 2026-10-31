@@ -465,6 +465,8 @@ async def test_a_redirect_chain_past_the_limit_yields_no_text(monkeypatch):
 
 @pytest.mark.parametrize("location", [
     "https://invented-elsewhere.example/moved.xml", "https://10.0.0.1:8443/moved.xml",
+    # On S3 a subdomain of the bucket's host is another bucket.
+    "https://x.pmc-oa-opendata.s3.amazonaws.com/moved.xml",
 ])
 async def test_a_redirect_off_the_routes_hosts_is_not_followed(monkeypatch, location):
     requests = _install(monkeypatch, _pmc_xml_answered_by(
@@ -506,3 +508,37 @@ async def test_a_transient_error_is_retried_whatever_its_body(monkeypatch, codin
     assert result.basis == "fetch_failed"
     # The first try and 3 retries (D41): the body the decoder would refuse is never read.
     assert len([r for r in requests if r.url.path == XML_PATH]) == 4
+
+
+DEEP = 5_000  # nesting past Python's default recursion limit of 1,000
+DEEP_JSON = 100_000  # past the C JSON decoder's own limit too (it decodes 5,000 on 3.12)
+
+
+@pytest.mark.parametrize("case, overrides", [
+    ("europepmc-result-strings", {"pmcid": None}),
+    ("biorxiv-collection-dict", {"pmcid": None, "doi": PREPRINT_DOI}),
+    ("deep-json", {"doi": None}),
+    ("deep-jats", {"doi": None}),
+    ("huge-version-key", {"doi": None}),
+])
+async def test_a_malformed_upstream_body_leaves_its_route_empty(monkeypatch, case, overrides):
+    pmc = _pmc_handler(_meta("CC BY"))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bucket, path = request.url.host == "pmc-oa-opendata.s3.amazonaws.com", request.url.path
+        if case == "europepmc-result-strings" and path.endswith("/search"):
+            return httpx.Response(200, json={"resultList": {"result": ["invented"]}})
+        if case == "biorxiv-collection-dict" and "/details/biorxiv/" in path:
+            return httpx.Response(200, json={"collection": {"invented": {}}})
+        if case == "deep-json" and bucket and path.startswith("/metadata/"):
+            return httpx.Response(200, text="[" * DEEP_JSON + "]" * DEEP_JSON)
+        if case == "deep-jats" and bucket and path == XML_PATH:
+            return httpx.Response(200, text=(
+                f"<article><body>{'<sec>' * DEEP}invented{'</sec>' * DEEP}</body></article>"))
+        if case == "huge-version-key" and bucket and path == "/":
+            return httpx.Response(200, text=f"<Key>metadata/{PMCID}.{'9' * DEEP}.json</Key>")
+        return pmc(request)
+
+    _install(monkeypatch, handler)
+    result = await fulltext.fetch_full_text(_doc(**overrides))
+    assert (result.basis, result.route) == ("summary", None)

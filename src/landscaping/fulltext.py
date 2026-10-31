@@ -22,9 +22,9 @@ coding, or a truncated compressed body, is not read); an error status's body is 
 so only the status decides. Redirects are followed by hand, at most `_MAX_REDIRECTS`, only to
 ``https`` URLs on the route's own hosts, never reading a redirect's body; the preprint JATS
 fetch, whose URL comes from the ``details`` record, must itself be ``https`` on
-`_PREPRINT_HOSTS`. A dropped body, a refused redirect or a request httpx cannot make (a bad
-URL, a host that is not valid IDNA, a bad redirect ``Location`` or coding) leaves the route
-with nothing.
+`_PREPRINT_HOSTS`. A dropped or malformed body, a refused redirect or a request httpx cannot
+make (a bad URL, a host that is not valid IDNA, a bad redirect ``Location`` or coding) leaves
+the route with nothing.
 """
 from __future__ import annotations
 
@@ -64,11 +64,12 @@ BIOC_URL = (
 EUROPEPMC_SEARCH_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 EUROPEPMC_TEXT_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML"
 BIORXIV_DETAILS_URL = "https://api.biorxiv.org/details/{server}/{doi}"
-#: The hosts each route may be redirected to (`_allowed`: the host or a subdomain of it).
+#: The hosts each route may be redirected to (`_allowed`): an exact name, or with a leading
+#: dot a domain and its subdomains. The bucket's is exact: on S3 a subdomain is another bucket.
 _PMC_HOSTS = ("pmc-oa-opendata.s3.amazonaws.com",)
-_BIOC_HOSTS = ("ncbi.nlm.nih.gov",)
-_EUROPEPMC_HOSTS = ("ebi.ac.uk",)
-_PREPRINT_HOSTS = ("biorxiv.org", "medrxiv.org")
+_BIOC_HOSTS = (".ncbi.nlm.nih.gov",)
+_EUROPEPMC_HOSTS = (".ebi.ac.uk",)
+_PREPRINT_HOSTS = (".biorxiv.org", ".medrxiv.org")
 #: Most bytes of one response body read, both as received and after content decoding; a
 #: longer body is dropped. JATS or BioC markup carrying `MAX_CHARS` of text is a small
 #: fraction of this.
@@ -90,6 +91,10 @@ _UNREADABLE = (
     httpx.UnsupportedProtocol, httpx.TooManyRedirects, httpx.DecodingError, httpx.InvalidURL,
     UnicodeError,
 )
+#: What reading an upstream body of the wrong shape raises: JSON whose fields are not the
+#: documented types, JSON or JATS nested past the recursion limit, a number too long to
+#: convert. A route that raises one has nothing.
+_MALFORMED = (ValueError, TypeError, LookupError, AttributeError, RecursionError)
 #: Headers describing the transferred body, not the decoded bytes a capped read keeps.
 _TRANSFER_HEADERS = frozenset({"content-encoding", "content-length", "transfer-encoding"})
 
@@ -159,7 +164,7 @@ def _pmcid(value: Any) -> str | None:
 
 
 def _allowed(host: str, hosts: tuple[str, ...]) -> bool:
-    return any(host == h or host.endswith("." + h) for h in hosts)
+    return any(host == h.lstrip(".") or (h.startswith(".") and host.endswith(h)) for h in hosts)
 
 
 def _https_host(url: Any) -> str:
@@ -675,8 +680,8 @@ async def fetch_full_text(doc) -> FullText:
 
     A document flagged retracted is summary-only without a request. The basis is
     ``fetch_failed`` when a route failed transiently and no route produced full text or a
-    final "summary only"; the caller retries such a document later (D41). Never raises for
-    an upstream failure."""
+    final "summary only"; the caller retries such a document later (D41). A route whose
+    upstream body is malformed has nothing. Never raises for an upstream failure."""
     if doc.is_retracted:
         return _summary(doc, "summary", _normalize_license(doc.license))
     failed = False
@@ -687,6 +692,10 @@ async def fetch_full_text(doc) -> FullText:
             except _TransientFetch as exc:
                 logger.warning("full text: %s failed transiently: %s", route.__name__, exc)
                 failed = True
+                continue
+            except _MALFORMED as exc:
+                logger.warning("full text: %s read a malformed response: %s: %s",
+                               route.__name__, type(exc).__name__, str(exc)[:200])
                 continue
             if result is not None:
                 return result
