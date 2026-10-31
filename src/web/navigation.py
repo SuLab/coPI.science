@@ -18,6 +18,7 @@ WORKSPACE_NAVIGATION = (
     NavigationItem("pis", "PIs", "workspace_pis"),
     NavigationItem("assessments", "Assessments", "workspace_assessments"),
     NavigationItem("projects", "Projects", "workspace_projects"),
+    NavigationItem("landscape", "Landscape", "workspace_landscape"),
     NavigationItem("slack-bots", "Slack Bots", "workspace_slack_bots", True),
     NavigationItem("staff", "Staff", "workspace_staff", True),
     NavigationItem("discussions", "Discussions", "workspace_discussions", True),

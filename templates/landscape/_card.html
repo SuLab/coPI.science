@@ -1,0 +1,36 @@
+{# One Landscape card (spec §13.1, L41): included with `card` (a landscape_view card dict) and
+   `scope` (a string unique to the card's place on the page, so its form ids never repeat
+   when the same card shows twice, e.g. as a carry-over and in its earlier batch).
+   The read model has already removed what this viewer may not see: a blind card arrives
+   without score, band and rank until the viewer decides (L53), an expert's own open sample
+   item without S9's calls until they submit (D63). Nothing here re-derives a hiding; it
+   only says why a value is missing. Model-written text renders autoescaped. #}
+{% set band_class = {'advance': 'bg-green-100 text-green-700', 'conditional': 'bg-amber-100 text-amber-700', 'pass': 'bg-gray-100 text-gray-700'} %}
+<div class="landscape-card bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+    <div class="flex items-start justify-between gap-4 flex-wrap">
+        <div class="min-w-0">
+            <h3 class="landscape-card-title text-base font-semibold text-gray-900"><a href="{{ page_url(request, 'workspace_landscape_detail', opportunity_id=card.opportunity_id) }}" class="text-indigo-700 hover:underline">{{ card.headline or card.label or 'Untitled opportunity' }}</a></h3>
+            {% if card.label and card.headline %}<p class="text-sm text-gray-600 mt-0.5">{{ card.label }}</p>{% endif %}
+        </div>
+        <div class="flex flex-wrap items-center gap-2 shrink-0 text-sm">
+            {% if card.changed_since_decision %}<span class="landscape-changed px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-indigo-100 text-indigo-700">changed since your decision</span>{% endif %}
+            {% if card.retired %}<span class="landscape-retired px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-gray-100 text-gray-700">retired</span>{% endif %}
+            {% if card.probe %}<span class="landscape-probe px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-amber-100 text-amber-700">probe</span>{% endif %}
+            {% if card.blind %}<span class="landscape-blind px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-slate-100 text-slate-700">blind batch</span>{% endif %}
+            {% if card.band %}<span class="landscape-band px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap {{ band_class.get(card.band, 'bg-gray-100 text-gray-700') }}">{{ card.band }}</span>{% endif %}
+            {% if card.score is not none %}<span class="landscape-score text-gray-700">score {{ '%.2f' | format(card.score) }}</span>{% endif %}
+            {% if card.rank %}<span class="landscape-rank text-gray-700">rank {{ card.rank }}</span>{% endif %}
+        </div>
+    </div>
+    {% if card.blind_hidden %}<p class="landscape-blind-note mt-1 text-sm text-gray-600">Score, band and rank are hidden until you record your decision.</p>{% endif %}
+    {% if card.expert_hidden %}<p class="landscape-expert-note mt-1 text-sm text-gray-600">This is one of your expert opportunities: the pipeline's own calls are hidden until you submit your judgment.</p>{% endif %}
+    {% if card.no_assessment %}
+    <p class="landscape-no-assessment mt-2 text-sm text-amber-800">No completed assessment under the current criteria{% if card.failure and card.failure.status %} ({{ card.failure.status }}){% endif %}.{% if card.history_assessment_id %} Its page shows the last earlier one as history.{% endif %}</p>
+    {% endif %}
+    {% if card.structured_lines %}
+    <ul class="landscape-lines mt-2 space-y-0.5 text-sm text-gray-800">{% for line in card.structured_lines %}<li>{{ line }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% if card.pitch %}<p class="landscape-pitch mt-2 text-base leading-relaxed text-gray-700 max-w-[68ch]">{{ card.pitch }}</p>{% endif %}
+    <p class="landscape-labs mt-2 text-sm text-gray-600">Labs: {{ card.labs | join(', ') if card.labs else '—' }}{% if card.issued_on %} · issued {{ card.issued_on }}{% endif %}</p>
+    {% with opportunity_id=card.opportunity_id, assessment_id=card.assessment_id, decision=card.my_decision, form_id='dec-' ~ scope ~ '-' ~ card.opportunity_id ~ '-' %}{% include "landscape/_decision_form.html" %}{% endwith %}
+</div>

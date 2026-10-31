@@ -38,8 +38,8 @@ def test_every_template_is_a_literal_existing_file():
 
 def test_tutorial_shapes():
     keys = {t.key: t for t in hp.TUTORIALS}
-    assert len(keys["reviewer"].steps) == 8
-    assert len(keys["manager"].steps) == 10
+    assert len(keys["reviewer"].steps) == 9
+    assert len(keys["manager"].steps) == 11
     assert [t.key for t in hp.tutorials_for(STAFF)] == ["manager", "reviewer"]
     assert [t.key for t in hp.tutorials_for(REVIEWER)] == ["reviewer"]
 
@@ -85,7 +85,7 @@ def test_unknown_page_and_tutorial_are_404():
         assert exc.value.status_code == 404
 
 
-@pytest.mark.parametrize("step", ["0", "9", "01", "1.0", "²", "-1", "1000", "", " 1"])
+@pytest.mark.parametrize("step", ["0", "10", "01", "1.0", "²", "-1", "1000", "", " 1"])
 def test_tutorial_step_rejects_non_canonical_numbers(step):
     with pytest.raises(HTTPException) as exc:
         hp.lookup_step("reviewer", step, REVIEWER)

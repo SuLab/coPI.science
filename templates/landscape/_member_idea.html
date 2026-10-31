@@ -1,0 +1,82 @@
+{# One member idea of an opportunity (spec §13.2), collapsed after the first. Included with
+   `member` (a landscape_view member dict) and `n` (its 1-based position). `member.deep` is
+   the idea's newest S6 row after the viewer's hiding (D56, D63): a hidden field is absent,
+   so it renders nothing. The first member carries the `disease-profile` and `panel` ids the
+   landscaping chat record cites (src/services/landscape_chat_record.py); later members get
+   the same ids with their position appended. The labs' OpenAlex and ORCID links are the
+   only links built from data; there is no PI page, because these researchers are not on the
+   roster. Model-written text renders autoescaped. #}
+{% set suffix = '' if n == 1 else '-' ~ n %}
+{% set deep = member.deep or {} %}
+{% macro support_badge(support) %}{% if support is string %}<span class="landscape-support px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-gray-100 text-gray-700">{{ support }}</span>{% elif support %}<span class="landscape-support px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-green-100 text-green-700" title="{{ support | join(', ') }}">sourced</span>{% endif %}{% endmacro %}
+<details class="landscape-member mb-4 rounded-xl border border-gray-200 bg-white"{% if n == 1 %} open{% endif %}>
+<summary class="cursor-pointer px-5 py-4"><h3 class="inline text-base font-semibold text-gray-900">{{ member.structured_line or member.idea_key }}</h3></summary>
+<div class="px-5 pb-5 space-y-4">
+    <p class="text-sm text-gray-700">Type: {{ member.idea_type or '—' }} · Stage: {{ member.stage or '—' }} · Evidence grade: {{ member.evidence_grade or '—' }} · Johns Hopkins groups: {{ member.jhu_group_count if member.jhu_group_count is not none else '—' }} · Outside groups: {{ member.outside_group_count if member.outside_group_count is not none else '—' }}</p>
+
+    <section class="landscape-target-biology">
+        <h4 class="text-sm font-semibold text-gray-900">Target biology</h4>
+        {% if deep.target_biology %}
+        <ul class="mt-1 space-y-1 text-base leading-relaxed text-gray-700 max-w-[68ch]">{% for entry in deep.target_biology %}<li>{{ entry.line if entry is mapping else entry }} {% if entry is mapping %}{{ support_badge(entry.support) }}{% endif %}</li>{% endfor %}</ul>
+        {% else %}<p class="mt-1 text-sm text-gray-600">None recorded.</p>{% endif %}
+    </section>
+
+    <section id="disease-profile{{ suffix }}" class="landscape-disease-profile scroll-mt-16">
+        <h4 class="text-sm font-semibold text-gray-900">Disease profile</h4>
+        {% if deep.disease_profile %}
+        <dl class="mt-1 space-y-1 text-sm">
+            {% for field, entry in deep.disease_profile.items() %}
+            <div class="flex flex-wrap gap-x-2"><dt class="font-medium text-gray-700">{{ field | replace('_', ' ') }}</dt><dd class="text-gray-800">{{ (entry.value if entry is mapping else entry) or '—' }} {% if entry is mapping %}{{ support_badge(entry.support) }}{% endif %}</dd></div>
+            {% endfor %}
+        </dl>
+        {% else %}<p class="mt-1 text-sm text-gray-600">None recorded.</p>{% endif %}
+    </section>
+
+    <section id="panel{{ suffix }}" class="landscape-panel scroll-mt-16">
+        <h4 class="text-sm font-semibold text-gray-900">Panel opinions</h4>
+        {% if member.consults %}
+        <ul class="mt-1 space-y-2">
+            {% for c in member.consults %}
+            <li class="rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-800">
+                <p><span class="font-semibold">{{ c.domain }}</span>{% if c.verdict_signal %} · {{ c.verdict_signal }}{% endif %}{% if c.confidence %} · {{ c.confidence }} confidence{% endif %}</p>
+                {% for key, title in [('established', 'Established'), ('concerns', 'Concerns'), ('questions_to_ask', 'Questions to ask')] %}
+                {% if c[key] %}<p class="mt-1 font-medium text-gray-700">{{ title }}:</p><ul class="list-disc list-inside">{% for line in c[key] %}<li>{{ line }}</li>{% endfor %}</ul>{% endif %}
+                {% endfor %}
+                {% if c.raw_opinion %}<details class="mt-1"><summary class="cursor-pointer text-sm text-gray-600">Raw opinion (admin)</summary><pre class="mt-1 text-sm bg-gray-50 p-2 rounded overflow-x-auto whitespace-pre-wrap">{{ c.raw_opinion }}</pre></details>{% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}<p class="mt-1 text-sm text-gray-600">No panel opinions to show.</p>{% endif %}
+    </section>
+
+    <section class="landscape-member-evidence">
+        <h4 class="text-sm font-semibold text-gray-900">Evidence</h4>
+        {% if deep.summary %}<p class="mt-1 text-base leading-relaxed text-gray-700 max-w-[68ch] whitespace-pre-line">{{ deep.summary }}</p>{% endif %}
+        {% if deep.full_text_evidence and deep.full_text_evidence.documents %}
+        <ul class="mt-1 text-sm text-gray-700 list-disc list-inside">{% for d in deep.full_text_evidence.documents %}<li>{{ d.basis | replace('_', ' ') }}{% if d.license %} · {{ d.license }}{% endif %}{% if d.truncated %} · truncated{% endif %}</li>{% endfor %}</ul>
+        {% endif %}
+        {% if member.evidence_summary %}
+        <details class="mt-1"><summary class="cursor-pointer text-sm text-gray-600">Database evidence</summary><pre class="mt-1 text-sm bg-gray-50 p-2 rounded overflow-x-auto max-h-96 whitespace-pre-wrap">{{ member.evidence_summary | tojson(indent=2) }}</pre></details>
+        {% endif %}
+        {% if not deep.summary and not member.evidence_summary %}<p class="mt-1 text-sm text-gray-600">None recorded.</p>{% endif %}
+    </section>
+
+    <section class="landscape-sources">
+        <h4 class="text-sm font-semibold text-gray-900">Sources ({{ member.sources | length }})</h4>
+        {% if member.sources %}
+        <ul class="mt-1 space-y-1 text-sm text-gray-800">
+            {% for s in member.sources %}<li>{{ s.title or 'Untitled document' }} <span class="text-gray-600">· {{ s.kind or s.document_type or 'document' }}{% if s.published_on %} · {{ s.published_on }}{% endif %}{% if s.doi %} · doi {{ s.doi }}{% elif s.pmid %} · PMID {{ s.pmid }}{% endif %} · role basis: {{ s.role_basis or '—' }} · licence: {{ s.license or '—' }} · text basis: {{ (s.text_basis or '—') | replace('_', ' ') }}</span></li>{% endfor %}
+        </ul>
+        {% else %}<p class="mt-1 text-sm text-gray-600">None recorded.</p>{% endif %}
+    </section>
+
+    <section class="landscape-labs-section">
+        <h4 class="text-sm font-semibold text-gray-900">Labs</h4>
+        {% if member.labs %}
+        <ul class="mt-1 space-y-1 text-sm text-gray-800">
+            {% for lab in member.labs %}<li>{{ lab.name }}{% if lab.openalex_url %} · <a href="{{ lab.openalex_url }}" class="text-indigo-700 hover:underline" rel="noopener noreferrer" target="_blank">OpenAlex</a>{% endif %}{% if lab.orcid_url %} · <a href="{{ lab.orcid_url }}" class="text-indigo-700 hover:underline" rel="noopener noreferrer" target="_blank">ORCID</a>{% endif %}</li>{% endfor %}
+        </ul>
+        {% else %}<p class="mt-1 text-sm text-gray-600">None recorded.</p>{% endif %}
+    </section>
+</div>
+</details>

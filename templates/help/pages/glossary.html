@@ -112,10 +112,19 @@ For how the parts fit together, read
     counts under <strong>Dimension distribution</strong> use the stored name pass for the
     lowest band, which the rest of the page shows under the rubric's label.</dd>
 
+    <dt id="term-batch">Batch (Landscape)</dt>
+    <dd>The set of Landscape opportunities issued in one week, the same for everyone, each
+    opportunity issued once. Cards you have not decided on carry over into later weeks. See
+    <a href="{{ page_url(request, 'help_page', slug='landscape', fragment='list') }}">The Landscape page</a>.</dd>
+
     <dt id="term-blackbirdbot">BlackbirdBot (the hub)</dt>
     <dd>Blackbird's own AI agent. It has no lab; it interviews the lab agents about their
     ideas, screens each idea against the rubric and records an assessment. Pages also call
     it <strong>the hub</strong>.</dd>
+
+    <dt id="term-blind-batch">Blind batch</dt>
+    <dd>A Landscape batch whose cards are shuffled, with the score, band, rank and their
+    rationales hidden on each card until you record your quick decision on it.</dd>
 
     {% if permissions.staff %}
     <dt id="term-candidate-papers">Candidate papers</dt>
@@ -154,6 +163,11 @@ For how the parts fit together, read
     <strong>Corpus and profile review</strong> section is where staff check it.</dd>
     {% endif %}
 
+    <dt id="term-cut">Cut</dt>
+    <dd>The strongest ideas the Landscape pipeline keeps after ranking everything it found.
+    Only ideas in the cut are analysed in depth and become opportunities.{% if permissions.staff %}
+    The pipeline page shows the latest cut and when it was made.{% endif %}</dd>
+
     <dt id="term-dimension">Dimension</dt>
     <dd>One of the separate qualities the rubric scores an idea on. Each has a title and a
     weight in the weighted score; both are shown under <strong>Rubric scores &amp;
@@ -178,6 +192,10 @@ For how the parts fit together, read
     recorded for the thread: <strong>Proposal</strong>, <strong>No Proposal</strong> or
     <strong>Timeout</strong>.</dd>
     {% endif %}
+
+    <dt id="term-disease-profile">Disease profile</dt>
+    <dd>On a Landscape opportunity's page, for each idea: the disease, the patients and what
+    treats them today. Each field has a badge saying what supports it.</dd>
 
     <dt id="term-dont-learn-log-only">Don't learn — log only</dt>
     <dd>The feedback mode that keeps your review as a record only. The prompt-suggestion bot
@@ -364,6 +382,11 @@ For how the parts fit together, read
     <strong>Ask:</strong>. Clicking either kind sends that question to the chat straight
     away.</dd>
 
+    <dt id="term-opportunity">Opportunity (Landscape)</dt>
+    <dd>One or more related ideas from Johns Hopkins research, grouped and assessed together
+    by BlackbirdBot, shown as one card on the Landscape page. An opportunity keeps its identity
+    when its assessment is rewritten, so decisions and reviews stay attached to it.</dd>
+
     <dt id="term-orcid-id">ORCID iD</dt>
     <dd>A researcher's unique identifier from ORCID. You sign in to Blackbird with yours,
     and PIs are added and found by theirs.</dd>
@@ -516,6 +539,11 @@ For how the parts fit together, read
     Regenerate.</dd>
     {% endif %}
 
+    <dt id="term-role-basis">Role basis</dt>
+    <dd>On a Landscape opportunity's page, under <strong>Sources</strong>: why a document counts
+    as a lab's own work, for example that the lab's leader is its corresponding or last author,
+    or leads the grant.</dd>
+
     {% if permissions.staff %}
     <dt id="term-roster-sync">Roster sync</dt>
     <dd>A running simulation re-reads which lab agents are active from time to time. An agent
@@ -598,6 +626,10 @@ For how the parts fit together, read
     BlackbirdBot and the assessment pages. A rejected or deleted company is never suggested
     again.</dd>
     {% endif %}
+
+    <dt id="term-text-basis">Text basis</dt>
+    <dd>On a Landscape opportunity's page, under <strong>Sources</strong>: whether the pipeline
+    read a document's full text or only its summary, or could not fetch the full text.</dd>
 
     <dt id="term-the-ask">The ask</dt>
     <dd>The next step BlackbirdBot recommends for an idea, on the assessment's page. When it

@@ -136,25 +136,6 @@ ALLOWLIST: dict[str, str] = {
         "tests/integration/test_engine_liveness.py to prove liveness follows the "
         "lock-holding connection. No production reader is planned."
     ),
-    # Landscaping (docs/plans/2026-10-30-blackbird-landscaping-plan.md, Global Constraints,
-    # "Dead-code guard"): the package has no live root until the worker (Task 6.5) and the
-    # routes (Phase 7). Each phase's verification step adds an entry naming the task that
-    # brings the caller and removes the ones reported stale; none remains after Phase 7.
-    "src.landscaping.epochs:override": (
-        "Caller lands in Task 7.3 (the epoch override route)."
-    ),
-    "src.landscaping.rescue:_Kind.excludes": (
-        "Caller lands in Task 7.3 (the rescue route calls rescue, which calls this)."
-    ),
-    "src.landscaping.rescue:rescue": (
-        "Caller lands in Task 7.3 (the pipeline controls' rescue route)."
-    ),
-    "src.landscaping.review_batches:viewer_cards": (
-        "Caller lands in Task 7.1 (the landscaping read model)."
-    ),
-    "src.landscaping.prompt_set:chat_prompt_matches": (
-        "Caller lands in Task 7.4 (the landscaping chat router)."
-    ),
 }
 
 

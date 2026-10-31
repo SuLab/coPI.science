@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% from "help/_link.html" import help_link %}
+{% block title %}Workspace — Landscape — Blackbird{% endblock %}
+{% block extra_head %}{% include "assessments/_head.html" %}{% endblock %}
+{% block content %}
+{# The Landscape page (spec §13.1). `batch` is landscape_view.batch_view (this week's batch,
+   the viewer's own carry-overs and changed cards, and the earlier batches); `lists` is
+   lists_view for a staff viewer who chose Current or All assessed (L48), else none; `expert`
+   is expert_view (a marked expert's open sample items, D63). Tabs and counts are the
+   viewer's own (D60). Cards come from landscape/_card.html, whose `scope` keeps form ids
+   unique when one card shows in two places. #}
+<div class="flex flex-wrap items-baseline gap-x-4 gap-y-1 mb-2">
+    <h1 class="text-2xl font-bold text-gray-900">Landscape</h1>
+    {{ help_link(request, effective_user, 'landscape', 'list') }}
+</div>
+<p class="text-sm text-gray-600 mb-4 max-w-[68ch]">Opportunities the pipeline found in Johns Hopkins research, issued in a weekly batch. Read each card and record a quick decision: Pursue or Pass.</p>
+
+{% if permissions.staff %}
+<nav class="landscape-views mb-4 flex flex-wrap items-center gap-2 border-b border-gray-200" aria-label="Landscape views">
+    <a href="{{ page_url(request, 'workspace_landscape') }}"{% if selected_view == 'batch' %} aria-current="page" class="border-b-2 border-indigo-600 px-3 py-2 text-sm font-semibold text-indigo-700"{% else %} class="px-3 py-2 text-sm text-gray-600 hover:text-gray-900"{% endif %}>This week's batch</a>
+    <a href="{{ page_url(request, 'workspace_landscape', query={'view': 'current'}) }}"{% if selected_view == 'current' %} aria-current="page" class="border-b-2 border-indigo-600 px-3 py-2 text-sm font-semibold text-indigo-700"{% else %} class="px-3 py-2 text-sm text-gray-600 hover:text-gray-900"{% endif %}>Current</a>
+    <a href="{{ page_url(request, 'workspace_landscape', query={'view': 'all'}) }}"{% if selected_view == 'all' %} aria-current="page" class="border-b-2 border-indigo-600 px-3 py-2 text-sm font-semibold text-indigo-700"{% else %} class="px-3 py-2 text-sm text-gray-600 hover:text-gray-900"{% endif %}>All assessed</a>
+    <a href="{{ page_url(request, 'workspace_landscape_pipeline') }}" class="ml-auto px-3 py-2 text-sm text-indigo-700 hover:underline">Pipeline</a>
+</nav>
+{% endif %}
+
+{% set banner_text = (lists.banner if lists else (batch.banner if batch else none)) %}
+{% if banner_text %}<div class="landscape-banner mb-4 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">{{ banner_text }}</div>{% endif %}
+
+{% if expert and expert.is_expert and expert['items'] %}
+<section class="landscape-expert-sample mb-8">
+    <h2 class="text-lg font-semibold text-gray-900 mb-1">Your expert opportunities ({{ expert.quarter }})</h2>
+    <p class="text-sm text-gray-600 mb-3 max-w-[68ch]">Judge each in full on its page. The pipeline's own calls stay hidden until you submit.</p>
+    <div class="space-y-4">{% for card in expert['items'] %}{% with card=card, scope='expert' %}{% include "landscape/_card.html" %}{% endwith %}{% endfor %}</div>
+</section>
+{% endif %}
+
+{% if lists %}
+<section class="landscape-list">
+    <h2 class="text-lg font-semibold text-gray-900 mb-1">{{ 'Current' if lists.view == 'current' else 'All assessed' }}</h2>
+    {% if lists.cut %}<p class="text-sm text-gray-600 mb-2">Latest complete cut: {{ lists.cut.k }} kept of {{ lists.cut.n }}{% if lists.cut.completed_at %}, {{ lists.cut.completed_at | ts }}{% endif %}.</p>{% endif %}
+    <nav class="landscape-tabs mb-3 flex flex-wrap items-center gap-2 border-b border-gray-200" aria-label="Decision status">
+        {% for value, text in [('unreviewed', 'Unreviewed'), ('reviewed', 'Reviewed'), ('all', 'All')] %}
+        <a href="{{ page_url(request, 'workspace_landscape', query={'view': lists.view, 'tab': value, 'assignment': lists.assignment}) }}"{% if lists.tab == value %} aria-current="page" class="border-b-2 border-indigo-600 px-3 py-2 text-sm font-semibold text-indigo-700"{% else %} class="px-3 py-2 text-sm text-gray-600 hover:text-gray-900"{% endif %}>{{ text }} ({{ lists.counts[value] }})</a>
+        {% endfor %}
+        <span class="ml-2 text-sm text-gray-600">Reviewed means you have recorded a quick decision.</span>
+    </nav>
+    <form method="get" action="{{ page_url(request, 'workspace_landscape') }}" class="mb-4 flex flex-wrap items-center gap-2">
+        <input type="hidden" name="view" value="{{ lists.view }}">
+        <input type="hidden" name="tab" value="{{ lists.tab }}">
+        <label for="landscape-assignment" class="text-sm text-gray-600">Assignment:</label>
+        <select id="landscape-assignment" name="assignment" class="text-sm border border-gray-300 rounded-md shadow-sm"><option value="all" {% if lists.assignment != 'mine' %}selected{% endif %}>All</option><option value="mine" {% if lists.assignment == 'mine' %}selected{% endif %}>Assigned to me</option></select>
+        <button type="submit" class="px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700">Apply</button>
+    </form>
+    {% if lists.cards %}
+    <div class="space-y-4">{% for card in lists.cards %}{% with card=card, scope='list' %}{% include "landscape/_card.html" %}{% endwith %}{% endfor %}</div>
+    {% else %}
+    <div class="bg-white rounded-xl border border-gray-200 p-8 text-center text-gray-600">No opportunities on this tab.</div>
+    {% endif %}
+</section>
+{% elif batch %}
+<section class="landscape-this-week mb-8">
+    <h2 class="text-lg font-semibold text-gray-900 mb-1">This week's batch</h2>
+    {% if batch.this_week %}
+    <p class="text-sm text-gray-600 mb-3">Issued {{ batch.this_week.issued_on }}{% if batch.this_week.blind %} · a blind batch: its cards are shuffled, and each hides its score, band and rank until you decide{% endif %}.</p>
+    {% if batch.this_week.cards %}
+    <div class="space-y-4">{% for card in batch.this_week.cards %}{% with card=card, scope='week' %}{% include "landscape/_card.html" %}{% endwith %}{% endfor %}</div>
+    {% else %}<p class="text-sm text-gray-600">This week's batch is empty.</p>{% endif %}
+    {% else %}
+    <p class="text-sm text-gray-600">No batch has been issued yet.</p>
+    {% endif %}
+</section>
+
+{% if batch.changed %}
+<section class="landscape-changed-cards mb-8">
+    <h2 class="text-lg font-semibold text-gray-900 mb-1">Changed since your decision</h2>
+    <p class="text-sm text-gray-600 mb-3 max-w-[68ch]">Their assessment has been rewritten since you decided. Your decision stands; read the new assessment, then confirm or change it.</p>
+    <div class="space-y-4">{% for card in batch.changed %}{% with card=card, scope='changed' %}{% include "landscape/_card.html" %}{% endwith %}{% endfor %}</div>
+</section>
+{% endif %}
+
+<section class="landscape-carry-overs mb-8">
+    <h2 class="text-lg font-semibold text-gray-900 mb-1">Carried over</h2>
+    {% if batch.carry_overs %}
+    <p class="text-sm text-gray-600 mb-3">Cards from earlier batches you have not decided on yet, newest batch first.</p>
+    <div class="space-y-4">{% for card in batch.carry_overs %}{% with card=card, scope='carry' %}{% include "landscape/_card.html" %}{% endwith %}{% endfor %}</div>
+    {% else %}<p class="text-sm text-gray-600">Nothing carried over: you have decided on every earlier card.</p>{% endif %}
+</section>
+
+{% if batch.earlier_batches %}
+<section class="landscape-earlier mb-8">
+    <h2 class="text-lg font-semibold text-gray-900 mb-2">Earlier batches</h2>
+    {% for b in batch.earlier_batches %}
+    {% set batch_scope = 'b' ~ loop.index %}
+    <details class="landscape-earlier-batch mb-3 rounded-xl border border-gray-200 bg-white">
+        <summary class="cursor-pointer px-5 py-3 text-sm font-medium text-gray-800">Issued {{ b.issued_on }}{% if b.blind %} · blind{% endif %} · {{ b.cards | length }} card{{ '' if b.cards | length == 1 else 's' }}</summary>
+        <div class="px-5 pb-5 space-y-4">{% for card in b.cards %}{% with card=card, scope=batch_scope %}{% include "landscape/_card.html" %}{% endwith %}{% endfor %}</div>
+    </details>
+    {% endfor %}
+</section>
+{% endif %}
+{% endif %}
+{% endblock %}

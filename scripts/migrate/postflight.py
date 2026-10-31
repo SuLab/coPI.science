@@ -16,7 +16,7 @@ What follows --target and what does not:
     or the comparison FAILs; a snapshot ``target`` other than --target only WARNs.
   * The pinned table/column/index/constraint expectations (EXPECTED_TABLES,
     EXPECTED_COLUMNS, EXPECTED_INDEXES, EXPECTED_CONSTRAINTS) describe the 0019-0023
-    chain and the 0056, 0062, 0065, 0068, 0069, 0070, 0071, 0072, 0073, 0075, 0076 and 0077 objects only (VERIFIED_REVISIONS), whatever the target.
+    chain and the 0056, 0062, 0065, 0068, 0069, 0070, 0071, 0072, 0073, 0075, 0076, 0077 and 0078 objects only (VERIFIED_REVISIONS), whatever the target.
 
 Exit codes (contract):
 
@@ -808,6 +808,10 @@ EXPECTED_COLUMNS: tuple[tuple[str, str, str, bool, str | None], ...] = (
     ("landscape_reports", "payload", "jsonb", True, ""),
     ("landscape_reports", "handled_at", "timestamp with time zone", True, ""),
     ("landscape_reports", "created_at", "timestamp with time zone", False, "now()"),
+    # 0078 — the chat tables' landscaping subject.
+    ("assessment_chat_turns", "landscape_opportunity_id", "uuid", True, ""),
+    ("assessment_chat_usage", "landscape_opportunity_id", "uuid", True, ""),
+    ("assessment_chat_opens", "landscape_opportunity_id", "uuid", True, ""),
 )
 
 EXPECTED_TABLES = (
@@ -862,12 +866,12 @@ EXPECTED_TABLES = (
 
 #: Revisions this script's EXPECTED_TABLES/EXPECTED_COLUMNS/EXPECTED_INDEXES below
 #: actually verify. Pinned: 0019-0023, 0056, 0062, 0065, 0068, 0069, 0070, 0071, 0072, 0073,
-#: 0075, 0076 and 0077. Not pinned (documented omission): the 0024-0055, 0057-0061, 0063-0064
+#: 0075, 0076, 0077 and 0078. Not pinned (documented omission): the 0024-0055, 0057-0061, 0063-0064
 #: and 0066-0067 objects (0074 creates none), which preflight's PLANNED_OBJECTS collision check and
 #: tests/integration/test_model_migration_parity.py cover. Bump this tuple (and add the
 #: corresponding EXPECTED_* entries) to extend the pins. The row-count and enum checks
 #: do not read it: they are scoped by revision span instead.
-VERIFIED_REVISIONS: tuple[str, ...] = ("0019", "0020", "0021", "0022", "0023", "0056", "0062", "0065", "0068", "0069", "0070", "0071", "0072", "0073", "0075", "0076", "0077")
+VERIFIED_REVISIONS: tuple[str, ...] = ("0019", "0020", "0021", "0022", "0023", "0056", "0062", "0065", "0068", "0069", "0070", "0071", "0072", "0073", "0075", "0076", "0077", "0078")
 
 #: index name -> the exact pg_indexes.indexdef tail, so a same-named index on the WRONG
 #: columns (or a partial index that lost its predicate) fails too.
@@ -1062,6 +1066,10 @@ EXPECTED_INDEXES: dict[str, str] = {
     "uq_landscape_llm_calls_batch_seq": "USING btree (batch_id, item_seq)",
     "ix_landscape_llm_calls_created_at": "USING btree (created_at)",
     "uq_landscape_reports_kind_created": "USING btree (kind, created_at)",
+    # 0078.
+    "ix_assessment_chat_turns_landscape_conversation": (
+        "USING btree (landscape_opportunity_id, user_id, context_tier, created_at)"
+    ),
 }
 
 #: constraint name -> (table, pg_get_constraintdef)
@@ -1155,7 +1163,8 @@ EXPECTED_CONSTRAINTS: dict[str, tuple[str, str]] = {
     "hub_project_review_assignments_assigned_by_user_id_fkey": (
         "hub_project_review_assignments", "REFERENCES users(id) ON DELETE SET NULL",
     ),
-    # 0076. Each subject CHECK is pinned by its last allowed value.
+    # 0076. Each subject CHECK is pinned by its last allowed value, which 0078 moved to
+    # 'landscape'; the turns CHECK carries 0078's third column.
     "fk_assessment_chat_turns_project_id_hub_projects": (
         "assessment_chat_turns",
         "FOREIGN KEY (project_id) REFERENCES hub_projects(id) ON DELETE CASCADE",
@@ -1169,10 +1178,11 @@ EXPECTED_CONSTRAINTS: dict[str, tuple[str, str]] = {
         "FOREIGN KEY (project_id) REFERENCES hub_projects(id) ON DELETE SET NULL",
     ),
     "ck_assessment_chat_turns_one_subject": (
-        "assessment_chat_turns", "num_nonnulls(assessment_id, project_id) = 1",
+        "assessment_chat_turns",
+        "num_nonnulls(assessment_id, project_id, landscape_opportunity_id) = 1",
     ),
-    "ck_assessment_chat_usage_subject": ("assessment_chat_usage", "'project'"),
-    "ck_assessment_chat_opens_subject": ("assessment_chat_opens", "'project'"),
+    "ck_assessment_chat_usage_subject": ("assessment_chat_usage", "'landscape'"),
+    "ck_assessment_chat_opens_subject": ("assessment_chat_opens", "'landscape'"),
     # 0077. Uniques by definition, each CHECK by a value or bound it must keep, and the inline
     # foreign keys by Postgres's default names.
     "uq_landscape_sources_source": ("landscape_sources", "UNIQUE (source)"),
@@ -1545,6 +1555,22 @@ EXPECTED_CONSTRAINTS: dict[str, tuple[str, str]] = {
     ),
     "uq_landscape_reports_kind_created": ("landscape_reports", "UNIQUE (kind, created_at)"),
     "ck_landscape_reports_kind": ("landscape_reports", "'metrics'"),
+    # 0078: the three named foreign keys (its CHECKs are the 0076 entries above).
+    "fk_assessment_chat_turns_landscape_opportunity": (
+        "assessment_chat_turns",
+        "FOREIGN KEY (landscape_opportunity_id) REFERENCES landscape_opportunities(id)"
+        " ON DELETE CASCADE",
+    ),
+    "fk_assessment_chat_usage_landscape_opportunity": (
+        "assessment_chat_usage",
+        "FOREIGN KEY (landscape_opportunity_id) REFERENCES landscape_opportunities(id)"
+        " ON DELETE SET NULL",
+    ),
+    "fk_assessment_chat_opens_landscape_opportunity": (
+        "assessment_chat_opens",
+        "FOREIGN KEY (landscape_opportunity_id) REFERENCES landscape_opportunities(id)"
+        " ON DELETE SET NULL",
+    ),
 }
 
 EXPECTED_ENUMS: dict[str, tuple[str, ...]] = {

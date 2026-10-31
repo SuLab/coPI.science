@@ -19,6 +19,7 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
 | touch the assessment chat | `docs/operations/assessment-chat.md` |
 | touch BlackbirdBot, the rubric, prompts, verdict capture, specialists or the review bot | `docs/operations/blackbird-hub.md` |
 | change a workspace, settings or login page, or anything under `templates/help/` | `docs/operations/help-content.md` |
+| run, deploy or change the landscaping pipeline | `docs/operations/landscaping.md` |
 
 ## Testing
 
@@ -28,8 +29,7 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
   on a throwaway Postgres, `ruff check` on `tests/` (zero findings) and on `src/` (a
   ratcheted ceiling), then the full pytest run with a branch-coverage floor. Run it
   before committing. `scripts/install-hooks.sh` installs it as a `pre-push` hook.
-- Its throwaway Postgres is named `copi-ci-migcheck-<pid>` on a free port, so two runs no longer
-  collide on it (a leaked container from an interrupted run is removed by name at that run's exit).
+- Its throwaway Postgres (`copi-ci-migcheck-<pid>`, free port) is per run; a leaked one is removed by name at exit.
 - Run pytest on the host, not in a container (the images install without the `[dev]`
   extra, so pytest is absent there): `.venv-test/bin/python -m pytest tests/ -v`. With
   `TEST_DATABASE_URL` unset, `tests/conftest.py` starts its own Postgres through
@@ -71,9 +71,9 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
 - The web service is `blackbird-app` only in the working tree's UNCOMMITTED
   `docker-compose.prod.yml`; the committed file still says `app`. That edit also pins
   the `blackbird-app` and `agent` container names, joins `copi-edge`, swaps `awslogs`
-  for `json-file`, gives the worker its `prompts/` mount and runs the agent service as
-  `src.agent.supervisor`. It stays uncommitted by decision
-  (D5 of `docs/plans/2026-09-25-rca-remediation-plan.md`): never `git checkout`,
+  for `json-file`, gives the worker its `prompts/` mount, runs the agent service as
+  `src.agent.supervisor`; at deploy it gains the `landscape-worker` service. It stays uncommitted
+  by decision (D5 of `docs/plans/2026-09-25-rca-remediation-plan.md`): never `git checkout`,
   `git stash` or `git restore` it, and don't commit it unless the owner reverses D5.
 - Never accept a changed SSH host key for the host (open-findings row
   `2026-09-25/R-ssh-host-key`).
@@ -102,7 +102,7 @@ and `alembic/CLAUDE.md` load on their own when you read files in those directori
   request.
 - `.env` changes need a container recreate, not a restart, of every service that reads
   it: `$DC up -d --force-recreate blackbird-app worker`, and `agent` only with no live run.
-- `0056` (head is `0076` since the project chat): run `scripts/migrate/remediate_0056.py --jobs --provisions --publications --emails`
+- `0056` (head is `0078` since the landscaping chat): run `scripts/migrate/remediate_0056.py --jobs --provisions --publications --emails`
   as a dry run first, and apply the publications dedupe only with the owner's go-ahead
   (the "Deploy order for `0056`" box in `docs/operations/migration-deploy-notes.md`).
 - A migration that alters `jobs` (`0053`) needs the worker idle (no `processing` row) or

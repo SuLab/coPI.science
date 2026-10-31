@@ -75,7 +75,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0077"
+DEFAULT_TARGET = "0078"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -115,8 +115,10 @@ DEFAULT_TARGET = "0077"
 #: not list), 0066's table, 0067's table, 0068's column and CHECK, 0069's column, foreign key and index, 0070's table, 0071's table, 0072's table, unique, CHECK and index, and 0073's four tables with their
 #: uniques, CHECKs and indexes, 0075's table with its unique and indexes, 0076's five
 #: columns, three foreign keys, three indexes and three CHECKs on the chat tables (its
-#: DROP NOT NULL on assessment_chat_turns.assessment_id creates nothing), and 0077's 42
-#: landscape_* tables with their uniques, CHECKs and indexes. 0063's and 0073's
+#: DROP NOT NULL on assessment_chat_turns.assessment_id creates nothing), 0077's 42
+#: landscape_* tables with their uniques, CHECKs and indexes, and 0078's three columns, three
+#: foreign keys and index on the chat tables (its three CHECKs are dropped and recreated under
+#: the same names, so, like 0065's CHECK swap, they are not listed). 0063's and 0073's
 #: ADD VALUE on
 #: thread_outcome_enum, and 0074's two ADD VALUEs (thread_outcome_enum and
 #: sim_command_enum), enumerate nothing: adding a value to an existing type creates
@@ -128,7 +130,7 @@ SUPPORTED_START_REVISIONS = (
     "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
     "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060",
     "0061", "0062", "0063", "0064", "0065", "0066", "0067", "0068", "0069", "0070", "0071",
-    "0072", "0073", "0074", "0075", "0076",
+    "0072", "0073", "0074", "0075", "0076", "0077",
 )
 
 #: Tables whose row counts are snapshotted for postflight. Empty = every user table.
@@ -1006,11 +1008,33 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject("0077", "index", "ix_landscape_llm_calls_created_at", "landscape_llm_calls"),
     PlannedObject("0077", "constraint", "uq_landscape_reports_kind_created", "landscape_reports"),
     PlannedObject("0077", "constraint", "ck_landscape_reports_kind", "landscape_reports"),
+    # 0078_landscape_chat (the landscaping chat, spec 2026-10-30 §13.5). Its foreign keys are
+    # named. The three subject CHECKs it redefines recreate existing constraints, so they stay
+    # out (as 0065's does), and out of PLANNED_DROPS too, which lists tables only.
+    PlannedObject("0078", "column", "landscape_opportunity_id", "assessment_chat_turns"),
+    PlannedObject("0078", "column", "landscape_opportunity_id", "assessment_chat_usage"),
+    PlannedObject("0078", "column", "landscape_opportunity_id", "assessment_chat_opens"),
+    PlannedObject(
+        "0078", "constraint", "fk_assessment_chat_turns_landscape_opportunity",
+        "assessment_chat_turns",
+    ),
+    PlannedObject(
+        "0078", "constraint", "fk_assessment_chat_usage_landscape_opportunity",
+        "assessment_chat_usage",
+    ),
+    PlannedObject(
+        "0078", "constraint", "fk_assessment_chat_opens_landscape_opportunity",
+        "assessment_chat_opens",
+    ),
+    PlannedObject(
+        "0078", "index", "ix_assessment_chat_turns_landscape_conversation",
+        "assessment_chat_turns",
+    ),
 )
 
 #: What ``upgrade()`` DROPS. Kept apart from PLANNED_OBJECTS because the collision check
 #: must never treat a drop's precondition (the object exists) as a collision. 0026 is
-#: the only upgrade-time ``drop_table`` in 0019-0077.
+#: the only upgrade-time ``drop_table`` in 0019-0078.
 PLANNED_DROPS: tuple[PlannedObject, ...] = (
     PlannedObject("0026", "table", "grantbot_posted_foas"),
 )
@@ -1030,7 +1054,7 @@ REVISION_ORDER = (
     "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
     "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060",
     "0061", "0062", "0063", "0064", "0065", "0066", "0067", "0068", "0069", "0070", "0071", "0072",
-    "0073", "0074", "0075", "0076", "0077",
+    "0073", "0074", "0075", "0076", "0077", "0078",
 )
 
 

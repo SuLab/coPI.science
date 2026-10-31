@@ -1,0 +1,59 @@
+{% extends "help/_layout.html" %}
+{% from "help/_callouts.html" import careful, note %}
+{% block help_body %}
+<p class="text-sm text-gray-600">Reviewer tutorial</p>
+<h1>{{ step.title }}</h1>
+
+<h2 id="where">Where</h2>
+<p><strong>Workspace → Landscape</strong>.</p>
+
+<h2 id="what-it-means">What it means</h2>
+<p>Landscape opportunities come from reading Johns Hopkins research, not from lab interviews.
+Each week the same new batch is issued to everyone, and your job is a quick decision on each
+card: pursue or pass.</p>
+
+<h3>The page</h3>
+<ul>
+    <li><strong>This week's batch</strong> comes first, strongest first.</li>
+    <li>Below it are the cards from earlier batches that you have not decided on yet. They stay
+    until you decide, so a missed week is never lost.</li>
+    <li>A card marked <strong>changed since your decision</strong> has a rewritten assessment:
+    read it, then confirm or change your decision.</li>
+</ul>
+
+<h3>Deciding</h3>
+<p>On each card, choose <strong>Pursue</strong> or <strong>Pass</strong>, pick any reason tags
+that fit, and add a short reason. You can edit your decision later. Until you have decided on an
+opportunity you see nobody else's decisions or reviews of it, and no counts of them, so your
+decision is your own. A full review, with a rating from 1 to 5 and a comment of up to 10,000
+characters, is optional and is on the opportunity's page.</p>
+{% call careful() %}
+<p>Your decision is saved under your name, and others who have decided on the same opportunity
+can read it.</p>
+{% endcall %}
+
+<h3>Blind batches</h3>
+<p>Some weeks the batch is blind: shuffled rather than ranked, with the score, band, rank and
+their rationales hidden until you decide on each card. Decide from the headline, the key points
+and the evidence.</p>
+
+{% call note("Expert opportunities") %}
+<p>If a manager has marked you as an expert, your Landscape page also lists a few opportunities
+for you to judge in full. The pipeline's own calls on them stay hidden until you submit.</p>
+{% endcall %}
+
+<h3 id="finishing">Finishing</h3>
+{% if impersonation_banner %}
+<p>While an admin is viewing the app as another user, <strong>Back to Help</strong> below
+replaces <strong>Finish</strong> and records nothing.</p>
+{% else %}
+<p><strong>Finish</strong> below ends the tutorial, stops the "New to Blackbird?" box from
+appearing and takes you to the Help overview.</p>
+{% endif %}
+<p>The tutorial stays under Help, so you can come back to any step.</p>
+
+<p>More detail: <a href="{{ page_url(request, 'help_page', slug='landscape', fragment='list') }}">The Landscape page</a>
+and <a href="{{ page_url(request, 'help_page', slug='landscape', fragment='reviewing') }}">Deciding and reviewing</a>.</p>
+
+{% include "help/_step_nav.html" %}
+{% endblock %}

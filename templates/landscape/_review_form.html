@@ -1,0 +1,39 @@
+{# The optional full review (spec §13.3): an overall score, optional dimension scores on the
+   live rubric (`review_dimensions`, `review_scale_min`, `review_scale_max`, the set
+   /reviews validates against) and a comment of up to 10,000 characters. Included with
+   `opportunity_id`, `assessment_id` (always posted, D50), `review` (the viewer's own review
+   dict or none) and `form_id`. A first review posts to /reviews/landscape/<id>/review, an
+   edit to /reviews/landscape-reviews/<id>/edit; an edit re-posts every dimension, so
+   clearing one clears it. #}
+{% set own_scores = (review.dimension_scores if review and review.dimension_scores else {}) %}
+{% if review %}
+<form method="post" action="/reviews/landscape-reviews/{{ review.id }}/edit" class="landscape-review-form space-y-2">
+{% else %}
+<form method="post" action="/reviews/landscape/{{ opportunity_id }}/review" class="landscape-review-form space-y-2">
+{% endif %}
+    <input type="hidden" name="assessment_id" value="{{ assessment_id or '' }}">
+    <label for="{{ form_id }}score" class="block text-sm font-medium text-gray-700">Rating (1 = weak … 5 = strong)</label>
+    <select id="{{ form_id }}score" name="score" required class="text-sm border border-gray-300 rounded-md shadow-sm">
+        {% if not review %}<option value="" disabled selected>—</option>{% endif %}
+        {% for n in range(1, 6) %}<option value="{{ n }}" {% if review and review.score == n %}selected{% endif %}>{{ n }}</option>{% endfor %}
+    </select>
+    {% if review_dimensions %}
+    <fieldset class="mt-2">
+        <legend class="text-sm font-medium text-gray-700">Dimension scores (optional)</legend>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1">
+            {% for dim in review_dimensions %}
+            <div class="flex items-center justify-between gap-2">
+                <label for="{{ form_id }}dim-{{ dim.key }}" class="text-sm text-gray-700">{{ dim.title }}</label>
+                <select id="{{ form_id }}dim-{{ dim.key }}" name="dim_{{ dim.key }}" class="text-sm border border-gray-300 rounded-md shadow-sm">
+                    <option value="">—</option>
+                    {% for n in range(review_scale_min, review_scale_max + 1) %}<option value="{{ n }}" {% if own_scores.get(dim.key) == n %}selected{% endif %}>{{ n }}</option>{% endfor %}
+                </select>
+            </div>
+            {% endfor %}
+        </div>
+    </fieldset>
+    {% endif %}
+    <label for="{{ form_id }}comment" class="block text-sm font-medium text-gray-700 mt-2">Comment</label>
+    <textarea id="{{ form_id }}comment" name="comment" rows="4" maxlength="10000" class="w-full text-sm border border-gray-300 rounded-md shadow-sm">{{ review.comment if review and review.comment else '' }}</textarea>
+    <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">{{ 'Save review' if review else 'Submit review' }}</button>
+</form>

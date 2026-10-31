@@ -2180,7 +2180,9 @@ Reason-tag approval is not a route: an operator sets `[reason_tags] approved = t
     conversation, and the reverse.
   - `test_subcap_stops_landscape_but_not_assessment_chat`.
   - `test_reviews_doc_respects_independent_votes`.
-  - `test_switch_off_404`.
+  - `test_switch_off_503`: either switch off answers 503 `disabled` before the lookup, as
+    `project_chat.py` does (spec §13.5: the same refusal order); with both on, an unknown id
+    is 404.
   - `test_unrecorded_chat_md_edit_503`.
   - `test_verdict_doc_blinded_and_expert_hidden`: the Verdict document of an undecided
     blind-batch card; the Verdict, Panel, Disease profile and Evidence documents of an expert's

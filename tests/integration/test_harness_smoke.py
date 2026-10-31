@@ -108,7 +108,8 @@ async def test_container_is_migrated(engine):
         # 0075 hub_project_review_assignments (project review assignments)
         # 0076 assessment_chat_* project_id and subject (project chat)
         # 0077 the 42 landscape_* tables (landscaping pipeline)
-        assert v == "0077"
+        # 0078 assessment_chat_* landscape_opportunity_id (landscaping chat)
+        assert v == "0078"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

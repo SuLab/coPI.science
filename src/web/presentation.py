@@ -133,6 +133,11 @@ SCHEMAS = {
 # These fields contain intentionally open research/rubric JSON, not ORM objects.
 JSON_FIELDS = frozenset(
     "techniques experimental_models disease_areas key_targets keywords scores gating dimension_rationales gating_rationales key_points dimension_scores identity_evidence evidence components coverage config fields content prompt_files feedback_snapshot analysis raw_verdict raw_choice raw_final".split()
+) | frozenset(
+    # Landscaping JSON whose keys come from data (src/services/landscape_view.py): reports,
+    # metrics, an idea's facets and evidence, and the S6 row (``deep``) after its hiding.
+    "metrics drift positive_control_trace payload results deep targets disease "
+    "modality_variants evidence_summary data_flags claim_support member_notes".split()
 )
 SECRET_KEYS = frozenset(
     "password password_hash slack_bot_token token_hash private_profile_seed private_profile_md user_submitted_texts pending_profile system_prompt messages_json".split()
@@ -140,10 +145,16 @@ SECRET_KEYS = frozenset(
 STAFF_VERDICT_FIELDS = frozenset(f.column for f in VERDICT_FIELDS if f.staff_only)
 STAFF_KEYS = frozenset(
     "jobs review revisions outside_window draft discovery company_suggestions companies_suggested activation_blockers activation_blocked activated blockers has_bot_token can_retry_profile profile_status agent_status email email_verified_at name_sanitized_at onboarding_complete claimed_at last_login_at".split()
+) | frozenset(
+    # The Landscape staff lists and pipeline page (spec §13.1, §13.4).
+    "lists epochs metrics drift positive_control_trace reports picks_applied positive_controls "
+    "experts review_users blind_batches no_assessment_cards incomplete_slices filtered "
+    "audit_disagreements".split()
 )
 ADMIN_KEYS = frozenset(
     "raw_verdict raw_opinion raw_opinion_truncated unplaced_turns held_counts in_doubt "
-    "microsoft_link research_cost_usd refinement_cost_usd calls_url raw_choice raw_final".split()
+    "microsoft_link research_cost_usd refinement_cost_usd calls_url raw_choice raw_final "
+    "search_transcript".split()
 )
 REVIEWER_SCHEMAS = {
     "PiGrantIdentity": SCHEMAS["PiGrantIdentity"] - {"candidates"},
@@ -239,10 +250,34 @@ VIEW_FIELDS = frozenset(
         "reviewers run_started_at has_close plan_title changed opening_value matched "
         "sources_by_kind earlier_count truncated thread_unavailable posts closed_thread "
         "raw_choice raw_final assignments chat_available card_chat_available "
+        # The Landscape pages (src/services/landscape_view.py, spec §13).
+        "batch lists expert selected_view reason_tag_choices review_dimensions review_scale_min "
+        "review_scale_max expert_gates expert_deal_breakers expert_recommendations test "
+        "epoch banner is_staff is_admin this_week carry_overs changed earlier_batches batch_id "
+        "issued_on blind superseded cards opportunity_id headline pitch labs rank recommendation "
+        "no_assessment failure history_assessment_id retired probe blind_hidden expert_hidden "
+        "my_decision changed_since_decision judgment_id drawn_at issued_before_draw reviewer_id "
+        "reason_tags landscape_assessment_id prompt_set_version criteria_version activated_at "
+        "view tab cut k quarter is_expert theme is_history hiding members votes_unlocked "
+        "decisions status_events expert_item history epoch_id epoch_status opportunity_version "
+        "unestablished mid_scale body idea_id idea_key idea_type structured_line structured_lines "
+        "direction targets disease modality_variants evidence_grade jhu_group_count "
+        "outside_group_count evidence_summary data_flags deep consults labs verdict_signal "
+        "questions_to_ask reply_truncated document_id document_type published_on role_basis "
+        "license text_basis lab_key orcid_url openalex_url actor_name assignee_id expert "
+        "paused epochs metrics drift positive_control_trace reports pilot bakeoff probes "
+        "picks_applied positive_controls experts review_users blind_batches position "
+        "no_assessment_cards incomplete_slices filtered audit_disagreements changed_stages "
+        "hold_reason override_actor_id override_reason override_at drained_at retired_at "
+        "regression_run set_version results enabled last_success_at completeness next_due_at "
+        "last_fetch slice_key expected_count received_count item_kind item_id expected_status "
+        "original_decision audit_decision rescue mine "
     ).split()
 )
 DYNAMIC_MAP_FIELDS = frozenset(
-    "runs_by_id assessment_counts_by_run pi_user_ids panel_by_thread agent_stats channel_stats band_counts drop_counts review_counts list_state counts gating_definitions gating_reasons gating_descriptions".split()
+    "runs_by_id assessment_counts_by_run pi_user_ids panel_by_thread agent_stats channel_stats band_counts drop_counts review_counts list_state counts gating_definitions gating_reasons gating_descriptions "
+    # A landscaping assessment's column map, and the filtered-items browser by stage.
+    "assessment filtered".split()
 )
 
 

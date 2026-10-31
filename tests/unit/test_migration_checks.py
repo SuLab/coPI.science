@@ -279,9 +279,9 @@ def test_supported_start_revisions_are_exactly_the_documented_set():
         "0039", "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048",
         "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058",
         "0059", "0060", "0061", "0062", "0063", "0064", "0065", "0066", "0067", "0068",
-        "0069", "0070", "0071", "0072", "0073", "0074", "0075", "0076",
+        "0069", "0070", "0071", "0072", "0073", "0074", "0075", "0076", "0077",
     )
-    assert pf.DEFAULT_TARGET == "0077"
+    assert pf.DEFAULT_TARGET == "0078"
 
 
 def test_every_post_branch_revision_is_a_supported_start():
@@ -2204,8 +2204,10 @@ def test_postflight_pins_the_0076_objects():
         po.EXPECTED_COLUMNS)
     assert po.EXPECTED_INDEXES["ix_assessment_chat_turns_project_conversation"] == (
         "USING btree (project_id, user_id, context_tier, created_at)")
+    # 0078 widened this CHECK to its third subject column.
     assert po.EXPECTED_CONSTRAINTS["ck_assessment_chat_turns_one_subject"] == (
-        "assessment_chat_turns", "num_nonnulls(assessment_id, project_id) = 1")
+        "assessment_chat_turns",
+        "num_nonnulls(assessment_id, project_id, landscape_opportunity_id) = 1")
     assert po.EXPECTED_CONSTRAINTS["fk_assessment_chat_turns_project_id_hub_projects"] == (
         "assessment_chat_turns",
         "FOREIGN KEY (project_id) REFERENCES hub_projects(id) ON DELETE CASCADE")
@@ -2214,7 +2216,8 @@ def test_postflight_pins_the_0076_objects():
         assert po.EXPECTED_CONSTRAINTS[fk] == (
             table, "FOREIGN KEY (project_id) REFERENCES hub_projects(id) ON DELETE SET NULL")
         check = "ck_" + table + "_subject"
-        assert po.EXPECTED_CONSTRAINTS[check] == (table, "'project'")
+        # Pinned by the last allowed value, which 0078 moved to 'landscape'.
+        assert po.EXPECTED_CONSTRAINTS[check] == (table, "'landscape'")
 
 
 def test_0077_plans_the_landscape_tables_and_alters_nothing():
