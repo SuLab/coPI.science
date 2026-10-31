@@ -452,15 +452,18 @@ async def _set_batch(db_factory, cut_id: uuid.UUID, batch_id: uuid.UUID) -> None
         await db.commit()
 
 
-async def _advance_pending(db_factory, cut_id: uuid.UUID) -> None:
+async def _advance_pending(db_factory, cut_id: uuid.UUID, *, may_submit: bool) -> None:
     """A cut due while the boundary tournament runs is skipped (§7.6). Meanwhile: finish the
-    pending cut once settled, and re-send comparisons a result put back to ``pending``."""
+    pending cut once settled, and (when `may_submit`) send the comparisons still ``pending``:
+    ones a result put back, or ones held while over the daily cap."""
     async with db_factory() as db:
         cut = await db.get(LandscapeCut, cut_id)
         _, rows = await _class_rows(db, cut)
         await db.commit()
     if comparator.settled(rows):
         await _finish(db_factory, cut_id)
+        return
+    if not may_submit:
         return
     resend = [row.id for row in rows if row.status == "pending" and row.fallback_from is None]
     if resend:
@@ -482,10 +485,11 @@ async def _frozen(db: AsyncSession, epoch: LandscapeEpoch) -> bool:
 
 async def _boundary(
     db_factory, cut_id: uuid.UUID, epoch_id: uuid.UUID, order: list[uuid.UUID],
-    folds: dict, k: int, span: tuple[int, int],
+    folds: dict, k: int, span: tuple[int, int], *, may_submit: bool,
 ) -> uuid.UUID | None:
     """Resolve the tie class across K: from cached answers when every comparison is already
-    settled (no call), else by one Message Batch, leaving the cut ``boundary_pending``."""
+    settled (no call), else by one Message Batch, leaving the cut ``boundary_pending``. Without
+    `may_submit` the comparisons stay ``pending`` and a later call sends them."""
     members = order[span[0]:span[1]]
     pairs = tournament_pairs(members, full_up_to=BOUNDARY_FULL_UP_TO, seed=_seed(cut_id))
     async with db_factory() as db:
@@ -510,14 +514,22 @@ async def _boundary(
         db.add(_new_cut(cut_id, epoch_id, status="boundary_pending", order=order, folds=folds,
                         k=k, class_size=len(members)))
         await db.commit()
+    if not may_submit:
+        return None
     batch_id = await comparator.submit_rows(db_factory, [row.id for row in rows])
     if batch_id is not None:
         await _set_batch(db_factory, cut_id, batch_id)
     return None
 
 
-async def run_cut(db_factory, epoch_id: uuid.UUID) -> uuid.UUID | None:
+async def run_cut(
+    db_factory, epoch_id: uuid.UUID, *, may_submit: bool = True,
+) -> uuid.UUID | None:
     """Take S5 for ``epoch_id`` (spec §7.6); the id of the new complete cut, or None.
+
+    `may_submit` false (the worker over its daily cap) still takes the cut but sends no
+    boundary comparison: the tie class waits ``pending`` in a ``boundary_pending`` cut until a
+    call with `may_submit` sends it (the cap defers model work only, §12.2).
 
     None when: the epoch is gone or retired; a boundary tournament is pending (one cut per
     epoch in flight: this call only advances it, finishing it once settled); the epoch is a
@@ -539,7 +551,7 @@ async def run_cut(db_factory, epoch_id: uuid.UUID) -> uuid.UUID | None:
                 return None
             ranked = await _pool(db, epoch_id)
     if pending_id is not None:
-        await _advance_pending(db_factory, pending_id)
+        await _advance_pending(db_factory, pending_id, may_submit=may_submit)
         return None
     kept, folded = _fold(ranked)
     order = [item.idea_id for item in kept]
@@ -548,7 +560,9 @@ async def run_cut(db_factory, epoch_id: uuid.UUID) -> uuid.UUID | None:
     cut_id = uuid.uuid4()
     span = _tie_span(kept, k)
     if span is not None:
-        return await _boundary(db_factory, cut_id, epoch_id, order, folds, k, span)
+        return await _boundary(
+            db_factory, cut_id, epoch_id, order, folds, k, span, may_submit=may_submit,
+        )
     async with db_factory() as db:
         cut = _new_cut(cut_id, epoch_id, status="complete", order=order, folds=folds, k=k,
                        class_size=0)

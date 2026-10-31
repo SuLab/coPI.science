@@ -224,10 +224,9 @@ def _placed(results: Iterable[tuple]) -> set[uuid.UUID]:
     return {idea for a, b, winners in results if winners for idea in (a, b)}
 
 
-async def _rebuild_in_flight(db: AsyncSession, epoch_id: uuid.UUID) -> bool:
-    """True while the epoch's newest rebuild batch still owes an answer (in a batch, waiting
-    to be re-sent, or waiting for the fallback chain)."""
-    batch_id = await db.scalar(
+async def newest_rebuild_batch(db: AsyncSession, epoch_id: uuid.UUID) -> uuid.UUID | None:
+    """The ``landscape_batches`` id of the epoch's newest rebuild tournament, or None."""
+    return await db.scalar(
         select(LandscapeBatch.id)
         .join(LandscapeBatchItem, LandscapeBatchItem.batch_id == LandscapeBatch.id)
         .join(LandscapeComparison, LandscapeComparison.id == LandscapeBatchItem.row_id)
@@ -238,6 +237,12 @@ async def _rebuild_in_flight(db: AsyncSession, epoch_id: uuid.UUID) -> bool:
         .order_by(LandscapeBatch.seq.desc())
         .limit(1)
     )
+
+
+async def _rebuild_in_flight(db: AsyncSession, epoch_id: uuid.UUID) -> bool:
+    """True while the epoch's newest rebuild batch still owes an answer (in a batch, waiting
+    to be re-sent, or waiting for the fallback chain)."""
+    batch_id = await newest_rebuild_batch(db, epoch_id)
     return batch_id is not None and not await comparator.tournament_complete(db, batch_id)
 
 

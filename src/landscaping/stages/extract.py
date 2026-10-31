@@ -1,6 +1,7 @@
 """S3 extract from summaries: one batched call per screened-in document and epoch (spec §7.4).
 
-A document S2 answered ``yes`` or ``unsure`` gets a ``summary``-basis extraction row. Its result
+A document S2 answered ``yes`` or ``unsure``, or whose S2 ``no`` staff rescued (§10.5, L44), gets
+a ``summary``-basis extraction row. Its result
 is quote-checked against the text S2 read (§7.4 step 3), its targets, disease and agent are
 normalized (step 4), and each idea candidate is merged into the epoch's ideas (step 7). For a
 patent or a technology-transfer listing, each ``linked_publications`` entry found verbatim in
@@ -21,7 +22,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -82,13 +83,13 @@ def _request(doc: LandscapeDocument, *, model: str, system: str, retry: bool) ->
 
 
 def _screened_in(epoch_id: uuid.UUID):
-    """The join condition: the document's S2 row in the epoch is done with yes or unsure."""
+    """The join condition: the document's S2 row in the epoch is done with yes or unsure, or
+    rescued (a rescued ``no`` re-enters at the next stage, L44)."""
     S = LandscapeScreen
     return and_(
         S.document_id == LandscapeDocument.id,
         S.epoch_id == epoch_id,
-        S.status == "done",
-        S.decision.in_(("yes", "unsure")),
+        or_(and_(S.status == "done", S.decision.in_(("yes", "unsure"))), S.status == "rescued"),
     )
 
 
@@ -122,11 +123,11 @@ async def _ensure_rows(db: AsyncSession, epoch_id: uuid.UUID) -> None:
 
 
 async def submit_extract_batch(db_factory, epoch_id: uuid.UUID) -> int:
-    """Batch S3 for the epoch's documents whose S2 answer is ``yes`` or ``unsure``.
+    """Batch S3 for the epoch's documents whose S2 answer is ``yes`` or ``unsure``, or rescued.
 
     First creates the missing ``pending`` rows. A pending row is sent only while its S2 row is
-    still done with yes or unsure, so a document whose summary changed waits for its new
-    screen. Rows waiting for the fallback chain are never batched (D42). Requests use the
+    still done with yes or unsure, or rescued, so a document whose summary changed waits for
+    its new screen. Rows waiting for the fallback chain are never batched (D42). Requests use the
     epoch's own prompt and model (§7.11). Returns the number of requests submitted.
     """
     D, E = LandscapeDocument, LandscapeExtraction

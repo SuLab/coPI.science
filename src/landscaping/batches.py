@@ -691,12 +691,17 @@ class FallbackAdapter:
     read session that closes before the call; ``on_success(db, row, result)`` writes the
     stage's result rows in ``run_fallbacks``' transaction. Each batched stage module exports
     ``FALLBACKS: tuple[FallbackAdapter, ...]``.
+
+    ``ledger_stage`` names the ledger stage of the re-runs when it differs from ``stage``: the
+    reject audit's requests are built by the audited stage's builder but ledgered as ``audit``
+    (D66). None ledgers them under ``stage``.
     """
 
     stage: str
     row_model: type
     build: Callable[[AsyncSession, Any], Awaitable[dict]]
     on_success: Callable[[AsyncSession, Any, CallResult], Awaitable[None]]
+    ledger_stage: str | None = None
 
 
 async def run_fallbacks(db_factory, adapter: FallbackAdapter) -> int:
@@ -731,7 +736,7 @@ async def _run_one_fallback(db_factory, adapter: FallbackAdapter, row: Any) -> i
     result = await call_sync(
         adapter.stage, request, db_factory=db_factory,
         item_ref=f"{adapter.row_model.__tablename__}:{row.id}",
-        skip_models=frozenset({refused_by}),
+        skip_models=frozenset({refused_by}), ledger_stage=adapter.ledger_stage,
     )
     async with db_factory() as db:
         current = await db.get(adapter.row_model, row.id, with_for_update=True)

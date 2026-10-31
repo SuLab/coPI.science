@@ -1301,9 +1301,10 @@ async def submit_tournament(db_factory, *, epoch_id, ids, pairs, basis: Literal[
 def win_fraction_order(results, *, tiebreak) -> list
     # win fraction = (wins + 0.5 × ties) / pairs met, where a pair whose two orders disagree is a tie;
     # equal fractions fall to `tiebreak` (S5: tie keys 6-8; S7: S6 provisional weighted_score, then id)
-async def run_cut(db_factory, epoch_id) -> uuid.UUID | None
+async def run_cut(db_factory, epoch_id, *, may_submit: bool = True) -> uuid.UUID | None
     # §7.6: pool (rescued included), order, folds (D34), K; if ranks K and K+1 tie on keys 1-5, submit the boundary
-    # tournament (basis "triage", blinded S4 dossiers, full_up_to=20) and return None. The previous cut stays
+    # tournament (basis "triage", blinded S4 dossiers, full_up_to=20) and return None; with may_submit false (the
+    # worker over its daily cap) the tournament's rows wait pending and a later call sends them. The previous cut stays
     # current, and finish_cut(...) completes the snapshot when the batch ends. Then queue S6 (re-queue throttled
     # per batch cycle, D37). One cut per epoch is in flight: a cut due while a boundary batch is pending is
     # skipped, returning None. A candidate that has a complete cut taken after its drained_at takes no further cut
@@ -1447,7 +1448,9 @@ async def run_deep(db_factory, idea_id, *, epoch_id) -> None
 - Test: `tests/integration/landscaping/test_stage_rerank.py`
 
 **Interfaces:** produces `async def update_rankings(db_factory, *, epoch_id, cut_id) -> None`
-and `async def finish_rebuild(db_factory, *, epoch_id, batch_id) -> None` (spec §7.8).
+and `async def finish_rebuild(db_factory, *, epoch_id, batch_id) -> None` (spec §7.8), plus
+`async def newest_rebuild_batch(db, epoch_id) -> uuid.UUID | None`, which the worker uses to land
+a rebuild completed through the fallback chain (no batch end follows it).
 1. It removes ideas that left the cut.
 2. When the list is empty, or more than 25% of the cut is new since the last rebuild, it
    submits a rebuild: `submit_tournament(..., basis="deep")` over `tournament_pairs(ids,
@@ -1781,8 +1784,10 @@ async def run_regression(db_factory, epoch_id) -> bool
 - the latest cut (N, K, tie-class size).
 
 It also produces `async def drift_report(db) -> dict` (§5.1 drift), `async def
-positive_control_trace(db) -> dict` (§10.2), and `async def pilot_report(db_factory) ->
-uuid.UUID`, a `LandscapeReport("pilot")` holding (D68):
+positive_control_trace(db) -> dict` (§10.2), and `async def pilot_report(db_factory, *,
+s4_repeatability: dict | None = None) -> uuid.UUID`, a `LandscapeReport("pilot")` holding (D68)
+(the worker passes the `run_s4_repeatability` result it just measured, so the pilot pays for it
+once):
 - the latest bake-off and probes reports;
 - completeness per pilot slice and source;
 - the S4 repeatability result, and the normalization rate with its ambiguous-name count;

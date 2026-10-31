@@ -712,3 +712,41 @@ async def test_usage_recorded_with_batch_true(db_factory, fake):
     assert call.cost_usd == cost_for_request(
         MODEL, input_tokens=1000, output_tokens=200, cache_read=0, cache_creation=0, batch=True
     )
+
+
+async def test_fallback_ledger_stage_passed_to_call_sync(db_factory, fake, monkeypatch):
+    """An adapter's ``ledger_stage`` reaches ``call_sync``, so the reject audit's re-runs are
+    ledgered as ``audit`` while built by the audited stage (D66); unset, it stays None and
+    ``call_sync`` ledgers under ``stage``."""
+    ids = await _screens(db_factory, 2)
+    seen: list[tuple[str, str | None]] = []
+
+    async def fake_call_sync(stage, request, *, db_factory, item_ref, skip_models=frozenset(),
+                             ledger_stage=None):
+        seen.append((stage, ledger_stage))
+        return CallResult(
+            message=_message(), text="{}", stop_reason="end_turn", refusal_category=None,
+            served_by="claude-opus-5", usage={}, error=None,
+        )
+
+    async def build(db, row):
+        return _request()
+
+    async def on_success(db, row, result):
+        row.decision = "yes"
+
+    monkeypatch.setattr(batches, "call_sync", fake_call_sync)
+    for row_id, ledger_stage in zip(ids, (None, "audit"), strict=True):
+        async with db_factory() as db:
+            await db.execute(
+                update(LandscapeScreen).where(LandscapeScreen.id == row_id)
+                .values(fallback_from=MODEL)
+            )
+            await db.commit()
+        adapter = batches.FallbackAdapter(
+            stage="screen", row_model=LandscapeScreen, build=build, on_success=on_success,
+            **({} if ledger_stage is None else {"ledger_stage": ledger_stage}),
+        )
+        assert await batches.run_fallbacks(db_factory, adapter) == 1
+
+    assert seen == [("screen", None), ("screen", "audit")]

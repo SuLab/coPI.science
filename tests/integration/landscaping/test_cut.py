@@ -398,6 +398,25 @@ async def test_cut_skipped_while_boundary_batch_pending(db_factory, fake):
 
 
 @pytest.mark.asyncio
+async def test_boundary_waits_without_may_submit(db_factory, fake):
+    """Over the daily cap the cut is taken but its tie class waits unsent; the next call that
+    may submit sends it (the cap defers model work only, spec §12.2)."""
+    epoch_id = await _epoch(db_factory)
+    for _ in range(3):
+        await _idea(db_factory, epoch_id, score=4.0)
+
+    assert await run_cut(db_factory, epoch_id, may_submit=False) is None
+    (pending,) = await _cuts(db_factory, epoch_id)
+    assert pending.status == "boundary_pending" and pending.boundary_batch_id is None
+    assert fake.created == []
+
+    assert await run_cut(db_factory, epoch_id) is None
+    (pending,) = await _cuts(db_factory, epoch_id)
+    assert pending.status == "boundary_pending" and pending.boundary_batch_id is not None
+    assert len(fake.created) == 1 and len(fake.created[0]) == 6  # 3 pairs, both orders
+
+
+@pytest.mark.asyncio
 async def test_candidate_cut_frozen_after_post_drain_cut(db_factory):
     epoch_id = await _epoch(db_factory)
     await _idea(db_factory, epoch_id, score=4.5)

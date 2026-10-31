@@ -814,8 +814,9 @@ def pilot_slices(*, today: date, seed: int) -> list[tuple[str, str]]:
     return list(dict.fromkeys(slices))
 
 
-def _backfill_slices(today: date, window_days: int) -> list[tuple[str, str]]:
-    """Every slice of the window, oldest first (§15 Phase 1)."""
+def backfill_slices(today: date, window_days: int) -> list[tuple[str, str]]:
+    """Every slice of the window, oldest first (§15 Phase 1). The worker's D69 drain check
+    reads the same list: the backfill has drained once each enabled source's slices ended."""
     slices: list[tuple[str, str]] = [("jhtv", "feed:backfill")]
     for year, month in _window_months(today, window_days):
         slices += _month_slices(year, month)
@@ -901,7 +902,7 @@ async def schedule_due(db: AsyncSession, *, now: datetime) -> list[tuple[str, st
         anchor_day, seed = await _pilot_anchor(db, now)
         wanted = pilot_slices(today=anchor_day, seed=seed)
     elif phase == "backfill":
-        wanted = _backfill_slices(now.date(), window_days)
+        wanted = backfill_slices(now.date(), window_days)
         if not _ncbi_off_peak(now):
             wanted = [(s, k) for s, k in wanted if s not in NCBI_SOURCES]
     elif phase == "continuous":
