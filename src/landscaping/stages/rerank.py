@@ -440,6 +440,10 @@ async def finish_rebuild(db_factory, *, epoch_id: uuid.UUID, batch_id: uuid.UUID
     by ``win_fraction_order`` (ties: S6 provisional ``weighted_score``, then id), removes ideas
     that left the current cut meanwhile, and inserts the ideas that entered meanwhile, or whose
     S6 version changed, one at a time. Waits for the epoch's rerank lock.
+
+    The insertions are synchronous model calls, so call it only when new model work is
+    allowed: the worker calls it from ``_sync_step`` (its S7 task, before ``update_rankings``),
+    never from batch ingestion, which runs while disabled, paused or over the daily cap (§9.5).
     """
     async with _rerank_lock(epoch_id) as lock:
         async with db_factory() as db:

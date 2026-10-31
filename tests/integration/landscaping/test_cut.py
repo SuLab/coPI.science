@@ -406,6 +406,34 @@ async def test_previous_cut_current_until_boundary_batch_ends(db_factory):
 
 
 @pytest.mark.asyncio
+async def test_batch_not_the_pending_cuts_leaves_it_alone(db_factory, fake):
+    """A tie-break batch that ends after its cut was deleted (an idea merge) is not the
+    pending cut's ``boundary_batch_id``: it finishes nothing and raises nothing, returning the
+    newest complete cut, or None before any exists."""
+    epoch_id = await _epoch(db_factory)
+    await _tied_class(db_factory, epoch_id)
+    orphaned = uuid.uuid4()
+
+    assert await finish_cut(db_factory, epoch_id=epoch_id, tournament_batch_id=orphaned) is None
+
+    other_epoch = await _epoch(db_factory)
+    await _idea(db_factory, other_epoch, score=4.5)
+    await _idea(db_factory, other_epoch, score=3.0)
+    first = await run_cut(db_factory, other_epoch)
+    await _idea(db_factory, other_epoch, score=4.5)
+    assert await run_cut(db_factory, other_epoch) is None
+
+    assert await finish_cut(
+        db_factory, epoch_id=other_epoch, tournament_batch_id=orphaned
+    ) == first
+    for epoch in (epoch_id, other_epoch):
+        cuts = await _cuts(db_factory, epoch)
+        assert cuts[-1].status == "boundary_pending"
+        assert cuts[-1].boundary_batch_id not in (None, orphaned)
+    assert len(fake.created) == 2
+
+
+@pytest.mark.asyncio
 async def test_cut_skipped_while_boundary_batch_pending(db_factory, fake):
     epoch_id = await _epoch(db_factory)
     await _tied_class(db_factory, epoch_id)

@@ -1,7 +1,9 @@
 """Full-text retrieval (plan Task 5.1, spec 2026-10-30 §6.2, D6, D41).
 No network: HTTP runs over an httpx.MockTransport on recorded-shape fixtures with invented
 article content."""
+import gzip
 import json
+import zlib
 
 import httpx
 import pytest
@@ -280,3 +282,141 @@ async def test_an_oversized_body_stops_at_the_cap(monkeypatch):
     assert result.basis == "summary"
     assert result.route is None
     assert sum(sent) <= fulltext.MAX_BODY_BYTES + 1_000
+
+
+XML_PATH = f"/{PMCID}.2/{PMCID}.2.xml"
+
+
+def _streamed(data: bytes, size: int = 4096):
+    """``data`` as a streamed body, so httpx neither reads nor decodes it when the response
+    is built (it does for bytes) and fulltext's own bounded decoder reads it."""
+    async def chunks():
+        for start in range(0, len(data), size):
+            yield data[start:start + size]
+    return chunks()
+
+
+def _pmc_xml_answered_by(xml_response):
+    """The PMC route with its JATS fetch answered by ``xml_response(request)``; any other
+    bucket path ending ``.xml`` serves the JATS."""
+    pmc = _pmc_handler(_meta("CC BY"))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "pmc-oa-opendata.s3.amazonaws.com":
+            if request.url.path == XML_PATH:
+                return xml_response(request)
+            if request.url.path.endswith(".xml"):
+                return httpx.Response(200, text=JATS)
+        return pmc(request)
+    return handler
+
+
+async def test_a_gzip_body_stops_at_the_cap_without_decoding_it_all(monkeypatch):
+    monkeypatch.setattr(fulltext, "MAX_BODY_BYTES", 10_000)
+    bomb = gzip.compress(b"<p>" + b"x" * 5_000_000 + b"</p>")
+    decoded: list[int] = []
+    real = zlib.decompressobj
+
+    class Spy:
+        def __init__(self, wbits):
+            self.inner = real(wbits)
+
+        @property
+        def unconsumed_tail(self):
+            return self.inner.unconsumed_tail
+
+        def decompress(self, data, max_length=0):
+            out = self.inner.decompress(data, max_length)
+            decoded.append(len(out))
+            return out
+
+        def flush(self):
+            return self.inner.flush()
+
+    monkeypatch.setattr(fulltext.zlib, "decompressobj", Spy)
+    _install(monkeypatch, _pmc_xml_answered_by(
+        lambda request: httpx.Response(
+            200, content=_streamed(bomb), headers={"Content-Encoding": "gzip"},
+        )
+    ))
+    result = await fulltext.fetch_full_text(_doc(doi=None))
+    assert result.basis == "summary"
+    assert sum(decoded) <= fulltext.MAX_BODY_BYTES + 1
+
+    # Control: a gzip body under the cap is decoded and read.
+    monkeypatch.setattr(fulltext, "MAX_BODY_BYTES", 16 * 1024 * 1024)
+    _install(monkeypatch, _pmc_xml_answered_by(lambda request: httpx.Response(
+        200, content=_streamed(gzip.compress(JATS.encode())), headers={"Content-Encoding": "gzip"},
+    )))
+    result = await fulltext.fetch_full_text(_doc(doi=None))
+    assert (result.basis, result.route) == ("full_text", "pmc")
+
+
+def _raw_deflate(data: bytes) -> bytes:
+    packer = zlib.compressobj(wbits=-zlib.MAX_WBITS)
+    return packer.compress(data) + packer.flush()
+
+
+@pytest.mark.parametrize("pack", [zlib.compress, _raw_deflate], ids=["zlib", "raw"])
+async def test_a_deflate_body_is_decoded_with_or_without_its_zlib_wrapper(monkeypatch, pack):
+    _install(monkeypatch, _pmc_xml_answered_by(lambda request: httpx.Response(
+        200, content=_streamed(pack(JATS.encode())), headers={"Content-Encoding": "deflate"},
+    )))
+    result = await fulltext.fetch_full_text(_doc(doi=None))
+    assert (result.basis, result.route) == ("full_text", "pmc")
+
+
+async def test_an_unread_content_coding_yields_no_text(monkeypatch):
+    _install(monkeypatch, _pmc_xml_answered_by(
+        lambda request: httpx.Response(
+            200, content=_streamed(b"\x00"), headers={"Content-Encoding": "br"},
+        )
+    ))
+    result = await fulltext.fetch_full_text(_doc(doi=None))
+    assert (result.basis, result.route) == ("summary", None)
+
+
+@pytest.mark.parametrize("location", [
+    "http://pmc-oa-opendata.s3.amazonaws.com/moved.xml", "ftp://invented.example/a.xml",
+])
+async def test_a_redirect_off_https_yields_no_text(monkeypatch, location):
+    requests = _install(monkeypatch, _pmc_xml_answered_by(
+        lambda request: httpx.Response(302, headers={"Location": location})
+    ))
+    result = await fulltext.fetch_full_text(_doc(doi=None))
+    assert (result.basis, result.route) == ("summary", None)
+    assert not [r for r in requests if r.url.scheme != "https"]
+
+
+async def test_a_redirect_on_an_open_route_is_followed_unread(monkeypatch):
+    body_read: list[bool] = []
+
+    async def body():
+        body_read.append(True)
+        yield b"invented redirect body"
+
+    def moved(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            302, headers={"Location": "https://pmc-oa-opendata.s3.amazonaws.com/moved.xml"},
+            content=body(),
+        )
+
+    requests = _install(monkeypatch, _pmc_xml_answered_by(moved))
+    result = await fulltext.fetch_full_text(_doc(doi=None))
+    assert (result.basis, result.route) == ("full_text", "pmc")
+    assert any(r.url.path == "/moved.xml" for r in requests)
+    assert body_read == []
+
+
+async def test_a_redirect_chain_past_the_limit_yields_no_text(monkeypatch):
+    def loop(request: httpx.Request) -> httpx.Response:
+        hop = int(request.url.params.get("hop", "0")) + 1
+        return httpx.Response(
+            302, headers={"Location": f"https://pmc-oa-opendata.s3.amazonaws.com{XML_PATH}"
+                                      f"?hop={hop}"},
+        )
+
+    requests = _install(monkeypatch, _pmc_xml_answered_by(loop))
+    result = await fulltext.fetch_full_text(_doc(doi=None))
+    assert (result.basis, result.route) == ("summary", None)
+    assert len([r for r in requests if r.url.path == XML_PATH]) == fulltext._MAX_REDIRECTS + 1

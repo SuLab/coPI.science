@@ -17,9 +17,10 @@ compare with (``expected``). Item kinds and the stages whose change runs them:
 
 **The gate** (``run_regression``) asks the candidate epoch's own prompts, models and rubric
 (``epochs.epoch_inputs``) for each item of the stages its change touches, and holds the epoch
-when any stage misses its threshold or has no item to check (expert items excepted). With no
-active epoch only the S2-S4 items are checked (D65). The candidate is judged on the set version
-current when it was created, or the first version when it predates every version.
+when any stage misses its threshold or has no item to check (expert, pair and similarity items
+excepted: ``EMPTY_ALLOWED_KINDS``). With no active epoch only the S2-S4 items are checked (D65).
+The candidate is judged on the set version current when it was created, or the first version
+when it predates every version.
 
 Reading the S6 dossier, the S9 message and the S7/S8 texts reuses the stage modules' own
 builders, so a regression request is the production request (D32). The S6 item is asked as
@@ -89,9 +90,11 @@ KIND_STAGES: dict[str, tuple[str, ...]] = {
 #: All an epoch is checked on while none is active (D65).
 FIRST_EPOCH_KINDS = ("screen", "extract", "triage")
 #: The kinds a set version may hold none of without failing the gate: no submitted expert
-#: judgment is a normal state (§10.6). Any other touched kind with no items fails its stage, so
-#: an unchecked change is held for an admin (L28) rather than passed.
-EMPTY_ALLOWED_KINDS = frozenset({"expert"})
+#: judgment is a normal state (§10.6), and ``pair`` and ``similarity`` items exist only when
+#: the active cut produced comparisons or related pairs, which a small active landscape (K = 1)
+#: never does. Any other touched kind with no items (S2-S4, ``deep``, ``final``) fails its
+#: stage, so an unchecked change is held for an admin (L28) rather than passed.
+EMPTY_ALLOWED_KINDS = frozenset({"expert", "pair", "similarity"})
 
 # The §10.4 pass rule for S6-S9 (S2-S4 use the §10.1 thresholds in ``eval.bakeoff``).
 DEEP_MIN_GATES = 0.90
@@ -677,7 +680,8 @@ async def run_regression(db_factory, epoch_id: uuid.UUID) -> bool:
     the S5 tie-break the winner ≥ 80%; S8 the verdict ≥ 85%; S9 the recommendation ≥ 80%,
     gates and scores ±1 ≥ 90%; expert items at least as often as the active epoch. A touched
     kind the version holds no items of fails its stage (``{"items": 0, "checks": {"items":
-    False}, "passed": False}``), except an ``EMPTY_ALLOWED_KINDS`` one, which is skipped.
+    False}, "passed": False}``), except an ``EMPTY_ALLOWED_KINDS`` one (expert, pair,
+    similarity), which is skipped.
 
     Records a ``LandscapeRegressionRun`` with the per-stage results and stamps the epoch's
     ``regression_set_version`` and ``regression_run_id``. On a failure the epoch is held

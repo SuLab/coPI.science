@@ -581,31 +581,31 @@ async def run_cut(
 
 async def finish_cut(
     db_factory, *, epoch_id: uuid.UUID, tournament_batch_id: uuid.UUID
-) -> uuid.UUID:
-    """Complete the epoch's ``boundary_pending`` cut from its tournament's answers; returns
-    the cut id. Call once ``tournament_complete`` is true for ``tournament_batch_id``.
+) -> uuid.UUID | None:
+    """Complete the epoch's ``boundary_pending`` cut from its tournament's answers when
+    ``tournament_batch_id`` is that cut's ``boundary_batch_id``; returns the cut id. Call once
+    ``tournament_complete`` is true for ``tournament_batch_id``.
 
-    Idempotent: with no pending cut it returns the epoch's newest complete cut.
-    ``LookupError`` when the epoch has no cut; ``RuntimeError`` when the class still owes an
-    answer.
+    A batch that is not the pending cut's (none is pending, the cut it served was deleted by
+    an idea merge, or a resend re-pointed ``boundary_batch_id`` at a later batch) finishes
+    nothing: it returns the epoch's newest complete cut, or None when there is none. So a
+    repeated call is idempotent. ``RuntimeError`` when the pending cut's own class still owes
+    an answer.
     """
     async with db_factory() as db:
-        pending_id = await db.scalar(
-            select(LandscapeCut.id)
+        pending = (await db.execute(
+            select(LandscapeCut.id, LandscapeCut.boundary_batch_id)
             .where(LandscapeCut.epoch_id == epoch_id, LandscapeCut.status == "boundary_pending")
             .limit(1)
-        )
-        if pending_id is None:
-            done = await db.scalar(
+        )).first()
+        if pending is None or pending.boundary_batch_id != tournament_batch_id:
+            return await db.scalar(
                 select(LandscapeCut.id)
                 .where(LandscapeCut.epoch_id == epoch_id, LandscapeCut.status == "complete")
                 .order_by(LandscapeCut.completed_at.desc().nulls_last())
                 .limit(1)
             )
-            if done is None:
-                raise LookupError(f"epoch {epoch_id} has no cut for batch {tournament_batch_id}")
-            return done
-    finished = await _finish(db_factory, pending_id)
+    finished = await _finish(db_factory, pending.id)
     if finished is None:
-        raise RuntimeError(f"cut {pending_id}: its boundary tournament still owes answers")
+        raise RuntimeError(f"cut {pending.id}: its boundary tournament still owes answers")
     return finished

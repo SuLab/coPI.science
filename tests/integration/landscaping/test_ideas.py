@@ -31,6 +31,7 @@ from src.landscaping.ideas import (
     version_hash,
 )
 from src.landscaping.stages import cut as cut_stage
+from src.landscaping.stages import triage as triage_stage
 from src.models.landscape import (
     LandscapeAssessment,
     LandscapeCut,
@@ -208,6 +209,31 @@ async def test_rekeyed_candidate_refreshes_the_idea_it_leaves(db_session):
     idea = await _idea(db_session, left)
     assert idea.version_hash == version_hash([other_doc.id])
     assert idea.jhu_group_count == 1
+
+
+async def test_idea_left_with_no_qualifying_document_has_no_version(db_session):
+    """Re-keying an idea's only document leaves it with no version, not the hash of nothing,
+    so S4 creates no row for it (an empty dossier for an idea the S5 pool never takes)."""
+    epoch = await _epoch(db_session)
+    doc = await _doc(db_session)
+    extraction = await _extraction(db_session, epoch, doc)
+    left = await _merge(db_session, epoch, doc, _bio("inhibit"), extraction=extraction)
+    assert (await _idea(db_session, left)).version_hash == version_hash([doc.id])
+
+    moved = await _merge(db_session, epoch, doc, _bio("activate"), extraction=extraction)
+
+    assert moved != left
+    idea = await _idea(db_session, left)
+    assert idea.version_hash is None
+    assert idea.jhu_group_count == 0
+    idea.evidence_status = {source: {"status": "done"} for source in EVIDENCE_SOURCES}
+    await db_session.flush()
+    due = await triage_stage._due_rows(db_session, epoch.id)
+    assert left not in {row.idea_id for row, _ in due}
+    rows = (await db_session.execute(
+        select(LandscapeTriage.id).where(LandscapeTriage.idea_id == left)
+    )).scalars().all()
+    assert rows == []
 
 
 async def test_unregistered_agent_key_includes_lab(db_session):

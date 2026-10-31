@@ -343,10 +343,35 @@ async def test_undecided_blind_cards_left_out_of_current_and_all(db_session):
 
     assert await listed("current") == await listed("all") == [str(normal.opp.id)]
     await _decide(db_session, viewer, blind[0])
-    assert await listed("current") == [str(normal.opp.id)]
+    later = await _card(db_session, epoch)
+    await _batch(db_session, WEEK_1 + timedelta(weeks=2), [later])
+    # Superseded, but the viewer still has an undecided card in it.
+    assert await listed("current") == sorted([str(normal.opp.id), str(later.opp.id)])
     await _decide(db_session, viewer, blind[1])
-    everything = sorted(str(c.opp.id) for c in [*blind, normal])
+    everything = sorted(str(c.opp.id) for c in [*blind, normal, later])
     assert await listed("current") == await listed("all") == everything
+
+
+async def test_unsuperseded_blind_batch_left_out_of_lists_for_decided_staff(db_session):
+    """A staff viewer who decided every card of a blind batch not yet superseded sees none of
+    its cards: its in-cut cards listed without its probes would name the probes (F2)."""
+    epoch = await _epoch(db_session)
+    in_cut = await _card(db_session, epoch, rank=1)
+    probe = await _card(db_session, epoch, probe=True)
+    await _batch(db_session, WEEK_1, [in_cut, probe], blind=True, probes=(probe,))
+    viewer = await make_user(db_session, user_role=USER_ROLE_MANAGER)
+    await _decide(db_session, viewer, in_cut)
+    await _decide(db_session, viewer, probe)
+
+    async def listed(which):
+        got = await view.lists_view(db_session, viewer, view=which, tab="all", assignment="all")
+        return sorted(_ids(got["cards"]))
+
+    assert await listed("current") == await listed("all") == []
+    later = await _card(db_session, epoch)
+    await _batch(db_session, WEEK_1 + timedelta(weeks=1), [later])
+    assert await listed("current") == sorted([str(in_cut.opp.id), str(later.opp.id)])
+    assert await listed("all") == sorted(str(c.opp.id) for c in (in_cut, probe, later))
 
 
 async def test_probe_flags_hidden_until_superseded(db_session):
@@ -766,6 +791,33 @@ async def test_blind_results_withheld_from_staff_with_undecided_card(db_session)
     assert await results() == []
     await _decide(db_session, manager, probe)
     assert await results() == [str(blind_id)]
+
+
+async def test_expert_disagreements_withheld_on_viewers_open_item(db_session):
+    """Another expert's submitted disagreement carries S9's recommendation: a staff expert
+    with an open item on that opportunity does not see it until they submit (D63)."""
+    epoch = await _epoch(db_session)
+    card = await _card(db_session, epoch)
+    other = await make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    db_session.add(LandscapeExpertJudgment(
+        opportunity_id=card.opp.id, expert_id=other.id, expert_name=other.name,
+        quarter=_quarter(), landscape_assessment_id=card.assessment.id,
+        recommendation="conditional", submitted_at=datetime.now(UTC),
+    ))
+    expert = await make_user(db_session, user_role=USER_ROLE_MANAGER)
+    judgment = await _judgment(db_session, expert, card)
+
+    async def disagreements() -> list[str]:
+        pipeline = await view.pipeline_view(db_session, expert)
+        return [d["opportunity_id"]
+                for group in pipeline["metrics"]["expert_agreement"].values()
+                for d in group["disagreements"]]
+
+    assert await disagreements() == []
+    judgment.recommendation = "conditional"
+    judgment.submitted_at = datetime.now(UTC)
+    await db_session.flush()
+    assert await disagreements() == [str(card.opp.id)] * 2
 
 
 # --- the expert hiding's span and fields -------------------------------------------------------

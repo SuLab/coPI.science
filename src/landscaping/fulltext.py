@@ -16,9 +16,12 @@ transport failure, still failing after 3 retries) on a route makes the result
 ``fetch_failed`` unless a later route yields full text, so a failed fetch is never recorded
 as "summary only" (D41).
 
-Every response body is read up to `MAX_BODY_BYTES` and dropped past it. The preprint JATS
-fetch, whose URL comes from the ``details`` record, follows redirects only to
-`_PREPRINT_HOSTS`. A dropped body or a refused redirect leaves the route with nothing.
+Every response body is read up to `MAX_BODY_BYTES` and dropped past it, counted after a
+bounded decode of its ``gzip`` or ``deflate`` coding (any other coding is not read).
+Redirects are followed by hand, at most `_MAX_REDIRECTS`, only to ``https`` URLs and never
+reading a redirect's body; the preprint JATS fetch, whose URL comes from the ``details``
+record, follows them only to `_PREPRINT_HOSTS`. A dropped body, a refused redirect or a
+request httpx cannot make (a bad URL or coding) leaves the route with nothing.
 """
 from __future__ import annotations
 
@@ -26,6 +29,7 @@ import gzip
 import logging
 import re
 import xml.etree.ElementTree as ET
+import zlib
 from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import quote
@@ -58,11 +62,21 @@ EUROPEPMC_SEARCH_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 EUROPEPMC_TEXT_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML"
 BIORXIV_DETAILS_URL = "https://api.biorxiv.org/details/{server}/{doi}"
 _PREPRINT_HOSTS = ("biorxiv.org", "medrxiv.org")
-#: Most bytes of one response body read (after content decoding); a longer body is dropped.
-#: JATS or BioC markup carrying `MAX_CHARS` of text is a small fraction of this.
+#: Most bytes of one response body read, both as received and after content decoding; a
+#: longer body is dropped. JATS or BioC markup carrying `MAX_CHARS` of text is a small
+#: fraction of this.
 MAX_BODY_BYTES = 16 * 1024 * 1024
-#: Redirects followed by an allowlisted fetch, each checked against the allowlist.
+#: Redirects followed by one fetch, each target checked before it is requested.
 _MAX_REDIRECTS = 5
+#: Content codings read, with their zlib ``wbits`` (None: no decoding).
+_CODINGS: dict[str, int | None] = {
+    "identity": None, "gzip": 16 + zlib.MAX_WBITS, "deflate": zlib.MAX_WBITS,
+}
+#: httpx errors that mean this request cannot be made or read, whatever the retry: the route
+#: has nothing. Transient transport errors (`evidence.RETRYABLE_TRANSPORT`) are not here.
+_UNREADABLE = (
+    httpx.UnsupportedProtocol, httpx.TooManyRedirects, httpx.DecodingError, httpx.InvalidURL,
+)
 #: Headers describing the transferred body, not the decoded bytes a capped read keeps.
 _TRANSFER_HEADERS = frozenset({"content-encoding", "content-length", "transfer-encoding"})
 
@@ -99,7 +113,8 @@ class _TransientFetch(Exception):
 
 
 class _Unread(Exception):
-    """A response not read: a body over `MAX_BODY_BYTES`, or a redirect off the allowlist."""
+    """A response not read: a body over `MAX_BODY_BYTES` or in an unread or corrupt coding,
+    or a redirect refused (not ``https``, off the allowlist, or past `_MAX_REDIRECTS`)."""
 
 
 def _make_client() -> httpx.AsyncClient:
@@ -134,17 +149,78 @@ def _allowed(host: str, hosts: tuple[str, ...]) -> bool:
     return any(host == h or host.endswith("." + h) for h in hosts)
 
 
+class _BoundedDecoder:
+    """Decodes one body's content coding from its raw bytes, never holding more than
+    `MAX_BODY_BYTES` of output: zlib's ``max_length`` stops each step one byte past what is
+    left, so a small compressed read cannot expand past the cap before it is checked."""
+
+    def __init__(self, resp: httpx.Response):
+        self.url = resp.request.url
+        codings = [
+            c.strip().lower() for c in resp.headers.get("content-encoding", "").split(",")
+            if c.strip() and c.strip().lower() != "identity"
+        ] or ["identity"]
+        if len(codings) > 1 or codings[0] not in _CODINGS:
+            raise _Unread(f"content-encoding {', '.join(codings)} from {self.url}")
+        self.coding = codings[0]
+        wbits = _CODINGS[self.coding]
+        self.inflater = None if wbits is None else zlib.decompressobj(wbits)
+        self.started = False
+        self.raw = 0
+        self.size = 0
+
+    def _keep(self, out: bytes) -> bytes:
+        self.size += len(out)
+        if self.size > MAX_BODY_BYTES:
+            raise _Unread(f"body over {MAX_BODY_BYTES} bytes from {self.url}")
+        return out
+
+    def _inflate(self, data: bytes) -> bytes:
+        try:
+            return self.inflater.decompress(data, MAX_BODY_BYTES - self.size + 1)
+        except zlib.error:
+            if self.started or self.coding != "deflate":
+                raise
+            # Some servers send "deflate" without the zlib wrapper; httpx reads both.
+            self.inflater = zlib.decompressobj(-zlib.MAX_WBITS)
+            return self.inflater.decompress(data, MAX_BODY_BYTES - self.size + 1)
+
+    def decode(self, chunk: bytes) -> list[bytes]:
+        self.raw += len(chunk)
+        if self.raw > MAX_BODY_BYTES:
+            raise _Unread(f"body over {MAX_BODY_BYTES} bytes from {self.url}")
+        if self.inflater is None:
+            return [self._keep(chunk)]
+        out = [self._keep(self._inflate(chunk))]
+        self.started = True
+        while self.inflater.unconsumed_tail:
+            out.append(self._keep(self._inflate(self.inflater.unconsumed_tail)))
+        return out
+
+    def flush(self) -> bytes:
+        return b"" if self.inflater is None else self._keep(self.inflater.flush())
+
+
 async def _read_capped(resp: httpx.Response) -> httpx.Response:
-    """``resp`` (sent with ``stream=True``) read to at most `MAX_BODY_BYTES`, as a loaded
-    response; `_Unread` past the cap. Closes ``resp`` either way."""
+    """``resp`` (sent with ``stream=True``) read raw and decoded by `_BoundedDecoder`, as a
+    loaded response with the decoded body; `_Unread` past `MAX_BODY_BYTES`, for a coding
+    other than ``gzip``, ``deflate`` or ``identity``, or for a corrupt compressed body.
+    Closes ``resp`` either way."""
+    if resp.is_stream_consumed:
+        # A response a transport built in memory (httpx.MockTransport's) arrives read and
+        # decoded already; only its size is left to check. A network response never does.
+        await resp.aclose()
+        if len(resp.content) > MAX_BODY_BYTES:
+            raise _Unread(f"body over {MAX_BODY_BYTES} bytes from {resp.request.url}")
+        return resp
     chunks: list[bytes] = []
-    size = 0
     try:
-        async for chunk in resp.aiter_bytes():
-            size += len(chunk)
-            if size > MAX_BODY_BYTES:
-                raise _Unread(f"body over {MAX_BODY_BYTES} bytes from {resp.request.url}")
-            chunks.append(chunk)
+        decoder = _BoundedDecoder(resp)
+        async for chunk in resp.aiter_raw():
+            chunks.extend(decoder.decode(chunk))
+        chunks.append(decoder.flush())
+    except zlib.error as exc:
+        raise _Unread(f"corrupt compressed body from {resp.request.url}: {exc}") from exc
     finally:
         await resp.aclose()
     headers = [(k, v) for k, v in resp.headers.multi_items() if k.lower() not in _TRANSFER_HEADERS]
@@ -155,17 +231,20 @@ async def _read_capped(resp: httpx.Response) -> httpx.Response:
 
 async def _fetch(client: httpx.AsyncClient, url: str, params: dict[str, str] | None,
                  hosts: tuple[str, ...] | None) -> httpx.Response:
-    """One GET with its body capped. With ``hosts``, each redirect is followed only to a host
-    in ``hosts`` (`_Unread` otherwise, before any request to it); without, redirects are
-    followed freely."""
+    """One GET with its body capped. Up to `_MAX_REDIRECTS` redirects are followed by hand,
+    each only to an ``https`` URL and, with ``hosts``, only to a host in ``hosts``; a
+    redirect's body is never read. `_Unread` for a refused redirect, before any request to
+    its target, or past the redirect limit."""
     request = client.build_request("GET", url, params=params)
     for _ in range(_MAX_REDIRECTS + 1):
-        resp = await client.send(request, stream=True, follow_redirects=hosts is None)
+        resp = await client.send(request, stream=True, follow_redirects=False)
         target = resp.next_request
-        if target is None or hosts is None:
+        if target is None:
             return await _read_capped(resp)
         await resp.aclose()
-        if not _allowed(target.url.host, hosts):
+        if target.url.scheme != "https":
+            raise _Unread(f"redirect from {url} to a {target.url.scheme} URL")
+        if hosts is not None and not _allowed(target.url.host, hosts):
             raise _Unread(f"redirect from {url} off the allowlist to {target.url.host}")
         request = target
     raise _Unread(f"more than {_MAX_REDIRECTS} redirects from {url}")
@@ -175,9 +254,9 @@ async def _get(client: httpx.AsyncClient, url: str, pacer: Pacer,
                params: dict[str, str] | None = None, *,
                hosts: tuple[str, ...] | None = None) -> httpx.Response | None:
     """GET, paced and retried, its body read up to `MAX_BODY_BYTES`. None for a
-    non-transient error status, a body over the cap, or (with ``hosts``) a redirect to a
-    host outside ``hosts``: the route has nothing. `_TransientFetch` when the retries end on
-    a transient status or error."""
+    non-transient error status, a body `_fetch` or `_read_capped` refuses, or an
+    `_UNREADABLE` httpx error: the route has nothing. `_TransientFetch` when the retries end
+    on a transient status or error."""
     try:
         resp = await with_retries(
             lambda: _fetch(client, url, params, hosts), attempts=evidence.ATTEMPTS,
@@ -188,6 +267,9 @@ async def _get(client: httpx.AsyncClient, url: str, pacer: Pacer,
         raise _TransientFetch(f"{type(exc).__name__} from {url}") from exc
     except _Unread as exc:
         logger.warning("full text: %s", exc)
+        return None
+    except _UNREADABLE as exc:
+        logger.warning("full text: %s from %s: %s", type(exc).__name__, url, exc)
         return None
     if resp.status_code in TRANSIENT_STATUSES:
         raise _TransientFetch(f"HTTP {resp.status_code} from {url}")

@@ -26,9 +26,9 @@ people's decisions, reviews and status events; tabs and counts are the viewer's 
 **Probe flags and blind batches** (F2, D56). A card's ``probe`` flag is true only once the blind
 batch that issued it is superseded by a later batch. Until then no card of that batch shows a
 rank, for any viewer: probes are never ranked, so a rank on its in-cut cards alone would flag
-the probes (``_shown_rank``). Probe opportunities stay out of the staff lists until then, and a
-viewer with an undecided card in a blind batch sees none of that batch's cards in **Current**
-or **All assessed**, nor that batch's results on the pipeline page.
+the probes (``_shown_rank``). No card of that batch appears in **Current** or **All assessed**
+until then, for any viewer; a viewer with an undecided card in a blind batch sees none of that
+batch's cards in those lists even afterwards, nor that batch's results on the pipeline page.
 """
 from __future__ import annotations
 
@@ -844,11 +844,23 @@ def _withheld_blind(issued: _Issued, viewer: _Viewer) -> set[uuid.UUID]:
 
 def _visible_metrics(metrics: dict, issued: _Issued, viewer: _Viewer) -> dict:
     """`metrics` without the ``blind_results`` of a blind batch in which the viewer has an
-    undecided card: its counts are other reviewers' votes on that card (L40, L50, D60)."""
+    undecided card: its counts are other reviewers' votes on that card (L40, L50, D60). Each
+    ``expert_agreement`` group also loses its ``disagreements`` on the viewer's open expert
+    items: they carry S9's recommendation and another expert's vote (D63)."""
     withheld = {str(b) for b in _withheld_batches(issued, viewer)}
-    return {**metrics, "blind_results": [
+    open_items = {str(o) for o in viewer.expert}
+    visible = {**metrics, "blind_results": [
         r for r in metrics.get("blind_results") or [] if r.get("batch_id") not in withheld
     ]}
+    if "expert_agreement" in metrics:
+        visible["expert_agreement"] = {
+            group: {**stats, "disagreements": [
+                d for d in stats.get("disagreements") or []
+                if d.get("opportunity_id") not in open_items
+            ]}
+            for group, stats in metrics["expert_agreement"].items()
+        }
+    return visible
 
 
 async def _list_candidates(
@@ -888,9 +900,10 @@ async def lists_view(
     Staff only: anyone else gets ``PermissionError`` (the page answers 403). ``view`` other
     than ``"all"`` reads as ``"current"``; ``tab`` other than ``unreviewed``/``reviewed`` as
     ``"all"``; ``assignment`` ``"mine"`` keeps the viewer's assigned cards, anything else all.
-    Tabs are per viewer: *unreviewed* is no quick decision by this viewer (D60). A viewer with
-    an undecided card in a blind batch sees none of that batch's cards (F2), and a probe
-    appears only once its blind batch is superseded.
+    Tabs are per viewer: *unreviewed* is no quick decision by this viewer (D60). No card of a
+    blind batch not yet superseded is listed, for any viewer; a viewer with an undecided card
+    in a blind batch sees none of that batch's cards even after it is superseded; and a probe
+    appears only once its blind batch is superseded (F2).
 
     Returns ``{"view": str, "tab": str, "assignment": "mine"|"all", "epoch": dict|None,
     "banner": str|None, "cut": {"n", "k", "completed_at"}|None, "counts": {"unreviewed":
@@ -905,9 +918,10 @@ async def lists_view(
     ep = await _epochs(db)
     issued = await _issued(db)
     candidates, probes = await _list_candidates(db, ep, view)
-    visible_probes = issued.visible_probes()
-    candidates -= _withheld_blind(issued, viewer)
-    candidates -= probes - visible_probes
+    # No card of a blind batch not yet superseded is listed, for any viewer: its in-cut cards
+    # listed without its probes would name the probes (F2, spec §10.6).
+    candidates -= issued.open_blind() | _withheld_blind(issued, viewer)
+    candidates -= probes - issued.visible_probes()
     if assignment == "mine":
         R = LandscapeReviewAssignment
         candidates &= set((await db.scalars(
@@ -1533,7 +1547,8 @@ async def pipeline_view(db, user) -> dict:
     "override_reason", "override_at", "drained_at", "activated_at", "retired_at",
     "regression_run": {"id", "status", "set_version", "started_at", "finished_at",
     "results"}|None}], "metrics": reports.pipeline_metrics (its ``blind_results`` without a
-    blind batch in which the viewer has an undecided card), "drift": reports.drift_report,
+    blind batch in which the viewer has an undecided card, its ``expert_agreement``
+    disagreements without the viewer's open expert items), "drift": reports.drift_report,
     "positive_control_trace": reports.positive_control_trace, "reports": {"pilot", "bakeoff",
     "probes": {"id", "created_at", "payload"}|None}, "picks_applied": bool,
     "positive_controls": [str] (the stored DOIs and PMIDs), "experts": [{"id", "name",

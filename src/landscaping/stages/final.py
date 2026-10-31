@@ -272,7 +272,9 @@ async def _member_section(db: AsyncSession, idea: LandscapeIdea, deep: Landscape
     full_text = _json(deep.full_text_evidence) if deep.full_text_evidence else "None."
     return "\n".join([
         f"# Member {idea.idea_key}",
-        f"Structured line: {structured_line(idea)}",
+        "Structured line:",
+        # Built from S3's as-written names, model output copied from source text: fenced too.
+        delimit(structured_line(idea), "publication_abstract"),
         delimit(record, "publication_abstract"),
         "Full-text evidence:",
         delimit(full_text, "methods_section"),

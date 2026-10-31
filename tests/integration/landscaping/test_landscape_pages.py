@@ -133,6 +133,23 @@ async def test_expert_form_only_on_own_sample_item(client, db_session):
     assert theirs.status_code == 200 and action not in theirs.text
 
 
+async def test_expert_red_flags_section_says_withheld_not_none(client, db_session):
+    """On an expert's open item the red flags are S9's calls, withheld: the section must not
+    claim S9 recorded none (D63)."""
+    opportunity_id = await seed_landscape_opportunity(db_session)
+    expert = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    db_session.add(LandscapeExpertJudgment(
+        id=uuid.uuid4(), opportunity_id=opportunity_id, expert_id=expert.id,
+        expert_name=expert.name, quarter=landscape_view._quarter(datetime.now(UTC)),
+    ))
+    await db_session.flush()
+
+    html = (await _get(client, expert, f"{_LIST}/{opportunity_id}")).text
+    red_flags = html.split('class="landscape-red-flags', 1)[1].split("</div>", 1)[0]
+    assert "None recorded." not in red_flags and "Gate red flag" not in red_flags
+    assert "hidden until you submit your judgment" in red_flags
+
+
 async def test_pages_503_without_0077(client, db_session, monkeypatch):
     opportunity_id = await seed_landscape_opportunity(db_session)
     manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)

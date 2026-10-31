@@ -624,17 +624,15 @@ async def test_outcomes_routed_by_stage(db_factory, settings, calls, monkeypatch
     assert calls.args("finish_cut") == [
         ((db_factory,), {"epoch_id": cut_epoch, "tournament_batch_id": batch_ids["rerank"]})
     ]
-    assert calls.args("finish_rebuild") == [
-        ((db_factory,), {"epoch_id": rank_epoch, "batch_id": batch_ids["rerank"]})
-    ]
+    assert "finish_rebuild" not in calls.names()
 
 
 @pytest.mark.asyncio
 async def test_rebuild_completed_by_fallbacks_lands_once(
     db_factory, settings, calls, monkeypatch,
 ):
-    """A rebuild whose last answers came through the fallback chain has no batch end to land
-    it: the S7 step lands it once, before updating the list (spec §7.8)."""
+    """A rebuild whose last answers came through the fallback chain has no batch end: the S7
+    step lands it once, before updating the list (spec §7.8)."""
     await _set(db_factory, "landscape_phase", "continuous")
     epoch_id = await _epoch(db_factory, "active")
     await _cut(db_factory, epoch_id, [await _idea(db_factory, epoch_id)], at=NOW)
@@ -658,6 +656,50 @@ async def test_rebuild_completed_by_fallbacks_lands_once(
     s7 = [name for name in calls.names() if name in ("finish_rebuild", "update_rankings")]
     assert s7[:2] == ["finish_rebuild", "update_rankings"]
     assert s7.count("update_rankings") == 2
+
+
+@pytest.mark.asyncio
+async def test_rebuild_ending_over_the_cap_lands_only_under_it(
+    db_factory, settings, calls, monkeypatch,
+):
+    """Landing a rebuild inserts entrants with synchronous questions, so a rebuild batch that
+    ends while the daily cap is reached is not landed by ingestion; the next loop under the cap
+    lands it in the S7 step (spec §7.8, §9.5)."""
+    await _set(db_factory, "landscape_phase", "continuous")
+    epoch_id = await _epoch(db_factory, "active")
+    await _cut(db_factory, epoch_id, [await _idea(db_factory, epoch_id)], at=NOW)
+    rebuild = uuid.uuid4()
+
+    async def tournament_keys(db, batch_id):
+        return [(epoch_id, rerank_stage.BASIS)] if batch_id == rebuild else []
+
+    async def newest(db, epoch_id_):
+        return rebuild if epoch_id_ == epoch_id else None
+
+    async def complete(db, batch_id):
+        return batch_id == rebuild
+
+    monkeypatch.setattr(worker, "_tournament_keys", tournament_keys)
+    monkeypatch.setattr(rerank_stage, "newest_rebuild_batch", newest)
+    monkeypatch.setattr(comparator, "tournament_complete", complete)
+    monkeypatch.setitem(worker.INGESTERS, "rerank", _noop)
+    calls.chunks = [(rebuild, [_outcome(rebuild, "rerank")], True)]
+    calls.results["over_daily_cap"] = True
+    state = worker.WorkerState()
+    await worker.run_once(db_factory, state, now=NOW)
+
+    assert calls.args("mark_ingested") == [((db_factory, rebuild), {})]
+    assert not set(calls.names()) & {"finish_rebuild", "update_rankings"}
+
+    calls.chunks = []
+    calls.results["over_daily_cap"] = False
+    await worker.run_once(db_factory, state, now=NOW + timedelta(minutes=1))
+
+    assert calls.args("finish_rebuild") == [
+        ((db_factory,), {"epoch_id": epoch_id, "batch_id": rebuild})
+    ]
+    s7 = [name for name in calls.names() if name in ("finish_rebuild", "update_rankings")]
+    assert s7 == ["finish_rebuild", "update_rankings"]
 
 
 # --- phases -----------------------------------------------------------------------------------

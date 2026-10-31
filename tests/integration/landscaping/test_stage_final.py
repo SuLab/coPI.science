@@ -331,6 +331,9 @@ async def test_final_request_carries_no_rank(db_factory, submitted):
     assert message.index(first.idea_key) < message.index(second.idea_key)
     assert "Invented marsh programme" in message
     assert "<publication_abstract>" in message and "<methods_section>" in message
+    # Each member's structured line (S3's as-written names) is fenced, not bare.
+    assert "Structured line:\n<publication_abstract>" in message
+    assert "Structured line: " not in message
     assert "Invented opinion." in message
 
 

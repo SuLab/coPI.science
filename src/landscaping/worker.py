@@ -13,7 +13,9 @@ batch reconciliation before returning stale ``running`` rows to ``pending``.
 **Each loop** (``run_once``):
 
 - Always, even while disabled or paused: batch reconciliation, then polling ended batches and
-  ingesting them chunk by chunk, each batch marked ingested after its last chunk (§9.5).
+  ingesting them chunk by chunk, each batch marked ingested after its last chunk (§9.5). An
+  ended S5 tie-break tournament finishes its cut here (it asks nothing); an ended S7 rebuild
+  is landed only by the synchronous step, whose insertions ask the model.
 - Only while ``landscape_enabled`` is true and ``app_settings.landscape_paused`` is not, in §12.2
   order: intake (and the D69 flip to ``continuous``); evidence assembly and S2-S4 submissions;
   synchronous work (S6, S7, similarity judgments, fallback chains) while no simulation run is
@@ -188,9 +190,9 @@ class WorkerState:
     grouped: set[tuple[uuid.UUID, uuid.UUID]] = field(default_factory=set)
     #: Bake-off triggers already tried, so a failing bake-off is not re-run every loop.
     tried: set[str] = field(default_factory=set)
-    #: Rebuild batches this process has landed from the loop (spec §7.8). A rebuild whose last
-    #: answers came through the fallback chain has no batch end to land it, so the S7 step
-    #: lands it once; landing is idempotent, so one landed at a batch end may land again.
+    #: Rebuild batches this process has landed (spec §7.8). The S7 step is the only place a
+    #: completed rebuild lands, whether its last answers came in a batch or through the fallback
+    #: chain, so it lands each once; landing is idempotent, so a restart may land one again.
     landed: set[uuid.UUID] = field(default_factory=set)
 
     def poll_due(self, now: datetime, seconds: float) -> bool:
@@ -422,7 +424,8 @@ async def _funnel_open(db_factory, phase: str) -> bool:
 
 async def ingest_ended(db_factory) -> int:
     """Poll ended batches and route each chunk's outcomes through ``INGESTERS``; a batch is
-    marked ingested after its last chunk, then a completed rerank tournament is landed. A batch
+    marked ingested after its last chunk, then a completed S5 tie-break finishes its cut
+    (``_after_tournament``). A batch
     whose chunk fails is left unmarked and read again on the next poll (the compare-and-set
     makes the replay harmless). Returns the number of batches marked ingested."""
     ingested = 0
@@ -469,13 +472,15 @@ async def _tournament_keys(db: AsyncSession, batch_id: uuid.UUID) -> list[tuple[
 
 
 async def _after_tournament(db_factory, batch_id: uuid.UUID) -> None:
+    """Finish the cut whose S5 tie-break tournament ``batch_id`` completed; finishing asks the
+    model nothing, so it runs from ingestion while disabled, paused or over the cap. A completed
+    S7 rebuild is not landed here: landing inserts entrants with synchronous questions, so it
+    waits for ``_rerank_tasks`` in the gated synchronous step (§9.5, §12.2)."""
     async with db_factory() as db:
         keys = await _tournament_keys(db, batch_id)
     for epoch_id, basis in keys:
         if basis == "triage":
             await cut_stage.finish_cut(db_factory, epoch_id=epoch_id, tournament_batch_id=batch_id)
-        elif basis == rerank_stage.BASIS:
-            await rerank_stage.finish_rebuild(db_factory, epoch_id=epoch_id, batch_id=batch_id)
 
 
 # --- step 1: intake and the D69 flip ----------------------------------------------------------
@@ -769,8 +774,9 @@ async def _probe_ideas(db: AsyncSession, epoch: LandscapeEpoch) -> set[uuid.UUID
 
 
 async def _rerank_tasks(db_factory, state: WorkerState, epoch_id: uuid.UUID) -> list:
-    """S7 for the current cut. A rebuild whose tournament completed with no batch ending
-    afterwards (its last answers came through the fallback chain) lands first, once (§7.8)."""
+    """S7 for the current cut. The newest rebuild whose tournament completed lands first, once
+    per process (§7.8): this is the only place a rebuild lands, whether its batch ended or its
+    last answers came through the fallback chain, so its insertions run only under the cap."""
     async with db_factory() as db:
         cut = await _current_cut(db, epoch_id)
         if cut is None:

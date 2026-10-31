@@ -559,6 +559,26 @@ async def test_empty_expert_kind_does_not_fail_the_gate(db_factory, models):
     assert set(run.results["stages"]) == {"final"}
 
 
+async def test_empty_pair_and_similarity_kinds_do_not_hold_a_candidate(db_factory, models):
+    """A small active cut (K = 1) answers no comparison and records no related pair, so a set
+    frozen from it holds no ``pair`` or ``similarity`` items: a change touching S7 and S8 passes
+    those stages rather than being held for them."""
+    await _epoch(db_factory, status="active")
+    await _seed_set(db_factory, _screen_items(5) + _final_items(5))
+    epoch_id = await _epoch(db_factory, changed=["rerank", "similarity"])
+
+    assert await regression.run_regression(db_factory, epoch_id) is True
+
+    assert models.calls == []
+    epoch = await _epoch_row(db_factory, epoch_id)
+    assert epoch.status == "candidate"
+    async with db_factory() as db:
+        run = await db.get(LandscapeRegressionRun, epoch.regression_run_id)
+    assert run.status == "passed"
+    assert set(run.results["kinds"]) == {"pair", "similarity"}
+    assert run.results["stages"] == {}
+
+
 async def _active_epoch_with_outputs(db_factory) -> uuid.UUID:
     """An active epoch with one assessed opportunity of one idea, an S6 record, one answered
     comparison and one similarity verdict."""

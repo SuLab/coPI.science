@@ -1318,7 +1318,9 @@ async def run_cut(db_factory, epoch_id, *, may_submit: bool = True) -> uuid.UUID
     # per batch cycle, D37). One cut per epoch is in flight: a cut due while a boundary batch is pending is
     # skipped, returning None. A candidate that has a complete cut taken after its drained_at takes no further cut
     # until it activates (spec §7.6), returning None.
-async def finish_cut(db_factory, *, epoch_id, tournament_batch_id) -> uuid.UUID
+async def finish_cut(db_factory, *, epoch_id, tournament_batch_id) -> uuid.UUID | None
+    # finishes the pending cut only when tournament_batch_id is its boundary batch; any other batch (one of a cut a
+    # merge dropped) returns the newest complete cut's id, or None
 async def ingest_tournament_outcomes(db_factory, outcomes) -> None  # comparison winners through apply_result
 FALLBACKS: tuple[FallbackAdapter, ...]  # tournament pairs, stage "rerank" (Task 2.2)
 async def tournament_complete(db, batch_row_id: uuid.UUID) -> bool
@@ -1459,7 +1461,8 @@ async def run_deep(db_factory, idea_id, *, epoch_id) -> None
 **Interfaces:** produces `async def update_rankings(db_factory, *, epoch_id, cut_id) -> None`
 and `async def finish_rebuild(db_factory, *, epoch_id, batch_id) -> None` (spec §7.8), plus
 `async def newest_rebuild_batch(db, epoch_id) -> uuid.UUID | None`, which the worker uses to land
-a rebuild completed through the fallback chain (no batch end follows it).
+a completed rebuild from its synchronous step, the only place S7 asks the model (landing inserts
+by synchronous questions, so it runs only enabled, unpaused and under the daily cap, §9.5).
 1. It removes ideas that left the cut.
 2. When the list is empty, or more than 25% of the cut is new since the last rebuild, it
    submits a rebuild: `submit_tournament(..., basis="deep")` over `tournament_pairs(ids,
@@ -1657,7 +1660,9 @@ async def run_regression(db_factory, epoch_id) -> bool
     # spec §10.4 pass rule, on the set version current when the candidate was created: S2-S4 §10.1 thresholds;
     # S6 gates ≥ 90% and scores ±1 ≥ 90%; S7 (and the S5 tie-break) winner ≥ 80% of the 30 pairs; S8 similarity
     # verdict ≥ 85% of the 30 pairs, labels unscored; S9 recommendation ≥ 80%, gates ≥ 90%, scores ±1 ≥ 90%
-    # (S6-S9 against the active epoch's stored outputs); expert items ≥ the active epoch's agreement.
+    # (S6-S9 against the active epoch's stored outputs); expert items ≥ the active epoch's agreement. A touched
+    # stage with no items fails (an S6 or S9 set frozen empty is broken), except pair, similarity and expert items,
+    # which a small active cut or an expert-less quarter legitimately lacks.
     # With no active epoch, only the S2-S4 items are checked, against the bake-off references (D65); a candidate
     # created before any set version exists is judged on the first one, the bake-off's
 ```
@@ -1832,8 +1837,9 @@ once):
 - **`INGESTERS: dict[str, Callable]`** routes each `BatchOutcome` by `stage`: `screen`,
   `extract`, `triage`, `label`, `final` and `audit` go to their stage's ingest function;
   `rerank` goes to `ingest_tournament_outcomes`, and a completed tournament then calls
-  `finish_cut` (basis `triage`) or `finish_rebuild` (basis `deep`). A batch is marked ingested
-  once all its outcomes are in.
+  `finish_cut` (basis `triage`); a completed rebuild (basis `deep`) is landed by the synchronous
+  step instead, since landing asks the model (§9.5). A batch is marked ingested once all its
+  outcomes are in.
 - **At start:**
   - take `LANDSCAPE_WORKER_LOCK_KEY` with `SessionAdvisoryLock(settings.database_url, …)`, and
     exit if it is held;

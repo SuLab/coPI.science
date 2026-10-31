@@ -17,7 +17,8 @@ provisional key, else empty. An idea whose key holds any unmatched facet is ``pr
 documents (S1 ``eligible``, not a tombstone). It is recomputed only when a qualifying document
 that was not yet attached attaches, or when a re-extracted candidate takes its document away
 from the idea, so tombstoning a document, a database-evidence refresh and an evidence-only
-document never change a stored version.
+document never change a stored version. An idea left with no qualifying document has no version
+(``version_hash`` None, like an idea that never had one), so S4, S6 and the cut pass it by.
 
 **Aliases** (D36, D64). When a key changes (a provisional facet resolves, or a chemistry key's
 lab is unified under another lab), the idea is either re-keyed in place or, when an idea with
@@ -278,10 +279,15 @@ async def _qualifying_ids(db: AsyncSession, idea_id: uuid.UUID) -> set[uuid.UUID
 
 async def _refresh_version(db: AsyncSession, idea: LandscapeIdea) -> None:
     """Recompute the version and the JHU group count; called only when a qualifying document
-    that was not yet attached has attached (D37), or one attached has been taken away."""
+    that was not yet attached has attached (D37), or one attached has been taken away.
+
+    With no qualifying document left the version is None, not the hash of nothing: a version
+    with no documents would get a paid S4 row with an empty dossier for an idea that can never
+    enter the S5 pool, and the S4 drain check would wait on it."""
     await db.flush()
     documents = await _idea_documents(db, idea.id)
-    idea.version_hash = version_hash(d.id for d in documents if _qualifying(d))
+    qualifying = [d.id for d in documents if _qualifying(d)]
+    idea.version_hash = version_hash(qualifying) if qualifying else None
     idea.jhu_group_count = group_counts(idea, documents)[0]
 
 
@@ -402,7 +408,8 @@ async def _prior_attachment(
     A replayed candidate returns its first decision (D27); a candidate re-extracted with other
     facets (the document's summary changed) drops its stale attachment and merges afresh. The
     idea it leaves gets a fresh version and JHU group count when that took a qualifying
-    document away from it, so S4 and S6 see the idea without the document."""
+    document away from it, so S4 and S6 see the idea without the document; with none left it
+    has no version (``_refresh_version``)."""
     row = (await db.execute(
         select(LandscapeIdeaEvidence, LandscapeIdea.idea_key)
         .join(LandscapeIdea, LandscapeIdea.id == LandscapeIdeaEvidence.idea_id)
