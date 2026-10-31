@@ -444,6 +444,40 @@ class Settings(BaseSettings):
     # (clamped to 1..8, RESEARCH_MAX_LANES in src/services/project_research.py).
     project_research_concurrency: int = 3
 
+    # Landscaping pipeline (spec §9.1, §12.3, §13.5). Models are priced in
+    # src/services/llm_pricing.py; never claude-opus-5-5 or the dated Haiku 4.5 id (L17).
+    landscape_enabled: bool = False
+    landscape_screen_model: str = "claude-sonnet-5"
+    landscape_extract_model: str = "claude-sonnet-5"
+    landscape_triage_model: str = "claude-sonnet-5"
+    landscape_deep_model: str = "claude-opus-5"
+    landscape_rerank_model: str = "claude-opus-5"
+    landscape_label_model: str = "claude-opus-5"
+    landscape_final_model: str = "claude-opus-5"
+    landscape_similarity_model: str = "claude-opus-5"
+    landscape_audit_model: str = "claude-opus-5"
+    # Ordered fallback chain; a request skips the model that refused (D42).
+    landscape_fallback_models: list[str] = ["claude-opus-5", "claude-opus-4-8"]
+    llm_landscape_chat_model: str = "claude-opus-5"
+    # None means no daily dollar cap; a set value must be finite and positive (spec §12.3).
+    landscape_daily_usd_cap: float | None = None
+    landscape_batch_min_items: int = 500
+    landscape_batch_max_wait_minutes: int = 60
+    landscape_batch_poll_seconds: int = 300
+    landscape_sync_concurrency: int = 4
+    landscape_running_stale_minutes: int = 30
+    landscape_reject_audit_size: int = 100
+    # Requests per second, applied through each client's set_min_interval (D58).
+    landscape_ncbi_max_rps: float = 3.0
+    landscape_europepmc_max_rps: float = 1.0
+    landscape_bioc_max_rps: float = 3.0
+    landscape_pubtator_max_rps: float = 3.0
+    landscape_openfda_daily_requests: int = 1000
+    landscape_window_days: int = 1096
+    landscape_cut_fraction: float = 0.01
+    landscape_chat_enabled: bool = False
+    landscape_chat_daily_usd_limit: float = 50.0
+
     # Worker
     worker_poll_interval: int = 5  # seconds
 
@@ -684,6 +718,18 @@ class Settings(BaseSettings):
         )
         return "log"
 
+    @field_validator("landscape_daily_usd_cap")
+    @classmethod
+    def _landscape_cap_finite_positive(cls, value: float | None) -> float | None:
+        """None disables the cap; any set value must be finite and positive (spec §12.3).
+        Unlike the warn-and-fall-back limits, a bad cap fails startup: falling back to
+        "no cap" would silently remove the guard."""
+        if value is not None and (not math.isfinite(value) or value <= 0):
+            raise ValueError(
+                f"LANDSCAPE_DAILY_USD_CAP must be a finite positive number, got {value!r}."
+            )
+        return value
+
     @model_validator(mode="after")
     def _guard_assessment_chat_settings(self) -> "Settings":
         """Fall back to the default for an assessment-chat or company-discovery limit that cannot work.
@@ -708,6 +754,7 @@ class Settings(BaseSettings):
             "assessment_chat_suggestions_daily_usd_limit",
             "interview_trajectories_daily_usd_limit",
             "company_discovery_daily_usd_limit",
+            "landscape_chat_daily_usd_limit",
         ):
             value = getattr(self, name)
             if not math.isfinite(value):

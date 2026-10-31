@@ -107,7 +107,8 @@ async def test_container_is_migrated(engine):
         # 0074 thread_outcome_enum 'stopped', sim_command_enum 'system' (independent controls)
         # 0075 hub_project_review_assignments (project review assignments)
         # 0076 assessment_chat_* project_id and subject (project chat)
-        assert v == "0076"
+        # 0077 the 42 landscape_* tables (landscaping pipeline)
+        assert v == "0077"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

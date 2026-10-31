@@ -155,6 +155,17 @@ NON_SECRET_STR_FIELDS = {
     "llm_assessment_chat_suggestions_model",
     "llm_interview_trajectories_model",
     "llm_project_research_model",
+    # Landscaping model ids (spec §9.1): model names, not credentials.
+    "landscape_screen_model",
+    "landscape_extract_model",
+    "landscape_triage_model",
+    "landscape_deep_model",
+    "landscape_rerank_model",
+    "landscape_label_model",
+    "landscape_final_model",
+    "landscape_similarity_model",
+    "landscape_audit_model",
+    "llm_landscape_chat_model",
     # COI founder-extraction model id (spec O14): a model id, not a credential.
     "llm_coi_model",
     # Channel names for the run-start announcement — public channel names,

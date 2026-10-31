@@ -232,7 +232,9 @@ task that owns its test.
   object, as `tests/unit/test_migration_checks.py:1312-1318` asks of a later migration);
   `docs/operations/migration-deploy-notes.md` (a "Deploy order for `0077_landscape`" box)
 - Modify (pins): `tests/unit/test_migration_checks.py` (head pins),
-  `tests/integration/test_harness_smoke.py:109-110`
+  `tests/integration/test_harness_smoke.py:109-110`,
+  `tests/integration/test_review_models.py::test_recorded_by_columns_exist_and_default_null`
+  (the landscape decision, review and review-event tables carry `recorded_by_user_id` too)
 - Test: `tests/integration/landscaping/test_migration_0077.py`,
   `tests/unit/landscaping/test_models.py`
 

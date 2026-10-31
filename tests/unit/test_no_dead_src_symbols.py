@@ -136,6 +136,76 @@ ALLOWLIST: dict[str, str] = {
         "tests/integration/test_engine_liveness.py to prove liveness follows the "
         "lock-holding connection. No production reader is planned."
     ),
+    # Landscaping (docs/plans/2026-10-30-blackbird-landscaping-plan.md, Global Constraints,
+    # "Dead-code guard"): the package has no live root until the worker (Task 6.5) and the
+    # routes (Phase 7). Each phase's verification step adds an entry naming the task that
+    # brings the caller and removes the ones reported stale; none remains after Phase 7.
+    "src.landscaping.criteria:load_criteria": (
+        "Caller lands in Task 6.5: the landscaping worker (Task 6.5) is the first live root, and loads the criteria at start."
+    ),
+    "src.landscaping.criteria:_table": (
+        "Helper of load_criteria; live once the landscaping worker (Task 6.5) is the first live root."
+    ),
+    "src.landscaping.criteria:_str": (
+        "Helper of load_criteria; live once the landscaping worker (Task 6.5) is the first live root."
+    ),
+    "src.landscaping.criteria:_str_list": (
+        "Helper of load_criteria; live once the landscaping worker (Task 6.5) is the first live root."
+    ),
+    "src.landscaping.criteria:_deal_breakers": (
+        "Helper of load_criteria; live once the landscaping worker (Task 6.5) is the first live root."
+    ),
+    "src.landscaping.criteria:_dimension_share": (
+        "Helper of load_criteria; live once the landscaping worker (Task 6.5) is the first live root."
+    ),
+    "src.landscaping.criteria:_judging_hash": (
+        "Helper of load_criteria; live once the landscaping worker (Task 6.5) is the first live root."
+    ),
+    "src.landscaping.institutions:is_baltimore_affiliation": (
+        "Caller lands in Task 3.5 (S1 qualification); live once the landscaping worker (Task 6.5) is the first live root."
+    ),
+    "src.landscaping.institutions:qualifies_openalex": (
+        "Caller lands in Task 3.1 (the OpenAlex source); live once the landscaping worker (Task 6.5) is the first live root."
+    ),
+    "src.landscaping.prompt_set:system_prompt": (
+        "Caller lands in Task 4.4 (stage runners); live once the landscaping worker (Task 6.5) is the first live root."
+    ),
+    "src.landscaping.prompt_set:load_blackbird_extracts": (
+        "Caller lands in Task 6.5: the landscaping worker (Task 6.5) is the first live root, and loads the extracts at start."
+    ),
+    "src.landscaping.prompt_set:chat_prompt_matches": (
+        "Caller lands in Task 7.4 (the landscaping chat router)."
+    ),
+    "src.landscaping.prompt_set:_line_start": (
+        "Helper of load_blackbird_extracts; caller lands in Task 6.5."
+    ),
+    "src.landscaping.prompt_set:_paragraph": (
+        "Helper of load_blackbird_extracts; caller lands in Task 6.5."
+    ),
+    "src.landscaping.prompt_set:_standards": (
+        "Helper of load_blackbird_extracts; caller lands in Task 6.5."
+    ),
+    "src.landscaping.prompt_set:_contract": (
+        "Helper of load_blackbird_extracts; caller lands in Task 6.5."
+    ),
+    "src.landscaping.prompt_set:_criteria_vocab": (
+        "Helper of system_prompt; caller lands in Task 4.4, live with Task 6.5."
+    ),
+    "src.landscaping.prompt_set:_deal_breakers": (
+        "Helper of system_prompt; caller lands in Task 4.4, live with Task 6.5."
+    ),
+    "src.landscaping.prompt_set:_target_rubric": (
+        "Helper of system_prompt; caller lands in Task 4.4, live with Task 6.5."
+    ),
+    "src.landscaping.schema_check:schema_ready": (
+        "Callers land in Task 6.5 (worker start) and Task 7.5 (the landscape pages)."
+    ),
+    "src.services.advisory_locks:landscape_rerank_lock_key": (
+        "Caller lands in Task 5.3 (S7 insertion); live once the landscaping worker (Task 6.5) is the first live root."
+    ),
+    "src.services.llm_pricing:cost_for_request": (
+        "Caller lands in Task 2.1 (the landscaping ledger); live once the landscaping worker (Task 6.5) is the first live root."
+    ),
 }
 
 

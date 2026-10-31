@@ -1,0 +1,128 @@
+# Landscaping criteria (spec §8.1, L25): the one written place for landscaping's own
+# judgement, read by the screen, extract, triage, deep and final stages. Loaded and
+# validated by src/landscaping/criteria.py; an invalid file stops the worker.
+#
+# The rubric stays the source of the dimensions, gates, weights and bands; nothing here
+# restates them. This file holds no worked examples from past deals (L26).
+#
+# Editing this file changes its hash in set.toml: record it with a new set version
+# (`python -m src.landscaping.prompt_set --stamp <version>`), and bump [meta].version
+# with a changelog line. Every table except [meta] and [reason_tags] is a judging input:
+# changing one opens a new judgment epoch (D61).
+
+[meta]
+version = "1.0.0"
+changelog = [
+  "1.0.0 (2026-10-30): first version; reason tags drafted for owner approval.",
+]
+
+# The therapeutic-scope definition (spec §5.4, L6, L22). Inlined into the prompts, so it
+# obeys the prompt-file phrase rules of tests/unit/test_doc_prompt_sync.py.
+[scope]
+text = """
+**In scope.** There are two idea types, and a document can hold both. Each idea is judged on its own terms, and the two are linked.
+- **Biology ideas:** research that identifies, validates or modulates a specific molecular intervention point in a human disease. Intervention points are a gene, protein, RNA, complex, defined pathway node, or a cell population with a molecular handle.
+- **Chemistry and delivery ideas:** a new way to make or deliver a medicine. This covers a new agent, series or format against a target, including targets ordinary drugs cannot reach, and a delivery technology such as one that carries a drug across the blood-brain barrier. A single disease or target may or may not be named.
+
+**What either type covers:**
+- **Any modality:** small molecule, antibody or other biologic, peptide, oligonucleotide, gene therapy, gene editing, cell therapy, degrader, therapeutic vaccine, microbiome therapeutic.
+- **Repurposing:** an existing drug moved to a new indication with a mechanistic rationale.
+
+**Out of scope:**
+- diagnostics, and biomarkers without a therapeutic hypothesis;
+- devices and imaging;
+- prophylactic vaccines;
+- epidemiology, health services, and behavioural or surgical interventions;
+- pure research methods or tools that make no medicine;
+- veterinary or agricultural work.
+
+Unmet need and druggability are not reasons to drop a document at screening. Druggability depends on the modality and is judged later, at triage and in deep analysis.
+"""
+
+# Vocabularies (spec §7.4 step 2). The extraction schema and the stored rows use exactly
+# these values.
+[vocab]
+idea_types = ["biology", "chemistry"]
+directions = ["inhibit", "activate", "degrade", "replace", "edit", "deliver_to", "modulate", "unknown"]
+stages = [
+  "association", "target_validation", "tool_or_hit", "lead",
+  "preclinical_candidate", "clinical", "repurposing",
+]
+# Ladder order, weakest first: the cut's tie-break ranks on it.
+evidence_grades = ["correlation", "in_vitro", "in_vivo", "patient_material", "human_genetics", "clinical"]
+agent_kinds = [
+  "small_molecule", "antibody", "peptide", "oligonucleotide", "gene_therapy",
+  "cell_therapy", "degrader", "vaccine", "delivery_technology", "other",
+]
+
+# Deal-breakers (spec §7.4 step 5, §7.5). Flags only: none excludes an idea (L24).
+# `test` is "data" (computed from a database record) or "llm" (judged at triage).
+[[deal_breakers]]
+key = "target_essential"
+test = "data"
+description = "Open Targets marks the target as essential (isEssential)."
+
+[[deal_breakers]]
+key = "safety_liabilities"
+test = "data"
+description = "Open Targets lists at least one safety liability for the target (safetyLiabilities is non-empty)."
+
+[[deal_breakers]]
+key = "same_target_in_clinic"
+test = "data"
+description = "A clinical-stage drug or candidate acts on the same target for the idea's disease or a narrower one (Open Targets drugAndClinicalCandidates, ClinicalTrials.gov)."
+
+[[deal_breakers]]
+key = "correlation_only"
+test = "llm"
+description = "The evidence links the intervention point to the disease only by association, with no perturbation showing an effect."
+
+[[deal_breakers]]
+key = "model_unrepresentative_no_human_data"
+test = "llm"
+description = "The model systems do not represent the human disease, and no human data or patient material supports the claim."
+
+[[deal_breakers]]
+key = "key_molecule_owned_elsewhere"
+test = "llm"
+description = "The key molecule, construct or asset the idea depends on is owned or controlled by another party."
+
+[[deal_breakers]]
+key = "literature_contradiction"
+test = "llm"
+description = "Published work contradicts the central claim, and the documents do not address it."
+
+# Gene symbols that are also common words or abbreviations (spec §7.4 step 4). A name on
+# this list is never matched by symbol lookup alone; it stays unmatched unless an
+# annotation of the same document resolves it. Compared case-insensitively.
+[normalization]
+ambiguous_gene_words = [
+  "ACE", "ARC", "ATM", "CAD", "CAMP", "CAT", "CLOCK", "GPI", "HP", "HR", "IMPACT",
+  "MAX", "MET", "NHS", "PAH", "PC", "REST", "SET", "STAR", "TANK", "TG", "TH", "WAS",
+]
+
+# The triage blend (spec §7.5, L62): triage_score = share * dimension_mean
+# + (1 - share) * checklist_score.
+[triage]
+dimension_share = 0.8
+
+# Reason tags for quick decisions (spec §13.3, L49), drafted from the rubric dimension
+# titles and the deal-breakers. No review batch is issued while `approved` is false; the
+# owner sets it to true. Not a judging input: editing it re-judges nothing (D61).
+[reason_tags]
+approved = false
+tags = [
+  "Differentiation & unmet need",
+  "Scientific credibility & mechanism",
+  "Translational & development path",
+  "Fundable killer experiment & capital efficiency",
+  "Venture potential: IP path, platform & signals",
+  "Team & executability",
+  "Target essential",
+  "Safety liabilities",
+  "Same target in the clinic",
+  "Correlation only",
+  "Unrepresentative model, no human data",
+  "Key molecule owned elsewhere",
+  "Contradicted by the literature",
+]

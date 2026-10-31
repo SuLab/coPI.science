@@ -276,4 +276,8 @@ async def test_recorded_by_columns_exist_and_default_null(db_session):
             )
         )
     ).scalars().all()
-    assert sorted(cols) == ["assessment_review_events", "assessment_reviews"]
+    assert sorted(cols) == [
+        "assessment_review_events", "assessment_reviews",
+        # Landscaping mirrors the assessment review tables (spec §13.3).
+        "landscape_decisions", "landscape_review_events", "landscape_reviews",
+    ]

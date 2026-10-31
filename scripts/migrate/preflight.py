@@ -75,7 +75,7 @@ EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_WARN = 2
 
-DEFAULT_TARGET = "0076"
+DEFAULT_TARGET = "0077"
 #: Revisions this migration path has been exercised from.
 #:
 #: 0020 and 0021 are here because origin/main's own alembic head is 0021 (PR19). A
@@ -113,9 +113,10 @@ DEFAULT_TARGET = "0076"
 #: PLANNED_RECREATES) below, plus 0063's two nullable columns, 0064's one, 0065's
 #: index (its CHECK swap recreates an existing constraint, which the collision check must
 #: not list), 0066's table, 0067's table, 0068's column and CHECK, 0069's column, foreign key and index, 0070's table, 0071's table, 0072's table, unique, CHECK and index, and 0073's four tables with their
-#: uniques, CHECKs and indexes, 0075's table with its unique and indexes, and 0076's five
+#: uniques, CHECKs and indexes, 0075's table with its unique and indexes, 0076's five
 #: columns, three foreign keys, three indexes and three CHECKs on the chat tables (its
-#: DROP NOT NULL on assessment_chat_turns.assessment_id creates nothing). 0063's and 0073's
+#: DROP NOT NULL on assessment_chat_turns.assessment_id creates nothing), and 0077's 42
+#: landscape_* tables with their uniques, CHECKs and indexes. 0063's and 0073's
 #: ADD VALUE on
 #: thread_outcome_enum, and 0074's two ADD VALUEs (thread_outcome_enum and
 #: sim_command_enum), enumerate nothing: adding a value to an existing type creates
@@ -127,7 +128,7 @@ SUPPORTED_START_REVISIONS = (
     "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
     "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060",
     "0061", "0062", "0063", "0064", "0065", "0066", "0067", "0068", "0069", "0070", "0071",
-    "0072", "0073", "0074", "0075",
+    "0072", "0073", "0074", "0075", "0076",
 )
 
 #: Tables whose row counts are snapshotted for postflight. Empty = every user table.
@@ -687,11 +688,329 @@ PLANNED_OBJECTS: tuple[PlannedObject, ...] = (
     PlannedObject(
         "0076", "constraint", "ck_assessment_chat_opens_subject", "assessment_chat_opens",
     ),
+    # 0077_landscape (the landscaping pipeline, spec 2026-10-30 §11.1). Its foreign keys are
+    # inline and unnamed, as 0073's are, so postflight pins them by Postgres's default names;
+    # the columns of a table it creates need no entry of their own (they cannot collide
+    # without the table).
+    PlannedObject("0077", "table", "landscape_sources"),
+    PlannedObject("0077", "table", "landscape_fetches"),
+    PlannedObject("0077", "table", "landscape_labs"),
+    PlannedObject("0077", "table", "landscape_evidence_cache"),
+    PlannedObject("0077", "table", "landscape_documents"),
+    PlannedObject("0077", "table", "landscape_document_links"),
+    PlannedObject("0077", "table", "landscape_texts"),
+    PlannedObject("0077", "table", "landscape_batches"),
+    PlannedObject("0077", "table", "landscape_batch_items"),
+    PlannedObject("0077", "table", "landscape_regression_sets"),
+    PlannedObject("0077", "table", "landscape_epochs"),
+    PlannedObject("0077", "table", "landscape_regression_items"),
+    PlannedObject("0077", "table", "landscape_regression_runs"),
+    PlannedObject("0077", "table", "landscape_screens"),
+    PlannedObject("0077", "table", "landscape_extractions"),
+    PlannedObject("0077", "table", "landscape_ideas"),
+    PlannedObject("0077", "table", "landscape_idea_links"),
+    PlannedObject("0077", "table", "landscape_extraction_links"),
+    PlannedObject("0077", "table", "landscape_idea_evidence"),
+    PlannedObject("0077", "table", "landscape_idea_aliases"),
+    PlannedObject("0077", "table", "landscape_triage"),
+    PlannedObject("0077", "table", "landscape_cuts"),
+    PlannedObject("0077", "table", "landscape_candidate_groupings"),
+    PlannedObject("0077", "table", "landscape_deep"),
+    PlannedObject("0077", "table", "landscape_consults"),
+    PlannedObject("0077", "table", "landscape_comparisons"),
+    PlannedObject("0077", "table", "landscape_rankings"),
+    PlannedObject("0077", "table", "landscape_similarity"),
+    PlannedObject("0077", "table", "landscape_opportunities"),
+    PlannedObject("0077", "table", "landscape_opportunity_versions"),
+    PlannedObject("0077", "table", "landscape_assessments"),
+    PlannedObject("0077", "table", "landscape_decisions"),
+    PlannedObject("0077", "table", "landscape_reviews"),
+    PlannedObject("0077", "table", "landscape_review_events"),
+    PlannedObject("0077", "table", "landscape_review_assignments"),
+    PlannedObject("0077", "table", "landscape_review_batches"),
+    PlannedObject("0077", "table", "landscape_review_batch_items"),
+    PlannedObject("0077", "table", "landscape_expert_judgments"),
+    PlannedObject("0077", "table", "landscape_reject_audits"),
+    PlannedObject("0077", "table", "landscape_rescues"),
+    PlannedObject("0077", "table", "landscape_llm_calls"),
+    PlannedObject("0077", "table", "landscape_reports"),
+    PlannedObject("0077", "constraint", "uq_landscape_sources_source", "landscape_sources"),
+    PlannedObject(
+        "0077", "constraint", "uq_landscape_fetches_source_slice_started", "landscape_fetches",
+    ),
+    PlannedObject("0077", "constraint", "ck_landscape_fetches_status", "landscape_fetches"),
+    PlannedObject("0077", "index", "ix_landscape_fetches_status", "landscape_fetches"),
+    PlannedObject("0077", "constraint", "uq_landscape_labs_lab_key", "landscape_labs"),
+    PlannedObject(
+        "0077", "constraint", "uq_landscape_evidence_cache_source_release_query", "landscape_evidence_cache",
+    ),
+    PlannedObject(
+        "0077", "constraint", "uq_landscape_documents_kind_external_id", "landscape_documents",
+    ),
+    PlannedObject("0077", "constraint", "ck_landscape_documents_kind", "landscape_documents"),
+    PlannedObject("0077", "constraint", "ck_landscape_documents_s1_status", "landscape_documents"),
+    PlannedObject("0077", "index", "ix_landscape_documents_doi", "landscape_documents"),
+    PlannedObject("0077", "index", "ix_landscape_documents_pmid", "landscape_documents"),
+    PlannedObject("0077", "index", "ix_landscape_documents_openalex_id", "landscape_documents"),
+    PlannedObject("0077", "index", "ix_landscape_documents_lab_key", "landscape_documents"),
+    PlannedObject("0077", "index", "ix_landscape_documents_s1_status", "landscape_documents"),
+    PlannedObject("0077", "index", "ix_landscape_documents_merged_into", "landscape_documents"),
+    PlannedObject(
+        "0077", "constraint", "uq_landscape_document_links_pair_kind", "landscape_document_links",
+    ),
+    PlannedObject(
+        "0077", "constraint", "ck_landscape_document_links_kind", "landscape_document_links",
+    ),
+    PlannedObject("0077", "index", "ix_landscape_document_links_doc_b", "landscape_document_links"),
+    PlannedObject("0077", "constraint", "uq_landscape_texts_document_id", "landscape_texts"),
+    PlannedObject("0077", "constraint", "ck_landscape_texts_basis", "landscape_texts"),
+    PlannedObject("0077", "constraint", "uq_landscape_batches_seq", "landscape_batches"),
+    PlannedObject("0077", "constraint", "uq_landscape_batches_api_batch_id", "landscape_batches"),
+    PlannedObject("0077", "constraint", "ck_landscape_batches_status", "landscape_batches"),
+    PlannedObject("0077", "index", "ix_landscape_batches_status", "landscape_batches"),
+    PlannedObject(
+        "0077", "constraint", "uq_landscape_batch_items_batch_seq", "landscape_batch_items",
+    ),
+    PlannedObject("0077", "index", "ix_landscape_batch_items_row_id", "landscape_batch_items"),
+    PlannedObject(
+        "0077", "constraint", "uq_landscape_regression_sets_version", "landscape_regression_sets",
+    ),
+    PlannedObject("0077", "constraint", "ck_landscape_epochs_status", "landscape_epochs"),
+    PlannedObject("0077", "index", "uq_landscape_epochs_one_active", "landscape_epochs"),
+    PlannedObject("0077", "index", "ix_landscape_epochs_built_from_epoch_id", "landscape_epochs"),
+    PlannedObject("0077", "index", "ix_landscape_epochs_override_actor_id", "landscape_epochs"),
+    PlannedObject(
+        "0077", "constraint", "uq_landscape_regression_items_set_id", "landscape_regression_items",
+    ),
+    PlannedObject(
+        "0077", "constraint", "uq_landscape_regression_runs_epoch_started", "landscape_regression_runs",
+    ),
+    PlannedObject(
+        "0077", "constraint", "ck_landscape_regression_runs_status", "landscape_regression_runs",
+    ),
+    PlannedObject(
+        "0077", "index", "ix_landscape_regression_runs_set_version", "landscape_regression_runs",
+    ),
+    PlannedObject("0077", "constraint", "uq_landscape_screens_document_epoch", "landscape_screens"),
+    PlannedObject("0077", "constraint", "ck_landscape_screens_status", "landscape_screens"),
+    PlannedObject("0077", "index", "ix_landscape_screens_status", "landscape_screens"),
+    PlannedObject("0077", "index", "ix_landscape_screens_epoch_id", "landscape_screens"),
+    PlannedObject("0077", "index", "ix_landscape_screens_batch_item_id", "landscape_screens"),
+    PlannedObject(
+        "0077", "constraint", "uq_landscape_extractions_document_epoch_basis", "landscape_extractions",
+    ),
+    PlannedObject("0077", "constraint", "ck_landscape_extractions_status", "landscape_extractions"),
+    PlannedObject("0077", "constraint", "ck_landscape_extractions_basis", "landscape_extractions"),
+    PlannedObject("0077", "index", "ix_landscape_extractions_status", "landscape_extractions"),
+    PlannedObject("0077", "index", "ix_landscape_extractions_epoch_id", "landscape_extractions"),
+    PlannedObject(
+        "0077", "index", "ix_landscape_extractions_batch_item_id", "landscape_extractions",
+    ),
+    PlannedObject("0077", "constraint", "uq_landscape_ideas_epoch_key", "landscape_ideas"),
+    PlannedObject("0077", "constraint", "ck_landscape_ideas_type", "landscape_ideas"),
+    PlannedObject(
+        "0077", "constraint", "uq_landscape_idea_links_epoch_pair", "landscape_idea_links",
+    ),
+    PlannedObject("0077", "index", "ix_landscape_idea_links_idea_a", "landscape_idea_links"),
+    PlannedObject("0077", "index", "ix_landscape_idea_links_idea_b", "landscape_idea_links"),
+    PlannedObject("0077", "index", "ix_landscape_idea_links_document_id", "landscape_idea_links"),
+    PlannedObject(
+        "0077", "constraint", "uq_landscape_extraction_links_epoch_pair", "landscape_extraction_links",
+    ),
+    PlannedObject(
+        "0077", "index", "ix_landscape_extraction_links_doc_a", "landscape_extraction_links",
+    ),
+    PlannedObject(
+        "0077", "index", "ix_landscape_extraction_links_doc_b", "landscape_extraction_links",
+    ),
+    PlannedObject(
+        "0077", "index", "ix_landscape_extraction_links_extraction_id", "landscape_extraction_links",
+    ),
+    PlannedObject(
+        "0077", "constraint", "uq_landscape_idea_evidence_idea_extraction_index", "landscape_idea_evidence",
+    ),
+    PlannedObject(
+        "0077", "index", "ix_landscape_idea_evidence_extraction_id", "landscape_idea_evidence",
+    ),
+    PlannedObject(
+        "0077", "constraint", "uq_landscape_idea_aliases_epoch_old_key", "landscape_idea_aliases",
+    ),
+    PlannedObject("0077", "index", "ix_landscape_idea_aliases_idea_id", "landscape_idea_aliases"),
+    PlannedObject(
+        "0077", "constraint", "uq_landscape_triage_idea_version_epoch", "landscape_triage",
+    ),
+    PlannedObject("0077", "constraint", "ck_landscape_triage_status", "landscape_triage"),
+    PlannedObject("0077", "index", "ix_landscape_triage_status", "landscape_triage"),
+    PlannedObject("0077", "index", "ix_landscape_triage_epoch_id", "landscape_triage"),
+    PlannedObject("0077", "index", "ix_landscape_triage_batch_item_id", "landscape_triage"),
+    PlannedObject("0077", "constraint", "ck_landscape_cuts_status", "landscape_cuts"),
+    PlannedObject("0077", "index", "ix_landscape_cuts_epoch_id", "landscape_cuts"),
+    PlannedObject("0077", "index", "ix_landscape_cuts_boundary_batch_id", "landscape_cuts"),
+    PlannedObject(
+        "0077", "constraint", "uq_landscape_candidate_groupings_epoch_key", "landscape_candidate_groupings",
+    ),
+    PlannedObject(
+        "0077", "constraint", "ck_landscape_candidate_groupings_status", "landscape_candidate_groupings",
+    ),
+    PlannedObject(
+        "0077", "index", "ix_landscape_candidate_groupings_status", "landscape_candidate_groupings",
+    ),
+    PlannedObject(
+        "0077", "index", "ix_landscape_candidate_groupings_cut_id", "landscape_candidate_groupings",
+    ),
+    PlannedObject(
+        "0077", "index", "ix_landscape_candidate_groupings_batch_item_id", "landscape_candidate_groupings",
+    ),
+    PlannedObject("0077", "constraint", "uq_landscape_deep_idea_version_epoch", "landscape_deep"),
+    PlannedObject("0077", "constraint", "ck_landscape_deep_status", "landscape_deep"),
+    PlannedObject("0077", "index", "ix_landscape_deep_status", "landscape_deep"),
+    PlannedObject("0077", "index", "ix_landscape_deep_epoch_id", "landscape_deep"),
+    PlannedObject("0077", "index", "ix_landscape_deep_cut_id", "landscape_deep"),
+    PlannedObject("0077", "constraint", "uq_landscape_consults_deep_domain", "landscape_consults"),
+    PlannedObject("0077", "constraint", "uq_landscape_comparisons_pair", "landscape_comparisons"),
+    PlannedObject("0077", "constraint", "ck_landscape_comparisons_status", "landscape_comparisons"),
+    PlannedObject("0077", "constraint", "ck_landscape_comparisons_basis", "landscape_comparisons"),
+    PlannedObject(
+        "0077", "constraint", "ck_landscape_comparisons_ask_order", "landscape_comparisons",
+    ),
+    PlannedObject("0077", "index", "ix_landscape_comparisons_status", "landscape_comparisons"),
+    PlannedObject("0077", "index", "ix_landscape_comparisons_idea_b", "landscape_comparisons"),
+    PlannedObject("0077", "index", "ix_landscape_comparisons_epoch_id", "landscape_comparisons"),
+    PlannedObject(
+        "0077", "index", "ix_landscape_comparisons_batch_item_id", "landscape_comparisons",
+    ),
+    PlannedObject(
+        "0077", "index", "ix_landscape_comparisons_winner_idea_id", "landscape_comparisons",
+    ),
+    PlannedObject("0077", "constraint", "uq_landscape_rankings_epoch_idea", "landscape_rankings"),
+    PlannedObject("0077", "index", "ix_landscape_rankings_idea_id", "landscape_rankings"),
+    PlannedObject("0077", "constraint", "uq_landscape_similarity_pair", "landscape_similarity"),
+    PlannedObject("0077", "index", "ix_landscape_similarity_idea_b", "landscape_similarity"),
+    PlannedObject("0077", "index", "ix_landscape_similarity_epoch_id", "landscape_similarity"),
+    PlannedObject(
+        "0077", "constraint", "uq_landscape_opportunity_versions_opportunity_version", "landscape_opportunity_versions",
+    ),
+    PlannedObject(
+        "0077", "constraint", "ck_landscape_opportunity_versions_status", "landscape_opportunity_versions",
+    ),
+    PlannedObject(
+        "0077", "index", "ix_landscape_opportunity_versions_status", "landscape_opportunity_versions",
+    ),
+    PlannedObject(
+        "0077", "index", "ix_landscape_opportunity_versions_epoch_id", "landscape_opportunity_versions",
+    ),
+    PlannedObject(
+        "0077", "index", "ix_landscape_opportunity_versions_cut_id", "landscape_opportunity_versions",
+    ),
+    PlannedObject(
+        "0077", "index", "ix_landscape_opportunity_versions_batch_item_id", "landscape_opportunity_versions",
+    ),
+    PlannedObject(
+        "0077", "constraint", "uq_landscape_assessments_opportunity_version_epoch", "landscape_assessments",
+    ),
+    PlannedObject(
+        "0077", "constraint", "uq_landscape_assessments_epoch_grouping", "landscape_assessments",
+    ),
+    PlannedObject("0077", "constraint", "ck_landscape_assessments_status", "landscape_assessments"),
+    PlannedObject(
+        "0077", "constraint", "ck_landscape_assessments_one_key", "landscape_assessments",
+    ),
+    PlannedObject("0077", "index", "ix_landscape_assessments_status", "landscape_assessments"),
+    PlannedObject("0077", "index", "ix_landscape_assessments_grouping_id", "landscape_assessments"),
+    PlannedObject(
+        "0077", "index", "ix_landscape_assessments_batch_item_id", "landscape_assessments",
+    ),
+    PlannedObject(
+        "0077", "constraint", "uq_landscape_decisions_opportunity_reviewer", "landscape_decisions",
+    ),
+    PlannedObject("0077", "constraint", "ck_landscape_decisions_decision", "landscape_decisions"),
+    PlannedObject(
+        "0077", "constraint", "ck_landscape_decisions_reason_length", "landscape_decisions",
+    ),
+    PlannedObject("0077", "index", "ix_landscape_decisions_reviewer_id", "landscape_decisions"),
+    PlannedObject(
+        "0077", "index", "ix_landscape_decisions_landscape_assessment_id", "landscape_decisions",
+    ),
+    PlannedObject(
+        "0077", "index", "ix_landscape_decisions_recorded_by_user_id", "landscape_decisions",
+    ),
+    PlannedObject(
+        "0077", "constraint", "uq_landscape_reviews_opportunity_reviewer", "landscape_reviews",
+    ),
+    PlannedObject("0077", "constraint", "ck_landscape_reviews_score", "landscape_reviews"),
+    PlannedObject("0077", "constraint", "ck_landscape_reviews_comment_length", "landscape_reviews"),
+    PlannedObject("0077", "index", "ix_landscape_reviews_reviewer_id", "landscape_reviews"),
+    PlannedObject(
+        "0077", "index", "ix_landscape_reviews_landscape_assessment_id", "landscape_reviews",
+    ),
+    PlannedObject("0077", "index", "ix_landscape_reviews_recorded_by_user_id", "landscape_reviews"),
+    PlannedObject(
+        "0077", "constraint", "ck_landscape_review_events_action", "landscape_review_events",
+    ),
+    PlannedObject(
+        "0077", "index", "ix_landscape_review_events_opportunity_id", "landscape_review_events",
+    ),
+    PlannedObject(
+        "0077", "index", "ix_landscape_review_events_landscape_assessment_id", "landscape_review_events",
+    ),
+    PlannedObject(
+        "0077", "index", "ix_landscape_review_events_actor_id", "landscape_review_events",
+    ),
+    PlannedObject(
+        "0077", "index", "ix_landscape_review_events_recorded_by_user_id", "landscape_review_events",
+    ),
+    PlannedObject(
+        "0077", "constraint", "uq_landscape_review_assignments_opportunity_assignee", "landscape_review_assignments",
+    ),
+    PlannedObject(
+        "0077", "index", "ix_landscape_review_assignments_assignee_id", "landscape_review_assignments",
+    ),
+    PlannedObject(
+        "0077", "index", "ix_landscape_review_assignments_assigned_by_user_id", "landscape_review_assignments",
+    ),
+    PlannedObject(
+        "0077", "constraint", "uq_landscape_review_batches_issued_on", "landscape_review_batches",
+    ),
+    PlannedObject(
+        "0077", "constraint", "uq_landscape_review_batch_items_batch_opportunity", "landscape_review_batch_items",
+    ),
+    PlannedObject(
+        "0077", "index", "ix_landscape_review_batch_items_opportunity_id", "landscape_review_batch_items",
+    ),
+    PlannedObject(
+        "0077", "constraint", "uq_landscape_expert_judgments_opportunity_expert_quarter", "landscape_expert_judgments",
+    ),
+    PlannedObject(
+        "0077", "index", "ix_landscape_expert_judgments_expert_id", "landscape_expert_judgments",
+    ),
+    PlannedObject(
+        "0077", "index", "ix_landscape_expert_judgments_landscape_assessment_id", "landscape_expert_judgments",
+    ),
+    PlannedObject(
+        "0077", "constraint", "uq_landscape_reject_audits_item_epoch", "landscape_reject_audits",
+    ),
+    PlannedObject(
+        "0077", "constraint", "ck_landscape_reject_audits_status", "landscape_reject_audits",
+    ),
+    PlannedObject("0077", "index", "ix_landscape_reject_audits_status", "landscape_reject_audits"),
+    PlannedObject(
+        "0077", "index", "ix_landscape_reject_audits_epoch_id", "landscape_reject_audits",
+    ),
+    PlannedObject(
+        "0077", "index", "ix_landscape_reject_audits_batch_item_id", "landscape_reject_audits",
+    ),
+    PlannedObject("0077", "index", "ix_landscape_rescues_item", "landscape_rescues"),
+    PlannedObject("0077", "index", "ix_landscape_rescues_epoch_id", "landscape_rescues"),
+    PlannedObject("0077", "index", "ix_landscape_rescues_actor_id", "landscape_rescues"),
+    PlannedObject("0077", "constraint", "uq_landscape_llm_calls_batch_seq", "landscape_llm_calls"),
+    PlannedObject("0077", "index", "ix_landscape_llm_calls_created_at", "landscape_llm_calls"),
+    PlannedObject("0077", "constraint", "uq_landscape_reports_kind_created", "landscape_reports"),
+    PlannedObject("0077", "constraint", "ck_landscape_reports_kind", "landscape_reports"),
 )
 
 #: What ``upgrade()`` DROPS. Kept apart from PLANNED_OBJECTS because the collision check
 #: must never treat a drop's precondition (the object exists) as a collision. 0026 is
-#: the only upgrade-time ``drop_table`` in 0019-0076.
+#: the only upgrade-time ``drop_table`` in 0019-0077.
 PLANNED_DROPS: tuple[PlannedObject, ...] = (
     PlannedObject("0026", "table", "grantbot_posted_foas"),
 )
@@ -711,7 +1030,7 @@ REVISION_ORDER = (
     "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
     "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060",
     "0061", "0062", "0063", "0064", "0065", "0066", "0067", "0068", "0069", "0070", "0071", "0072",
-    "0073", "0074", "0075", "0076",
+    "0073", "0074", "0075", "0076", "0077",
 )
 
 
