@@ -1,0 +1,269 @@
+{% extends "base.html" %}
+{% from "help/_link.html" import help_link %}
+{% block title %}Workspace — Landscape opportunity — Blackbird{% endblock %}
+{% block extra_head %}{% include "assessments/_head.html" %}{% endblock %}
+{% block content %}<div class="max-w-5xl mx-auto">
+{# An opportunity's page (spec §13.2), copied in the fashion of the assessment and project
+   pages rather than shared with them (D26). Every value comes from
+   landscape_view.detail_view, which has already applied the viewer's hidings (blind batch,
+   expert sample) and the independent-votes rule; a hidden field is simply absent here.
+   `assessment` is the current assessment in the active epoch (or, for a retired
+   opportunity, its last one as history). The section ids `brief`, `verdict`, `gating`,
+   `scores`, `evidence`, `reviews` and `review` are the anchors the landscaping chat record
+   cites (src/services/landscape_chat_record.py); `disease-profile` and `panel` are on the
+   first member idea. Forms post to literal /reviews/ paths, which redirect back here.
+   Model-written text renders autoescaped. #}
+{% set a = assessment or {} %}
+{% set band_class = {'advance': 'bg-green-100 text-green-700', 'conditional': 'bg-amber-100 text-amber-700', 'pass': 'bg-gray-100 text-gray-700'} %}
+{% macro item_list(items) %}<ul class="list-disc list-inside text-base leading-relaxed text-gray-700 space-y-1 max-w-[68ch]">{% for item in items %}<li>{{ item }}</li>{% endfor %}</ul>{% endmacro %}
+{% macro signal_list(title, items) %}
+<div class="landscape-signal-group">
+    <h3 class="text-sm font-semibold text-gray-900">{{ title }}</h3>
+    {% if items %}
+    <ul class="mt-1 space-y-1 text-base leading-relaxed text-gray-700">
+        {% for item in items %}<li>{% if item.label and item.source != 'red_flag' %}<span class="font-semibold">{{ item.label }}</span> — {% endif %}{{ item.detail }}{% if item.rationale %}<span class="block ml-4 text-sm text-gray-600">Reason: {{ item.rationale }}</span>{% endif %}</li>{% endfor %}
+    </ul>
+    {% else %}<p class="mt-1 text-sm text-gray-600">None.</p>{% endif %}
+</div>
+{% endmacro %}
+
+<a href="{{ page_url(request, 'workspace_landscape') }}" class="text-sm text-indigo-700 hover:underline">← Landscape</a>
+<div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 mt-1 mb-4"><h1 class="text-2xl font-bold text-gray-900">{{ label or 'Opportunity' }}</h1>{{ help_link(request, effective_user, 'landscape', 'detail') }}</div>
+
+{% if banner %}<div class="landscape-banner mb-4 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">{{ banner }}</div>{% endif %}
+{% if is_history %}<div class="landscape-history-note mb-4 rounded-lg border border-gray-300 bg-gray-50 px-4 py-3 text-sm text-gray-700">This opportunity has been retired. Its page shows its last assessment, as history.</div>{% endif %}
+{% if no_assessment %}<div class="landscape-no-assessment mb-4 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">No completed assessment under the current criteria{% if failure and failure.status %} (status: {{ failure.status }}){% endif %}.{% if history_assessment_id %} The last earlier assessment is listed under History below.{% endif %}</div>{% endif %}
+{% if hiding and hiding.blind %}<div class="landscape-blind-note mb-4 rounded-lg border border-slate-300 bg-slate-50 px-4 py-3 text-sm text-slate-900">This opportunity is in a blind batch: the score, band, dimension scores and their rationales are hidden until you record your decision, and the rank until the next batch is issued.</div>{% endif %}
+{% if hiding and hiding.expert %}<div class="landscape-expert-note mb-4 rounded-lg border border-slate-300 bg-slate-50 px-4 py-3 text-sm text-slate-900">This is one of your expert opportunities: the pipeline's own calls (gates, scores, band, recommendation, red flags, the panel's opinions and the rationales) are hidden until you submit your judgment.</div>{% endif %}
+
+<div id="brief" class="landscape-brief scroll-mt-16 bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+    <h2 class="text-base font-semibold text-gray-900">Brief</h2>
+    {% if a.headline %}<p class="assessment-headline mt-2 text-2xl font-semibold text-gray-900">{{ a.headline }}</p>{% endif %}
+    <p class="text-sm text-gray-600 mt-1">{% if theme %}{{ theme }} · {% endif %}{% if probe %}probe · {% endif %}{% if blind %}issued in a blind batch · {% endif %}{% if retired %}retired · {% endif %}{% if epoch %}criteria {{ epoch.criteria_version or '—' }}, prompts {{ epoch.prompt_set_version or '—' }}{% endif %}</p>
+    {% if a.structured_lines %}<ul class="landscape-lines mt-3 space-y-0.5 text-sm text-gray-800">{% for line in a.structured_lines %}<li>{{ line }}</li>{% endfor %}</ul>{% endif %}
+    {% if a.elevator_pitch %}
+    <div class="mt-4"><h3 class="text-sm font-semibold text-gray-600">In one minute</h3><p class="mt-1 text-base leading-relaxed text-gray-800 max-w-[68ch] whitespace-pre-line">{{ a.elevator_pitch }}</p></div>
+    {% endif %}
+    {% if key_points %}
+    <div class="mt-4 space-y-3">
+        {% for group in key_points %}
+        <div>
+            <h3 class="text-sm font-semibold text-gray-700">{{ group.label }}</h3>
+            <ul class="mt-1 space-y-1 text-base leading-relaxed text-gray-700 max-w-[68ch]">
+                {% for bullet in group.bullets %}<li>{{ bullet.text }} {% if bullet.support is string %}<span class="landscape-support px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-gray-100 text-gray-700">{{ bullet.support }}</span>{% else %}<span class="landscape-support px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-green-100 text-green-700" title="{{ bullet.support | join(', ') }}">sourced</span>{% endif %}</li>{% endfor %}
+            </ul>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+    {% if not assessment %}<p class="mt-2 text-sm text-gray-600">No assessment to show.</p>{% endif %}
+</div>
+
+<div id="evidence" class="landscape-evidence scroll-mt-16 bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-2">Evidence summary</h2>
+    {% set vs = verdict_signals or {} %}
+    <div class="space-y-3">
+        {{ signal_list('Strengths', vs.strengths) }}
+        {{ signal_list('Risks', vs.risks) }}
+        {{ signal_list('Mid-scale', vs.mid_scale) }}
+        {{ signal_list('Not established', vs.unestablished) }}
+    </div>
+    {% if a.strengths %}<h3 class="mt-3 text-sm font-semibold text-gray-900">Listed strengths</h3>{{ item_list(a.strengths) }}{% endif %}
+    {% if a.risks %}<h3 class="mt-3 text-sm font-semibold text-gray-900">Listed risks</h3>{{ item_list(a.risks) }}{% endif %}
+    {% if a.competitive_landscape %}<h3 class="mt-3 text-sm font-semibold text-gray-900">Competitive landscape</h3>{{ item_list(a.competitive_landscape) }}{% endif %}
+    {% if a.evidence_maturity %}<h3 class="mt-3 text-sm font-semibold text-gray-900">Evidence maturity</h3>{{ item_list(a.evidence_maturity) }}{% endif %}
+</div>
+
+<div class="landscape-ask bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-2">The ask</h2>
+    {% if a.recommended_next_experiment %}<p class="text-base leading-relaxed text-gray-800 max-w-[68ch] whitespace-pre-line">{{ a.recommended_next_experiment }}</p>{% else %}<p class="text-sm text-gray-600">None recorded.</p>{% endif %}
+</div>
+
+<div id="verdict" class="landscape-verdict scroll-mt-16 bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-2">Verdict</h2>
+    <p class="text-sm text-gray-800">
+        {% if a.band %}<span class="px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap {{ band_class.get(a.band, 'bg-gray-100 text-gray-700') }}">{{ a.band }}</span>{% endif %}
+        {% if a.weighted_score is not none and a.weighted_score is defined %} Score {{ '%.2f' | format(a.weighted_score) }}{% if scale_max %} of {{ scale_max }}{% endif %}{% endif %}
+        {% if a.recommendation %} · Recommendation: {{ a.recommendation }}{% endif %}
+        {% if a.confidence %} · Confidence: {{ a.confidence }}{% endif %}
+    </p>
+    <p class="mt-1 text-sm text-gray-600">The score and band are provisional and advisory{% if epoch %}, judged under criteria {{ epoch.criteria_version or '—' }} and prompts {{ epoch.prompt_set_version or '—' }}{% endif %}.</p>
+    {% if a.score_rationale %}<h3 class="mt-3 text-sm font-semibold text-gray-900">Why this score</h3><p class="mt-1 text-base leading-relaxed text-gray-700 max-w-[68ch] whitespace-pre-line">{{ a.score_rationale }}</p>{% endif %}
+</div>
+
+<div id="gating" class="landscape-gating scroll-mt-16 bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-2">Gating criteria</h2>
+    {% if a.gating %}
+    <ul class="space-y-2 text-sm text-gray-800">
+        {% for key, value in a.gating.items() %}
+        {% set meta = gating_definitions.get(key) if gating_definitions else none %}
+        <li><span class="font-semibold">{{ meta.title if meta else key | replace('_', ' ') }}</span>: {{ value | replace('_', ' ') }}
+            {% if a.gating_rationales and a.gating_rationales.get(key) %}<span class="block ml-4 text-gray-600">Hub's reason: {{ a.gating_rationales.get(key) }}</span>{% elif meta %}<span class="block ml-4 text-gray-600">Rubric definition: {{ meta.description }}</span>{% endif %}</li>
+        {% endfor %}
+    </ul>
+    {% else %}<p class="text-sm text-gray-600">No gate calls to show.</p>{% endif %}
+</div>
+
+<div class="landscape-red-flags bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-2">Red flags{% if a.red_flags %} ({{ a.red_flags | length }}){% endif %}</h2>
+    {% if hiding and hiding.expert %}<p class="text-sm text-gray-600">The pipeline's red flags are hidden until you submit your judgment.</p>{% elif a.red_flags %}{{ item_list(a.red_flags) }}{% else %}<p class="text-sm text-gray-600">None recorded.</p>{% endif %}
+</div>
+
+<div class="landscape-rationale bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-2">Rationale</h2>
+    {% if a.rationale %}<div class="text-base leading-relaxed text-gray-700 max-w-[68ch] whitespace-pre-line">{{ a.rationale }}</div>{% else %}<p class="text-sm text-gray-600">None to show.</p>{% endif %}
+</div>
+
+<div id="scores" class="landscape-scores scroll-mt-16 bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-2">Dimension scores</h2>
+    {% if dimensions %}
+    <ul class="space-y-2 text-sm text-gray-800">
+        {% for row in dimensions %}
+        <li><span class="font-semibold">{{ row.title }}</span>{% if row.weight %} <span class="text-gray-600">(weight {{ row.weight }})</span>{% endif %}: {{ row.score if row.score is not none else 'not scored' }}{% if scale_max and row.score is not none %} of {{ scale_max }}{% endif %}
+            {% if row.rationale %}<span class="block ml-4 text-gray-600">Hub's reason: {{ row.rationale }}</span>{% endif %}</li>
+        {% endfor %}
+    </ul>
+    {% else %}<p class="text-sm text-gray-600">No dimension scores to show.</p>{% endif %}
+</div>
+
+<div class="landscape-deal-breakers bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-2">Deal-breaker flags</h2>
+    {% set ns = namespace(any=false) %}
+    {% for member in members %}
+    {% set reviewed = (member.deep or {}).get('flags_reviewed') or {} %}
+    {% if member.data_flags %}
+    {% set ns.any = true %}
+    {% if members | length > 1 %}<h3 class="mt-2 text-sm font-semibold text-gray-900">{{ member.structured_line or member.idea_key }}</h3>{% endif %}
+    <ul class="mt-1 space-y-2 text-sm text-gray-800">
+        {% for flag, evidence in member.data_flags.items() %}
+        {% set call = reviewed.get(flag) %}
+        <li><span class="font-semibold">{{ flag | replace('_', ' ') }}</span>{% if call %} · {{ call.status if call is mapping else call }}{% if call is mapping and call.reason %}: {{ call.reason }}{% endif %}{% endif %}
+            <details class="mt-1"><summary class="cursor-pointer text-sm text-gray-600">Evidence</summary><pre class="mt-1 text-sm bg-gray-50 p-2 rounded overflow-x-auto max-h-64 whitespace-pre-wrap">{{ evidence | tojson(indent=2) }}</pre></details></li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+    {% endfor %}
+    {% if not ns.any %}<p class="text-sm text-gray-600">No deal-breaker flags raised.</p>{% endif %}
+</div>
+
+<div class="landscape-human-review bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-lg font-semibold text-gray-900 mb-3">Human review</h2>
+    {% set shown_id = a.id if assessment else none %}
+    <section id="review" class="scroll-mt-16">
+        <h3 class="text-base font-semibold text-gray-900">Your decision and review</h3>
+        {% if changed_since_decision %}<p class="mt-1"><span class="landscape-changed px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-indigo-100 text-indigo-700">changed since your decision</span> <span class="text-sm text-gray-600">Read the new assessment, then confirm or change your decision.</span></p>{% endif %}
+        {% with opportunity_id=opportunity_id, assessment_id=shown_id, decision=my_decision, form_id='detail-dec-' %}{% include "landscape/_decision_form.html" %}{% endwith %}
+        {% set own_review = (reviews | selectattr('mine') | list | first) if reviews else none %}
+        <details class="mt-3 border-t border-gray-100 pt-3">
+            <summary class="cursor-pointer text-sm font-medium text-indigo-700">{{ 'Edit your full review' if own_review else 'Write a full review (optional)' }}</summary>
+            <div class="mt-2">{% with opportunity_id=opportunity_id, assessment_id=shown_id, review=own_review, form_id='detail-rev-' %}{% include "landscape/_review_form.html" %}{% endwith %}</div>
+        </details>
+        <div class="mt-3 border-t border-gray-100 pt-3 flex flex-wrap items-center gap-2">
+            <span class="text-sm text-gray-700">Mark this opportunity:</span>
+            {% for action, text in [('approved', 'Approve'), ('disapproved', 'Disapprove'), ('cleared', 'Clear the mark')] %}
+            <form method="post" action="/reviews/landscape/{{ opportunity_id }}/status" class="inline">
+                <input type="hidden" name="assessment_id" value="{{ shown_id or '' }}">
+                <input type="hidden" name="action" value="{{ action }}">
+                <button type="submit" class="text-sm rounded border border-indigo-300 px-2 py-0.5 text-indigo-700 hover:bg-indigo-50">{{ text }}</button>
+            </form>
+            {% endfor %}
+        </div>
+        {% if expert_item and not impersonation_banner %}
+        <div class="landscape-expert mt-3 border-t border-gray-100 pt-3">
+            <h4 class="text-sm font-semibold text-gray-900 mb-2">Your expert judgment ({{ expert_item.quarter }})</h4>
+            {% with opportunity_id=opportunity_id %}{% include "landscape/_expert_form.html" %}{% endwith %}
+        </div>
+        {% endif %}
+    </section>
+
+    <section id="reviews" class="scroll-mt-16 mt-5 border-t border-gray-200 pt-4">
+        <h3 class="text-base font-semibold text-gray-900">Decisions and reviews</h3>
+        {% if not votes_unlocked %}<p class="mt-1 text-sm text-gray-600">Others' decisions, reviews and marks appear once you record your own quick decision.</p>{% endif %}
+        {% if review_status %}<p class="mt-1 text-sm text-gray-700">Current mark: {{ review_status.action }} by {{ review_status.actor_name or '—' }}, {{ review_status.created_at | ts }}</p>{% endif %}
+        {% if decisions %}
+        <ul class="mt-2 space-y-1 text-sm text-gray-800">
+            {% for d in decisions %}<li><span class="font-medium">{{ d.reviewer_name or '—' }}</span>: {{ 'Pursue' if d.decision == 'pursue' else 'Pass' }}{% if d.reason_tags %} · {{ d.reason_tags | join(', ') }}{% endif %}{% if d.reason %} · {{ d.reason }}{% endif %}{% if d.landscape_assessment_id != shown_id %} <span class="text-gray-600">(made on an earlier assessment)</span>{% endif %}{% if d.edited %} <span class="text-gray-600">(edited)</span>{% endif %}</li>{% endfor %}
+        </ul>
+        {% endif %}
+        {% if reviews %}
+        <ul class="mt-2 space-y-2">
+            {% for review in reviews %}
+            <li class="rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-800">
+                <p><span class="font-medium">{{ review.reviewer_name or '—' }}</span> · {{ review.score }}/5 · <span class="text-gray-600">{{ review.created_at | ts }}{% if review.edited %} (edited){% endif %}</span></p>
+                {% if review.dimension_scores %}<p class="mt-1 text-gray-700">{% for key, value in review.dimension_scores.items() %}{{ key | replace('_', ' ') }} {{ value }}{{ ', ' if not loop.last }}{% endfor %}</p>{% endif %}
+                {% if review.comment %}<p class="mt-1 whitespace-pre-line">{{ review.comment }}</p>{% endif %}
+                {% if permissions.admin and not impersonation_banner %}
+                <form method="post" action="/reviews/landscape-reviews/{{ review.id }}/delete" class="mt-1" data-confirm="Delete this review? This cannot be undone.">
+                    <button type="submit" class="text-sm text-red-600 hover:text-red-800">Delete</button>
+                </form>
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+        {% if status_events %}
+        <ul class="mt-2 space-y-0.5 text-sm text-gray-700">{% for e in status_events %}<li>{{ e.action }} by {{ e.actor_name or '—' }}, {{ e.created_at | ts }}</li>{% endfor %}</ul>
+        {% endif %}
+        {% if not decisions and not reviews and not status_events %}<p class="mt-1 text-sm text-gray-600">Nothing to show yet.</p>{% endif %}
+        {# Assignments: read by everyone who sees the page; assign and remove are staff-only
+           and refused under impersonation (src/routers/reviews.py). #}
+        {% set can_assign = permissions.staff and not impersonation_banner %}
+        <div class="landscape-assignments mt-4 border-t border-gray-100 pt-4">
+            <h4 class="text-sm font-semibold text-gray-700">Assigned{% if assignments %} ({{ assignments | length }}){% endif %}</h4>
+            {% if assignments %}
+            <ul class="mt-1 space-y-1 text-sm">
+                {% for assigned in assignments %}
+                <li class="flex items-center gap-2">
+                    <span class="text-gray-700">{{ assigned.assignee_name }}</span>
+                    {% if can_assign and assigned.assignee_id %}
+                    <form method="post" action="/reviews/landscape/{{ opportunity_id }}/unassign" class="inline">
+                        <input type="hidden" name="assignee_user_id" value="{{ assigned.assignee_id }}">
+                        <button type="submit" class="text-sm text-red-600 hover:text-red-800" aria-label="Remove {{ assigned.assignee_name }}">Remove</button>
+                    </form>
+                    {% endif %}
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}<p class="text-sm text-gray-600 mt-1">No one assigned.</p>{% endif %}
+            {% if can_assign and review_capable_users %}
+            <form method="post" action="/reviews/landscape/{{ opportunity_id }}/assign" class="mt-2 flex items-center gap-2">
+                <label for="landscape-assign-user" class="text-sm text-gray-700">Assign to</label>
+                <select id="landscape-assign-user" name="assignee_user_id" class="border rounded px-1 py-0.5 text-sm">
+                    {% for u in review_capable_users %}<option value="{{ u.id }}">{{ u.name }}</option>{% endfor %}
+                </select>
+                <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Assign</button>
+            </form>
+            {% endif %}
+        </div>
+    </section>
+</div>
+
+<div class="landscape-members mb-6">
+    <h2 class="text-lg font-semibold text-gray-900 mb-3">The ideas in it ({{ members | length }})</h2>
+    {% for member in members %}
+    {% with member=member, n=loop.index %}{% include "landscape/_member_idea.html" %}{% endwith %}
+    {% else %}
+    <p class="text-sm text-gray-600">No member ideas to show.</p>
+    <span id="disease-profile"></span><span id="panel"></span>
+    {% endfor %}
+</div>
+
+{% if history %}
+<div class="landscape-history bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-2">History</h2>
+    <ul class="space-y-1 text-sm text-gray-700">
+        {% for h in history %}<li>{{ h.created_at | ts }} · version {{ h.opportunity_version or '—' }} · {{ h.epoch_status or '—' }} criteria · {{ h.status }}{% if h.headline %} · {{ h.headline }}{% endif %}</li>{% endfor %}
+    </ul>
+</div>
+{% endif %}
+
+{% if permissions.admin and a.raw_verdict %}
+<details class="landscape-raw bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <summary class="cursor-pointer text-sm font-semibold text-gray-700 uppercase">Raw verdict JSON</summary>
+    <pre class="mt-3 text-sm bg-gray-50 p-3 rounded-lg overflow-x-auto max-h-96 overflow-y-auto whitespace-pre-wrap">{{ a.raw_verdict | tojson(indent=2) }}</pre>
+</details>
+{% endif %}
+
+<script src="/static/js/assessment_timeline.js"></script>
+{% if chat_available %}{% set chat_kind = "landscape" %}{% set chat_subject_id = opportunity_id %}{% include "assessments/_chat_drawer.html" %}{% endif %}
+</div>{% endblock %}

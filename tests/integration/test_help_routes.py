@@ -128,7 +128,7 @@ async def test_bare_tutorial_redirects_to_step_one(client, db_session):
 
 async def test_finish_is_a_link_while_impersonating(client, db_session):
     admin, reviewer = await _ids(db_session, USER_ROLE_ADMIN, USER_ROLE_REVIEWER)
-    r = await client.get("/help/tutorials/reviewer/8",
+    r = await client.get("/help/tutorials/reviewer/9",
                          headers=auth_headers(admin, impersonate=reviewer))
     assert r.status_code == 200
     assert "Back to Help" in r.text

@@ -65,6 +65,7 @@ the CLI emergency path.
 > `git show HEAD:docker-compose.prod.yml`. The agent service's
 > `command`/`restart`/`container_name`/`stop_grace_period` lines are the same
 > kind of exception — working-tree only, absent from the committed file.
+> So is the `landscape-worker` service (profile `landscape`); its block is in `docs/operations/landscaping.md`.
 > Keeping the file uncommitted was a deliberate decision on 2026-09-25 (D5 of
 > `docs/plans/2026-09-25-rca-remediation-plan.md`), recorded as open in
 > `docs/audits/open-findings.md`.

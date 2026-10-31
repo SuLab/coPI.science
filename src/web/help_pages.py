@@ -81,6 +81,11 @@ HELP_PAGES: tuple[HelpPage, ...] = (
              "Reading BlackbirdBot's projects, asking about them, and reviewing them.",
              AUDIENCE_ALL, "help/pages/projects.html",
              ("list", "outcomes", "detail", "reviewing", "assigning", "chat", "what-labs-see")),
+    HelpPage("landscape", "Landscape",
+             "The weekly batch of opportunities found in Johns Hopkins research, deciding on "
+             "them, and the pipeline that finds them.",
+             AUDIENCE_ALL, "help/pages/landscape.html",
+             ("list", "detail", "reviewing", "pipeline")),
     HelpPage("pis", "PIs",
              "The PI directory and a PI's page.",
              AUDIENCE_ALL, "help/pages/pis.html",
@@ -114,7 +119,7 @@ HELP_PAGES: tuple[HelpPage, ...] = (
     HelpPage("troubleshooting", "Troubleshooting",
              "Messages you may see, what they mean and what to do.",
              AUDIENCE_ALL, "help/pages/troubleshooting.html",
-             ("sign-in", "access", "assessments", "projects", "assessment-chat",
+             ("sign-in", "access", "assessments", "projects", "landscape", "assessment-chat",
               "project-chat", "pi-pages", "staff-pages")),
 )
 
@@ -139,6 +144,8 @@ _REVIEWER_STEPS = (
     TutorialStep("PI pages, and getting help",
                  "help/tutorials/reviewer/08-pi-pages-and-help.html", "workspace_pis",
                  ("pis-list-reviewer", "pi-detail-reviewer")),
+    TutorialStep("The Landscape batch", "help/tutorials/reviewer/09-landscape.html",
+                 "workspace_landscape", ()),
 )
 
 _MANAGER_STEPS = (
@@ -163,16 +170,18 @@ _MANAGER_STEPS = (
     TutorialStep("Discussions, Activity and Prompt Suggestions",
                  "help/tutorials/manager/10-discussions-activity-suggestions.html",
                  "workspace_discussions", ("discussions", "activity", "prompt-suggestions")),
+    TutorialStep("Landscape and its pipeline", "help/tutorials/manager/11-landscape.html",
+                 "workspace_landscape_pipeline", ()),
 )
 
 #: Manager first: staff see both, and the manager tutorial is theirs (spec §4.4).
 TUTORIALS: tuple[Tutorial, ...] = (
     Tutorial("manager", "Manager tutorial",
-             "A read-only tour of the pages managers use: PIs, lab bots, staff accounts and the "
-             "simulation's records.", AUDIENCE_STAFF, _MANAGER_STEPS),
+             "A read-only tour of the pages managers use: PIs, lab bots, staff accounts, the "
+             "simulation's records and the landscaping pipeline.", AUDIENCE_STAFF, _MANAGER_STEPS),
     Tutorial("reviewer", "Reviewer tutorial",
-             "A read-only tour of the pages reviewers use: assessments, the chat and recording a "
-             "review.", AUDIENCE_ALL, _REVIEWER_STEPS),
+             "A read-only tour of the pages reviewers use: assessments, the chat, recording a "
+             "review and the Landscape batch.", AUDIENCE_ALL, _REVIEWER_STEPS),
 )
 
 

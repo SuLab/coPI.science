@@ -1869,3 +1869,76 @@ ship with it. The guarded procedure itself is `docs/production-migration.md`.
 > later re-upgrade reads the project rows as pre-`0076` (NULL `subject`) assessment rows.
 > **Never downgrade first.** Never reuse revision id `0076`. Never start a run as part of
 > this deploy.
+
+> **Deploy order for `0077_landscape` — migrate BEFORE the new images serve; no agent
+> rebuild.** `0077` creates the landscaping pipeline's 42 `landscape_*` tables
+> (`docs/specs/2026-10-30-blackbird-landscaping-design.md` §11.1): shared inputs
+> (documents, texts, labs, sources, fetches, the evidence cache), epoch-scoped judgments
+> (screens through assessments, each unique within its `epoch_id`), stable opportunities with
+> their decisions, reviews and weekly batches, and the reject-audit, Message Batch, ledger and
+> report tables. Status-like columns are strings with a CHECK (no new enum type), and a partial
+> unique index `uq_landscape_epochs_one_active` allows one `active` epoch. No existing table
+> is altered and the migration writes no row.
+>
+> *Old code on the new schema* is unaffected: nothing old reads or writes a `landscape_` table.
+> *New code on the old schema*: the landscaping worker and the landscape pages refuse
+> (`src.landscaping.schema_check.schema_ready` is false until `landscape_epochs` exists, spec
+> §12.5); nothing else reads these tables. **Images:** the agent image needs no rebuild (D45):
+> the engine never touches these tables.
+>
+> **When:** no simulation or projects run has to stop. Prefer the worker idle (no `processing`
+> job), for the reason the `0059` box gives: the foreign keys to `users` lock it briefly, and
+> the chain's 10 s `lock_timeout` rolls back behind a worker transaction. That rollback is
+> harmless: re-run it.
+>
+> Before: `SELECT version_num FROM alembic_version;` reads `0076`, and
+> `SELECT to_regclass('public.landscape_epochs');` is NULL. After:
+> `$DC run --rm blackbird-app alembic current` reads `0077`, and the same `to_regclass` is
+> not NULL.
+>
+> **Rollback:** first run the previous image (the tables are harmless to old code); only then,
+> if wanted, `alembic downgrade 0076` from a one-off container off the NEW image. It drops every
+> `landscape_` table and every row in them: documents, judgments, opportunities, decisions,
+> reviews and the LLM ledger. **Never downgrade first.** Never reuse revision id `0077`.
+
+> **Deploy order for `0078_landscape_chat` — migrate BEFORE the new web image serves, with the
+> worker idle; rebuild `blackbird-app` only.** `0078` gives the assessment chat's tables a
+> landscaping subject for "Ask about this opportunity"
+> (`docs/specs/2026-10-30-blackbird-landscaping-design.md` §13.5, L63), as `0076` did for
+> projects. The chat is keyed on the stable opportunity, not one assessment version.
+> `assessment_chat_turns` gains `landscape_opportunity_id` (`ON DELETE CASCADE` from
+> `landscape_opportunities`, FK `fk_assessment_chat_turns_landscape_opportunity`, index
+> `ix_assessment_chat_turns_landscape_conversation`), and CHECK
+> `ck_assessment_chat_turns_one_subject` becomes
+> `num_nonnulls(assessment_id, project_id, landscape_opportunity_id) = 1`.
+> `assessment_chat_usage` and `assessment_chat_opens` each gain `landscape_opportunity_id`
+> (`ON DELETE SET NULL`, FKs `fk_assessment_chat_usage_landscape_opportunity` /
+> `fk_assessment_chat_opens_landscape_opportunity`, not indexed), and their `subject` CHECKs
+> admit `landscape`. The three CHECKs are dropped and recreated under the same names.
+>
+> *Old code on the new schema* is safe: it never writes the new column, and the widened checks
+> admit everything it writes. *New code on the old schema* breaks EVERY chat: the chat models
+> map `landscape_opportunity_id`, so every assessment, project and landscaping chat request
+> raises `UndefinedColumn`. Migrate before the new web image serves. **Images:** the engine
+> and the BlackbirdBot worker never read the new column, so neither the agent nor the worker
+> image needs a rebuild for it.
+>
+> **When:** with the worker idle (no `processing` job), for the reason the `0059` box gives.
+> `ALTER TABLE` takes a brief ACCESS EXCLUSIVE lock on each chat table, and the foreign keys
+> lock `landscape_opportunities`, which only the landscaping worker writes; a 10 s
+> `lock_timeout` rollback is harmless: re-run it. No simulation or projects run has to stop.
+>
+> Before: `SELECT version_num FROM alembic_version;` reads `0077`. After:
+> `$DC run --rm blackbird-app alembic current` reads `0078`, and `\d assessment_chat_turns`
+> shows `landscape_opportunity_id`. The landscaping chat stays off until both
+> `ASSESSMENT_CHAT_ENABLED` and `LANDSCAPE_CHAT_ENABLED` are true in `.env` (then
+> `$DC up -d --force-recreate --no-deps blackbird-app`); it answers 503 while
+> `prompts/landscaping/chat.md` does not match its hash in `set.toml`.
+>
+> **Rollback:** first run the previous image; only then, if wanted, `alembic downgrade 0077`
+> from a one-off container off the NEW image. It DELETES every landscaping chat turn
+> (questions and answers), sets `subject` to NULL on the landscaping ledger and opens rows so
+> the restored `0076` CHECKs hold, then drops the index, foreign keys and columns. Ledger and
+> opens rows stay (the ledger outlives its subject); after a re-upgrade they read as
+> pre-`0076` (NULL `subject`) assessment rows. **Never downgrade first.** Never reuse revision
+> id `0078`.

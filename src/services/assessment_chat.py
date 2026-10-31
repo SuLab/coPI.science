@@ -9,16 +9,24 @@ session is committed and released before the model is called, so a streaming ans
 holds no pooled connection; and a browser that goes away does not cancel the answer:
 the producer finishes, persists it, and it appears the next time the drawer opens.
 
-A chat is about one subject (``ChatSubject``): an assessment, or a finished BlackbirdBot
-project (docs/specs/2026-10-27-projects-pages-redesign-design.md §8). Every public entry
-point takes ``assessment_id=`` or ``project_id=``, exactly one. The subject's kind picks
-the record loader, the system prompt, the revision (a project is always revision 1) and
-whether the record may still change (a project's never does, because only a finished
-one is asked about), and every conversation read and write filters by that kind's
-column, never by a None id: SQLAlchemy renders ``== None`` as ``IS NULL``, which matches
-every row of the other kind. The one-in-flight check, the daily question count, the
-dollar ceilings and the stale sweep read every row of every subject on purpose: the two
-chats share one answer in flight per user and one budget.
+A chat is about one subject (``ChatSubject``): an assessment, a finished BlackbirdBot
+project (docs/specs/2026-10-27-projects-pages-redesign-design.md §8), or a landscaping
+opportunity (docs/specs/2026-10-30-blackbird-landscaping-design.md §13.5). Every public
+entry point takes ``assessment_id=``, ``project_id=`` or ``landscape_opportunity_id=``,
+exactly one. The subject's kind picks the record loader, the system prompt, the model, the
+revision (a project and a landscaping opportunity are always revision 1) and whether the
+record may still change (never for a project, because only a finished one is asked about,
+nor for a landscaping opportunity, whose conversation is keyed on the stable opportunity
+across its versions; each turn's ``record_changed`` flags a newer record). Every
+conversation read and write filters by that kind's column, never by a None id: SQLAlchemy
+renders ``== None`` as ``IS NULL``, which matches every row of the other kinds. The
+one-in-flight check, the daily question count, the dollar ceilings and the stale sweep
+read every row of every subject on purpose: the chats share one answer in flight per user
+and one budget. Landscaping spend also has its own daily sub-cap
+(``landscape_chat_daily_usd_limit``, D47), so it can never use up the shared total.
+
+A landscaping record is built per viewer (``landscape_chat_record``): the independent-votes,
+blind-batch and expert-sample hidings depend on who asks.
 
 Nothing here logs question or answer text, or ``str()`` of a database exception — a
 ``DBAPIError`` message carries its bound parameters, which include both (F11).
@@ -62,6 +70,7 @@ from src.models.assessment_chat import (
     CHAT_STATUS_INTERRUPTED,
     CHAT_STATUS_STREAMING,
     CHAT_SUBJECT_ASSESSMENT,
+    CHAT_SUBJECT_LANDSCAPE,
     CHAT_SUBJECT_PROJECT,
     CHAT_SUBJECTS,
     ONE_STREAMING_INDEX,
@@ -121,6 +130,10 @@ _SPEND_LOCK_POLL_SECONDS = 0.05
 PROMPT_PATH = Path("prompts/assessment-chat.md")
 #: The project chat's system prompt, read the same way.
 PROJECT_PROMPT_PATH = Path("prompts/project-chat.md")
+#: The landscaping chat's system prompt (spec 2026-10-30 §8.1, §13.5), read the same way; the
+#: router refuses to ask while it does not match its recorded hash
+#: (``src.landscaping.prompt_set.chat_prompt_matches``).
+LANDSCAPE_PROMPT_PATH = Path("prompts/landscaping/chat.md")
 _WINDOW = timedelta(hours=24)
 
 
@@ -153,29 +166,57 @@ class ChatSubject:
         return self.kind == CHAT_SUBJECT_PROJECT
 
     @property
+    def is_landscape(self) -> bool:
+        return self.kind == CHAT_SUBJECT_LANDSCAPE
+
+    @property
     def turn_column(self) -> Any:
         """The turns' column that names this kind of subject."""
         if self.is_project:
             return AssessmentChatTurn.project_id
+        if self.is_landscape:
+            return AssessmentChatTurn.landscape_opportunity_id
         return AssessmentChatTurn.assessment_id
 
     @property
     def label(self) -> str:
-        """The log lines' prefix: "Assessment" or "Project" (followed by " chat")."""
-        return "Project" if self.is_project else "Assessment"
+        """The log lines' prefix: "Assessment", "Project" or "Landscape" (then " chat")."""
+        if self.is_project:
+            return "Project"
+        if self.is_landscape:
+            return "Landscape"
+        return "Assessment"
 
     def id_kwargs(self) -> dict[str, uuid.UUID]:
-        """``{"assessment_id": id}`` or ``{"project_id": id}``, for this module's own calls."""
-        return {"project_id": self.id} if self.is_project else {"assessment_id": self.id}
+        """``{"assessment_id": id}``, ``{"project_id": id}`` or
+        ``{"landscape_opportunity_id": id}``, for this module's own calls."""
+        if self.is_project:
+            return {"project_id": self.id}
+        if self.is_landscape:
+            return {"landscape_opportunity_id": self.id}
+        return {"assessment_id": self.id}
 
 
-def _subject(assessment_id: uuid.UUID | None, project_id: uuid.UUID | None) -> ChatSubject:
-    """The subject named by exactly one of the two ids, else ValueError."""
-    if (assessment_id is None) == (project_id is None):
-        raise ValueError("exactly one of assessment_id and project_id is required")
-    if project_id is not None:
-        return ChatSubject(CHAT_SUBJECT_PROJECT, project_id)
-    return ChatSubject(CHAT_SUBJECT_ASSESSMENT, assessment_id)
+def _subject(
+    assessment_id: uuid.UUID | None,
+    project_id: uuid.UUID | None,
+    landscape_opportunity_id: uuid.UUID | None = None,
+) -> ChatSubject:
+    """The subject named by exactly one of the three ids, else ValueError."""
+    named = [
+        (kind, value)
+        for kind, value in (
+            (CHAT_SUBJECT_ASSESSMENT, assessment_id),
+            (CHAT_SUBJECT_PROJECT, project_id),
+            (CHAT_SUBJECT_LANDSCAPE, landscape_opportunity_id),
+        )
+        if value is not None
+    ]
+    if len(named) != 1:
+        raise ValueError(
+            "exactly one of assessment_id, project_id and landscape_opportunity_id is required"
+        )
+    return ChatSubject(*named[0])
 
 
 # ---------------------------------------------------------------------------
@@ -461,13 +502,18 @@ async def questions_used_24h(db: AsyncSession, *, user_id: uuid.UUID) -> int:
     return (await _questions_in_window(db, user_id=user_id))[0]
 
 
-async def spend_24h(db: AsyncSession, *, user_id: uuid.UUID | None = None) -> Decimal:
-    """Dollars in the rolling 24 h window — one user's, or everyone's."""
+async def spend_24h(
+    db: AsyncSession, *, user_id: uuid.UUID | None = None, subject: str | None = None
+) -> Decimal:
+    """Dollars in the rolling 24 h window — one user's, or everyone's; with ``subject`` (one
+    of CHAT_SUBJECTS), only the ledger rows recorded with that subject."""
     query = select(AssessmentChatUsage.usage_by_model).where(
         AssessmentChatUsage.created_at >= _since(_WINDOW)
     )
     if user_id is not None:
         query = query.where(AssessmentChatUsage.user_id == user_id)
+    if subject is not None:
+        query = query.where(AssessmentChatUsage.subject == subject)
     usages = (await db.execute(query)).scalars().all()
     return sum((row_spend(usage) for usage in usages), Decimal(0))
 
@@ -503,35 +549,67 @@ async def _assessment_revision(db: AsyncSession, assessment_id: uuid.UUID) -> in
 
 async def _subject_revision(db: AsyncSession, subject: ChatSubject) -> int:
     """The subject's current revision: an assessment's verdict revision; a project is
-    always 1 (it is asked about only once finished, so its record never moves on)."""
+    always 1 (it is asked about only once finished, so its record never moves on); a
+    landscaping opportunity is always 1 (its conversation spans its versions, spec
+    2026-10-30 §13.5, X7)."""
     if subject.is_project:
+        return 1
+    if subject.is_landscape:
         return 1
     return await _assessment_revision(db, subject.id)
 
 
 async def _subject_may_change(db: AsyncSession, subject: ChatSubject, row: Any) -> bool:
-    """``verdict_may_change`` for an assessment; False for a (finished) project."""
+    """``verdict_may_change`` for an assessment; False for a (finished) project and for a
+    landscaping opportunity (no revision split; see ``_subject_revision``)."""
     if subject.is_project:
+        return False
+    if subject.is_landscape:
         return False
     return await verdict_may_change(db, row)
 
 
 async def _load_subject_record(
-    db: AsyncSession, subject: ChatSubject, *, tier: str
+    db: AsyncSession, subject: ChatSubject, *, tier: str, user: Any
 ) -> tuple[ChatRecord, Any] | None:
-    """(record, the subject's row), or None when the subject does not exist."""
+    """(record, the subject's row), or None when the subject does not exist. A landscaping
+    record is ``user``'s own (its hidings depend on the viewer), returns None when the
+    viewer may not see the opportunity or it has no current assessment, and carries no row
+    (nothing reads it for that kind)."""
     if subject.is_project:
         # Imported here, not at module level: project_chat_record imports projects_view,
         # which imports project_research, which imports this module.
         from src.services.project_chat_record import load_project_chat_record
 
         return await load_project_chat_record(db, subject.id, tier=tier)
+    if subject.is_landscape:
+        # Imported here for the same reason the project loader is: keep this shared module's
+        # import graph unchanged for the agent and the worker.
+        from src.services.landscape_chat_record import build_landscape_chat_record
+
+        record = await build_landscape_chat_record(db, subject.id, user)
+        return None if record is None else (record, None)
     return await load_chat_record(db, subject.id, tier=tier)
 
 
 def _subject_prompt_path(subject: ChatSubject) -> Path:
     # The module globals, read at call time (tests replace them).
-    return PROJECT_PROMPT_PATH if subject.is_project else PROMPT_PATH
+    if subject.is_project:
+        return PROJECT_PROMPT_PATH
+    if subject.is_landscape:
+        return LANDSCAPE_PROMPT_PATH
+    return PROMPT_PATH
+
+
+def _subject_model(subject: ChatSubject, settings: Any) -> str:
+    """The model a subject's questions are asked of: the landscaping chat has its own
+    setting, because the shared one names a model landscaping may not use (spec 2026-10-30
+    §13.5, L17, D25)."""
+    if subject.is_project:
+        return settings.llm_assessment_chat_model
+    if subject.is_landscape:
+        return settings.llm_landscape_chat_model
+    return settings.llm_assessment_chat_model
 
 
 def current_revision_turns(turns: list[Any], revision: int) -> list[Any]:
@@ -547,10 +625,11 @@ async def _conversation(
     *,
     assessment_id: uuid.UUID | None = None,
     project_id: uuid.UUID | None = None,
+    landscape_opportunity_id: uuid.UUID | None = None,
     user_id: uuid.UUID,
     tier: str,
 ) -> list[AssessmentChatTurn]:
-    subject = _subject(assessment_id, project_id)
+    subject = _subject(assessment_id, project_id, landscape_opportunity_id)
     rows = await db.execute(
         select(AssessmentChatTurn)
         .where(
@@ -587,16 +666,19 @@ class PreparedTurn:
     daily_limit: int
     started: float  # time.monotonic() when the question was accepted
     project_id: uuid.UUID | None = None  # set instead of assessment_id for a project
+    #: Set instead of assessment_id for a landscaping opportunity.
+    landscape_opportunity_id: uuid.UUID | None = None
 
     @property
     def subject(self) -> ChatSubject:
-        return _subject(self.assessment_id, self.project_id)
+        return _subject(self.assessment_id, self.project_id, self.landscape_opportunity_id)
 
 
 def _new_rows(
     *,
     assessment_id: uuid.UUID | None = None,
     project_id: uuid.UUID | None = None,
+    landscape_opportunity_id: uuid.UUID | None = None,
     user_id: uuid.UUID,
     tier: str,
     question: str,
@@ -607,11 +689,12 @@ def _new_rows(
     verdict_revision: int,
     origin: str | None = None,
 ) -> tuple[AssessmentChatTurn, AssessmentChatUsage]:
-    subject = _subject(assessment_id, project_id)
+    subject = _subject(assessment_id, project_id, landscape_opportunity_id)
     turn = AssessmentChatTurn(
         id=uuid.uuid4(),
         assessment_id=assessment_id,
         project_id=project_id,
+        landscape_opportunity_id=landscape_opportunity_id,
         user_id=user_id,
         context_tier=tier,
         question=question,
@@ -630,6 +713,7 @@ def _new_rows(
         user_id=user_id,
         assessment_id=assessment_id,
         project_id=project_id,
+        landscape_opportunity_id=landscape_opportunity_id,
         subject=subject.kind,
         context_tier=tier,
         model=model,
@@ -641,7 +725,7 @@ def _new_rows(
 
 
 async def _has_streaming_turn(db: AsyncSession, *, user_id: uuid.UUID) -> bool:
-    """True while this user (any assessment or project, any tier) already has a `streaming`
+    """True while this user (any subject, any tier) already has a `streaming`
     turn — the same predicate ONE_STREAMING_INDEX enforces at insert time."""
     return bool(
         await db.scalar(
@@ -658,6 +742,7 @@ async def _refuse_over_caps(
     *,
     assessment_id: uuid.UUID | None = None,
     project_id: uuid.UUID | None = None,
+    landscape_opportunity_id: uuid.UUID | None = None,
     user_id: uuid.UUID,
     tier: str,
 ) -> list[AssessmentChatTurn]:
@@ -665,7 +750,7 @@ async def _refuse_over_caps(
     subject's questions counted); otherwise return the conversation's current-revision
     turns, oldest first."""
     settings = get_settings()
-    subject = _subject(assessment_id, project_id)
+    subject = _subject(assessment_id, project_id, landscape_opportunity_id)
     turns = await _conversation(db, **subject.id_kwargs(), user_id=user_id, tier=tier)
     turns = current_revision_turns(turns, await _subject_revision(db, subject))
     if len(turns) >= settings.assessment_chat_max_turns:
@@ -699,14 +784,18 @@ async def prepare_turn(
     *,
     assessment_id: uuid.UUID | None = None,
     project_id: uuid.UUID | None = None,
+    landscape_opportunity_id: uuid.UUID | None = None,
     user: Any,
     question_raw: object,
     origin_raw: object = None,
 ) -> PreparedTurn:
     """§6.2 steps 2-10, cheapest first; the router has already refused impersonation,
-    a disabled chat, an unknown subject, an open project and a non-JSON body. Raises
-    ChatError for every refusal, ValueError unless exactly one of ``assessment_id`` and
-    ``project_id`` is given, and commits on success.
+    a disabled chat, an unknown subject, an open project, an opportunity the viewer may not
+    see, an unrecorded landscaping prompt and a non-JSON body. Raises ChatError for every
+    refusal, ValueError unless exactly one of ``assessment_id``, ``project_id`` and
+    ``landscape_opportunity_id`` is given, and commits on success. A landscaping question
+    is also refused (429 ``landscape_spend_limit``) once landscaping's own 24 h spend
+    reaches ``landscape_chat_daily_usd_limit``.
 
     RSEC-3: every earlier release of this function serialized EVERY ask — refusals
     included — behind one unbounded advisory lock, held across the record build. A
@@ -717,10 +806,10 @@ async def prepare_turn(
     repeat click, a full conversation, the daily question count, an unknown
     assessment — is checked first, unlocked, so it can never queue on the lock at
     all."""
-    subject = _subject(assessment_id, project_id)
+    subject = _subject(assessment_id, project_id, landscape_opportunity_id)
     settings = get_settings()
     question = validate_question(question_raw, max_chars=settings.assessment_chat_max_question_chars)
-    model = settings.llm_assessment_chat_model
+    model = _subject_model(subject, settings)
     if model not in PRICES:
         raise ChatError(503, "model_unpriced")
     system_prompt, prompt_sha = load_system_prompt(_subject_prompt_path(subject))
@@ -738,7 +827,7 @@ async def prepare_turn(
         raise ChatError(409, "answer_in_progress")
     tier = tier_for(user)
     await _refuse_over_caps(db, **subject.id_kwargs(), user_id=user_id, tier=tier)
-    loaded = await _load_subject_record(db, subject, tier=tier)
+    loaded = await _load_subject_record(db, subject, tier=tier, user=user)
     if loaded is None:
         raise ChatError(404, "not_found")
     record = loaded[0]
@@ -767,6 +856,10 @@ async def prepare_turn(
         raise ChatError(429, "daily_spend_limit")
     if await spend_24h(db) >= Decimal(str(settings.assessment_chat_daily_total_usd_limit)):
         raise ChatError(429, "global_spend_limit")
+    if subject.is_landscape and await spend_24h(db, subject=CHAT_SUBJECT_LANDSCAPE) >= Decimal(
+        str(settings.landscape_chat_daily_usd_limit)
+    ):
+        raise ChatError(429, "landscape_spend_limit")
     revision = await _subject_revision(db, subject)
     created_at = datetime.now(UTC)
     turn, usage = _new_rows(
@@ -796,6 +889,7 @@ async def prepare_turn(
         usage_id=usage.id,
         assessment_id=assessment_id,
         project_id=project_id,
+        landscape_opportunity_id=landscape_opportunity_id,
         user_id=user_id,
         tier=tier,
         model=model,
@@ -926,7 +1020,7 @@ async def _persist(
     """Write one outcome (§6.3). The ledger row is ALWAYS updated — the tokens were
     billed either way. The turn is updated only while it is still `streaming`, so an
     answer never overwrites a turn that was swept to `interrupted`, and a turn that
-    CASCADEd away with its assessment or project stays gone.
+    CASCADEd away with its subject (assessment, project or opportunity) stays gone.
 
     Returns ("ok", done-payload), ("gone", None) when the turn no longer accepts the
     answer, or ("error", None) when the database refused the write."""
@@ -1117,12 +1211,13 @@ async def _own_turn_is_stale(
     *,
     assessment_id: uuid.UUID | None = None,
     project_id: uuid.UUID | None = None,
+    landscape_opportunity_id: uuid.UUID | None = None,
     user_id: uuid.UUID,
 ) -> bool:
     """Whether the caller has a `streaming` turn on this subject older than
     STALE_AFTER_SECONDS — the one case a poll must still sweep, or the drawer would
     poll a dead answer until it is reopened."""
-    subject = _subject(assessment_id, project_id)
+    subject = _subject(assessment_id, project_id, landscape_opportunity_id)
     count = await db.scalar(
         select(func.count(AssessmentChatTurn.id)).where(
             subject.turn_column == subject.id,
@@ -1139,21 +1234,24 @@ async def list_history(
     *,
     assessment_id: uuid.UUID | None = None,
     project_id: uuid.UUID | None = None,
+    landscape_opportunity_id: uuid.UUID | None = None,
     user: Any,
     sweep: bool = True,
 ) -> dict[str, Any] | None:
-    """The GET shape (§6.5), or None for an unknown subject. Sweeps first; builds
+    """The GET shape (§6.5), or None for an unknown subject (for a landscaping opportunity,
+    also one the viewer may not see or with no current assessment). Sweeps first; builds
     the current record so each turn can say whether its record has changed.
     `sweep=False` is the drawer's 5 s poll (B-08): it skips the every-user sweep
     unless the caller's own turn here is already stale (`_own_turn_is_stale`).
-    A project's `verdict_revision` is always 1 and its `verdict_may_change` False."""
-    subject = _subject(assessment_id, project_id)
+    A project's and a landscaping opportunity's `verdict_revision` is always 1 and their
+    `verdict_may_change` False."""
+    subject = _subject(assessment_id, project_id, landscape_opportunity_id)
     settings = get_settings()
     user_id = user.id
     tier = tier_for(user)
     if sweep or await _own_turn_is_stale(db, **subject.id_kwargs(), user_id=user_id):
         await sweep_stale(db)
-    loaded = await _load_subject_record(db, subject, tier=tier)
+    loaded = await _load_subject_record(db, subject, tier=tier, user=user)
     if loaded is None:
         return None
     record, row = loaded
@@ -1180,6 +1278,7 @@ async def clear_history(
     *,
     assessment_id: uuid.UUID | None = None,
     project_id: uuid.UUID | None = None,
+    landscape_opportunity_id: uuid.UUID | None = None,
     user_id: uuid.UUID,
 ) -> int:
     """Delete the caller's turns on this subject, every tier (D16); other subjects'
@@ -1188,7 +1287,7 @@ async def clear_history(
     survive (`turn_id` SET NULL), which is why Clear cannot reset the caps. Takes the
     spend lock first (LC-07), after committing the sweep as `prepare_turn` does, so a
     concurrent ask cannot insert a streaming turn between the check and the delete."""
-    subject = _subject(assessment_id, project_id)
+    subject = _subject(assessment_id, project_id, landscape_opportunity_id)
     await sweep_stale(db)
     await db.commit()
     await _take_spend_lock(db)
@@ -1222,18 +1321,20 @@ async def record_open(
     *,
     assessment_id: uuid.UUID | None = None,
     project_id: uuid.UUID | None = None,
+    landscape_opportunity_id: uuid.UUID | None = None,
     user: Any,
     via_raw: object,
 ) -> None:
     """One content-free row per drawer opening: who (a SET NULL reference), which
-    assessment or project and its `subject` kind, the tier, and how it was opened (one
-    of OPEN_VIAS, else NULL)."""
-    subject = _subject(assessment_id, project_id)
+    assessment, project or landscaping opportunity and its `subject` kind, the tier, and
+    how it was opened (one of OPEN_VIAS, else NULL)."""
+    subject = _subject(assessment_id, project_id, landscape_opportunity_id)
     db.add(
         AssessmentChatOpen(
             user_id=user.id,
             assessment_id=assessment_id,
             project_id=project_id,
+            landscape_opportunity_id=landscape_opportunity_id,
             subject=subject.kind,
             context_tier=tier_for(user),
             opened_via=via_raw if isinstance(via_raw, str) and via_raw in OPEN_VIAS else None,

@@ -32,7 +32,10 @@ from src.models import (
 from src.routers import admin, manager, workspace
 from tests import factories
 from tests.integration.test_manager_access import auth_headers
-from tests.integration.test_rendered_page_gate import seed_ready_project
+from tests.integration.test_rendered_page_gate import (
+    seed_landscape_opportunity,
+    seed_ready_project,
+)
 from tests.workspace_support import POST_SUFFIXES
 
 pytestmark = pytest.mark.integration
@@ -361,6 +364,7 @@ async def test_manager_gets_are_guarded_before_legacy_redirects(client, db_sessi
 ], ids=["anonymous", "pi", "reviewer", "manager", "admin", "admin-as-admin", "admin-as-pi", "admin-as-reviewer", "admin-as-manager"])
 async def test_all_workspace_get_and_head_routes_follow_effective_role(client, db_session, role, as_role):
     pi, ids = await _target(db_session)
+    opportunity_id = await seed_landscape_opportunity(db_session)
     paths = (
         "/workspace", "/workspace/pis", f"/workspace/pis/{pi.id}",
         "/workspace/assessments", f"/workspace/assessments/{ids['assessment_id']}",
@@ -368,7 +372,15 @@ async def test_all_workspace_get_and_head_routes_follow_effective_role(client, d
         f"/workspace/activity/{ids['run_id']}", "/workspace/prompt-suggestions",
         f"/workspace/prompt-suggestions/{ids['suggestion_id']}",
         "/workspace/projects", f"/workspace/projects/{ids['project_id']}",
+        "/workspace/landscape", "/workspace/landscape/pipeline",
+        f"/workspace/landscape/{opportunity_id}",
     )
+    # A reviewer opens the Landscape list and an issued opportunity, never the pipeline page.
+    reviewer_ok = ("/pis", "/assessments", "/projects", "/landscape")
+
+    def reviewer_allowed(path):
+        return any(part in path for part in reviewer_ok) and path != "/workspace/landscape/pipeline"
+
     headers = {}
     effective_role = role
     if role:
@@ -383,7 +395,7 @@ async def test_all_workspace_get_and_head_routes_follow_effective_role(client, d
         elif effective_role == "pi":
             assert response.status_code == 403, path
         elif effective_role == "reviewer":
-            expected = 200 if any(part in path for part in ("/pis", "/assessments", "/projects")) else 403
+            expected = 200 if reviewer_allowed(path) else 403
             if path == "/workspace":
                 expected = 302
             assert response.status_code == expected, path
@@ -391,14 +403,14 @@ async def test_all_workspace_get_and_head_routes_follow_effective_role(client, d
             assert response.status_code in {200, 302}, path
         head = await client.head(path, headers=headers, follow_redirects=False)
         assert head.status_code == response.status_code, path
-        if path.startswith(("/workspace/interviews", "/workspace/projects")):
+        if path.startswith(("/workspace/interviews", "/workspace/projects", "/workspace/landscape")):
             continue  # no /manager alias exists for these pages
         legacy = await client.get(path.replace("/workspace", "/manager", 1), headers=headers, follow_redirects=False)
         legacy_head = await client.head(path.replace("/workspace", "/manager", 1), headers=headers, follow_redirects=False)
         assert legacy_head.status_code == legacy.status_code, path
         if effective_role in {None, "pi"}:
             assert legacy.status_code == response.status_code, path
-        elif effective_role == "reviewer" and path != "/workspace" and not any(part in path for part in ("/pis", "/assessments", "/projects")):
+        elif effective_role == "reviewer" and path != "/workspace" and not reviewer_allowed(path):
             assert legacy.status_code == 403, path
         else:
             assert legacy.status_code == 302, path

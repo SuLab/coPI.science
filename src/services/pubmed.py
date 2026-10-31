@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 import httpx
@@ -92,9 +93,29 @@ def reconcile_pub_doi(
 # pausing 0.12s could burst far past the keyless 3/s (issue #23 V9).
 _request_semaphore = asyncio.Semaphore(3)
 
+# A process-wide floor under _pace_interval() (D58, spec §14), None at import. The key's rate
+# is shared by the app, the worker and the agent, so the landscaping worker sets this once at
+# start to slow every E-utilities call of its own process, reused functions included.
+_MIN_INTERVAL: float | None = None
+
+
+def set_min_interval(seconds: float | None) -> None:
+    """Floor every NCBI request interval of this process at ``seconds``.
+
+    Every ``_ncbi_get`` call waits on ``_pace_interval()``, so the floor covers reused
+    ``lookup_pmcids``, ``convert_dois_to_pmids`` and ``project_search.search_pubmed`` too
+    (D58, spec §14). ``None`` restores the import-time behaviour exactly (0.11 s with a key,
+    0.34 s without); a floor below that interval changes nothing.
+    """
+    global _MIN_INTERVAL
+    if seconds is not None and not seconds > 0:
+        raise ValueError(f"NCBI minimum interval must be positive seconds, got {seconds!r}")
+    _MIN_INTERVAL = seconds
+
 
 def _pace_interval() -> float:
-    return 0.11 if get_settings().ncbi_api_key else 0.34
+    base = 0.11 if get_settings().ncbi_api_key else 0.34
+    return base if _MIN_INTERVAL is None else max(base, _MIN_INTERVAL)
 
 
 _PACER = Pacer(lambda: _pace_interval())  # the lambda keeps patching _pace_interval effective
@@ -828,6 +849,190 @@ async def search_pmids(
     except ValueError as exc:
         raise PubMedParseError(f"ESearch response was not JSON: {exc}") from exc
     return list(data.get("esearchresult", {}).get("idlist", []))
+
+
+async def esearch_page(
+    term: str, *, retstart: int, retmax: int, sort: str = "pub date"
+) -> tuple[int, list[str]]:
+    """One PubMed ESearch page: ``(count, pmids)``, where ``count`` is PubMed's total for
+    ``term`` (not the page size), so a caller can page with ``retstart`` and compare what it
+    received against the total (spec §12.4). ESearch serves at most 9,999 records per query
+    (K8); a caller slices its query below that.
+
+    RAISES on transport failure, and ``PubMedParseError`` when the body is not JSON or carries
+    no count, rather than returning an empty page.
+    """
+    params = {
+        "db": "pubmed",
+        "term": term,
+        "retmode": "json",
+        "retstart": retstart,
+        "retmax": retmax,
+        "sort": sort,
+    }
+    resp = await _ncbi_get(f"{EUTILS_BASE}/esearch.fcgi", params)
+    try:
+        result = resp.json().get("esearchresult", {})
+        count = int(result["count"])
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise PubMedParseError(f"ESearch response carried no count: {exc!r}") from exc
+    return count, [str(p) for p in result.get("idlist", [])]
+
+
+async def fetch_pubmed_xml(pmids: list[str]) -> str:
+    """The EFetch XML of ``pmids``, fetched ``EFETCH_BATCH_SIZE`` at a time, as one
+    ``PubmedArticleSet`` document (a single batch's body is returned as NCBI sent it).
+
+    RAISES on any failed batch and ``PubMedParseError`` on a body that is not XML: no
+    batch is dropped silently. Missing PMIDs are simply absent from the result.
+    """
+    bodies = []
+    for i in range(0, len(pmids), EFETCH_BATCH_SIZE):
+        params = {
+            "db": "pubmed",
+            "id": ",".join(pmids[i : i + EFETCH_BATCH_SIZE]),
+            "rettype": "xml",
+            "retmode": "xml",
+        }
+        bodies.append((await _ncbi_get(f"{EUTILS_BASE}/efetch.fcgi", params)).text)
+    if len(bodies) == 1:
+        return bodies[0]
+    merged = ET.Element("PubmedArticleSet")
+    for body in bodies:
+        try:
+            merged.extend(list(ET.fromstring(body)))
+        except ET.ParseError as exc:
+            raise PubMedParseError(f"PubMed response was not parseable XML: {exc}") from exc
+    return ET.tostring(merged, encoding="unicode")
+
+
+#: Publication types that mark a work as retracted, or as the retraction notice itself;
+#: both are excluded from landscaping (spec §5.3, D4).
+_RETRACTION_TYPES = frozenset({"Retracted Publication", "Retraction of Publication"})
+_MONTHS = {
+    name: number
+    for number, name in enumerate(
+        ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"),
+        start=1,
+    )
+}
+#: PubMed's ISO 639-2 language codes mapped to OpenAlex's two-letter form, so one language
+#: test serves both sources (spec §5.3). Other codes are kept as PubMed gives them.
+_LANGUAGE_CODES = {"eng": "en"}
+
+
+def _month_number(text: str | None) -> int | None:
+    """A PubDate Month ("Mar", "03") as 1-12, else None."""
+    t = (text or "").strip().lower()
+    if t.isdigit():
+        return int(t) if 1 <= int(t) <= 12 else None
+    return _MONTHS.get(t[:3])
+
+
+def _element_date(el: ET.Element | None, *, need_month: bool) -> date | None:
+    """The date of a PubDate or ArticleDate element (Year, Month, Day); a missing day reads
+    as the 1st, and a missing month as January unless ``need_month``."""
+    if el is None or (year := _int_year(el.findtext("Year"))) is None:
+        return None
+    month = _month_number(el.findtext("Month"))
+    if month is None and need_month:
+        return None
+    day = _int_year(el.findtext("Day")) or 1
+    try:
+        return date(year, month or 1, day)
+    except ValueError:
+        return date(year, month or 1, 1)
+
+
+def _published(article: ET.Element) -> date | None:
+    """The publication date: the journal PubDate when it names a month, else the electronic
+    ArticleDate, else January 1st of the PubDate or MedlineDate year (the same sources as
+    ``_year``, with a full electronic date preferred over a bare year)."""
+    pub = article.find("./MedlineCitation/Article/Journal/JournalIssue/PubDate")
+    found = _element_date(pub, need_month=True) or _element_date(
+        article.find("./MedlineCitation/Article/ArticleDate"), need_month=False
+    )
+    if found is not None:
+        return found
+    year = _year(article)
+    return date(year, 1, 1) if year is not None else None
+
+
+def _last_individual_author(authors: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The last author that is valid (not ``ValidYN="N"``) and individual (no
+    ``CollectiveName``), the PubMed senior author of spec §5.2; None when there is none."""
+    for author in reversed(authors):
+        if author.get("valid", True) and not author.get("collective") and author.get("last"):
+            return author
+    return None
+
+
+def _article_extras(article: ET.Element) -> dict[str, Any]:
+    """One record's ``parse_pubmed_extras`` entry."""
+    citation = "./MedlineCitation"
+    authors, _complete = _authors(article)
+    pub_types = [
+        pt.text.strip()
+        for pt in article.findall(f"{citation}/Article/PublicationTypeList/PublicationType")
+        if pt.text and pt.text.strip()
+    ]
+    orcids: list[str] = []
+    for author in authors:
+        if author["orcid"] and author["orcid"] not in orcids:
+            orcids.append(author["orcid"])
+    language = (article.findtext(f"{citation}/Article/Language") or "").strip().lower()
+    return {
+        "abstract": _abstract(article),
+        "mesh": [
+            text
+            for heading in article.findall(f"{citation}/MeshHeadingList/MeshHeading")
+            if (text := _one_line(heading.findtext("DescriptorName")))
+        ],
+        "keywords": [
+            text
+            for kw in article.findall(f"{citation}/KeywordList/Keyword")
+            if (text := _one_line("".join(kw.itertext())))
+        ],
+        "grants": [
+            {
+                "grant_id": _one_line(grant.findtext("GrantID")),
+                "acronym": _one_line(grant.findtext("Acronym")),
+                "agency": _one_line(grant.findtext("Agency")),
+                "country": _one_line(grant.findtext("Country")),
+            }
+            for grant in article.findall(f"{citation}/Article/GrantList/Grant")
+        ],
+        "publication_types": pub_types,
+        "retracted": bool(_RETRACTION_TYPES.intersection(pub_types)),
+        "last_author": _last_individual_author(authors),
+        "orcids": orcids,
+        "published": _published(article),
+        "language": _LANGUAGE_CODES.get(language, language) or None,
+    }
+
+
+def parse_pubmed_extras(xml_text: str) -> dict[str, dict]:
+    """``{pmid: extras}`` for each ``PubmedArticle`` of an EFetch body, the fields landscaping
+    needs beyond ``_parse_pubmed_xml``'s record (which stays as it is, D45).
+
+    Each entry has: ``abstract`` (as ``_parse_pubmed_xml`` reads it), ``mesh`` (descriptor
+    names), ``keywords``, ``grants`` (dicts of grant_id, acronym, agency, country),
+    ``publication_types``, ``retracted`` (a retraction publication type, spec §5.3),
+    ``last_author`` (the last valid individual author as a ``record["authors"]`` entry, or
+    None; spec §5.2), ``orcids`` (every valid author ORCID, in author order), ``published``
+    (a ``date`` or None, see ``_published``) and ``language`` ("en" for PubMed's "eng").
+    Book records are skipped. RAISES ``PubMedParseError`` when the body is not XML.
+    """
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        raise PubMedParseError(f"PubMed response was not parseable XML: {exc}") from exc
+    extras: dict[str, dict] = {}
+    for article in root.findall(".//PubmedArticle"):
+        pmid = (article.findtext("./MedlineCitation/PMID") or "").strip()
+        if pmid:
+            extras[pmid] = _article_extras(article)
+    return extras
 
 
 async def convert_dois_to_pmids(

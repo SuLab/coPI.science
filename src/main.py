@@ -20,6 +20,8 @@ from src.routers import (
     csp_report,
     help,
     invite,
+    landscape,
+    landscape_chat,
     manager,
     microsoft_auth,
     onboarding,
@@ -280,6 +282,8 @@ def create_app() -> FastAPI:
     application.state.assessment_chat_enabled = settings.assessment_chat_enabled
     # The project chat answers only when both this and the assessment chat's switch are on.
     application.state.project_chat_enabled = settings.project_chat_enabled
+    # The landscaping chat answers only when both this and the assessment chat's switch are on.
+    application.state.landscape_chat_enabled = settings.landscape_chat_enabled
 
     # Microsoft sign-in for staff (spec 2026-10-13 §5.2, S1). Validated here, in the web
     # process only: a bad MICROSOFT_* value stops the web app at start (MicrosoftConfigError)
@@ -356,6 +360,10 @@ def create_app() -> FastAPI:
         assessment_chat.router, prefix="/assessment-chat", tags=["assessment-chat"]
     )
     application.include_router(project_chat.router, prefix="/project-chat", tags=["project-chat"])
+    application.include_router(landscape.router, prefix="/landscape", tags=["landscape"])
+    application.include_router(
+        landscape_chat.router, prefix="/landscape-chat", tags=["landscape-chat"]
+    )
     application.include_router(invite.router, tags=["invite"])
     application.include_router(settings_router.router, prefix="/settings", tags=["settings"])
     # HTML error pages for browser navigation; JSON stays for scripts (src/web/errors.py).

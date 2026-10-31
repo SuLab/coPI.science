@@ -1,0 +1,15 @@
+# Written by `python -m src.landscaping.prompt_set --stamp <version>`; do not edit
+# by hand. [files] holds the sha256 of every other file in this directory.
+version = "1.0.0"
+
+[files]
+"chat.md" = "64d4ce8dd5d3ce4b29fcff6e2000f428e09b2640d448964424875194fedba1eb"
+"cluster_label.md" = "b05e376fbc883c5dc659b4f947a9187ebe2dc0a7a26b4da6d6c600e18058ee6b"
+"criteria.toml" = "1e4f55c8dd710ac8aa8e3230e5dac734520d1260fe9aa59859b136cb3bb41665"
+"deep.md" = "7d2ca40e6e1708090236ad6172116e3d950a3f6258677ed85f7577c352d45bd4"
+"extract.md" = "5816dfb96225d529c3d25a9b6a022050e9fdfd3e854fd86f7aa703e281f34de1"
+"final.md" = "3013eec6dc68e399902cdfb2d882d660f2bcb369f3b03019f3e5bf73b293c1fa"
+"rerank.md" = "5f38f0ec033bb622b4ce43d2fd4897c3c7cd2701f2dee94ef1bc74e80dc7ea3f"
+"screen.md" = "8c731e4f72b267bfaef517e93e9475210ef1bfeacce411fb984053581184b289"
+"similarity.md" = "4a027bc057ad2f2244e8045918006827ed4f6012dbecaf1df542e7eb8d026897"
+"triage.md" = "b7677fc8faa9bdbb9b498ce4abc589a92cab09dbb76284b86348444f4cfb94f7"
