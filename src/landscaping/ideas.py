@@ -15,8 +15,9 @@ provisional key, else empty. An idea whose key holds any unmatched facet is ``pr
 
 **Versions** (D37). An idea's ``version_hash`` covers its attached qualifying idea-source
 documents (S1 ``eligible``, not a tombstone). It is recomputed only when a qualifying document
-that was not yet attached attaches, so tombstoning a document, a database-evidence refresh and
-an evidence-only document never change a stored version.
+that was not yet attached attaches, or when a re-extracted candidate takes its document away
+from the idea, so tombstoning a document, a database-evidence refresh and an evidence-only
+document never change a stored version.
 
 **Aliases** (D36, D64). When a key changes (a provisional facet resolves, or a chemistry key's
 lab is unified under another lab), the idea is either re-keyed in place or, when an idea with
@@ -36,7 +37,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import Text, cast, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -277,7 +278,7 @@ async def _qualifying_ids(db: AsyncSession, idea_id: uuid.UUID) -> set[uuid.UUID
 
 async def _refresh_version(db: AsyncSession, idea: LandscapeIdea) -> None:
     """Recompute the version and the JHU group count; called only when a qualifying document
-    that was not yet attached has attached (D37)."""
+    that was not yet attached has attached (D37), or one attached has been taken away."""
     await db.flush()
     documents = await _idea_documents(db, idea.id)
     idea.version_hash = version_hash(d.id for d in documents if _qualifying(d))
@@ -399,7 +400,9 @@ async def _prior_attachment(
     """The idea this candidate already merged into, when it still describes that idea.
 
     A replayed candidate returns its first decision (D27); a candidate re-extracted with other
-    facets (the document's summary changed) drops its stale attachment and merges afresh."""
+    facets (the document's summary changed) drops its stale attachment and merges afresh. The
+    idea it leaves gets a fresh version and JHU group count when that took a qualifying
+    document away from it, so S4 and S6 see the idea without the document."""
     row = (await db.execute(
         select(LandscapeIdeaEvidence, LandscapeIdea.idea_key)
         .join(LandscapeIdea, LandscapeIdea.id == LandscapeIdeaEvidence.idea_id)
@@ -418,8 +421,13 @@ async def _prior_attachment(
     holder = await _by_key(db, epoch_id, key)  # the idea was re-keyed since (D36)
     if holder is not None and holder.id == evidence.idea_id:
         return evidence.idea_id
+    left = await db.get(LandscapeIdea, evidence.idea_id)
+    before = await _qualifying_ids(db, evidence.idea_id)
     await db.delete(evidence)
     await db.flush()
+    if left is not None and before - await _qualifying_ids(db, left.id):
+        await _refresh_version(db, left)
+        await db.flush()
     return None
 
 
@@ -437,7 +445,8 @@ async def merge_candidate(
       merged keeps that decision (D27).
     - Ideas the same extraction produced of the other type are linked (biology ↔ chemistry).
     - The version and JHU group count are recomputed only when `document` is a qualifying
-      idea-source document not yet attached (D37).
+      idea-source document not yet attached (D37), and on the idea a stale attachment of
+      this candidate leaves.
 
     `document` is the candidate's ``LandscapeDocument``. Flushes; does not commit."""
     senior = await _canonical_lab(db, document.lab_key)
@@ -512,21 +521,61 @@ async def _repoint(db: AsyncSession, src: uuid.UUID, dst: uuid.UUID) -> None:
     )
 
 
-async def _repoint_cuts(db: AsyncSession, epoch_id: uuid.UUID, src: uuid.UUID, dst: uuid.UUID) -> None:
-    """Cut lists hold idea ids as JSON: the merged id becomes the survivor's, kept once."""
+def _repointed(ids: list | None, old: str, new: str) -> list:
+    """``ids`` with `old` read as `new`, each id kept once at its first place."""
+    out: list = []
+    for item in ids or []:
+        item = new if item == old else item
+        if item not in out:
+            out.append(item)
+    return out
+
+
+def _repointed_folds(folded: dict, kept: list, old: str, new: str) -> dict:
+    """``folds["folded"]`` with `old` read as `new`: a keeper's lists join, and an id is
+    folded once, never under itself and never while it is a kept (ranked) idea."""
+    out: dict[str, list[str]] = {}
+    seen = set(kept)
+    for keeper, members in folded.items():
+        keeper = new if keeper == old else keeper
+        for item in members:
+            item = new if item == old else item
+            if item != keeper and item not in seen:
+                seen.add(item)
+                out.setdefault(keeper, []).append(item)
+    return out
+
+
+async def _repoint_cuts(
+    db: AsyncSession, epoch_id: uuid.UUID, src: uuid.UUID, dst: uuid.UUID,
+) -> None:
+    """Re-point the epoch's cuts, whose lists hold idea ids as JSON, from `src` to `dst`.
+
+    In a complete cut, ``ordered_idea_ids`` and ``folds["folded"]`` name the survivor instead
+    (`_repointed`, `_repointed_folds`); its ``tie_class`` stays the record of what was compared.
+    A ``boundary_pending`` cut naming `src` is deleted: its order and tie class were drawn over
+    idea versions that no longer exist, and finishing it would redraw pairs naming the deleted
+    idea. Nothing attaches to a pending cut (S6 rows, groupings and opportunity versions take
+    complete ones), the previous complete cut stays current, and the next ``run_cut`` takes a
+    fresh cut from the pool (spec §7.6)."""
+    old, new = str(src), str(dst)
     cuts = (await db.execute(
         select(LandscapeCut).where(
             LandscapeCut.epoch_id == epoch_id,
-            LandscapeCut.ordered_idea_ids.contains([str(src)]),
+            or_(LandscapeCut.ordered_idea_ids.contains([old]),
+                cast(LandscapeCut.folds, Text).contains(old)),
         )
     )).scalars().all()
     for cut in cuts:
-        out: list = []
-        for item in cut.ordered_idea_ids or []:
-            item = str(dst) if item == str(src) else item
-            if item not in out:
-                out.append(item)
-        cut.ordered_idea_ids = out
+        if cut.status == "boundary_pending":
+            await db.delete(cut)
+            continue
+        cut.ordered_idea_ids = _repointed(cut.ordered_idea_ids, old, new)
+        folds = cut.folds or {}
+        if isinstance(folds.get("folded"), dict):
+            cut.folds = {**folds, "folded": _repointed_folds(
+                folds["folded"], cut.ordered_idea_ids, old, new
+            )}
 
 
 async def _record_alias(

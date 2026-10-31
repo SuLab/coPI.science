@@ -20,7 +20,7 @@ from src.landscaping import epochs, fulltext, liveness, panel, scoring
 from src.landscaping.evidence import hpa, openfda, opentargets, orphadata, uniprot
 from src.landscaping.fulltext import FullText
 from src.landscaping.llm_client import CallResult
-from src.landscaping.schemas import DIMENSION_KEYS, DISEASE_PROFILE_KEYS, GATING_KEYS
+from src.landscaping.schemas import DISEASE_PROFILE_KEYS, GATING_KEYS
 from src.landscaping.stages import deep
 from src.models import SimulationProcessStatus
 from src.models.landscape import (
@@ -35,6 +35,7 @@ from src.models.landscape import (
 )
 from src.services import project_search, simulation_control
 from src.services.advisory_locks import ENGINE_LOCK_KEY
+from src.services.blackbird_rubric import load_rubric
 
 pytestmark = pytest.mark.integration
 
@@ -47,6 +48,8 @@ MONDO = "MONDO:9999999"
 DRUG = "INVENTAMAB"
 APPLICATION = "NDA000001"
 RETRIEVED = "pmid:111"
+#: The rubric on disk's dimensions, which ``epochs.build_snapshot`` stores.
+DIMENSION_KEYS = tuple(dim.key for dim in load_rubric().dimensions)
 
 
 @pytest_asyncio.fixture
@@ -372,6 +375,55 @@ async def test_consults_and_scores_use_the_epochs_inputs(db_factory, fakes):
     assert row.provisional_weighted_score == scoring.epoch_weighted_score(
         rubric, fakes["answer"]["scores"]
     )
+
+
+async def test_s6_validates_and_stores_in_the_epochs_rubric_terms(db_factory, fakes):
+    """An epoch whose stored rubric renames a dimension and widens the scale: the S6 request's
+    schema, its validation and the stored scores follow the stored rubric, not the file on
+    disk (spec §7.11, D61)."""
+    renamed, invented = DIMENSION_KEYS[-1], "invented_team_dimension"
+    snapshot = epochs.build_snapshot()
+    rubric_text = snapshot["rubric"]
+    for old, new in ((f'key = "{renamed}"', f'key = "{invented}"'),
+                     (f'source = "{renamed}"', f'source = "{invented}"'),
+                     ("max = 5", "max = 7")):
+        assert old in rubric_text
+        rubric_text = rubric_text.replace(old, new)
+    snapshot["rubric"] = rubric_text
+    async with db_factory() as db:
+        epoch = LandscapeEpoch(status="candidate", snapshot=snapshot)
+        db.add(epoch)
+        await db.commit()
+        epoch_id = epoch.id
+    stored_keys = (*DIMENSION_KEYS[:-1], invented)
+
+    _, idea_id, doc_id = await _idea(db_factory, epoch_id=epoch_id)
+    fakes["answer"] = _answer(
+        f"doc:{doc_id}",
+        scores={key: 6 if key == invented else 3 for key in stored_keys},
+        dimension_rationales={key: "middling" for key in stored_keys},
+    )
+    await deep.run_deep(db_factory, idea_id, epoch_id=epoch_id)
+
+    schema = _deep_requests(fakes)[0]["output_config"]["format"]["schema"]
+    scores_schema = schema["properties"]["scores"]
+    assert scores_schema["required"] == list(stored_keys)
+    assert scores_schema["properties"][invented]["enum"] == list(range(1, 8))
+    row = await _deep_row(db_factory, idea_id)
+    assert row.status == "done"
+    assert row.provisional_scores == {key: 6 if key == invented else 3 for key in stored_keys}
+    assert set(row.dimension_rationales) == set(stored_keys)
+    async with db_factory() as db:
+        rubric = (await epochs.epoch_inputs(db, epoch_id)).rubric
+    assert row.provisional_weighted_score == scoring.epoch_weighted_score(
+        rubric, row.provisional_scores
+    )
+
+    # An answer in the disk rubric's terms lacks the stored dimension: it is not valid.
+    _, disk_idea_id, disk_doc_id = await _idea(db_factory, epoch_id=epoch_id)
+    fakes["answer"] = _answer(f"doc:{disk_doc_id}")
+    await deep.run_deep(db_factory, disk_idea_id, epoch_id=epoch_id)
+    assert (await _deep_row(db_factory, disk_idea_id)).status == "failed:invalid"
 
 
 async def test_disease_profile_every_field_has_support(db_factory, fakes):

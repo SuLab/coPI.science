@@ -8,7 +8,16 @@ import pytest
 from sqlalchemy import select
 
 from src.config import get_settings
-from src.landscaping.evidence import cache, chembl, mondo, openfda, opentargets, pubtator, trials
+from src.landscaping.evidence import (
+    cache,
+    chembl,
+    mondo,
+    openfda,
+    opentargets,
+    orphadata,
+    pubtator,
+    trials,
+)
 from src.models.landscape import LandscapeEvidenceCache
 from src.services import http_pacing, project_search
 
@@ -63,6 +72,24 @@ async def test_newer_release_expires_old_rows(db_session):
     assert sorted(rows) == [("chembl", "ChEMBL_10", "mech:CHEMBL3"),
                             ("hgnc", "2026-09", "sym:ABC1")]
 
+
+
+async def test_orphadata_lookups_keyed_by_its_dataset_date(monkeypatch):
+    urls = []
+
+    def handler(request):
+        urls.append(str(request.url))
+        return httpx.Response(200, json={"data": {"__count": 1, "results": {
+            "Date": "2099-06-23 07:57:58", "ORPHAcode": 558, "Prevalence": [],
+        }}})
+
+    monkeypatch.setattr(orphadata, "_make_client", _client_with(handler))
+    monkeypatch.setattr(orphadata._PACER, "_interval", 0.0)
+    monkeypatch.setattr(cache, "_release_memo", {})
+
+    assert await cache.current_release("orphadata") == "2099-06-23"
+    assert await cache.current_release("orphadata") == "2099-06-23"  # memoised
+    assert urls == ["https://api.orphadata.com/rd-epidemiology/orphacodes/558"]
 
 # --- Open Targets -------------------------------------------------------------------------
 

@@ -416,6 +416,15 @@ async def issue_weekly_batch(db_factory, *, today: date) -> uuid.UUID | None:
         return batch.id
 
 
+def decision_changed(
+    decided_assessment_id: uuid.UUID | None, shown_assessment_id: uuid.UUID | None
+) -> bool:
+    """Whether a quick decision recorded on `decided_assessment_id` is "changed since your
+    decision" now that `shown_assessment_id` is shown (D50). With no completed assessment
+    shown (None) there is nothing to compare, so it is not changed."""
+    return shown_assessment_id is not None and shown_assessment_id != decided_assessment_id
+
+
 def viewer_cards(
     batch_items: Sequence[tuple[Any, Any]],
     decisions: Iterable[Any],
@@ -438,8 +447,9 @@ def viewer_cards(
 
     Returns dicts ``{"opportunity_id", "batch_id", "issued_on", "blind", "kind",
     "assessment_id", "no_assessment"}``, ``kind`` being ``"carry_over"`` (no quick decision
-    by ``user``) or ``"changed"`` (decided on an assessment other than the one shown). Carry-
-    overs come first, then changed cards, each grouped by batch, newest batch first.
+    by ``user``) or ``"changed"`` (``decision_changed``: decided on an assessment other than
+    the one shown, and one is shown). Carry-overs come first, then changed cards, each grouped
+    by batch, newest batch first.
     """
     if not batch_items:
         return []
@@ -466,7 +476,7 @@ def viewer_cards(
             }
             if opportunity_id not in decided:
                 carry.append({**card, "kind": "carry_over"})
-            elif assessment_id is not None and assessment_id != decided[opportunity_id]:
+            elif decision_changed(decided[opportunity_id], assessment_id):
                 changed.append({**card, "kind": "changed"})
     return carry + changed
 

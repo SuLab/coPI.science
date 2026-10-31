@@ -44,6 +44,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.agent.prompt_safety import delimit
 from src.landscaping import batches, epochs
 from src.landscaping.batches import BatchOutcome, FallbackAdapter
 from src.landscaping.comparator import deep_text
@@ -764,13 +765,14 @@ async def _idea_texts(
     db: AsyncSession, epoch_id: uuid.UUID, ideas: Sequence[LandscapeIdea]
 ) -> dict[uuid.UUID, str]:
     """Per idea: its structured line, then its S6 record (``comparator.deep_text``) when it
-    has a passed one. No lab, author or institution is shown."""
+    has a passed one, fenced as ``publication_abstract`` since S6 restates untrusted source
+    text. No lab, author or institution is shown."""
     deep = await _passed_deep(db, epoch_id, {idea.id: _version(idea) for idea in ideas})
     texts = {}
     for idea in ideas:
         text = f"Structured line: {structured_line(idea)}"
         if idea.id in deep:
-            text += f"\n\nRecord:\n{deep_text(deep[idea.id])}"
+            text += f"\n\nRecord:\n{delimit(deep_text(deep[idea.id]), 'publication_abstract')}"
         texts[idea.id] = text
     return texts
 

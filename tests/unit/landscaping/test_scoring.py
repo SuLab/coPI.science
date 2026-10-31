@@ -9,12 +9,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.landscaping.criteria import load_criteria
 from src.landscaping.scoring import (
     checklist_score,
     dimension_mean,
     epoch_band,
     epoch_weighted_score,
     excluded_reason,
+    present_items,
     tie_key,
     triage_score,
 )
@@ -48,7 +50,7 @@ def test_triage_score_formula():
     }
     # The three dimensions carry equal weights in the rubric, so the mean is 4.
     assert dimension_mean(scores, rubric) == pytest.approx(4.0)
-    assert checklist_score(_checklist(11)) == pytest.approx(5.0)
+    assert checklist_score(_checklist(11), rubric=rubric) == pytest.approx(5.0)
     criteria = SimpleNamespace(dimension_share=0.8)
     assert triage_score(
         scores, _checklist(11), rubric=rubric, criteria=criteria
@@ -91,10 +93,66 @@ def test_tie_key_stage_earlier_first():
     }
     early = {**shared, "stage": "target_validation", "idea_id": uuid.UUID(int=2)}
     late = {**shared, "stage": "lead", "idea_id": uuid.UUID(int=1)}
-    assert sorted([late, early], key=tie_key) == [early, late]
+    criteria = load_criteria()
+    assert sorted([late, early], key=lambda r: tie_key(r, criteria=criteria)) == [early, late]
     # Stage is key 5: the JHU group count (key 4) still outranks it.
     more_groups = {**late, "jhu_group_count": 3}
-    assert sorted([early, more_groups], key=tie_key) == [more_groups, early]
+    assert sorted(
+        [early, more_groups], key=lambda r: tie_key(r, criteria=criteria)
+    ) == [more_groups, early]
+
+
+def test_tie_key_follows_the_ladders_of_the_criteria_it_is_given():
+    shared = {
+        "triage_score": 3.8, "evidence_count": 6, "jhu_group_count": 2, "document_count": 1,
+        "newest_document_date": date(2026, 1, 5),
+    }
+    first = {**shared, "evidence_grade": "invented_grade_a", "stage": "invented_stage_x",
+             "idea_id": uuid.UUID(int=1)}
+    second = {**shared, "evidence_grade": "invented_grade_b", "stage": "invented_stage_x",
+              "idea_id": uuid.UUID(int=2)}
+    # Grades are ranked weakest first: the later grade in the ladder ranks higher.
+    a_strong = SimpleNamespace(evidence_grades=("invented_grade_b", "invented_grade_a"),
+                               stages=("invented_stage_x",))
+    b_strong = SimpleNamespace(evidence_grades=("invented_grade_a", "invented_grade_b"),
+                               stages=("invented_stage_x",))
+    assert sorted([second, first], key=lambda r: tie_key(r, criteria=a_strong)) == [first, second]
+    assert sorted([first, second], key=lambda r: tie_key(r, criteria=b_strong)) == [second, first]
+
+    same_grade = {**second, "evidence_grade": "invented_grade_a", "stage": "invented_stage_y"}
+    x_first = SimpleNamespace(evidence_grades=("invented_grade_a",),
+                              stages=("invented_stage_x", "invented_stage_y"))
+    y_first = SimpleNamespace(evidence_grades=("invented_grade_a",),
+                              stages=("invented_stage_y", "invented_stage_x"))
+    assert sorted([same_grade, first], key=lambda r: tie_key(r, criteria=x_first)) == [
+        first, same_grade,
+    ]
+    assert sorted([first, same_grade], key=lambda r: tie_key(r, criteria=y_first)) == [
+        same_grade, first,
+    ]
+
+
+def test_checklist_counts_the_items_of_the_rubric_it_is_given():
+    rubric = load_rubric()
+    items = sum(len(d.evidence) for d in rubric.dimensions)
+    holder = next(d for d in rubric.dimensions if d.evidence)
+    longer = dataclasses.replace(rubric, dimensions=tuple(
+        dataclasses.replace(d, evidence=(*d.evidence, "An invented evidence item."))
+        if d is holder else d
+        for d in rubric.dimensions
+    ))
+    full = _checklist(items + 1, total=items + 1)
+
+    # Item N+1 lies outside the N-item checklist, so it is ignored there.
+    assert present_items(full, rubric=rubric) == items
+    assert present_items(full, rubric=longer) == items + 1
+    assert checklist_score(full, rubric=rubric) == pytest.approx(5.0)
+    assert checklist_score(full, rubric=longer) == pytest.approx(5.0)
+    half = _checklist(items // 2, total=items + 1)
+    assert checklist_score(half, rubric=rubric) == pytest.approx(1 + 4 * (items // 2) / items)
+    assert checklist_score(half, rubric=longer) == pytest.approx(
+        1 + 4 * (items // 2) / (items + 1)
+    )
 
 
 def _random_value(rng: random.Random):

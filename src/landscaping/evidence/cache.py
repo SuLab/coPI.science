@@ -1,9 +1,9 @@
 """The evidence cache, ``landscape_evidence_cache`` (spec §7.4 step 5, §11.2).
 
 A lookup is stored once per (source, release, query key). The release is the source's
-published release where it has one (Open Targets, ChEMBL, Mondo, HGNC), else the ISO week of
-the fetch, so a release-less source is re-fetched weekly. Storing a row under a newer release
-deletes that source's rows from older releases.
+published release where it has one (Open Targets, ChEMBL, Mondo, HGNC, Orphadata), else the
+ISO week of the fetch, so a release-less source is re-fetched weekly. Storing a row under a
+newer release deletes that source's rows from older releases.
 """
 from __future__ import annotations
 
@@ -17,8 +17,22 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.landscaping.evidence import chembl, hgnc, mondo, opentargets
+from src.landscaping import evidence
+from src.landscaping.evidence import chembl, hgnc, mondo, opentargets, orphadata
 from src.models.landscape import LandscapeEvidenceCache
+
+#: Orphadata has no release endpoint, but every epidemiology record carries its dataset's
+#: generation ``Date`` (one value for the whole twice-yearly release), so the record of this
+#: long-standing ORPHAcode names the release.
+_ORPHADATA_PROBE = "558"
+
+
+async def orphadata_release() -> str:
+    """Orphadata's release: the ``YYYY-MM-DD`` of its dataset's generation ``Date``."""
+    url = orphadata.EPIDEMIOLOGY_URL.format(code=_ORPHADATA_PROBE)
+    body = await evidence.request_json(orphadata._make_client, url, pacer=orphadata._PACER)
+    return str(body["data"]["results"]["Date"])[:10]
+
 
 #: The sources whose release is the source's own published one; every other source's
 #: release is `iso_week`.
@@ -27,6 +41,7 @@ RELEASE_RESOLVERS: dict[str, Callable[[], Awaitable[str]]] = {
     "chembl": chembl.chembl_release,
     "mondo": mondo.mondo_release,
     "hgnc": hgnc.hgnc_release,
+    "orphadata": orphadata_release,
 }
 #: Seconds a resolved release is reused before the source is asked again.
 RELEASE_TTL_S = 6 * 3600

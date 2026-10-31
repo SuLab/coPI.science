@@ -31,7 +31,8 @@ batch reconciliation before returning stale ``running`` rows to ``pending``.
 - ``continuous``: the whole funnel, review batches, probes and the expert sample.
 
 No candidate activates outside ``continuous`` (D70). While ``ledger.over_daily_cap`` is true, no
-new batch is submitted and no synchronous LLM call is made; intake, cuts, S8 grouping, the batch
+new batch is submitted and no synchronous LLM call is made (it is read once per loop, and again
+before each stage submission and each synchronous task); intake, cuts, S8 grouping, the batch
 issue and reports go on (§9.5). ``stages.cut.run_cut`` is called regardless, so a cut whose tie
 class needs the boundary tournament still submits it.
 
@@ -51,7 +52,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, exists, func, or_, select, update
+from sqlalchemy import and_, exists, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -91,13 +92,13 @@ from src.models.landscape import (
     LandscapeComparison,
     LandscapeCut,
     LandscapeDeep,
-    LandscapeDocument,
     LandscapeEpoch,
     LandscapeExtraction,
     LandscapeFetch,
     LandscapeIdea,
     LandscapeOpportunity,
     LandscapeOpportunityVersion,
+    LandscapeRegressionRun,
     LandscapeRejectAudit,
     LandscapeReport,
     LandscapeReviewBatch,
@@ -529,7 +530,7 @@ async def _backfill_drained(db_factory, now: datetime) -> bool:
         epoch = await _unactivated(db) or await epochs.active_epoch(db)
         if epoch is None:
             return False
-        return not await _s2_s4_pending(db, epoch.id)
+        return not await epochs.funnel_work_pending(db, epoch.id)
 
 
 async def _unactivated(db: AsyncSession) -> LandscapeEpoch | None:
@@ -564,49 +565,6 @@ async def _backfill_fetched(db: AsyncSession, now: datetime) -> bool:
     )
     ended = {(source, key) for source, key in rows.all()}
     return wanted <= ended
-
-
-async def _s2_s4_pending(db: AsyncSession, epoch_id: uuid.UUID) -> bool:
-    """Whether S2, S3, S4 or evidence-assembly work is owed in the epoch: a row in flight, or
-    an item its stage has not enqueued yet (an eligible document with no S2 row, a screened-in
-    (or rescued, L44) document with no S3 row, an idea version with no S4 row)."""
-    D, S, E = LandscapeDocument, LandscapeScreen, LandscapeExtraction
-    T, Idea = LandscapeTriage, LandscapeIdea
-    screened = select(S.id).where(S.document_id == D.id, S.epoch_id == epoch_id).exists()
-    extracted = select(E.id).where(
-        E.document_id == S.document_id, E.epoch_id == epoch_id, E.basis == "summary"
-    ).exists()
-    triaged = select(T.id).where(
-        T.idea_id == Idea.id, T.epoch_id == epoch_id, T.idea_version == Idea.version_hash
-    ).exists()
-    checks = (
-        select(S.id).where(S.epoch_id == epoch_id, S.status.in_(_IN_FLIGHT)).exists(),
-        select(E.id).where(
-            E.epoch_id == epoch_id, E.basis == "summary", E.status.in_(_IN_FLIGHT)
-        ).exists(),
-        select(T.id).join(Idea, Idea.id == T.idea_id).where(
-            T.epoch_id == epoch_id, T.status.in_(_IN_FLIGHT), T.idea_version == Idea.version_hash,
-        ).exists(),
-        select(D.id).where(
-            D.s1_status == "eligible", D.merged_into.is_(None), ~screened
-        ).exists(),
-        select(S.id).join(D, D.id == S.document_id).where(
-            S.epoch_id == epoch_id,
-            or_(and_(S.status == "done", S.decision.in_(("yes", "unsure"))),
-                S.status == "rescued"),
-            D.merged_into.is_(None), ~extracted,
-        ).exists(),
-        select(Idea.id).where(
-            Idea.epoch_id == epoch_id, Idea.evidence_assembled_at.is_(None)
-        ).exists(),
-        select(Idea.id).where(
-            Idea.epoch_id == epoch_id, Idea.version_hash.is_not(None), ~triaged
-        ).exists(),
-    )
-    for check in checks:
-        if await db.scalar(select(check)):
-            return True
-    return False
 
 
 async def _flip_to_continuous(db_factory) -> None:
@@ -685,8 +643,17 @@ async def _maybe_submit(
 ) -> int:
     if not loop.llm or not await _submit_due(db_factory, state, stage, epoch_id, loop.now):
         return 0
+    if await _over_cap(db_factory):
+        return 0
     state.last_submit[(epoch_id, stage)] = loop.now
     return await _SUBMITTERS[stage](db_factory, epoch_id)
+
+
+async def _over_cap(db_factory) -> bool:
+    """A fresh ``ledger.over_daily_cap`` reading: the loop's own is taken once, before its
+    submissions and synchronous calls add to the day's spend (§9.5)."""
+    async with db_factory() as db:
+        return await ledger.over_daily_cap(db)
 
 
 # --- step 3: synchronous work -----------------------------------------------------------------
@@ -705,7 +672,8 @@ def _fallback_adapters(phase: str) -> tuple[FallbackAdapter, ...]:
 async def _sync_step(db_factory, state: WorkerState, loop: _Loop, work: list) -> None:
     """S6, S7 insertions, similarity judgments and the fallback chains, at most
     ``landscape_sync_concurrency`` at a time; nothing while a simulation run is live (spec
-    §12.2 step 4, D33) or over the daily cap."""
+    §12.2 step 4, D33) or over the daily cap, which is read again before each task: once it is
+    reached, the tasks not yet started are skipped (§9.5)."""
     if not loop.llm or not loop.funnel:
         return
     async with db_factory() as db:
@@ -722,11 +690,19 @@ async def _sync_step(db_factory, state: WorkerState, loop: _Loop, work: list) ->
             tasks += await _rerank_tasks(db_factory, state, epoch_id)
             tasks += await _similarity_tasks(db_factory, epoch_id)
     semaphore = asyncio.Semaphore(max(1, get_settings().landscape_sync_concurrency))
+    capped = False
 
     async def bounded(name: str, thunk: Callable[[], Awaitable[Any]]) -> None:
+        nonlocal capped
         async with semaphore:
-            if not _shutdown:
-                await _step(name, thunk())
+            if _shutdown or capped:
+                return
+            # A failed reading counts as over the cap: the task waits for the next loop.
+            if await _step("daily cap", _over_cap(db_factory), default=True):
+                capped = True
+                logger.info("the daily cap is reached: the remaining synchronous work waits")
+                return
+            await _step(name, thunk())
 
     await asyncio.gather(*(bounded(name, thunk) for name, thunk in tasks))
 
@@ -981,13 +957,14 @@ async def _epoch_step(db_factory, loop: _Loop) -> None:
 
 
 async def _begin_rejudge(db_factory, loop: _Loop, epoch: LandscapeEpoch) -> None:
-    """Run the candidate's regression set, or skip it for an override, then begin its re-judge:
-    the unchanged stages are copied forward from the epoch it was built from (§7.11 steps 1-2).
+    """Run the candidate's regression set, or skip it for an override or a run of it that
+    already passed, then begin its re-judge: the unchanged stages are copied forward from the
+    epoch it was built from (§7.11 steps 1-2).
     The first candidate's regression waits for the bake-off, which seeds the set; in ``pilot``
     nothing begins before the bake-off's picks are applied (D65, D68)."""
     if not loop.funnel:
         return
-    if epoch.override_at is None:
+    if epoch.override_at is None and not await _regression_passed(db_factory, epoch):
         async with db_factory() as db:
             if await _latest_report(db, "bakeoff") is None:
                 return
@@ -1003,6 +980,19 @@ async def _begin_rejudge(db_factory, loop: _Loop, epoch: LandscapeEpoch) -> None
             db, from_epoch=epoch.built_from_epoch_id, to_epoch=epoch.id, stages=unchanged,
         )
     logger.info("epoch %s: re-judge begun, %d stage(s) copied forward", epoch.id, len(unchanged))
+
+
+async def _regression_passed(db_factory, epoch: LandscapeEpoch) -> bool:
+    """The candidate's recorded regression run passed: a re-judge that did not begin after it
+    (``copy_forward`` failed, or the worker stopped) is not paid for twice."""
+    if epoch.regression_run_id is None:
+        return False
+    async with db_factory() as db:
+        status = await db.scalar(
+            select(LandscapeRegressionRun.status)
+            .where(LandscapeRegressionRun.id == epoch.regression_run_id)
+        )
+    return status == "passed"
 
 
 async def _hold_failed(db_factory, epoch_id: uuid.UUID) -> None:
@@ -1129,7 +1119,7 @@ async def _pilot_measurements_due(db_factory) -> bool:
 
 
 async def _funnel_busy(db: AsyncSession, epoch_id: uuid.UUID) -> bool:
-    if await _s2_s4_pending(db, epoch_id):
+    if await epochs.funnel_work_pending(db, epoch_id):
         return True
     for model in (LandscapeDeep, LandscapeComparison, LandscapeCandidateGrouping,
                   LandscapeAssessment):

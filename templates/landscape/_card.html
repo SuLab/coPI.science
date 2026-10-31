@@ -22,7 +22,7 @@
             {% if card.rank %}<span class="landscape-rank text-gray-700">rank {{ card.rank }}</span>{% endif %}
         </div>
     </div>
-    {% if card.blind_hidden %}<p class="landscape-blind-note mt-1 text-sm text-gray-600">Score, band and rank are hidden until you record your decision.</p>{% endif %}
+    {% if card.blind_hidden %}<p class="landscape-blind-note mt-1 text-sm text-gray-600">Score and band are hidden until you record your decision, and the rank until the next batch is issued.</p>{% endif %}
     {% if card.expert_hidden %}<p class="landscape-expert-note mt-1 text-sm text-gray-600">This is one of your expert opportunities: the pipeline's own calls are hidden until you submit your judgment.</p>{% endif %}
     {% if card.no_assessment %}
     <p class="landscape-no-assessment mt-2 text-sm text-amber-800">No completed assessment under the current criteria{% if card.failure and card.failure.status %} ({{ card.failure.status }}){% endif %}.{% if card.history_assessment_id %} Its page shows the last earlier one as history.{% endif %}</p>

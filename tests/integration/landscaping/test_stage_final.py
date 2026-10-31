@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.landscaping import batches, epochs
 from src.landscaping.batches import BatchOutcome
-from src.landscaping.schemas import DIMENSION_KEYS, GATING_KEYS, KEY_POINT_KEYS, SCHEMAS
+from src.landscaping.schemas import GATING_KEYS, KEY_POINT_KEYS, stage_schema
 from src.landscaping.stages import final
 from src.landscaping.stages.cut import cut_due, run_cut
 from src.models.landscape import (
@@ -53,6 +53,8 @@ INVENTED_LAB = "Lab of Invented Marsh Biology"
 DRAINED = datetime(2026, 10, 1, 8, 0, tzinfo=UTC)
 #: ``landscape_review_batches.issued_on`` is unique: one day per issued batch.
 _ISSUE_DAYS = itertools.count()
+#: The rubric on disk's dimensions, which ``epochs.build_snapshot`` stores.
+DIMENSION_KEYS = tuple(dim.key for dim in blackbird_rubric.load_rubric().dimensions)
 _RANK_WORDS = re.compile(r"\b(rank|ranks|ranked|ranking|position|positions)\b", re.IGNORECASE)
 
 
@@ -383,7 +385,7 @@ async def test_invalid_gating_retried_then_failed(db_factory):
 
 
 async def test_claim_support_covers_every_bullet(db_factory):
-    assert "claim_support" in SCHEMAS["final"]["required"]
+    assert "claim_support" in stage_schema("final", blackbird_rubric.load_rubric())["required"]
     epoch_id = await _epoch(db_factory, "active")
     idea = await _idea(db_factory, epoch_id)
     opportunity_id = await _opportunity(db_factory, epoch_id, [idea.idea_key])

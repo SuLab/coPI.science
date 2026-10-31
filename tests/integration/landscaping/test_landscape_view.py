@@ -10,7 +10,7 @@ from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import func
+from sqlalchemy import func, select
 
 from src.models.landscape import (
     LandscapeAssessment,
@@ -299,6 +299,10 @@ async def test_blind_batch_hides_score_band_rank(db_session):
 
     await _decide(db_session, viewer, card)
     shown = (await view.batch_view(db_session, viewer))["this_week"]["cards"][0]
+    # The rank waits for the next batch: a probe of this batch has none (F2).
+    assert (shown["score"], shown["band"], shown["rank"]) == (4.1, "advance", None)
+    await _batch(db_session, WEEK_1 + timedelta(weeks=1), [await _card(db_session, epoch)])
+    shown = (await view.batch_view(db_session, viewer))["earlier_batches"][0]["cards"][0]
     assert (shown["score"], shown["band"], shown["rank"]) == (4.1, "advance", 1)
 
 
@@ -356,7 +360,12 @@ async def test_probe_flags_hidden_until_superseded(db_session):
 
     cards = (await view.batch_view(db_session, viewer))["this_week"]["cards"]
     assert [c["probe"] for c in cards] == [False, False]
+    # A rank on the in-cut card alone would flag the unranked probe: neither shows one.
+    assert [c["rank"] for c in cards] == [None, None]
     assert (await view.detail_view(db_session, viewer, probe.opp.id))["probe"] is False
+    for card in (in_cut, probe):
+        detail = await view.detail_view(db_session, viewer, card.opp.id)
+        assert detail["assessment"]["rank"] is None
     pipeline = await view.pipeline_view(db_session, viewer)
     assert pipeline["blind_batches"] == []
     listed = await view.lists_view(db_session, viewer, view="all", tab="all", assignment="all")
@@ -368,6 +377,10 @@ async def test_probe_flags_hidden_until_superseded(db_session):
     assert {c["opportunity_id"]: c["probe"] for c in earlier} == {
         str(in_cut.opp.id): False, str(probe.opp.id): True,
     }
+    assert {c["opportunity_id"]: c["rank"] for c in earlier} == {
+        str(in_cut.opp.id): 1, str(probe.opp.id): None,
+    }
+    assert (await view.detail_view(db_session, viewer, in_cut.opp.id))["assessment"]["rank"] == 1
     assert (await view.detail_view(db_session, viewer, probe.opp.id))["probe"] is True
     flagged = (await view.pipeline_view(db_session, viewer))["blind_batches"][0]["cards"]
     assert {c["opportunity_id"]: c["probe"] for c in flagged} == {
@@ -700,5 +713,194 @@ async def test_changed_since_compares_assessment_ids(db_session):
 
     decided = SimpleNamespace(landscape_assessment_id=card.assessment.id)
     assert view.changed_since_decision(decided, card.assessment.id) is False
-    assert view.changed_since_decision(decided, None) is True
+    assert view.changed_since_decision(decided, None) is False
     assert view.changed_since_decision(None, card.assessment.id) is False
+
+
+async def test_decided_card_without_completed_assessment_is_not_changed(db_session):
+    """With no completed assessment shown there is nothing to compare, on the card and in
+    the "changed" list alike (D50)."""
+    old = await _epoch(db_session)
+    card = await _card(db_session, old)
+    await _batch(db_session, WEEK_1, [card])
+    reviewer = await make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    await _decide(db_session, reviewer, card)
+    old.status = "retired"
+    await db_session.flush()
+    new = await _epoch(db_session)
+    card.opp.version_counter = 2
+    db_session.add(LandscapeOpportunityVersion(
+        opportunity_id=card.opp.id, version=2, epoch_id=new.id,
+        member_idea_keys=[card.idea.idea_key], label="Invented programme", status="done",
+    ))
+    await _assess(db_session, new, card.opp.id, version=2, status="failed:invalid")
+    await _batch(db_session, WEEK_1 + timedelta(weeks=1), [await _card(db_session, new)])
+
+    page = await view.batch_view(db_session, reviewer)
+    (shown,) = page["earlier_batches"][0]["cards"]
+    assert shown["no_assessment"] is True
+    assert shown["changed_since_decision"] is False
+    assert str(card.opp.id) not in _ids(page["changed"])
+    detail = await view.detail_view(db_session, reviewer, card.opp.id)
+    assert detail["changed_since_decision"] is False
+
+
+async def test_blind_results_withheld_from_staff_with_undecided_card(db_session):
+    """A superseded blind batch's pursue counts are other reviewers' votes, withheld from a
+    staff viewer until they have decided every card of that batch (L40, L50, D60)."""
+    epoch = await _epoch(db_session)
+    in_cut = await _card(db_session, epoch, rank=1)
+    probe = await _card(db_session, epoch, probe=True)
+    blind_id = await _batch(db_session, WEEK_1, [in_cut, probe], blind=True, probes=(probe,))
+    await _batch(db_session, WEEK_1 + timedelta(weeks=1), [await _card(db_session, epoch)])
+    other = await make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    await _decide(db_session, other, in_cut)
+    await _decide(db_session, other, probe, "pass")
+    manager = await make_user(db_session, user_role=USER_ROLE_MANAGER)
+
+    async def results() -> list[str]:
+        pipeline = await view.pipeline_view(db_session, manager)
+        return [r["batch_id"] for r in pipeline["metrics"]["blind_results"]]
+
+    await _decide(db_session, manager, in_cut)
+    assert await results() == []
+    await _decide(db_session, manager, probe)
+    assert await results() == [str(blind_id)]
+
+
+# --- the expert hiding's span and fields -------------------------------------------------------
+
+
+async def test_expert_hiding_outlasts_its_quarter(db_session):
+    """An unsubmitted judgment drawn in an earlier quarter still hides S9's calls; the
+    newest judgment decides, as it is the one the expert submits."""
+    epoch = await _epoch(db_session)
+    card = await _card(db_session, epoch)
+    expert = await make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    earlier = view._quarter(datetime.now(UTC) - timedelta(days=120))
+    drawn = datetime.now(UTC) - timedelta(days=120)
+    db_session.add(LandscapeExpertJudgment(
+        opportunity_id=card.opp.id, expert_id=expert.id, expert_name=expert.name,
+        quarter=earlier, drawn_at=drawn, landscape_assessment_id=card.assessment.id,
+    ))
+    await db_session.flush()
+
+    assert await view.hiding_for(db_session, expert, card.opp.id) == view.Hiding(False, True)
+    detail = await view.detail_view(db_session, expert, card.opp.id)
+    assert "gating" not in detail["assessment"] and "scores" not in detail["assessment"]
+    assert _ids((await view.expert_view(db_session, expert))["items"]) == [str(card.opp.id)]
+
+    db_session.add(LandscapeExpertJudgment(
+        opportunity_id=card.opp.id, expert_id=expert.id, expert_name=expert.name,
+        quarter=_quarter(), drawn_at=datetime.now(UTC), submitted_at=datetime.now(UTC),
+        landscape_assessment_id=card.assessment.id,
+    ))
+    await db_session.flush()
+    assert await view.hiding_for(db_session, expert, card.opp.id) == view.Hiding(False, False)
+
+
+async def test_expert_hiding_covers_every_s9_call(db_session):
+    """Red flags, risks, strengths, confidence and funnel stage are S9's calls or their
+    reasons, and the verdict signals list red flags and gates; descriptive fields stay."""
+    epoch = await _epoch(db_session)
+    card = await _card(
+        db_session, epoch, red_flags=["RED-FLAG-SENTINEL"], risks=["RISK-SENTINEL"],
+        strengths=["STRENGTH-SENTINEL"], confidence="High", funnel_stage="FUNNEL-SNT",
+        member_notes=[{"idea": "1", "note": "An invented member note."}],
+    )
+    expert = await make_user(db_session, user_role=USER_ROLE_MANAGER)
+    await _judgment(db_session, expert, card)
+
+    detail = await view.detail_view(db_session, expert, card.opp.id)
+    for key in (*_EXPERT_HIDDEN, "red_flags", "risks", "strengths", "confidence",
+                "funnel_stage"):
+        assert key not in detail["assessment"], key
+    assert detail["verdict_signals"] is None
+    assert "SENTINEL" not in repr(detail) and "FUNNEL-SNT" not in repr(detail)
+    assert detail["assessment"]["headline"] == "An invented headline"
+    assert detail["assessment"]["member_notes"] == [
+        {"idea": "1", "note": "An invented member note."}
+    ]
+    assert detail["assessment"]["key_points"] == {"why_it_matters": ["An invented point."]}
+
+    manager = await make_user(db_session, user_role=USER_ROLE_MANAGER)
+    unhidden = await view.detail_view(db_session, manager, card.opp.id)
+    assert unhidden["assessment"]["red_flags"] == ["RED-FLAG-SENTINEL"]
+    assert unhidden["verdict_signals"] is not None
+
+
+# --- member resolution ------------------------------------------------------------------------
+
+
+async def test_probe_members_resolve_in_shown_assessments_epoch(db_session):
+    """A probe is not re-minted at activation, so its version keeps the retired epoch while
+    the active epoch re-assesses it; the page shows the active epoch's member, S6 and rank."""
+    retired = await _epoch(db_session, "retired")
+    active = await _epoch(db_session)
+    key = f"biology;invented-lv-probe-{next(_counter)}"
+    ideas = {}
+    for epoch, summary in ((retired, "RETIRED-S6-SUMMARY"), (active, "ACTIVE-S6-SUMMARY")):
+        idea = LandscapeIdea(
+            id=uuid.uuid4(), epoch_id=epoch.id, idea_key=key, idea_type="biology",
+            direction="inhibit", targets=[{"hgnc_id": "HGNC:90004", "symbol": "INVLX"}],
+            disease={"mondo_id": "MONDO:9999996", "label": "invented nephritis"},
+            version_hash="v1",
+        )
+        db_session.add(idea)
+        await db_session.flush()
+        db_session.add(LandscapeDeep(
+            idea_id=idea.id, idea_version="v1", epoch_id=epoch.id, status="done",
+            summary=summary,
+        ))
+        ideas[epoch.id] = idea
+    db_session.add(LandscapeRanking(epoch_id=active.id, idea_id=ideas[active.id].id, position=3))
+    opp = LandscapeOpportunity(id=uuid.uuid4(), version_counter=1)
+    db_session.add(opp)
+    await db_session.flush()
+    db_session.add(LandscapeOpportunityVersion(
+        opportunity_id=opp.id, version=1, epoch_id=retired.id, member_idea_keys=[key],
+        label="Invented probe", status="done", is_probe=True,
+    ))
+    assessment = await _assess(db_session, active, opp.id, **_verdict())
+    probe = _Card(opp, ideas[active.id], assessment)
+    await _batch(db_session, WEEK_1, [probe], blind=True, probes=(probe,))
+    await _batch(db_session, WEEK_1 + timedelta(weeks=1), [await _card(db_session, active)])
+    manager = await make_user(db_session, user_role=USER_ROLE_MANAGER)
+    await _decide(db_session, manager, probe)
+
+    detail = await view.detail_view(db_session, manager, opp.id)
+    (member,) = detail["members"]
+    assert member["idea_id"] == str(ideas[active.id].id)
+    assert member["deep"]["summary"] == "ACTIVE-S6-SUMMARY"
+    assert "RETIRED-S6-SUMMARY" not in repr(detail)
+    assert detail["assessment"]["rank"] == 3
+    (shown,) = (await view.batch_view(db_session, manager))["earlier_batches"][0]["cards"]
+    assert shown["rank"] == 3
+
+
+async def test_member_shows_passed_s6_record(db_session):
+    """A member's S6 record is the one S8 judges by (``_passed_deep``): never a newer
+    ``pending`` or ``failed:*`` row, and a ``rescued`` row counts as passed."""
+    epoch = await _epoch(db_session)
+    card = await _card(db_session, epoch)
+    later = datetime.now(UTC) + timedelta(hours=1)
+    card.idea.version_hash = "v3"
+    for version, status in (("v2", "failed:invalid"), ("v3", "pending")):
+        db_session.add(LandscapeDeep(
+            idea_id=card.idea.id, idea_version=version, epoch_id=epoch.id, status=status,
+            summary=f"UNPASSED-{status}", created_at=later,
+        ))
+    rescued = await _card(db_session, epoch)
+    row = await db_session.scalar(
+        select(LandscapeDeep).where(LandscapeDeep.idea_id == rescued.idea.id)
+    )
+    row.status = "rescued"
+    await db_session.flush()
+    manager = await make_user(db_session, user_role=USER_ROLE_MANAGER)
+
+    detail = await view.detail_view(db_session, manager, card.opp.id)
+    deep = detail["members"][0]["deep"]
+    assert (deep["status"], deep["summary"]) == ("done", "Invented S6 summary.")
+    assert "UNPASSED" not in repr(detail)
+    detail = await view.detail_view(db_session, manager, rescued.opp.id)
+    assert detail["members"][0]["deep"]["status"] == "rescued"

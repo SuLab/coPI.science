@@ -1,10 +1,11 @@
 """S5, the cut (spec §7.6; L7, L23, L56, D10, D11, D34, D37, D52, X2).
 
-A cut ranks the epoch's pool on the §7.6 keys (``scoring.tie_key``), folds near-duplicates
-(D34), keeps K = ceil(1% of the unfolded ideas), and queues the top K for S6. When ranks K
-and K+1 are equal on keys 1-5, their whole tie class is ordered by one batched pairwise
-tournament over the blinded S4 dossiers (``comparator``), with no S6 and no synchronous call;
-until it ends the previous cut stays current.
+A cut ranks the epoch's pool on the §7.6 keys (``scoring.tie_key``, with the ladders of the
+epoch's own criteria, §7.11), folds near-duplicates (D34), keeps K = ceil(N ×
+``landscape_cut_fraction``) of the N unfolded ideas (1% by default, §9.1, L7), and queues the
+top K for S6. When ranks K and K+1 are equal on keys 1-5, their whole tie class is ordered by
+one batched pairwise tournament over the blinded S4 dossiers (``comparator``), with no S6 and
+no synchronous call; until it ends the previous cut stays current.
 
 ``landscape_cuts`` as this module writes it:
 
@@ -20,17 +21,20 @@ until it ends the previous cut stays current.
 from __future__ import annotations
 
 import logging
+import math
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from fractions import Fraction
 from typing import Any
 
 from sqlalchemy import exists, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.landscaping import comparator
+from src.config import get_settings
+from src.landscaping import comparator, epochs
 from src.landscaping.comparator import IN_FLIGHT, tournament_pairs, win_fraction_order
 from src.landscaping.evidence.mondo import is_ancestor
 from src.landscaping.scoring import tie_key
@@ -53,8 +57,6 @@ logger = logging.getLogger(__name__)
 CUT_DEADLINE = timedelta(hours=6)
 #: The boundary tournament is a full round robin up to this class size, else 10-regular (F8).
 BOUNDARY_FULL_UP_TO = 20
-#: K = ceil(N / _CUT_DIVISOR): the top 1% (L7).
-_CUT_DIVISOR = 100
 #: §7.6 keys 1-5 decide whether ranks K and K+1 tie; keys 6-8 order the class's ties.
 _BOUNDARY_KEYS = 5
 #: The batch cycle before the first review batch is issued (spec §7.1: a week).
@@ -184,7 +186,9 @@ async def _qualifying_documents(db: AsyncSession, epoch_id: uuid.UUID) -> dict[u
 
 async def _pool(db: AsyncSession, epoch_id: uuid.UUID) -> list[_Ranked]:
     """The §7.6 pool in rank order: ideas with a qualifying document and a passed or rescued
-    S4 result, less versions excluded at S6 and not rescued."""
+    S4 result, less versions excluded at S6 and not rescued, ranked on the epoch's own criteria
+    ladders (§7.11)."""
+    criteria = (await epochs.epoch_inputs(db, epoch_id)).criteria
     i = LandscapeIdea
     ideas = (
         await db.execute(
@@ -210,7 +214,7 @@ async def _pool(db: AsyncSession, epoch_id: uuid.UUID) -> list[_Ranked]:
             "evidence_grade": row.evidence_grade or idea.evidence_grade,
             "jhu_group_count": idea.jhu_group_count, "stage": row.stage or idea.stage,
             "document_count": count, "newest_document_date": newest,
-        })
+        }, criteria=criteria)
         ranked.append(_Ranked(
             idea_id=idea.id, key=key, idea_type=idea.idea_type,
             targets=_target_ids(idea.targets),
@@ -281,7 +285,9 @@ def _fold(ranked: list[_Ranked]) -> tuple[list[_Ranked], dict[str, list[str]]]:
 
 
 def _k(n: int) -> int:
-    return -(-n // _CUT_DIVISOR)
+    """K = ceil(n × ``landscape_cut_fraction``) (§9.1, L7), computed exactly: the setting is
+    read as its decimal text, so ``ceil(100 × 0.07)`` is 7, not 8."""
+    return math.ceil(n * Fraction(str(get_settings().landscape_cut_fraction)))
 
 
 def _tie_span(kept: list[_Ranked], k: int) -> tuple[int, int] | None:

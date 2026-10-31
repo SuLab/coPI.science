@@ -40,7 +40,7 @@ from src.landscaping import epochs, ideas
 from src.landscaping.criteria import Criteria
 from src.landscaping.epochs import EpochInputs
 from src.landscaping.llm_client import STAGE_SPECS, build_request, call_sync
-from src.landscaping.schemas import SCHEMAS
+from src.landscaping.schemas import stage_schema
 from src.landscaping.scoring import TRIAGE_DIMENSIONS, excluded_reason
 from src.landscaping.stages import extract, screen
 from src.landscaping.stages.triage import triage_dossier
@@ -52,6 +52,7 @@ from src.models.landscape import (
     LandscapeReport,
     LandscapeTriage,
 )
+from src.services.blackbird_rubric import Rubric
 from src.services.llm_pricing import cost_for_request
 
 #: The reference model of every bake-off stage (spec §10.1).
@@ -94,9 +95,12 @@ class Answer:
     cost: Decimal
 
 
-def stage_request(stage: str, user: str, *, model: str, system: str) -> dict:
-    """``stage``'s production request (``build_request`` with ``SCHEMAS[stage]``)."""
-    return build_request(stage, model=model, system=system, user=user, schema=SCHEMAS[stage])
+def stage_request(stage: str, user: str, *, model: str, system: str, rubric: Rubric) -> dict:
+    """``stage``'s production request (``build_request`` with ``stage_schema(stage, rubric)``;
+    ``rubric`` is the judging epoch's own, §7.11)."""
+    return build_request(
+        stage, model=model, system=system, user=user, schema=stage_schema(stage, rubric)
+    )
 
 
 async def _ask(stage: str, request: dict, *, db_factory, item_ref: str, only_model: bool) -> Answer:
@@ -423,7 +427,9 @@ async def _answers(
     """Each user message sent to ``model`` with the epoch's ``stage`` prompt; the reference
     model alone, without the fallback chain."""
     requests = {
-        key: stage_request(stage, user, model=model, system=inputs.system(stage))
+        key: stage_request(
+            stage, user, model=model, system=inputs.system(stage), rubric=inputs.rubric
+        )
         for key, user in users.items()
     }
     return await ask_all(

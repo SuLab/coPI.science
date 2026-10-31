@@ -380,6 +380,107 @@ async def test_verdict_doc_blinded_and_expert_hidden(db_session):
     assert S6_FLAG_REASON in _doc(record, "Evidence")
 
 
+async def _decide(db, user, opportunity_id: uuid.UUID) -> None:
+    db.add(LandscapeDecision(
+        opportunity_id=opportunity_id, reviewer_id=user.id, reviewer_name=user.name,
+        decision="pursue",
+    ))
+    await db.flush()
+
+
+async def test_verdict_doc_rank_waits_for_blind_batch_supersession(db_session):
+    """The record's rank is the page's: no card of an unsuperseded blind batch has one,
+    decided or not, since a probe is never ranked and would stand out (F2)."""
+    epoch_id = await _active_epoch(db_session)
+    in_cut = await seed_opportunity(db_session, epoch_id)
+    probe = await seed_opportunity(db_session, epoch_id)
+    probe_version = await db_session.scalar(select(LandscapeOpportunityVersion).where(
+        LandscapeOpportunityVersion.opportunity_id == probe
+    ))
+    probe_version.is_probe = True
+    for ranking in (await db_session.scalars(select(LandscapeRanking).where(
+        LandscapeRanking.idea_id.in_(
+            select(LandscapeIdea.id).where(
+                LandscapeIdea.idea_key == probe_version.member_idea_keys[0]
+            )
+        )
+    ))).all():
+        await db_session.delete(ranking)
+    batch = LandscapeReviewBatch(issued_on=date.today() - timedelta(weeks=1), blind=True)
+    db_session.add(batch)
+    await db_session.flush()
+    db_session.add_all([
+        LandscapeReviewBatchItem(batch_id=batch.id, opportunity_id=in_cut, position=1),
+        LandscapeReviewBatchItem(batch_id=batch.id, opportunity_id=probe, is_probe=True,
+                                 position=2),
+    ])
+    viewer = await _manager(db_session)
+    await _decide(db_session, viewer, in_cut)
+    await _decide(db_session, viewer, probe)
+
+    for opp in (in_cut, probe):
+        verdict = _doc(await build_landscape_chat_record(db_session, opp, viewer), "Verdict")
+        assert "rank:" not in verdict
+        assert "band: advance" in verdict
+
+    db_session.add(LandscapeReviewBatch(issued_on=date.today(), blind=False))
+    await db_session.flush()
+    verdict = _doc(await build_landscape_chat_record(db_session, in_cut, viewer), "Verdict")
+    assert f"rank: {RANK}" in verdict
+
+
+async def test_verdict_doc_expert_hides_red_flags_and_risks(db_session):
+    """On the expert's open item, the Verdict document leaves out S9's deal-breaker
+    confirmations (``red_flags``), ``risks``, ``strengths``, ``confidence`` and
+    ``funnel_stage``; descriptive fields stay."""
+    opp = await seed_opportunity(db_session, await _active_epoch(db_session))
+    assessment = await db_session.scalar(
+        select(LandscapeAssessment).where(LandscapeAssessment.opportunity_id == opp)
+    )
+    assessment.red_flags = ["S9-RED-FLAG-SENTINEL"]
+    assessment.risks = ["S9-RISK-SENTINEL"]
+    assessment.strengths = ["S9-STRENGTH-SENTINEL"]
+    assessment.confidence = "Speculative"
+    assessment.funnel_stage = "FUNNEL-SNT"
+    assessment.member_notes = [{"idea": "1", "note": "An invented member note."}]
+    expert = await _manager(db_session)
+    db_session.add(LandscapeExpertJudgment(
+        opportunity_id=opp, expert_id=expert.id, expert_name=expert.name,
+        quarter=_quarter(date.today()), issued_before_draw=False,
+    ))
+    await db_session.flush()
+
+    verdict = _doc(await build_landscape_chat_record(db_session, opp, expert), "Verdict")
+    for hidden in ("S9-RED-FLAG-SENTINEL", "S9-RISK-SENTINEL", "S9-STRENGTH-SENTINEL",
+                   "Speculative", "FUNNEL-SNT", "Red flag", "Confidence label"):
+        assert hidden not in verdict, hidden
+    assert S9_HEADLINE in verdict and "An invented member note." in verdict
+    shown = _doc(await build_landscape_chat_record(db_session, opp, await _manager(db_session)),
+                 "Verdict")
+    assert "S9-RED-FLAG-SENTINEL" in shown and "Speculative" in shown
+
+
+async def test_record_shows_passed_s6_record(db_session):
+    """The record's S6 record is the page's (``member_deep``): a ``rescued`` row is shown,
+    a newer unpassed one never."""
+    epoch_id = await _active_epoch(db_session)
+    opp = await seed_opportunity(db_session, epoch_id)
+    deep = await db_session.scalar(select(LandscapeDeep).where(LandscapeDeep.epoch_id == epoch_id))
+    deep.status = "rescued"
+    idea = await db_session.get(LandscapeIdea, deep.idea_id)
+    idea.version_hash = "v2"
+    db_session.add(LandscapeDeep(
+        idea_id=idea.id, idea_version="v2", epoch_id=deep.epoch_id, status="failed:invalid",
+        summary="UNPASSED-S6-SENTINEL", created_at=datetime.now(UTC) + timedelta(hours=1),
+    ))
+    await db_session.flush()
+
+    panel = _doc(await build_landscape_chat_record(db_session, opp, await _manager(db_session)),
+                 "Panel")
+    assert "An invented deep summary." in panel
+    assert "UNPASSED-S6-SENTINEL" not in panel
+
+
 # --- the router -------------------------------------------------------------------------------
 
 

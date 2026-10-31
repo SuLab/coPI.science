@@ -30,8 +30,10 @@ from src.landscaping.ideas import (
     resolve_aliases,
     version_hash,
 )
+from src.landscaping.stages import cut as cut_stage
 from src.models.landscape import (
     LandscapeAssessment,
+    LandscapeCut,
     LandscapeDocument,
     LandscapeEpoch,
     LandscapeExtraction,
@@ -188,6 +190,24 @@ async def test_attachment_not_revisited(db_session):
         select(LandscapeIdeaEvidence).where(LandscapeIdeaEvidence.extraction_id == extraction.id)
     )).scalars().all()
     assert [r.idea_id for r in rows] == [known]
+
+
+async def test_rekeyed_candidate_refreshes_the_idea_it_leaves(db_session):
+    epoch = await _epoch(db_session)
+    doc = await _doc(db_session, lab=LAB_A)
+    extraction = await _extraction(db_session, epoch, doc)
+    left = await _merge(db_session, epoch, doc, _bio("inhibit"), extraction=extraction)
+    other_doc = await _doc(db_session, lab=LAB_B)
+    assert await _merge(db_session, epoch, other_doc, _bio("inhibit")) == left
+    assert (await _idea(db_session, left)).jhu_group_count == 2
+
+    # The document's summary changed: its candidate now keys to another idea.
+    moved = await _merge(db_session, epoch, doc, _bio("activate"), extraction=extraction)
+
+    assert moved != left
+    idea = await _idea(db_session, left)
+    assert idea.version_hash == version_hash([other_doc.id])
+    assert idea.jhu_group_count == 1
 
 
 async def test_unregistered_agent_key_includes_lab(db_session):
@@ -368,6 +388,84 @@ async def test_lab_unification_rekeys_chemistry_idea_via_alias(db_session):
     assert later == canonical_active
 
 
+def _resolve_kinx(monkeypatch) -> None:
+    """Normalization resolves every unmatched target to ``TARGET``'s HGNC id."""
+    async def targets(items, *, pubtator, criteria):
+        return [{**t, "hgnc_id": TARGET["hgnc_id"]} for t in items]
+
+    async def disease(item, *, pubtator):
+        return item
+
+    monkeypatch.setattr(normalize, "normalize_targets", targets)
+    monkeypatch.setattr(normalize, "normalize_disease", disease)
+
+
+async def _survivor_and_merged(db: AsyncSession, epoch: LandscapeEpoch) -> tuple:
+    """A normalized idea and a provisional one that resolves into it (ids, then versions)."""
+    survivor = await _merge(db, epoch, await _doc(db), _bio("inhibit"))
+    unmatched = {"as_written": "Kinx-like", "kind": "gene", "species": "human",
+                 "provisional_key": "prov:target:kinx-like"}
+    merged = await _merge(db, epoch, await _doc(db, lab=LAB_B),
+                          _bio("inhibit", target=unmatched))
+    versions = [(await _idea(db, i)).version_hash for i in (survivor, merged)]
+    return survivor, merged, *versions
+
+
+async def test_merge_drops_pending_cut_whose_tie_class_held_the_merged_idea(
+    db_factory, monkeypatch,
+):
+    _resolve_kinx(monkeypatch)
+    async with db_factory() as db:
+        epoch = await _epoch(db)
+        survivor, merged, v_survivor, v_merged = await _survivor_and_merged(db, epoch)
+        ids = [str(survivor), str(merged)]
+        pending = LandscapeCut(
+            epoch_id=epoch.id, status="boundary_pending", n=2, k=1, ordered_idea_ids=ids,
+            folds={"folded": {}, "tie_class": {
+                "ids": ids, "versions": {ids[0]: v_survivor, ids[1]: v_merged},
+            }},
+            tie_class_size=2,
+        )
+        db.add(pending)
+        await db.commit()
+        epoch_id, pending_id = epoch.id, pending.id
+
+    async with db_factory() as db:
+        assert await resolve_aliases(db, epoch_id=epoch_id) == 1
+        await db.commit()
+    async with db_factory() as db:
+        assert await db.get(LandscapeCut, pending_id) is None
+
+    # The epoch is no longer held behind a tournament over the deleted idea.
+    cut_id = await cut_stage.run_cut(db_factory, epoch_id, may_submit=False)
+    assert cut_id is not None
+    async with db_factory() as db:
+        assert (await db.get(LandscapeCut, cut_id)).status == "complete"
+
+
+async def test_merge_repoints_complete_cut_folds_to_the_survivor(db_session, monkeypatch):
+    _resolve_kinx(monkeypatch)
+    epoch = await _epoch(db_session)
+    survivor, merged, _, _ = await _survivor_and_merged(db_session, epoch)
+    keeper, folded_a, folded_b = (str(uuid.uuid4()) for _ in range(3))
+    db_session.add(LandscapeCut(
+        epoch_id=epoch.id, status="complete", n=2, k=1,
+        ordered_idea_ids=[str(merged), keeper],
+        # The survivor was folded under the merged idea, which it now replaces as keeper.
+        folds={"folded": {str(merged): [str(survivor), folded_a], keeper: [folded_b]}},
+    ))
+    await db_session.flush()
+
+    assert await resolve_aliases(db_session, epoch_id=epoch.id) == 1
+
+    cut = (await db_session.execute(
+        select(LandscapeCut).where(LandscapeCut.epoch_id == epoch.id)
+        .execution_options(populate_existing=True)
+    )).scalar_one()
+    assert cut.ordered_idea_ids == [str(survivor), keeper]
+    assert cut.folds["folded"] == {str(survivor): [folded_a], keeper: [folded_b]}
+
+
 # --- versions, tombstones, dossiers -------------------------------------------------------------
 
 
@@ -478,7 +576,8 @@ def _fake_evidence(monkeypatch, failing: dict[str, int] | None = None) -> dict:
         return await fetch()
 
     async def current_release(source):
-        return {"opentargets": "invented-ot-26.09", "chembl": "invented-ChEMBL_99"}.get(
+        return {"opentargets": "invented-ot-26.09", "chembl": "invented-ChEMBL_99",
+                "orphadata": "invented-orpha-2099-06-23"}.get(
             source, f"invented-week-of-{source}"
         )
 
@@ -552,8 +651,8 @@ async def test_assemble_evidence_sets_flags_without_version_bump(db_factory, mon
 
 
 async def test_evidence_cached_under_each_sources_release(db_factory, monkeypatch):
-    """Open Targets and ChEMBL lookups key on the source's published release; the others on
-    their own (weekly) release, never one shared ISO week (§11.2)."""
+    """Open Targets, ChEMBL and Orphadata lookups key on the source's published release; the
+    others on their own (weekly) release, never one shared ISO week (§11.2)."""
     calls = _fake_evidence(monkeypatch)
     epoch_id, idea_id, _ = await _new_idea(db_factory)
     await assemble_evidence(db_factory, epoch_id=epoch_id, idea_id=idea_id)
@@ -563,7 +662,7 @@ async def test_evidence_cached_under_each_sources_release(db_factory, monkeypatc
         "opentargets_association": "invented-ot-26.09",
         "trials": "invented-week-of-trials",
         "comention": "invented-week-of-comention",
-        "orphadata": "invented-week-of-orphadata",
+        "orphadata": "invented-orpha-2099-06-23",
     }
 
 

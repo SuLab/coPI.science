@@ -28,8 +28,8 @@ Steps, each committing on its own (spec §12.2):
 4. **The panel** (``src.landscaping.panel``), for a row that is ``done``. A ``not_met`` gate
    gives ``excluded:deep_gate`` and no consults.
 
-The system prompts, the panel personas, the rubric that weighs the provisional scores and the
-models come from the epoch's own inputs (``epochs.epoch_inputs``), never the files on disk or
+The system prompts, the panel personas, the rubric (the S6 output schema, the dimensions
+validated and kept, and the weights of the provisional scores) and the models come from the epoch's own inputs (``epochs.epoch_inputs``), never the files on disk or
 the current settings (spec §7.11); each persona was composed as the engine composes it
 (``panel.compose_persona``, §7.7 step 8) when the epoch was created.
 
@@ -60,7 +60,7 @@ from src.landscaping.ideas import dossier_documents
 from src.landscaping.llm_client import CallResult, build_request, call_sync
 from src.landscaping.panel import consult_message, panel_domains
 from src.landscaping.quotes import apply_quote_check
-from src.landscaping.schemas import DIMENSION_KEYS, DISEASE_PROFILE_KEYS, GATING_KEYS, SCHEMAS
+from src.landscaping.schemas import DISEASE_PROFILE_KEYS, GATING_KEYS, SCHEMAS, stage_schema
 from src.landscaping.scoring import epoch_weighted_score
 from src.landscaping.stages.screen import KIND_LABELS, fenced_text, parse_output
 from src.models.landscape import (
@@ -704,7 +704,7 @@ async def _analysis(
         final = session.rounds >= MAX_SEARCH_ROUNDS
         request = build_request(
             STAGE, model=inputs.model(STAGE), system=inputs.system(STAGE), user=dossier,
-            schema=SCHEMAS[STAGE],
+            schema=stage_schema(STAGE, inputs.rubric),
             tools=None if final else project_search.research_tool_definitions(),
         )
         request["messages"] = _with_final_text(messages) if final else list(messages)
@@ -777,7 +777,13 @@ def _supported_lines(
     return kept
 
 
-def _valid(parsed: dict | None) -> bool:
+def _dimension_keys(rubric) -> tuple[str, ...]:
+    return tuple(dim.key for dim in rubric.dimensions)
+
+
+def _valid(parsed: dict | None, rubric) -> bool:
+    """Whether ``parsed`` has a summary, every gate and an integer score for every dimension of
+    ``rubric`` (the epoch's own, §7.11)."""
     if parsed is None or not isinstance(parsed.get("summary"), str):
         return False
     gating, scores = parsed.get("gating"), parsed.get("scores")
@@ -785,7 +791,7 @@ def _valid(parsed: dict | None) -> bool:
         isinstance(gating, dict) and all(gating.get(k) in _GATE_VALUES for k in GATING_KEYS)
         and isinstance(scores, dict)
         and all(isinstance(scores.get(k), int) and not isinstance(scores.get(k), bool)
-                for k in DIMENSION_KEYS)
+                for k in _dimension_keys(rubric))
     )
 
 
@@ -797,10 +803,11 @@ def _strings(raw: Any, keys: tuple[str, ...]) -> dict[str, str]:
 def _judged_from(parsed: dict, refs: Mapping[str, Any], session: _Session, rubric) -> dict:
     """The row's judged columns from a valid answer, its support checked in code; ``refs``
     holds every citable dossier document and database record key, and ``rubric`` (the epoch's)
-    weighs the provisional scores."""
+    names the kept dimensions and weighs the provisional scores."""
     retrieved = session.retrieved
     gating = {key: parsed["gating"][key] for key in GATING_KEYS}
-    scores = {key: parsed["scores"][key] for key in DIMENSION_KEYS}
+    dimension_keys = _dimension_keys(rubric)
+    scores = {key: parsed["scores"][key] for key in dimension_keys}
     outside = _supported_lines(parsed.get("outside_groups"), "finding", {}, retrieved,
                                _RETRIEVED_PREFIXES)
     flags = {
@@ -819,7 +826,7 @@ def _judged_from(parsed: dict, refs: Mapping[str, Any], session: _Session, rubri
         "gating_rationales": _strings(parsed.get("gating_rationales"), GATING_KEYS),
         "flags_reviewed": flags,
         "provisional_scores": scores,
-        "dimension_rationales": _strings(parsed.get("dimension_rationales"), DIMENSION_KEYS),
+        "dimension_rationales": _strings(parsed.get("dimension_rationales"), dimension_keys),
         "provisional_weighted_score": epoch_weighted_score(rubric, scores),
         "outside_group_count": len(outside),
         "search_transcript": [*session.transcript, {"outside_groups": outside}],
@@ -882,7 +889,7 @@ async def _deep(
     if failure is not None:
         return failure, []
     parsed = parse_output(result.text)
-    if not _valid(parsed):
+    if not _valid(parsed, inputs.rubric):
         return {"status": "failed:invalid", "served_by_model": result.served_by,
                 "error": job_error_text("deep output is not valid")}, []
     refs = {**records, **{f"doc:{doc.id}": None for doc in facts.documents}}

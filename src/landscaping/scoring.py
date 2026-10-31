@@ -15,9 +15,8 @@ from datetime import date, datetime
 from functools import lru_cache
 from typing import Any
 
-from src.landscaping.criteria import load_criteria
 from src.services.bands import BANDS, band_for
-from src.services.blackbird_rubric import _round_for_band, load_rubric
+from src.services.blackbird_rubric import _round_for_band
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +25,11 @@ TRIAGE_DIMENSIONS = (
     "differentiation_unmet_need", "scientific_credibility", "translational_path",
 )
 
-# The rubric's evidence checklist (the Target Rubric items across its dimensions, today 11),
-# counted from the rubric itself so the checklist score follows the document.
-_CHECKLIST_ITEMS = sum(len(d.evidence) for d in load_rubric().dimensions)
+
+def _checklist_items(rubric) -> int:
+    """The rubric's evidence checklist size: its Target Rubric items across its dimensions,
+    counted from the rubric itself so the checklist score follows the epoch's document."""
+    return sum(len(d.evidence) for d in rubric.dimensions)
 
 
 def dimension_mean(scores: dict[str, int], rubric) -> float:
@@ -45,29 +46,33 @@ def dimension_mean(scores: dict[str, int], rubric) -> float:
     return sum(weights[k] * scores[k] for k in TRIAGE_DIMENSIONS) / total
 
 
-def present_items(target_rubric: list[dict]) -> int:
+def present_items(target_rubric: list[dict], *, rubric) -> int:
     """The number of distinct checklist items marked ``present`` (the stored
-    ``evidence_count``, spec §7.5). Entries outside the rubric's item numbers are ignored."""
+    ``evidence_count``, spec §7.5). Entries outside ``rubric``'s item numbers are ignored."""
+    items = _checklist_items(rubric)
     return len({
         entry.get("item")
         for entry in target_rubric or ()
         if isinstance(entry, dict)
         and entry.get("status") == "present"
         and isinstance(entry.get("item"), int)
-        and 1 <= entry["item"] <= _CHECKLIST_ITEMS
+        and 1 <= entry["item"] <= items
     })
 
 
-def checklist_score(target_rubric: list[dict]) -> float:
-    """``1 + 4 × present ÷ items``: the checklist on the dimensions' 1-5 scale (spec §7.5)."""
-    return 1 + 4 * present_items(target_rubric) / _CHECKLIST_ITEMS
+def checklist_score(target_rubric: list[dict], *, rubric) -> float:
+    """``1 + 4 × present ÷ items`` over ``rubric``'s checklist: the checklist on the
+    dimensions' 1-5 scale (spec §7.5)."""
+    return 1 + 4 * present_items(target_rubric, rubric=rubric) / _checklist_items(rubric)
 
 
 def triage_score(scores, target_rubric, *, rubric, criteria) -> float:
     """``α · dimension_mean + (1 − α) · checklist_score``, α = ``criteria.dimension_share``
     (``[triage] dimension_share`` in the criteria file, L62)."""
     alpha = criteria.dimension_share
-    return alpha * dimension_mean(scores, rubric) + (1 - alpha) * checklist_score(target_rubric)
+    return alpha * dimension_mean(scores, rubric) + (1 - alpha) * checklist_score(
+        target_rubric, rubric=rubric
+    )
 
 
 def excluded_reason(result: dict) -> str | None:
@@ -82,14 +87,14 @@ def excluded_reason(result: dict) -> str | None:
     return None
 
 
-@lru_cache(maxsize=1)
-def _ladders() -> tuple[dict[str, int], dict[str, int]]:
-    """Evidence-grade and stage ranks from the criteria file, loaded once per process: a
-    vocabulary change is a judging change and opens a new epoch (D61)."""
-    criteria = load_criteria()
+@lru_cache(maxsize=8)
+def _ladders(
+    evidence_grades: tuple[str, ...], stages: tuple[str, ...]
+) -> tuple[dict[str, int], dict[str, int]]:
+    """Evidence-grade and stage ranks from a criteria file's ladders, cached on the ladders."""
     return (
-        {grade: n for n, grade in enumerate(criteria.evidence_grades)},
-        {stage: n for n, stage in enumerate(criteria.stages)},
+        {grade: n for n, grade in enumerate(evidence_grades)},
+        {stage: n for n, stage in enumerate(stages)},
     )
 
 
@@ -107,8 +112,9 @@ def _date_rank(value: date | datetime | None) -> int:
     return -value.toordinal()
 
 
-def tie_key(idea_row) -> tuple:
-    """The S5 sort key, ascending, for spec §7.6 keys 1-8.
+def tie_key(idea_row, *, criteria) -> tuple:
+    """The S5 sort key, ascending, for spec §7.6 keys 1-8, ranking grades and stages on the
+    ladders of ``criteria`` (the epoch's own, §7.11).
 
     ``idea_row`` is a mapping or object with ``triage_score``, ``evidence_count``,
     ``evidence_grade``, ``jhu_group_count``, ``stage``, ``document_count``,
@@ -117,7 +123,7 @@ def tie_key(idea_row) -> tuple:
     (the S3 count only, never S6's outside count), stage earlier first (L56; unknown last),
     qualifying documents ↓, newest qualifying document date ↓ (none last), idea id ↑.
     """
-    grades, stages = _ladders()
+    grades, stages = _ladders(criteria.evidence_grades, criteria.stages)
     idea_id = _field(idea_row, "idea_id") or _field(idea_row, "id")
     return (
         -(_field(idea_row, "triage_score") or 0.0),

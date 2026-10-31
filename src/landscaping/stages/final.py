@@ -45,7 +45,7 @@ from src.landscaping.comparator import IN_FLIGHT
 from src.landscaping.epochs import EpochInputs
 from src.landscaping.ideas import dossier_documents
 from src.landscaping.llm_client import CallResult, build_request
-from src.landscaping.schemas import SCHEMAS
+from src.landscaping.schemas import stage_schema
 from src.landscaping.scoring import epoch_band, epoch_weighted_score
 from src.landscaping.stages.cut import _batch_cycle_start
 from src.landscaping.stages.screen import message_text, parse_output, served_by, submit_items
@@ -306,10 +306,10 @@ async def _message_for(db: AsyncSession, row: LandscapeAssessment) -> str | None
 
 
 def _request(message: str, *, inputs: EpochInputs, retry: bool) -> dict:
-    """The S9 request in the epoch's own prompt and model (§7.11)."""
+    """The S9 request in the epoch's own prompt, model and rubric (§7.11)."""
     return build_request(
         STAGE, model=inputs.model(STAGE), system=inputs.system(STAGE), user=message,
-        schema=SCHEMAS[STAGE], retry=retry,
+        schema=stage_schema(STAGE, inputs.rubric), retry=retry,
     )
 
 

@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.landscaping import epochs, ideas
 from src.landscaping.eval import bakeoff, regression
 from src.landscaping.llm_client import CallResult
-from src.landscaping.schemas import DIMENSION_KEYS, GATING_KEYS, KEY_POINT_KEYS
+from src.landscaping.schemas import GATING_KEYS, KEY_POINT_KEYS
 from src.landscaping.scoring import TRIAGE_DIMENSIONS
 from src.landscaping.stages import deep, extract
 from src.models import AppSetting
@@ -42,11 +42,14 @@ from src.models.landscape import (
     LandscapeSimilarity,
     LandscapeTriage,
 )
+from src.services.blackbird_rubric import load_rubric
 
 pytestmark = pytest.mark.integration
 
 HAIKU, SONNET, SONNET_55 = bakeoff.CANDIDATE_MODELS
 REFERENCE = bakeoff.REFERENCE_MODEL
+#: The rubric on disk's dimensions, which ``epochs.build_snapshot`` stores.
+DIMENSION_KEYS = tuple(dim.key for dim in load_rubric().dimensions)
 REFUSE = object()
 _INDEX = re.compile(r"\bINV(\d+)\b")
 _PAIR = re.compile(r"\bpair-(\d+)\b")
@@ -414,7 +417,7 @@ async def test_regression_fail_holds_epoch(db_factory, models):
 
 async def test_regression_pass_allows_activation(db_factory, models):
     await _seed_set(db_factory, _screen_items(10))
-    epoch_id = await _epoch(db_factory)
+    epoch_id = await _epoch(db_factory, changed=["screen"])
     models.routes["screen"] = _screen("yes")
 
     assert await regression.run_regression(db_factory, epoch_id) is True
@@ -505,7 +508,7 @@ async def test_s8_similarity_pass_at_85_percent(db_factory, models):
 
 async def test_first_epoch_checks_s2_s4_only(db_factory, models):
     await _seed_set(db_factory, _screen_items(5) + _pair_items(5) + _final_items(5))
-    epoch_id = await _epoch(db_factory)
+    epoch_id = await _epoch(db_factory, changed=["screen", "rerank", "final"])
     models.routes["screen"] = _screen("yes")
 
     assert await regression.run_regression(db_factory, epoch_id) is True
@@ -517,6 +520,43 @@ async def test_first_epoch_checks_s2_s4_only(db_factory, models):
         )
     assert run.results["first_epoch"] is True
     assert set(run.results["stages"]) == {"screen"}
+
+
+async def test_touched_stage_without_items_fails_and_holds(db_factory, models):
+    """A set version frozen before any S6 output exists holds no ``deep`` items: a candidate
+    whose change touches S6 fails that stage instead of passing it unchecked (spec §10.4)."""
+    await _epoch(db_factory, status="active")
+    await _seed_set(db_factory, _screen_items(5) + _final_items(5))
+    epoch_id = await _epoch(db_factory, changed=["deep"])
+
+    assert await regression.run_regression(db_factory, epoch_id) is False
+
+    assert models.calls == []
+    epoch = await _epoch_row(db_factory, epoch_id)
+    assert epoch.status == "held"
+    assert "deep" in epoch.hold_reason
+    async with db_factory() as db:
+        run = await db.get(LandscapeRegressionRun, epoch.regression_run_id)
+    assert run.status == "failed"
+    assert run.results["stages"] == {
+        "deep": {"items": 0, "checks": {"items": False}, "passed": False},
+    }
+
+
+async def test_empty_expert_kind_does_not_fail_the_gate(db_factory, models):
+    await _epoch(db_factory, status="active")
+    await _seed_set(db_factory, _final_items(5))
+    epoch_id = await _epoch(db_factory, changed=["final"])
+    models.routes["final"] = lambda model, user: _verdict()
+
+    assert await regression.run_regression(db_factory, epoch_id) is True
+
+    async with db_factory() as db:
+        run = await db.scalar(
+            select(LandscapeRegressionRun).where(LandscapeRegressionRun.epoch_id == epoch_id)
+        )
+    assert "expert" in run.results["kinds"]
+    assert set(run.results["stages"]) == {"final"}
 
 
 async def _active_epoch_with_outputs(db_factory) -> uuid.UUID:
@@ -624,7 +664,7 @@ async def test_positive_controls_join_the_set(db_factory, models):
 
 async def test_set_versioned_additions_do_not_change_running_candidate(db_factory, models):
     first = await _seed_set(db_factory, _screen_items(10, "yes"))
-    epoch_id = await _epoch(db_factory, after_now=True)
+    epoch_id = await _epoch(db_factory, after_now=True, changed=["screen"])
     # Later versions: one frozen from the database, one whose references the candidate fails.
     frozen = await regression.freeze_regression_set(db_factory, reason="invented later version")
     failing = await _seed_set(db_factory, _screen_items(10, "no"))

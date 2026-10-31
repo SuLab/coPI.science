@@ -20,8 +20,9 @@ import hashlib
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 
-from sqlalchemy import ColumnElement, Table, and_, exists, func, insert, select, update
+from sqlalchemy import ColumnElement, Table, and_, exists, func, insert, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import get_settings
@@ -476,12 +477,15 @@ async def _copy_rows(
     *,
     refs: dict[str, tuple[dict[uuid.UUID, uuid.UUID], bool]] | None = None,
     adjust: Callable[[dict], None] | None = None,
+    ids_from: dict[uuid.UUID, uuid.UUID] | None = None,
 ) -> dict[uuid.UUID, uuid.UUID]:
     """Insert a copy of every ``table`` row matching ``where`` into ``to_epoch``; returns source
     id -> new id.
 
     ``refs`` maps a column to (id map, required): a reference outside its map skips the row when
-    required and becomes NULL otherwise. JSON contents are copied verbatim. Only inserts.
+    required and becomes NULL otherwise. JSON contents are copied verbatim. A copy's id is fresh,
+    unless the source row's id is a key of ``ids_from``: it then takes the mapped id (for a row
+    whose id is another table's row id). Only inserts.
     """
     rows = (await db.execute(select(table).where(where))).mappings().all()
     ids: dict[uuid.UUID, uuid.UUID] = {}
@@ -490,7 +494,8 @@ async def _copy_rows(
         values = {k: v for k, v in row.items() if k not in _FRESH_COLUMNS}
         if not _remap(values, refs or {}):
             continue
-        values["id"] = ids[row["id"]] = uuid.uuid4()
+        new_id = (ids_from or {}).get(row["id"]) or uuid.uuid4()
+        values["id"] = ids[row["id"]] = new_id
         if "epoch_id" in values:
             values["epoch_id"] = to_epoch
         if values.get("status") in _IN_FLIGHT:
@@ -627,12 +632,14 @@ async def _copy_deep(db, src, dst, maps: _IdMaps, stages: set[str]) -> None:
 
 
 async def _copy_rerank(db, src, dst, maps: _IdMaps, stages: set[str]) -> None:
-    """S7: its comparisons and the ranked list."""
+    """S7: its comparisons and the ranked list. A ranking row's id is the id of the S6 record it
+    was placed on (``stages.rerank``), which is how a re-run S6 version is detected, so a copied
+    row takes its S6 record's copy's id; one whose record had no copy keeps a fresh id."""
     await _copy_comparisons(db, src, dst, maps, "deep")
     ranking = LandscapeRanking.__table__
     await _copy_rows(db, ranking, ranking.c.epoch_id == src, dst, refs={
         "idea_id": (maps.ideas, True),
-    })
+    }, ids_from=maps.deep)
 
 
 async def _copy_similarity(db, src, dst, maps: _IdMaps, stages: set[str]) -> None:
@@ -684,11 +691,11 @@ async def copy_forward(
     ``rejudge_started_at`` and copy ``from_epoch``'s rows of the unchanged ``stages`` into it.
 
     ``stages`` must be closed upstream (the complement of ``changed_stages``); ``final`` copies
-    nothing. Copied rows get new ids, with their references to copied ideas, extractions, cuts
-    and deep records repointed (a cut's idea ids inside its JSON too); a row still owed work is
-    copied as ``pending``. Other JSON contents, and references to shared inputs (documents,
-    batches), are copied verbatim. Only inserts:
-    ``from_epoch``'s rows are never written. Raises ValueError for an unknown or not
+    nothing. Copied rows get new ids (an S7 ranking row takes its copied S6 record's id), with
+    their references to copied ideas, extractions, cuts and deep records repointed (a cut's
+    idea ids inside its JSON too); a row still owed work is copied as ``pending``. Other JSON
+    contents, and references to shared inputs (documents, batches), are copied verbatim. Only
+    inserts: ``from_epoch``'s rows are never written. Raises ValueError for an unknown or not
     upstream-closed stage set, or when ``to_epoch`` is not a ``candidate``.
 
     A candidate built from nothing (the first epoch) passes ``from_epoch=None`` and no stages:
@@ -743,39 +750,77 @@ def _old_idea(idea_id, cutoff) -> ColumnElement[bool]:
     )
 
 
-async def _work_pending(db: AsyncSession, epoch_id: uuid.UUID, cutoff) -> bool:
-    """Whether S2, S3, S4 or evidence-assembly work is owed in ``epoch_id`` for an item created
-    before ``cutoff``. Counts rows only: an item whose stage row is not yet enqueued owes
-    nothing here."""
-    screen, ext = LandscapeScreen.__table__, LandscapeExtraction.__table__
-    triage, idea = LandscapeTriage.__table__, LandscapeIdea.__table__
+async def funnel_work_pending(
+    db: AsyncSession, epoch_id: uuid.UUID, *, cutoff: datetime | None = None
+) -> bool:
+    """Whether S2, S3, S4 or evidence-assembly work is owed in ``epoch_id``: a row in flight, or
+    an item its stage has not enqueued yet (an eligible document with no S2 row, a screened-in
+    (or rescued, L44) document with no S3 row, an idea whose evidence is not assembled, an idea
+    version with no S4 row). S4 rows count only at the idea's current version: a stale-version
+    row is never sent.
+
+    With ``cutoff``, only the items the epoch had then count: documents created before it, and
+    ideas with evidence from such a document (§7.11 step 4).
+    """
+    D, S, E = LandscapeDocument, LandscapeScreen, LandscapeExtraction
+    T, Idea = LandscapeTriage, LandscapeIdea
+
+    def old_doc(document_id) -> tuple:
+        return () if cutoff is None else (_old_document(document_id, cutoff),)
+
+    def old_idea(idea_id) -> tuple:
+        return () if cutoff is None else (_old_idea(idea_id, cutoff),)
+
+    # Where D is in the outer FROM, compare its own column: an EXISTS over the same table
+    # would auto-correlate to nothing.
+    created_before = () if cutoff is None else (D.created_at < cutoff,)
+    screened = select(S.id).where(S.document_id == D.id, S.epoch_id == epoch_id).exists()
+    extracted = select(E.id).where(
+        E.document_id == S.document_id, E.epoch_id == epoch_id, E.basis == "summary"
+    ).exists()
+    triaged = select(T.id).where(
+        T.idea_id == Idea.id, T.epoch_id == epoch_id, T.idea_version == Idea.version_hash
+    ).exists()
     checks = (
-        exists().where(
-            screen.c.epoch_id == epoch_id, screen.c.status.in_(_IN_FLIGHT),
-            _old_document(screen.c.document_id, cutoff),
-        ),
-        exists().where(
-            ext.c.epoch_id == epoch_id, ext.c.basis == "summary", ext.c.status.in_(_IN_FLIGHT),
-            _old_document(ext.c.document_id, cutoff),
-        ),
-        exists().where(
-            triage.c.epoch_id == epoch_id, triage.c.status.in_(_IN_FLIGHT),
-            _old_idea(triage.c.idea_id, cutoff),
-        ),
-        exists().where(
-            idea.c.epoch_id == epoch_id, idea.c.evidence_assembled_at.is_(None),
-            _old_idea(idea.c.id, cutoff),
-        ),
+        select(S.id).where(
+            S.epoch_id == epoch_id, S.status.in_(_IN_FLIGHT), *old_doc(S.document_id),
+        ).exists(),
+        select(E.id).where(
+            E.epoch_id == epoch_id, E.basis == "summary", E.status.in_(_IN_FLIGHT),
+            *old_doc(E.document_id),
+        ).exists(),
+        select(T.id).join(Idea, Idea.id == T.idea_id).where(
+            T.epoch_id == epoch_id, T.status.in_(_IN_FLIGHT), T.idea_version == Idea.version_hash,
+            *old_idea(T.idea_id),
+        ).exists(),
+        select(D.id).where(
+            D.s1_status == "eligible", D.merged_into.is_(None), ~screened, *created_before,
+        ).exists(),
+        select(S.id).join(D, D.id == S.document_id).where(
+            S.epoch_id == epoch_id,
+            or_(and_(S.status == "done", S.decision.in_(("yes", "unsure"))),
+                S.status == "rescued"),
+            D.merged_into.is_(None), ~extracted, *created_before,
+        ).exists(),
+        select(Idea.id).where(
+            Idea.epoch_id == epoch_id, Idea.evidence_assembled_at.is_(None),
+            *old_idea(Idea.id),
+        ).exists(),
+        select(Idea.id).where(
+            Idea.epoch_id == epoch_id, Idea.version_hash.is_not(None), ~triaged,
+            *old_idea(Idea.id),
+        ).exists(),
     )
     for check in checks:
-        if (await db.execute(select(check))).scalar():
+        if await db.scalar(select(check)):
             return True
     return False
 
 
 async def mark_drained(db: AsyncSession, *, epoch_id: uuid.UUID) -> bool:
     """Set ``drained_at`` once no S2, S3, S4 or evidence-assembly work is pending for any item
-    (document, or idea from one) created before the epoch's ``rejudge_started_at`` (§7.11 step 4).
+    (document, or idea from one) created before the epoch's ``rejudge_started_at`` (§7.11 step 4),
+    whether its stage row is in flight or not yet enqueued (``funnel_work_pending``).
 
     Acts only in phase ``continuous`` and only after the re-judge has begun. Returns whether the
     epoch is drained; an earlier ``drained_at`` is kept (the D69 flip overwrites it in the worker).
@@ -787,7 +832,7 @@ async def mark_drained(db: AsyncSession, *, epoch_id: uuid.UUID) -> bool:
         return True
     if await _phase(db) != "continuous":
         return False
-    if await _work_pending(db, epoch_id, epoch.rejudge_started_at):
+    if await funnel_work_pending(db, epoch_id, cutoff=epoch.rejudge_started_at):
         return False
     await db.execute(
         update(LandscapeEpoch)

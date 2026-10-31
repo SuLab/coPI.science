@@ -31,7 +31,7 @@ from src.landscaping.batches import BatchOutcome, FallbackAdapter
 from src.landscaping.epochs import EpochInputs
 from src.landscaping.ideas import dossier_documents
 from src.landscaping.llm_client import CallResult, build_request
-from src.landscaping.schemas import SCHEMAS
+from src.landscaping.schemas import stage_schema
 from src.landscaping.scoring import (
     TRIAGE_DIMENSIONS,
     excluded_reason,
@@ -200,10 +200,10 @@ def triage_dossier(idea_fields: dict, evidence: dict, documents: list[dict]) -> 
 
 
 def _request(dossier: str, *, inputs: EpochInputs, retry: bool) -> dict:
-    """The S4 request for ``dossier`` in the epoch's own prompt and model (§7.11)."""
+    """The S4 request for ``dossier`` in the epoch's own prompt, model and rubric (§7.11)."""
     return build_request(
         STAGE, model=inputs.model(STAGE), system=inputs.system(STAGE), user=dossier,
-        schema=SCHEMAS[STAGE], retry=retry,
+        schema=stage_schema(STAGE, inputs.rubric), retry=retry,
     )
 
 
@@ -379,7 +379,7 @@ def _result_values(parsed: Any, inputs: EpochInputs) -> dict:
         triage_score=triage_score(
             scores, target_rubric, rubric=rubric, criteria=inputs.criteria
         ),
-        evidence_count=present_items(target_rubric),
+        evidence_count=present_items(target_rubric, rubric=rubric),
         exclusion_reason=_exclusion_text(parsed, reason),
     )
     return values

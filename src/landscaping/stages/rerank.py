@@ -6,11 +6,12 @@ version. ``landscape_rankings.position`` is 1-based and contiguous.
 
 - **Rebuild** when the list is empty, or when more than 25% of the cut is new since the last
   rebuild: one Message Batch of a sampled tournament (``comparator.submit_tournament``, basis
-  ``deep``). While its comparisons are owed, ``update_rankings`` changes nothing, so insertions
-  and removals wait and no second rebuild is submitted. ``finish_rebuild`` lands it.
+  ``deep``). While its comparisons are owed, ``update_rankings`` only re-sends the ones an
+  errored, expired, canceled or truncated result put back to ``pending``; insertions and
+  removals wait and no second rebuild is submitted. ``finish_rebuild`` lands it.
 - **Insertion** otherwise: each new or changed idea is placed by binary search with the
-  synchronous ``comparator.compare``, one idea at a time. Each question waits while a
-  simulation run is live (D33).
+  synchronous ``comparator.compare``, one idea at a time. A simulation run live before any
+  question stops the insertions; the ideas not yet placed wait for the next call (D33).
 - **Removal** of an idea that left the cut makes no call; a re-cut of unchanged ideas makes none.
 
 The list has no state table of its own, so three facts are read from the rows (X3):
@@ -20,8 +21,8 @@ The list has no state table of its own, so three facts are read from the rows (X
   not placed by a rebuild, which covers ideas inserted since, changed ones and absent ones.
 - *Changed*: a ranking row's ``id`` is the id of the ``landscape_deep`` row it was placed on. A
   row whose id is another S6 record of the same idea was placed on an older version, and is
-  removed and inserted again. A row whose id is no S6 record (an epoch copy gives rows fresh
-  ids) is kept as it is.
+  removed and inserted again. An epoch copy gives a ranking row the id of its copied S6
+  record; a row whose id is no S6 record (its record had no copy) is kept as it is.
 - *Rebuild in flight*: the epoch's newest rerank batch of deep comparisons is not
   ``comparator.tournament_complete``.
 
@@ -66,8 +67,6 @@ REBUILD_FULL_UP_TO = 11
 REBUILD_NEW_DIVISOR = 4
 #: Seconds between attempts to take the epoch's rerank lock while another call holds it.
 LOCK_RETRY_SECONDS = 2.0
-#: Seconds between liveness checks while a simulation run is live (D33).
-LIVE_POLL_SECONDS = 30.0
 _USABLE = ("done", "rescued")
 
 
@@ -81,7 +80,7 @@ class _Member:
     score: float
 
 
-# --- the lock and the liveness wait ---------------------------------------------------------
+# --- the lock -------------------------------------------------------------------------------
 
 
 @contextlib.asynccontextmanager
@@ -104,14 +103,6 @@ async def _rerank_lock(epoch_id: uuid.UUID) -> AsyncIterator[advisory_locks.Sess
         yield lock
     finally:
         await lock.release()
-
-
-async def _wait_while_live(db_factory) -> None:
-    while True:
-        async with db_factory() as db:
-            if not await liveness.simulation_live(db):
-                return
-        await asyncio.sleep(LIVE_POLL_SECONDS)
 
 
 # --- reads ----------------------------------------------------------------------------------
@@ -246,6 +237,23 @@ async def _rebuild_in_flight(db: AsyncSession, epoch_id: uuid.UUID) -> bool:
     return batch_id is not None and not await comparator.tournament_complete(db, batch_id)
 
 
+async def _resend(db_factory, epoch_id: uuid.UUID) -> None:
+    """Re-send the epoch's rebuild comparisons a batch result put back to ``pending``
+    (``batches.transition``) or reconciliation released: batched before (``batch_item_id``
+    set) and not waiting for the fallback chain. Without this the rebuild never completes."""
+    c = LandscapeComparison
+    async with db_factory() as db:
+        ids = list((await db.scalars(select(c.id).where(
+            c.epoch_id == epoch_id, c.basis == BASIS, c.status == "pending",
+            c.batch_item_id.is_not(None), c.fallback_from.is_(None),
+        ))).all())
+    if not ids:
+        return
+    batch_id = await comparator.submit_rows(db_factory, ids)
+    logger.info("rerank %s: re-sent %d rebuild comparison(s) in batch %s",
+                epoch_id, len(ids), batch_id)
+
+
 # --- writes ---------------------------------------------------------------------------------
 
 
@@ -283,17 +291,20 @@ async def _replace(
 
 async def _insert(
     db_factory, epoch_id: uuid.UUID, idea: uuid.UUID, member: _Member
-) -> None:
+) -> bool:
     """Place one idea by binary search over the committed list: about log₂K synchronous
-    questions, each after waiting out a live simulation run (D33)."""
+    questions. False, with the list untouched, when a simulation run is live before a
+    question (S7 yields like S6, D33); True otherwise."""
     async with db_factory() as db:
         order = [r.idea_id for r in await _ranked(db, epoch_id)]
     if idea in order:
-        return
+        return True
     lo, hi = 0, len(order)
     while lo < hi:
         mid = (lo + hi) // 2
-        await _wait_while_live(db_factory)
+        async with db_factory() as db:
+            if await liveness.simulation_live(db):
+                return False
         above = await comparator.compare(
             db_factory, idea, order[mid], epoch_id=epoch_id, basis=BASIS
         )
@@ -310,6 +321,7 @@ async def _insert(
         )
         db.add(r(id=member.deep_id, epoch_id=epoch_id, idea_id=idea, position=lo + 1))
         await db.commit()
+    return True
 
 
 async def _insert_all(
@@ -317,13 +329,19 @@ async def _insert_all(
     members: Mapping[uuid.UUID, _Member], lock: advisory_locks.SessionAdvisoryLock,
 ) -> None:
     """Insert ``ideas`` one at a time; an idea the comparator cannot place (an S6 record gone
-    meanwhile) is left for the next call."""
-    for idea in ideas:
+    meanwhile) is left for the next call. A live simulation run stops the loop: that idea and
+    the rest are left for the next call (D33)."""
+    for n, idea in enumerate(ideas):
         await lock.check()
         try:
-            await _insert(db_factory, epoch_id, idea, members[idea])
+            inserted = await _insert(db_factory, epoch_id, idea, members[idea])
         except ValueError as exc:
             logger.warning("rerank: idea %s not inserted: %s", idea, exc)
+            continue
+        if not inserted:
+            logger.info("rerank %s: a simulation run is live, %d insertion(s) wait",
+                        epoch_id, len(ideas) - n)
+            return
 
 
 async def _land(db_factory, epoch_id: uuid.UUID, lock: advisory_locks.SessionAdvisoryLock) -> None:
@@ -359,17 +377,25 @@ async def _land(db_factory, epoch_id: uuid.UUID, lock: advisory_locks.SessionAdv
 async def update_rankings(db_factory, *, epoch_id: uuid.UUID, cut_id: uuid.UUID) -> None:
     """Bring the epoch's S7 list up to the complete cut ``cut_id`` (spec §7.8).
 
-    Does nothing while a rebuild batch is in flight. Otherwise removes ideas that left the cut
-    or changed, then submits a rebuild when the list is empty or more than a quarter of the
-    cut is new since the last rebuild (landing it at once when every pair is already
-    answered), else inserts the absent members one at a time. Waits for the epoch's rerank
-    lock, and blocks through every synchronous question it asks.
+    While a rebuild batch is in flight, only re-sends its comparisons a result put back to
+    ``pending`` and changes nothing else. Otherwise removes ideas that left the cut or
+    changed, then submits a rebuild when the list is empty or more than a quarter of the cut
+    is new since the last rebuild (landing it at once when every pair is already answered),
+    else inserts the absent members one at a time until a simulation run is live (D33).
+    Waits for the epoch's rerank lock, and blocks through every synchronous question it asks.
+
+    Every path may spend on the model (a batch or synchronous questions), so call it only
+    when new model work is allowed: the worker calls it from ``_sync_step``, which runs only
+    under the daily cap and with no simulation run live.
     """
     async with _rerank_lock(epoch_id) as lock:
         async with db_factory() as db:
-            if await _rebuild_in_flight(db, epoch_id):
-                logger.info("rerank %s: rebuild in flight, cut %s waits", epoch_id, cut_id)
-                return
+            in_flight = await _rebuild_in_flight(db, epoch_id)
+        if in_flight:
+            logger.info("rerank %s: rebuild in flight, cut %s waits", epoch_id, cut_id)
+            await _resend(db_factory, epoch_id)
+            return
+        async with db_factory() as db:
             cut = await db.get(LandscapeCut, cut_id)
             if cut is None or cut.epoch_id != epoch_id or cut.status != "complete":
                 logger.warning("rerank %s: cut %s is not a complete cut of it", epoch_id, cut_id)

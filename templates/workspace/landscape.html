@@ -29,7 +29,7 @@
 
 {% if expert and expert.is_expert and expert['items'] %}
 <section class="landscape-expert-sample mb-8">
-    <h2 class="text-lg font-semibold text-gray-900 mb-1">Your expert opportunities ({{ expert.quarter }})</h2>
+    <h2 class="text-lg font-semibold text-gray-900 mb-1">Your expert opportunities</h2>
     <p class="text-sm text-gray-600 mb-3 max-w-[68ch]">Judge each in full on its page. The pipeline's own calls stay hidden until you submit.</p>
     <div class="space-y-4">{% for card in expert['items'] %}{% with card=card, scope='expert' %}{% include "landscape/_card.html" %}{% endwith %}{% endfor %}</div>
 </section>
@@ -62,7 +62,7 @@
 <section class="landscape-this-week mb-8">
     <h2 class="text-lg font-semibold text-gray-900 mb-1">This week's batch</h2>
     {% if batch.this_week %}
-    <p class="text-sm text-gray-600 mb-3">Issued {{ batch.this_week.issued_on }}{% if batch.this_week.blind %} · a blind batch: its cards are shuffled, and each hides its score, band and rank until you decide{% endif %}.</p>
+    <p class="text-sm text-gray-600 mb-3">Issued {{ batch.this_week.issued_on }}{% if batch.this_week.blind %} · a blind batch: its cards are shuffled, each hides its score and band until you decide, and the ranks stay hidden until the next batch is issued{% endif %}.</p>
     {% if batch.this_week.cards %}
     <div class="space-y-4">{% for card in batch.this_week.cards %}{% with card=card, scope='week' %}{% include "landscape/_card.html" %}{% endwith %}{% endfor %}</div>
     {% else %}<p class="text-sm text-gray-600">This week's batch is empty.</p>{% endif %}

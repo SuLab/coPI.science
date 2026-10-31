@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.landscaping import batches, epochs
+from src.landscaping.schemas import stage_schema
 from src.landscaping.stages import triage
 from src.models.landscape import (
     LandscapeDocument,
@@ -225,8 +226,9 @@ async def test_failed_evidence_does_not_block_triage(db_factory, submitted):
 async def test_triage_scores_and_requests_with_the_epochs_inputs(
     db_factory, submitted, monkeypatch
 ):
-    """The request's model and system prompt, the fallback rebuild and the computed score all
-    come from the epoch's snapshot, not the settings or files at the time of the call."""
+    """The request's model, system prompt and schema, the fallback rebuild and the computed
+    score all come from the epoch's snapshot, not the settings or files at the time of the
+    call."""
     from src.config import get_settings
 
     stored_model = get_settings().landscape_triage_model
@@ -241,6 +243,9 @@ async def test_triage_scores_and_requests_with_the_epochs_inputs(
         rebuilt = await triage.FALLBACKS[0].build(db, row)
     assert request["model"] == stored_model == rebuilt["model"]
     assert request["system"] == inputs.system("triage") == rebuilt["system"]
+    schema = stage_schema("triage", inputs.rubric)
+    assert request["output_config"]["format"]["schema"] == schema
+    assert rebuilt["output_config"]["format"]["schema"] == schema
 
     scores = {"differentiation_unmet_need": 3, "scientific_credibility": 4,
               "translational_path": 2}

@@ -15,11 +15,11 @@ compare with (``expected``). Item kinds and the stages whose change runs them:
 - ``similarity`` (S8): 30 similarity verdicts of the active epoch; labels are never scored;
 - ``expert``: submitted expert judgments (§10.6), with the active epoch's recommendation.
 
-**The gate** (``run_regression``) asks the candidate epoch's own prompts and models
+**The gate** (``run_regression``) asks the candidate epoch's own prompts, models and rubric
 (``epochs.epoch_inputs``) for each item of the stages its change touches, and holds the epoch
-when any stage misses its threshold. With no active epoch only the S2-S4 items are checked
-(D65). The candidate is judged on the set version current when it was created, or the first
-version when it predates every version.
+when any stage misses its threshold or has no item to check (expert items excepted). With no
+active epoch only the S2-S4 items are checked (D65). The candidate is judged on the set version
+current when it was created, or the first version when it predates every version.
 
 Reading the S6 dossier, the S9 message and the S7/S8 texts reuses the stage modules' own
 builders, so a regression request is the production request (D32). The S6 item is asked as
@@ -88,6 +88,10 @@ KIND_STAGES: dict[str, tuple[str, ...]] = {
 }
 #: All an epoch is checked on while none is active (D65).
 FIRST_EPOCH_KINDS = ("screen", "extract", "triage")
+#: The kinds a set version may hold none of without failing the gate: no submitted expert
+#: judgment is a normal state (§10.6). Any other touched kind with no items fails its stage, so
+#: an unchecked change is held for an admin (L28) rather than passed.
+EMPTY_ALLOWED_KINDS = frozenset({"expert"})
 
 # The §10.4 pass rule for S6-S9 (S2-S4 use the §10.1 thresholds in ``eval.bakeoff``).
 DEEP_MIN_GATES = 0.90
@@ -489,7 +493,9 @@ async def _ask_users(
     model; keyed by item id."""
     model, system = inputs.model(stage), inputs.system(stage)
     requests = {
-        str(item.id): stage_request(stage, item.item_ref["user"], model=model, system=system)
+        str(item.id): stage_request(
+            stage, item.item_ref["user"], model=model, system=system, rubric=inputs.rubric
+        )
         for item in items
     }
     return await _ask_stage(stage, requests, inputs=inputs, db_factory=db_factory)
@@ -539,7 +545,9 @@ async def _check_deep(items, *, inputs, db_factory, docs) -> dict:
     model, system = inputs.model("deep"), inputs.system("deep")
     requests = {}
     for item in items:
-        request = stage_request("deep", item.item_ref["user"], model=model, system=system)
+        request = stage_request(
+            "deep", item.item_ref["user"], model=model, system=system, rubric=inputs.rubric
+        )
         # S6's final round: no tools, the closing instruction appended (deep._analysis).
         request["messages"] = deep._with_final_text(request["messages"])
         requests[str(item.id)] = request
@@ -667,7 +675,9 @@ async def run_regression(db_factory, epoch_id: uuid.UUID) -> bool:
     stages its change touches (``kinds_to_check``; S2-S4 only while no epoch is active), each
     stage against its threshold: S2-S4 the §10.1 ones; S6 gates and scores ±1 ≥ 90%; S7 and
     the S5 tie-break the winner ≥ 80%; S8 the verdict ≥ 85%; S9 the recommendation ≥ 80%,
-    gates and scores ±1 ≥ 90%; expert items at least as often as the active epoch.
+    gates and scores ±1 ≥ 90%; expert items at least as often as the active epoch. A touched
+    kind the version holds no items of fails its stage (``{"items": 0, "checks": {"items":
+    False}, "passed": False}``), except an ``EMPTY_ALLOWED_KINDS`` one, which is skipped.
 
     Records a ``LandscapeRegressionRun`` with the per-stage results and stamps the epoch's
     ``regression_set_version`` and ``regression_run_id``. On a failure the epoch is held
@@ -699,10 +709,14 @@ async def run_regression(db_factory, epoch_id: uuid.UUID) -> bool:
     by_kind: dict[str, list[LandscapeRegressionItem]] = defaultdict(list)
     for item in items:
         by_kind[item.item_kind].append(item)
-    results = {
-        kind: await _CHECKS[kind](by_kind[kind], inputs=inputs, db_factory=db_factory, docs=docs)
-        for kind in kinds if by_kind[kind]
-    }
+    results: dict[str, dict] = {}
+    for kind in kinds:
+        if by_kind[kind]:
+            results[kind] = await _CHECKS[kind](
+                by_kind[kind], inputs=inputs, db_factory=db_factory, docs=docs
+            )
+        elif kind not in EMPTY_ALLOWED_KINDS:
+            results[kind] = {"items": 0, "checks": {"items": False}, "passed": False}
     passed = all(result["passed"] for result in results.values())
     run_id = uuid.uuid4()
     async with db_factory() as db:

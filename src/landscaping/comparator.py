@@ -11,7 +11,9 @@ is asked in both orders.
   the S5 boundary tournament. It goes through a Message Batch, never a synchronous call, so it
   never waits on a live simulation run (§7.6).
 - Basis ``deep``: the S6 record, for S7: ``compare`` (one synchronous insertion question) and
-  the rebuild tournament (a Message Batch).
+  the rebuild tournament (a Message Batch). S6 output restates untrusted source text, so it
+  is fenced with ``delimit(..., "publication_abstract")``; the S4 dossier fences its own
+  extracted text (``triage.triage_dossier``) and is shown as stored.
 
 Every request is built with the comparison's epoch's own system prompt and model
 (``epochs.epoch_inputs``), never the current files and settings, so an epoch never mixes
@@ -34,6 +36,7 @@ from sqlalchemy import and_, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.agent.prompt_safety import delimit
 from src.landscaping import batches, epochs
 from src.landscaping.batches import BatchOutcome, FallbackAdapter
 from src.landscaping.llm_client import CallResult, build_request, call_sync
@@ -258,7 +261,9 @@ async def _texts(
     db: AsyncSession, rows: Iterable[LandscapeComparison]
 ) -> dict[tuple[uuid.UUID, str], str]:
     """``(idea id, version) -> text`` for both ideas of every row: the triage row's stored
-    dossier for basis ``triage``, ``deep_text`` for ``deep``."""
+    dossier for basis ``triage``, ``deep_text`` fenced as ``publication_abstract`` for
+    ``deep``. The regression gate stores these texts and replays them through ``_request``,
+    so its requests match production's (D32)."""
     wanted: dict[tuple[uuid.UUID, str], set[tuple[uuid.UUID, str]]] = defaultdict(set)
     for row in rows:
         wanted[(row.epoch_id, row.basis)] |= {(row.idea_a, row.version_a), (row.idea_b, row.version_b)}
@@ -276,7 +281,8 @@ async def _texts(
                 if key not in keys:
                     continue
                 text = (
-                    (record.raw or {}).get("dossier") if basis == "triage" else deep_text(record)
+                    (record.raw or {}).get("dossier") if basis == "triage"
+                    else delimit(deep_text(record), "publication_abstract")
                 )
                 if text:
                     texts[key] = text
@@ -567,8 +573,8 @@ async def compare(
     answered at these versions (cached across cuts, so a re-cut makes no call). When the
     answers agree, or only one order was answered, that idea wins; otherwise the higher S6
     provisional ``weighted_score`` wins, then the lower id. ``ValueError`` when either idea
-    has no usable S6 record in the epoch. The caller serializes insertions and waits while a
-    simulation run is live (D33).
+    has no usable S6 record in the epoch. The caller serializes insertions and asks nothing
+    while a simulation run is live (D33).
     """
     if basis != "deep":
         raise ValueError("compare is the S7 comparator: basis must be 'deep'")

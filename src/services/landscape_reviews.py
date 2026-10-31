@@ -375,7 +375,9 @@ async def submit_expert_judgment(
     """Store an expert's own calls on one of their sample items and set ``submitted_at``, which
     lifts the hiding of S9's and S6's calls on it (L55, D63). Caller commits.
 
-    The item is the expert's newest ``LandscapeExpertJudgment`` row for this opportunity.
+    The item is the expert's newest ``LandscapeExpertJudgment`` row for this opportunity,
+    whatever its quarter: the row whose being unsubmitted makes ``landscape_view`` hide the
+    calls, in the same order (drawn, then quarter, then id).
     ``NotInExpertSample`` when there is none (the item is outside their own sample);
     ``ValueError`` when it is already submitted (the comparison needs the calls made before S9's
     were visible), or for a gate outside the live rubric, a deal-breaker outside the criteria
@@ -387,7 +389,10 @@ async def submit_expert_judgment(
             LandscapeExpertJudgment.opportunity_id == opportunity_id,
             LandscapeExpertJudgment.expert_id == expert.id,
         )
-        .order_by(LandscapeExpertJudgment.drawn_at.desc())
+        .order_by(
+            LandscapeExpertJudgment.drawn_at.desc(), LandscapeExpertJudgment.quarter.desc(),
+            LandscapeExpertJudgment.id.desc(),
+        )
         .limit(1)
         .with_for_update()
     )

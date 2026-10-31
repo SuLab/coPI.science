@@ -5,7 +5,7 @@ Opportunities, assessments and batches are written directly; every name is inven
 """
 import json
 import uuid
-from datetime import date
+from datetime import UTC, date, datetime
 
 import pytest
 from sqlalchemy import func, select
@@ -34,6 +34,7 @@ from src.models.landscape import (
     LandscapeReviewBatchItem,
     LandscapeReviewEvent,
 )
+from src.services import landscape_view
 from src.services.blackbird_rubric import RUBRIC_VERSION, load_rubric
 from tests import factories
 from tests.integration.test_manager_access import auth_headers
@@ -344,6 +345,35 @@ async def test_expert_judgment_only_for_own_sample_items(client, db_session):
     assert own.gates == {gate: "met"}
     assert own.scores == {rubric.dimensions[0].key: rubric.scale_max}
     assert own.recommendation == "advance"
+
+
+async def test_expert_judgment_from_an_earlier_quarter_still_submits(client, db_session):
+    """D63: the hiding holds from the draw until submission, whatever the quarter, so the
+    expert can still submit an item drawn in an earlier quarter, and only that lifts it."""
+    expert = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    db_session.add(AppSetting(key=EXPERTS_KEY, value=json.dumps([str(expert.id)])))
+    opp, assessment = await _opportunity(db_session)
+    row = LandscapeExpertJudgment(
+        opportunity_id=opp, expert_id=expert.id, expert_name=expert.name,
+        quarter="2020-Q1", landscape_assessment_id=assessment,
+        drawn_at=datetime(2020, 2, 1, tzinfo=UTC),
+    )
+    db_session.add(row)
+    await db_session.flush()
+    assert (await landscape_view.hiding_for(db_session, expert, opp)).expert is True
+
+    rubric = load_rubric()
+    r = await client.post(
+        f"/reviews/landscape/{opp}/expert-judgment", headers=auth_headers(expert.id),
+        data={"recommendation": "pass", "comment": "Invented judgment.",
+              f"gate_{next(iter(rubric.gating))}": "met",
+              f"dim_{rubric.dimensions[0].key}": str(rubric.scale_max)},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    await db_session.refresh(row)
+    assert row.submitted_at is not None
+    assert (await landscape_view.hiding_for(db_session, expert, opp)).expert is False
 
 
 async def test_reviewer_posts_outside_issued_batches_404(client, db_session):

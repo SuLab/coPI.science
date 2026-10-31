@@ -8,10 +8,10 @@ review routes and the chat record apply the same ones (``hiding_for``, ``hide_as
 - **Blind batch** (L53, D56): until the viewer has a quick decision on an opportunity that is a
   card of a blind batch, its score, band, rank, dimension and provisional scores,
   ``score_rationale`` and ``dimension_rationales`` are hidden.
-- **Expert sample** (D63): on the viewer's own unsubmitted expert-sample item of the current
-  quarter, S9's and S6's calls are hidden (gates, scores, provisional scores, deal-breaker
-  confirmations, panel opinions, rationales, band, recommendation). Both hidings apply until
-  both lift.
+- **Expert sample** (D63): on an opportunity whose newest expert-sample judgment by the viewer
+  is unsubmitted, whatever its quarter, S9's and S6's calls are hidden (gates, scores,
+  provisional scores, deal-breaker confirmations, panel opinions, rationales, band,
+  recommendation, and every display derived from them). Both hidings apply until both lift.
 
 **Which assessment** (spec §7.10, §13.2, X1). The assessment *shown* for an opportunity is its
 newest ``done`` S9 row in the active epoch (highest opportunity version, then newest), never a
@@ -24,9 +24,11 @@ as history: its last ``done`` assessment of an active or retired epoch, marked r
 people's decisions, reviews and status events; tabs and counts are the viewer's own.
 
 **Probe flags and blind batches** (F2, D56). A card's ``probe`` flag is true only once the blind
-batch that issued it is superseded by a later batch. Probe opportunities stay out of the staff
-lists until then, and a viewer with an undecided card in a blind batch sees none of that batch's
-cards in **Current** or **All assessed**.
+batch that issued it is superseded by a later batch. Until then no card of that batch shows a
+rank, for any viewer: probes are never ranked, so a rank on its in-cut cards alone would flag
+the probes (``_shown_rank``). Probe opportunities stay out of the staff lists until then, and a
+viewer with an undecided card in a blind batch sees none of that batch's cards in **Current**
+or **All assessed**, nor that batch's results on the pipeline page.
 """
 from __future__ import annotations
 
@@ -44,7 +46,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.landscaping import reports, review_batches
 from src.landscaping.intake import _parse_controls
-from src.landscaping.review_batches import viewer_cards
+from src.landscaping.review_batches import decision_changed, viewer_cards
+from src.landscaping.stages.opportunities import _passed_deep
 from src.landscaping.stages.rerank import card_order
 from src.landscaping.structured_lines import structured_line
 from src.landscaping.worker import picks_applied
@@ -104,9 +107,15 @@ _BLIND_ASSESSMENT = frozenset({
     "weighted_score", "band", "rank", "scores", "score_rationale", "dimension_rationales",
     "raw_verdict",
 })
-#: S9 columns hidden on an expert's own open sample item (D63).
+#: S9 columns hidden on an expert's own open sample item (D63): every column that states a call
+#: or a reason for one. ``red_flags`` are S9's deal-breaker confirmations; ``risks`` also carry
+#: confirmed flags that are not disqualifier-grade, and ``strengths`` are their counterpart;
+#: ``confidence`` and ``funnel_stage`` qualify the recommendation. Descriptive columns stay
+#: (headline, pitch, key points and their support, next experiment, competitive landscape,
+#: evidence maturity, member notes, structured lines).
 _EXPERT_ASSESSMENT = _BLIND_ASSESSMENT | {
-    "gating", "gating_rationales", "rationale", "recommendation",
+    "gating", "gating_rationales", "rationale", "recommendation", "red_flags", "risks",
+    "strengths", "confidence", "funnel_stage",
 }
 #: S6 columns a blind-batch card hides: the provisional scores and their reasons (D56).
 _BLIND_DEEP = frozenset({
@@ -130,7 +139,7 @@ class Hiding:
     """What one viewer may not see yet on one opportunity."""
 
     blind: bool  # an undecided card of a blind batch (L53, D56)
-    expert: bool  # the viewer's own unsubmitted expert-sample item this quarter (D63)
+    expert: bool  # the viewer's newest expert-sample judgment on it is unsubmitted (D63)
 
 
 # --- small helpers ----------------------------------------------------------------------------
@@ -178,7 +187,7 @@ async def _setting(db: AsyncSession, key: str) -> str | None:
 @dataclass
 class _Viewer:
     """One viewer's own state: their quick decisions, the blind-batch cards and their open
-    expert items this quarter."""
+    expert items (newest judgment unsubmitted, any quarter)."""
 
     user: Any
     staff: bool
@@ -202,20 +211,22 @@ async def _viewer(db: AsyncSession, user: Any, only: uuid.UUID | None = None) ->
     )
     decisions = select(D).where(D.reviewer_id == user.id)
     blind = select(BI.opportunity_id).join(B, B.id == BI.batch_id).where(B.blind.is_(True))
-    expert = select(J).where(
-        J.expert_id == user.id, J.submitted_at.is_(None), J.quarter == _quarter(datetime.now(UTC))
-    )
+    # Oldest first, so the dict below keeps each opportunity's newest judgment: the one
+    # ``landscape_reviews.submit_expert_judgment`` submits. The hiding holds from the draw until
+    # that submission, whatever the quarter (D63).
+    expert = select(J).where(J.expert_id == user.id).order_by(J.drawn_at, J.quarter, J.id)
     if only is not None:
         decisions = decisions.where(D.opportunity_id == only)
         blind = blind.where(BI.opportunity_id == only)
         expert = expert.where(J.opportunity_id == only)
+    newest = {j.opportunity_id: j for j in (await db.scalars(expert)).all()}
     return _Viewer(
         user=user,
         staff=is_staff(user),
         admin=user.user_role == USER_ROLE_ADMIN,
         decisions={d.opportunity_id: d for d in (await db.scalars(decisions)).all()},
         blind=set((await db.scalars(blind)).all()),
-        expert={j.opportunity_id: j for j in (await db.scalars(expert)).all()},
+        expert={o: j for o, j in newest.items() if j.submitted_at is None},
     )
 
 
@@ -230,7 +241,8 @@ def hide_assessment(values: dict, hiding: Hiding) -> dict:
 
     Blind: ``weighted_score``, ``band``, ``rank``, ``scores``, ``score_rationale``,
     ``dimension_rationales``. Expert: those plus ``gating``, ``gating_rationales``,
-    ``rationale`` and ``recommendation``. Either drops ``raw_verdict``, which holds them all."""
+    ``rationale``, ``recommendation``, ``red_flags``, ``risks``, ``strengths``, ``confidence``
+    and ``funnel_stage``. Either drops ``raw_verdict``, which holds them all."""
     hidden: frozenset[str] = frozenset()
     if hiding.blind:
         hidden |= _BLIND_ASSESSMENT
@@ -292,11 +304,12 @@ def visible_votes(user, opportunity_id, decisions, reviews, events) -> tuple[lis
 
 
 def changed_since_decision(decision, shown_assessment_id: uuid.UUID | None) -> bool:
-    """Whether `decision` was made on an assessment other than the one shown now (D50). No
-    decision is never changed; None (no completed assessment) differs from any decided id."""
+    """Whether `decision` was made on an assessment other than the one shown now (D50), by
+    ``review_batches.decision_changed``, the rule the "changed" list uses. No decision, or no
+    completed assessment shown (None), is never changed: there is nothing to compare."""
     if decision is None:
         return False
-    return decision.landscape_assessment_id != shown_assessment_id
+    return decision_changed(decision.landscape_assessment_id, shown_assessment_id)
 
 
 def strip_staff_only(view: dict, user) -> dict:
@@ -392,6 +405,14 @@ class _Issued:
 
     def batch_of(self) -> dict[uuid.UUID, LandscapeReviewBatch]:
         return {b.id: b for b in self.batches}
+
+    def open_blind(self) -> set[uuid.UUID]:
+        """The cards of every blind batch not yet superseded: none of them shows a rank (F2)."""
+        batches = self.batch_of()
+        return {
+            i.opportunity_id for i in self.items
+            if batches[i.batch_id].blind and not self.superseded(batches[i.batch_id])
+        }
 
     def visible_probes(self) -> set[uuid.UUID]:
         """Probes whose blind batch is superseded: the only probe flags any page shows (F2)."""
@@ -587,6 +608,63 @@ def _best_rank(members: Sequence[uuid.UUID], s7: Mapping, s5: Mapping) -> int | 
     return min(ranks) if ranks else None
 
 
+@dataclass(frozen=True)
+class _Unranked:
+    """What ``_shown_rank`` reads from the issued batches."""
+
+    open_blind: set[uuid.UUID]  # ``_Issued.open_blind``
+    probes: set[uuid.UUID]  # revealed probes, ``_Issued.visible_probes``
+
+    @classmethod
+    def of(cls, issued: _Issued) -> _Unranked:
+        return cls(issued.open_blind(), issued.visible_probes())
+
+
+def _shown_rank(
+    opportunity_id: uuid.UUID, version: LandscapeOpportunityVersion | None,
+    members: Sequence[uuid.UUID], unranked: _Unranked, s7: Mapping, s5: Mapping,
+) -> int | None:
+    """The rank any page or the chat record shows for an opportunity, before the viewer's own
+    hiding: the best member's S7 position, else its S5 rank (D30). None for every card of a
+    blind batch not yet superseded, and for a probe not yet revealed: a probe is never ranked,
+    so a rank (or its absence) would flag it (F2, spec §10.6)."""
+    if opportunity_id in unranked.open_blind:
+        return None
+    if version is not None and version.is_probe and opportunity_id not in unranked.probes:
+        return None
+    return _best_rank(members, s7, s5)
+
+
+async def shown_rank(
+    db: AsyncSession, opportunity_id: uuid.UUID, version: LandscapeOpportunityVersion | None,
+    member_ids: Sequence[uuid.UUID],
+) -> int | None:
+    """``_shown_rank`` for one opportunity whose member ideas are `member_ids` (ids in the
+    active epoch), read from the active epoch's ranks; the chat record's rank."""
+    ep = await _epochs(db)
+    s7, s5 = await _ranks(db, ep.active_id)
+    unranked = _Unranked.of(await _issued(db))
+    return _shown_rank(opportunity_id, version, member_ids, unranked, s7, s5)
+
+
+async def member_deep(db: AsyncSession, idea: LandscapeIdea) -> LandscapeDeep | None:
+    """The S6 record a member idea is judged by, as S8 picks it
+    (``stages.opportunities._passed_deep``): its current version's passed (``done`` or
+    ``rescued``) record, else its newest passed one; None when it has none. The detail page
+    and the chat record both show this one."""
+    return (await _passed_deep(db, idea.epoch_id, {idea.id: idea.version_hash or ""})).get(idea.id)
+
+
+def _member_epoch(
+    version: LandscapeOpportunityVersion, display: LandscapeAssessment | None
+) -> uuid.UUID:
+    """The epoch a card's member keys resolve in: the displayed assessment's. A probe is not
+    re-minted at activation, so its version can belong to a retired epoch while the new epoch
+    re-assessed it (``final._candidate_due``); its members, S6 records, labs and rank are
+    then the new epoch's."""
+    return display.epoch_id if display is not None else version.epoch_id
+
+
 def _card(
     viewer: _Viewer, opp: LandscapeOpportunity, version: LandscapeOpportunityVersion | None,
     pick: _Pick, *, probe: bool, labs: list[str], rank: int | None,
@@ -625,14 +703,14 @@ def _card(
 
 async def _load_cards(
     db: AsyncSession, viewer: _Viewer, ep: _Epochs, opportunity_ids: Iterable[uuid.UUID],
-    visible_probes: set[uuid.UUID],
+    issued: _Issued,
 ) -> _Cards:
     """Card dicts (§13.1) for these opportunities; unknown ids are skipped.
 
     Each card: ``opportunity_id`` (str), ``label`` (str|None), ``headline`` (str|None),
     ``structured_lines`` (list[str]), ``pitch`` (str|None, two sentences), ``labs``
-    (list[str]), ``score`` (float|None), ``band`` (str|None), ``rank`` (int|None, the best
-    member's S7 position or S5 rank; None for a probe not yet revealed), ``recommendation``
+    (list[str]), ``score`` (float|None), ``band`` (str|None), ``rank`` (int|None,
+    ``_shown_rank``: None on every card of an unsuperseded blind batch), ``recommendation``
     (str|None), ``assessment_id`` (str|None, the assessment rendered), ``no_assessment``
     (bool), ``failure``
     ({"status", "error"}|None), ``history_assessment_id`` (str|None), ``retired`` (bool),
@@ -640,6 +718,7 @@ async def _load_cards(
     dict|None) and ``changed_since_decision`` (bool). Score, band, rank and recommendation
     are None where the viewer's hiding hides them."""
     ids = set(opportunity_ids)
+    visible_probes = issued.visible_probes()
     opps = {o.id: o for o in (await db.scalars(
         select(LandscapeOpportunity).where(LandscapeOpportunity.id.in_(list(ids)))
     )).all()}
@@ -651,25 +730,24 @@ async def _load_cards(
     }
     chosen = {o: _card_version(opp, versions.get(o, {}), picks[o].display)
               for o, opp in opps.items()}
-    wanted = {(v.epoch_id, key) for v in chosen.values() if v for key in v.member_idea_keys or []}
+    epoch_of = {o: _member_epoch(v, picks[o].display) for o, v in chosen.items() if v}
+    wanted = {(epoch_of[o], key) for o, v in chosen.items() if v
+              for key in v.member_idea_keys or []}
     idea_ids = await _idea_ids(db, wanted)
     members = {
-        o: [idea_ids[(v.epoch_id, k)] for k in (v.member_idea_keys or [])
-            if (v.epoch_id, k) in idea_ids]
+        o: [idea_ids[(epoch_of[o], k)] for k in (v.member_idea_keys or [])
+            if (epoch_of[o], k) in idea_ids]
         if v else []
         for o, v in chosen.items()
     }
     labs = await _lab_names(db, {i for ids_ in members.values() for i in ids_})
     s7, s5 = await _ranks(db, ep.active_id)
-    # An unrevealed probe's rank lies beyond the cut, so showing it would flag it (F2).
-    unranked = {
-        o for o, v in chosen.items() if v is not None and v.is_probe and o not in visible_probes
-    }
+    unranked = _Unranked.of(issued)
     by_id = {
         o: _card(
             viewer, opp, chosen[o], picks[o], probe=o in visible_probes,
             labs=sorted({name for i in members[o] for name in labs.get(i, [])}),
-            rank=None if o in unranked else _best_rank(members[o], s7, s5),
+            rank=_shown_rank(o, chosen[o], members[o], unranked, s7, s5),
         )
         for o, opp in opps.items()
     }
@@ -711,9 +789,7 @@ async def batch_view(db, user) -> dict:
     viewer = await _viewer(db, user)
     ep = await _epochs(db)
     issued = await _issued(db)
-    cards = await _load_cards(
-        db, viewer, ep, {i.opportunity_id for i in issued.items}, issued.visible_probes()
-    )
+    cards = await _load_cards(db, viewer, ep, {i.opportunity_id for i in issued.items}, issued)
     grouped: dict[uuid.UUID, list[LandscapeReviewBatchItem]] = defaultdict(list)
     for item in issued.items:
         if item.opportunity_id in cards.by_id:
@@ -750,17 +826,29 @@ def _on_batch(card: dict, batch: LandscapeReviewBatch) -> dict:
             "blind": batch.blind}
 
 
-def _withheld_blind(issued: _Issued, viewer: _Viewer) -> set[uuid.UUID]:
-    """Every card of each blind batch in which the viewer has an undecided card (F2)."""
+def _withheld_batches(issued: _Issued, viewer: _Viewer) -> dict[uuid.UUID, list[uuid.UUID]]:
+    """Each blind batch in which the viewer has an undecided card, with its cards (F2)."""
     by_batch: dict[uuid.UUID, list[uuid.UUID]] = defaultdict(list)
     for item in issued.items:
         by_batch[item.batch_id].append(item.opportunity_id)
-    out: set[uuid.UUID] = set()
-    for batch in issued.batches:
-        opps = by_batch.get(batch.id, [])
-        if batch.blind and any(o not in viewer.decisions for o in opps):
-            out.update(opps)
-    return out
+    return {
+        batch.id: by_batch[batch.id] for batch in issued.batches
+        if batch.blind and any(o not in viewer.decisions for o in by_batch.get(batch.id, []))
+    }
+
+
+def _withheld_blind(issued: _Issued, viewer: _Viewer) -> set[uuid.UUID]:
+    """Every card of each blind batch in which the viewer has an undecided card (F2)."""
+    return {o for opps in _withheld_batches(issued, viewer).values() for o in opps}
+
+
+def _visible_metrics(metrics: dict, issued: _Issued, viewer: _Viewer) -> dict:
+    """`metrics` without the ``blind_results`` of a blind batch in which the viewer has an
+    undecided card: its counts are other reviewers' votes on that card (L40, L50, D60)."""
+    withheld = {str(b) for b in _withheld_batches(issued, viewer)}
+    return {**metrics, "blind_results": [
+        r for r in metrics.get("blind_results") or [] if r.get("batch_id") not in withheld
+    ]}
 
 
 async def _list_candidates(
@@ -825,7 +913,7 @@ async def lists_view(
         candidates &= set((await db.scalars(
             select(R.opportunity_id).where(R.assignee_id == user.id)
         )).all())
-    cards = await _load_cards(db, viewer, ep, candidates, visible_probes)
+    cards = await _load_cards(db, viewer, ep, candidates, issued)
     ordered = [cards.by_id[o] for o in cards.order(cards.by_id)]
     reviewed = [c for c in ordered if c["my_decision"] is not None]
     unreviewed = [c for c in ordered if c["my_decision"] is None]
@@ -846,16 +934,19 @@ async def _cut_summary(db: AsyncSession, ep: _Epochs) -> dict | None:
 
 
 async def expert_view(db, user) -> dict:
-    """The viewer's open expert-sample items this quarter (L55, D63), whether or not issued.
+    """The viewer's open expert-sample items (L55, D63), whether or not issued: those whose
+    newest judgment is unsubmitted, an earlier quarter's included, since that is still the one
+    they submit.
 
-    Returns ``{"quarter": "YYYY-Qn", "is_expert": bool, "items": [card]}``; each card is a
+    Returns ``{"quarter": "YYYY-Qn" (the current quarter), "is_expert": bool, "items":
+    [card]}``; each card is a
     ``_load_cards`` card (S9's calls hidden) plus ``judgment_id`` (str), ``drawn_at``
     (datetime) and ``issued_before_draw`` (bool|None)."""
     viewer = await _viewer(db, user)
     ep = await _epochs(db)
     issued = await _issued(db)
     experts = {u.id for u in await review_batches._experts(db)}
-    cards = await _load_cards(db, viewer, ep, viewer.expert, issued.visible_probes())
+    cards = await _load_cards(db, viewer, ep, viewer.expert, issued)
     items = [
         {**cards.by_id[o], "judgment_id": _sid(j.id), "drawn_at": j.drawn_at,
          "issued_before_draw": j.issued_before_draw}
@@ -939,12 +1030,9 @@ async def _sources(db: AsyncSession, idea_id: uuid.UUID) -> tuple[list[dict], li
 async def _member(
     db: AsyncSession, idea: LandscapeIdea, hiding: Hiding, *, admin: bool, label: str | None,
 ) -> tuple[dict, list[dict]]:
-    """One member idea's section (§13.2) and its panel opinions for the evidence summary."""
-    D = LandscapeDeep
-    deep = await db.scalar(
-        select(D).where(D.epoch_id == idea.epoch_id, D.idea_id == idea.id)
-        .order_by(D.created_at.desc(), D.id.desc()).limit(1)
-    )
+    """One member idea's section (§13.2), its S6 record as ``member_deep`` picks it, and its
+    panel opinions for the evidence summary."""
+    deep = await member_deep(db, idea)
     consults: list[dict] = []
     if deep is not None and not hiding.expert:
         consults = [
@@ -976,14 +1064,17 @@ async def _member(
 
 
 async def _members(
-    db: AsyncSession, version: LandscapeOpportunityVersion | None, hiding: Hiding, *, admin: bool
+    db: AsyncSession, version: LandscapeOpportunityVersion | None, epoch_id: uuid.UUID | None,
+    hiding: Hiding, *, admin: bool,
 ) -> tuple[list[dict], list[dict]]:
-    if version is None:
+    """The version's member sections and panel opinions, its keys resolved in `epoch_id`
+    (``_member_epoch``)."""
+    if version is None or epoch_id is None:
         return [], []
     keys = list(version.member_idea_keys or [])
-    idea_ids = await _idea_ids(db, {(version.epoch_id, k) for k in keys})
-    ordered = list(dict.fromkeys(idea_ids[(version.epoch_id, k)] for k in keys
-                                 if (version.epoch_id, k) in idea_ids))
+    idea_ids = await _idea_ids(db, {(epoch_id, k) for k in keys})
+    ordered = list(dict.fromkeys(idea_ids[(epoch_id, k)] for k in keys
+                                 if (epoch_id, k) in idea_ids))
     ideas = {i.id: i for i in (await db.scalars(
         select(LandscapeIdea).where(LandscapeIdea.id.in_(ordered))
     )).all()} if ordered else {}
@@ -1035,15 +1126,18 @@ def _verdict(values: dict | None, hiding: Hiding, consults: list[dict]) -> dict:
     subject = SimpleNamespace(**values)
     scored = not (hiding.blind or hiding.expert)
     dimensions = build_dimension_rows(subject, revision) if scored else []
+    # The signals list S9's gates and red flags as strengths and risks: S9's calls, which the
+    # expert hiding withholds (D63). Under the blind hiding alone they read only unhidden values.
+    signals = None if hiding.expert else derive_strengths_and_risks(
+        subject, dimensions=dimensions, consults=consults, revision=revision,
+        revision_provenance=provenance,
+    )
     return {
         "dimensions": dimensions,
         "revision_provenance": provenance,
         "scale_max": revision.scale_max if revision is not None else None,
         "gating_definitions": _gating_definitions(revision, provenance),
-        "verdict_signals": derive_strengths_and_risks(
-            subject, dimensions=dimensions, consults=consults, revision=revision,
-            revision_provenance=provenance,
-        ),
+        "verdict_signals": signals,
         "key_points": _key_points(values),
     }
 
@@ -1127,14 +1221,17 @@ async def detail_view(db, user, opportunity_id: uuid.UUID) -> dict | None:
     "expert_item": {"judgment_id", "quarter", "drawn_at"}|None, "is_staff": bool,
     "is_admin": bool}``.
 
-    ``assessment`` holds the shown ``LandscapeAssessment`` columns, ids as strings, without
-    what the viewer's hiding hides, without ``raw_verdict`` unless the viewer is an admin, and
-    without the staff-only verdict fields for a reviewer. A member is the idea's facets
+    ``assessment`` holds the shown ``LandscapeAssessment`` columns, ids as strings, ``rank``
+    set to the card's rank (``_shown_rank``), without what the viewer's hiding hides, without
+    ``raw_verdict`` unless the viewer is an admin, and without the staff-only verdict fields
+    for a reviewer; ``verdict_signals`` is None under the expert hiding. Members are resolved in
+    the shown assessment's epoch (``_member_epoch``). A member is the idea's facets
     (``idea_id``, ``idea_key``, ``idea_type``, ``structured_line``, ``direction``,
     ``targets``, ``agent``, ``disease``, ``modality_variants``, ``stage``,
     ``evidence_grade``, ``jhu_group_count``, ``outside_group_count``, ``evidence_summary``,
-    ``data_flags``), ``deep`` (its newest S6 row's columns after ``hide_deep``, or None),
-    ``consults`` (panel opinions; [] on an expert's open item), ``sources`` and ``labs``.
+    ``data_flags``), ``deep`` (its ``member_deep`` record's columns after ``hide_deep``, or
+    None), ``consults`` (panel opinions; [] on an expert's open item), ``sources`` and
+    ``labs``.
     A blind-batch card hides what ``batch_view`` hides until the viewer decides; an expert's
     own sample item hides S9's and S6's calls until they submit (D63). A retired
     opportunity reads as history: its last assessment, ``retired`` and ``is_history`` set
@@ -1151,10 +1248,19 @@ async def detail_view(db, user, opportunity_id: uuid.UUID) -> dict | None:
     pick = _pick(rows, ep, retired)
     version = _card_version(opp, (await _versions(db, [opportunity_id])).get(opportunity_id, {}),
                             pick.display)
-    values = hide_assessment(_row_values(pick.display), hiding) if pick.display else None
-    if values is not None and not viewer.admin:
-        values.pop("raw_verdict", None)
-    members, consults = await _members(db, version, hiding, admin=viewer.admin)
+    epoch_id = _member_epoch(version, pick.display) if version is not None else None
+    members, consults = await _members(db, version, epoch_id, hiding, admin=viewer.admin)
+    values = None
+    if pick.display is not None:
+        raw = _row_values(pick.display)
+        # ``LandscapeAssessment.rank`` is never written: the page's rank is ``_shown_rank``.
+        raw["rank"] = _shown_rank(
+            opportunity_id, version, [uuid.UUID(m["idea_id"]) for m in members],
+            _Unranked.of(issued), *await _ranks(db, ep.active_id),
+        )
+        values = hide_assessment(raw, hiding)
+        if not viewer.admin:
+            values.pop("raw_verdict", None)
     decision = viewer.decisions.get(opportunity_id)
     judgment = viewer.expert.get(opportunity_id)
     shown_id = pick.shown.id if pick.shown is not None else None
@@ -1426,7 +1532,8 @@ async def pipeline_view(db, user) -> dict:
     "criteria_version", "changed_stages", "hold_reason", "override_actor_id",
     "override_reason", "override_at", "drained_at", "activated_at", "retired_at",
     "regression_run": {"id", "status", "set_version", "started_at", "finished_at",
-    "results"}|None}], "metrics": reports.pipeline_metrics, "drift": reports.drift_report,
+    "results"}|None}], "metrics": reports.pipeline_metrics (its ``blind_results`` without a
+    blind batch in which the viewer has an undecided card), "drift": reports.drift_report,
     "positive_control_trace": reports.positive_control_trace, "reports": {"pilot", "bakeoff",
     "probes": {"id", "created_at", "payload"}|None}, "picks_applied": bool,
     "positive_controls": [str] (the stored DOIs and PMIDs), "experts": [{"id", "name",
@@ -1456,9 +1563,7 @@ async def pipeline_view(db, user) -> dict:
     judging = await _judging_epoch(db)
     experts = await review_batches._experts(db)
     expert_ids = {u.id for u in experts}
-    cards = await _load_cards(
-        db, viewer, ep, {i.opportunity_id for i in issued.items}, issued.visible_probes()
-    )
+    cards = await _load_cards(db, viewer, ep, {i.opportunity_id for i in issued.items}, issued)
     review_users = (await db.scalars(
         select(User).where(User.user_role.in_(_REVIEW_ROLES)).order_by(User.name)
     )).all()
@@ -1466,7 +1571,7 @@ async def pipeline_view(db, user) -> dict:
         "phase": await _setting(db, "landscape_phase") or "pilot",
         "paused": (await _setting(db, "landscape_paused") or "").lower() in _TRUE_WORDS,
         "epochs": await _epoch_rows(db),
-        "metrics": await reports.pipeline_metrics(db),
+        "metrics": _visible_metrics(await reports.pipeline_metrics(db), issued, viewer),
         "drift": await reports.drift_report(db),
         "positive_control_trace": await reports.positive_control_trace(db),
         "reports": {

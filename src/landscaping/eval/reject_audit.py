@@ -27,7 +27,7 @@ from src.landscaping import batches, epochs
 from src.landscaping.batches import BatchOutcome, FallbackAdapter
 from src.landscaping.epochs import EpochInputs
 from src.landscaping.llm_client import STAGE_SPECS, CallResult, build_request
-from src.landscaping.schemas import SCHEMAS
+from src.landscaping.schemas import SCHEMAS, stage_schema
 from src.landscaping.scoring import excluded_reason
 from src.landscaping.stages.screen import message_text, parse_output, submit_items, user_message
 from src.models.landscape import (
@@ -117,7 +117,7 @@ async def _request(
         return None
     return build_request(
         "triage", model=model, system=inputs.system("triage"), user=dossier,
-        schema=SCHEMAS["triage"], retry=retry,
+        schema=stage_schema("triage", inputs.rubric), retry=retry,
     )
 
 

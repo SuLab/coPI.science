@@ -802,11 +802,15 @@ async def activate(db, epoch_id, *, on_activate: Callable[[AsyncSession, uuid.UU
     # worker), then candidate → active and old active → retired; on_activate raising rolls the whole switch back
 async def copy_forward(db, *, from_epoch, to_epoch, stages: tuple[str, ...]) -> None
     # copies rows of unchanged upstream stages into the candidate (§7.11 step 2) and stamps its rejudge_started_at;
-    # a copied cut's idea ids (ordered_idea_ids, and the folds' keepers, folded ids and tie class) are repointed
+    # a copied cut's idea ids (ordered_idea_ids, and the folds' keepers, folded ids and tie class) are repointed;
+    # a copied S7 ranking row takes its copied S6 record's id, so a re-run S6 version is still detected
 async def mark_drained(db, *, epoch_id) -> bool
     # acts only in phase "continuous": sets drained_at once no S2, S3, S4 or evidence-assembly work is pending for
-    # any item created before rejudge_started_at. At the D69 flip the worker sets the current candidate's
-    # drained_at to now, overwriting any earlier value (spec §7.11 step 4)
+    # any item created before rejudge_started_at, in flight or not yet enqueued (an eligible document with no S2
+    # row, a screened-in one with no S3 row, an idea version with no S4 row). At the D69 flip the worker sets the
+    # current candidate's drained_at to now, overwriting any earlier value (spec §7.11 step 4)
+async def funnel_work_pending(db, epoch_id, *, cutoff=None) -> bool
+    # that check; with no cutoff it covers every item (the worker's backfill drain and pilot measurements)
 ```
 
 - [ ] **Step 1: Write the failing tests.**
@@ -1161,6 +1165,8 @@ def idea_key(candidate: dict, *, senior_lab: str | None) -> str  # D9 / L59: bio
 async def merge_candidate(db, *, epoch_id, extraction_id, index, candidate, document) -> uuid.UUID  # ideas are per epoch
     # L21 unknown-direction attachment decided once (D27); links biology<->chemistry from one document
 async def resolve_aliases(db, *, epoch_id) -> int  # provisional keys now normalized -> merge with FK-preserving alias rows (D36)
+    # a merge re-points complete cuts' idea lists and folds to the survivor, and deletes a boundary_pending cut that
+    # names the merged idea (its tie class was drawn over versions that no longer exist; the next run_cut retakes it)
 def version_hash(qualifying_document_ids: Iterable[uuid.UUID]) -> str
     # D37: only qualifying idea-source documents, never tombstones. Computed only when a qualifying document
     # attaches, so tombstoning never changes a stored version (spec §7.4)
@@ -1219,7 +1225,9 @@ async def apply_lab_unifications(db) -> int
 - **Produces:**
 
 ```python
-SCHEMAS: dict[str, dict]  # JSON Schemas for screen, extract, triage, deep, rerank, similarity, label, final
+SCHEMAS: dict[str, dict]  # JSON Schemas for screen, extract, rerank, similarity, label
+def stage_schema(stage: str, rubric) -> dict
+    # triage, deep and final built from the epoch's own rubric (dimension keys, scale; §7.11), else SCHEMAS[stage]
 FALLBACKS: tuple[FallbackAdapter, ...]  # in stages/screen.py and stages/extract.py, one per stage (Task 2.2)
 async def submit_screen_batch(db_factory, epoch_id) -> int  # documents with S1 eligible and S2 pending
 async def ingest_screen_outcomes(db_factory, outcomes: list[BatchOutcome]) -> None
@@ -1255,10 +1263,11 @@ async def ingest_extract_outcomes(db_factory, outcomes) -> None
 
 ```python
 def dimension_mean(scores: dict[str, int], rubric) -> float  # Σ wᵢsᵢ/Σwᵢ over the three dims, weights from load_rubric()
-def checklist_score(target_rubric: list[dict]) -> float  # 1 + 4 * present/11
+def checklist_score(target_rubric: list[dict], *, rubric) -> float  # 1 + 4 * present/items, over the epoch's rubric
 def triage_score(scores, target_rubric, *, rubric, criteria) -> float  # α·mean + (1−α)·checklist, α = criteria.dimension_share (L62)
 def excluded_reason(result: dict) -> str | None  # "excluded:gate" | "excluded:scope" | None; flags never exclude (L24)
-def tie_key(idea_row) -> tuple  # §7.6 keys 1-8: key 4 is the JHU-only group count; stage earlier-first (L56)
+def tie_key(idea_row, *, criteria) -> tuple  # §7.6 keys 1-8: key 4 is the JHU-only group count; stage earlier-first (L56);
+    # grades and stages ranked on the epoch's criteria ladders. K = ceil(N × landscape_cut_fraction), computed exactly
 def triage_dossier(idea_fields: dict, evidence: dict, documents: list[dict]) -> str
     # the blinded S4 user message (D20), pure; used by submit_triage_batch and by the bake-off
 async def submit_triage_batch(db_factory, epoch_id) -> int
@@ -1456,11 +1465,13 @@ a rebuild completed through the fallback chain (no batch end follows it).
    submits a rebuild: `submit_tournament(..., basis="deep")` over `tournament_pairs(ids,
    full_up_to=11, seed=…)`.
 3. While a rebuild batch is in flight, insertions wait and no later cut submits a second
-   rebuild. When it ends, `finish_rebuild` orders the list by `win_fraction_order` (ties: S6
+   rebuild; each call re-sends the rebuild's comparisons that an errored, expired, canceled or
+   truncated result put back to `pending`, so the rebuild always completes. When it ends, `finish_rebuild` orders the list by `win_fraction_order` (ties: S6
    provisional `weighted_score`, then id), removes ideas that left meanwhile, and inserts the
    ideas that entered meanwhile one at a time.
 4. Otherwise it inserts new or changed ideas **one at a time**, by binary search with
-   `compare(..., basis="deep")`. It holds `landscape_rerank_lock_key(epoch_id)` through a
+   `compare(..., basis="deep")`, asking nothing while a simulation run is live: the ideas not
+   yet placed wait for the next call (S7 yields as S6 does, D33). It holds `landscape_rerank_lock_key(epoch_id)` through a
    `SessionAdvisoryLock` on a dedicated connection for the whole search, which spans many
    commits (X3, §7.8).
 
@@ -1586,7 +1597,8 @@ async def ingest_final_outcomes(db_factory, outcomes) -> None
 - [ ] **Step 1: Write the failing tests.**
   - `test_final_request_carries_no_rank`: no rank, position or card order appears in the S9
     request (spec §7.10, F2).
-  - `test_weighted_score_from_existing_function`.
+  - `test_weighted_score_from_the_epochs_rubric`: the stored `weighted_score` equals
+    `blackbird_rubric.weighted_score` over the epoch's own rubric.
   - `test_invalid_gating_retried_then_failed`.
   - `test_claim_support_covers_every_bullet`.
   - `test_reassessment_at_most_once_per_cycle`.
@@ -1837,7 +1849,8 @@ once):
     in-flight HTTP calls (§9.5).
   - Only while `landscape_enabled` is true and `landscape_paused` is false, in §12.2 order.
     While `over_daily_cap` is true, every step still runs except new LLM submissions and
-    synchronous LLM calls (§9.5):
+    synchronous LLM calls (§9.5); it is read once per loop and again before each stage
+    submission and each synchronous task:
     1. due fetches (`schedule_due`), then `link_grants`, `link_datasets`,
        `apply_lab_unifications`, and `resolve_aliases` for each non-retired epoch. In phase
        `backfill`, once the backfill has drained (every enabled source's backfill slices have a
@@ -1972,7 +1985,8 @@ async def can_view(db, user, opportunity_id) -> bool
 async def batch_view(db, user) -> dict
     # this week's batch, the viewer's carry-overs (viewer_cards, D62) and the earlier batches (§13.1). Blind-batch
     # cards hide score, band, rank, dimension and provisional scores, score_rationale and dimension_rationales
-    # until the viewer decides (L53, D56). On the viewer's own unsubmitted expert-sample items, every view here and
+    # until the viewer decides (L53, D56); no card of an unsuperseded blind batch shows a rank, for any viewer,
+    # since a missing rank would mark the probes (F2). On the viewer's own unsubmitted expert-sample items, every view here and
     # below hides S9's and S6's calls (gates, scores, provisional scores, deal-breaker confirmations, panel opinions,
     # rationales, band, recommendation); on a blind-batch card both hidings apply
     # until both lift (D63). A card with no completed assessment in the active epoch says so and links the last
@@ -1986,7 +2000,7 @@ async def detail_view(db, user, opportunity_id) -> dict | None
     # unless can_view. Blind-batch cards hide what batch_view hides until the viewer decides. An expert's own
     # sample item hides S9's and S6's calls until they submit (D63). A retired
     # opportunity's page reads as history: its last assessment, marked retired (D62)
-async def expert_view(db, user) -> dict  # the viewer's open expert-sample items this quarter (L55)
+async def expert_view(db, user) -> dict  # the viewer's open expert-sample items: their newest judgment unsubmitted, any quarter (L55, D63)
 async def pipeline_view(db, user) -> dict
     # §13.4; probe flags and the blind metric only for superseded blind batches (F2); lists the cards with no
     # completed assessment in the active epoch (spec §7.10)
@@ -1994,7 +2008,8 @@ def visible_votes(user, opportunity_id, decisions, reviews, events) -> tuple[lis
     # L40/L50/L51: until `user` has a quick decision on this OPPORTUNITY, only the viewer's own items and no
     # count of anyone else's, staff included; a new assessment does not re-blind a viewer who has decided
 def changed_since_decision(decision, shown_assessment_id: uuid.UUID | None) -> bool
-    # compares landscape_assessment_id (D50); None (no completed assessment) differs from any decided one
+    # compares landscape_assessment_id (D50); None (no completed assessment) is not a change: there is nothing new to
+    # judge, and the card says it has no assessment (§7.10). review_batches.decision_changed is the one rule both use
 def strip_staff_only(view: dict, user) -> dict  # the same staff-only verdict fields presentation.py strips for OpportunityAssessment
 ```
 
@@ -2035,6 +2050,8 @@ def strip_staff_only(view: dict, user) -> dict  # the same staff-only verdict fi
 - Modify: `src/routers/reviews.py` (new POST routes)
 - Modify (pin): `tests/integration/test_reviews_router.py` (the POST allowlist gains the new
   paths)
+- Modify (pin): `tests/integration/test_review_models.py` (the tables with `recorded_by` columns
+  gain `landscape_decisions`, `landscape_reviews` and `landscape_review_events`)
 - Test: `tests/integration/landscaping/test_landscape_reviews.py`
 
 **Interfaces.**
@@ -2162,7 +2179,8 @@ Reason-tag approval is not a route: an operator sets `[reason_tags] approved = t
   Verdict, Evidence, Disease profile, Panel, Reviews and Rubric.
   - Its Reviews document goes through `visible_votes` (Task 7.1).
   - Its Verdict hides scores, band, rank and both rationale fields for an undecided
-    blind-batch card. On an expert's unsubmitted sample item, the record leaves S9's and S6's
+    blind-batch card, and the rank of every card of an unsuperseded blind batch (the page's rule,
+    `landscape_view.shown_rank`). On an expert's unsubmitted sample item, the record leaves S9's and S6's
     calls out of the Verdict and Panel documents, and any S6 call out of the Disease profile
     and Evidence documents (D63).
   - It returns None (→ 404) unless `can_view`.
@@ -2208,7 +2226,13 @@ Reason-tag approval is not a route: an operator sets `[reason_tags] approved = t
     reviewer-200 rule gain the landscape pages);
   - `tests/integration/test_rendered_page_gate.py` (`PAGES` entries with seed data, and
     `SKIPPED["/landscape-chat/{opportunity_id}"] = "JSON for static/js/assessment_chat.js"`,
-    as line 147 does for `/project-chat/{project_id}`).
+    as line 147 does for `/project-chat/{project_id}`);
+  - `tests/integration/test_help_links_render.py` (`LINKED_PAGES` gains the three landscape
+    pages and their help anchors);
+  - `tests/unit/test_reachability.py` (pins: the route-table cross-check strips a path
+    converter, since OpenAPI lists `{opportunity_id:uuid}` as `{opportunity_id}`; the
+    unresolvable-link ceiling moves from 82 to 86 for the member labs' ORCID and OpenAlex links
+    and the help page's two same-page `#reviewing` links).
 - Test: `tests/integration/landscaping/test_landscape_pages.py`
 
 **Interfaces.**
@@ -2256,6 +2280,9 @@ Reason-tag approval is not a route: an operator sets `[reason_tags] approved = t
 - Modify: the glossary template (cut, opportunity, batch, blind batch, disease profile, role
   basis, text basis) and the troubleshooting template (the new refusals);
   `docs/operations/help-content.md` (a table row for the new templates);
+  the tutorial-length pins (`tests/unit/test_help_registry.py`: 9 reviewer and 11 manager
+  steps, an out-of-range step of `"10"`; `tests/integration/test_help_routes.py`: the finish
+  link on reviewer step 9; `tests/e2e/ui_audit/journeys_phase6.py`: walks of 9 and 11 steps);
   `tests/e2e/help_shots/seed.py` (seeded opportunities, a batch and a blind batch), so the
   operator's capture step has something to capture. The `Shot` entries and the `figure()`
   references come with the PNGs in the operator's capture commit (Phase 8), because

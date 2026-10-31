@@ -210,3 +210,73 @@ async def test_truncation_at_section_boundary(monkeypatch):
     assert "MARKTWO" in result.text
     assert "MARKTHREE" not in result.text
     json.dumps(result.sections)  # the index is stored as JSONB
+
+
+PREPRINT_DOI = "10.1101/2026.01.05.900001"
+JATS_URL = "https://www.biorxiv.org/content/early/2026/01/05/invented.source.xml"
+
+
+def _preprint_handler(jats_response):
+    """No PMC or Europe PMC record; one CC BY bioRxiv record whose ``jatsxml`` is answered by
+    ``jats_response(request)``, and any other bioRxiv URL with the JATS."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.biorxiv.org" and "/details/biorxiv/" in request.url.path:
+            return httpx.Response(200, json={"collection": [
+                {"license": "cc_by", "jatsxml": JATS_URL}]})
+        if str(request.url) == JATS_URL:
+            return jats_response(request)
+        if request.url.host.endswith("biorxiv.org") and request.url.host != "api.biorxiv.org":
+            return httpx.Response(200, text=JATS)
+        return httpx.Response(404)
+    return handler
+
+
+def _install_following(monkeypatch, handler) -> list[httpx.Request]:
+    """As `_install`, on a client that follows redirects like production's."""
+    requests: list[httpx.Request] = []
+
+    def recording(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return handler(request)
+
+    monkeypatch.setattr(fulltext, "_make_client", lambda: httpx.AsyncClient(
+        transport=httpx.MockTransport(recording), follow_redirects=True))
+    return requests
+
+
+async def test_preprint_redirect_off_the_allowlist_yields_no_text(monkeypatch):
+    def off(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"Location": "https://invented-elsewhere.example/a.xml"})
+
+    requests = _install_following(monkeypatch, _preprint_handler(off))
+    result = await fulltext.fetch_full_text(_doc(pmcid=None, doi=PREPRINT_DOI))
+    assert result.basis == "summary"
+    assert result.route is None
+    assert not [r for r in requests if r.url.host == "invented-elsewhere.example"]
+
+    # Control: a redirect that stays on bioRxiv is followed.
+    def on(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"Location": "https://www.biorxiv.org/moved.xml"})
+
+    _install_following(monkeypatch, _preprint_handler(on))
+    result = await fulltext.fetch_full_text(_doc(pmcid=None, doi=PREPRINT_DOI))
+    assert (result.basis, result.route) == ("full_text", "biorxiv")
+
+
+async def test_an_oversized_body_stops_at_the_cap(monkeypatch):
+    monkeypatch.setattr(fulltext, "MAX_BODY_BYTES", 10_000)
+    sent: list[int] = []
+
+    async def endless():
+        while len(sent) < 1_000:
+            sent.append(1_000)
+            yield b"<p>" + b"x" * 993 + b"</p>"
+
+    def huge(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=endless())
+
+    _install(monkeypatch, _preprint_handler(huge))
+    result = await fulltext.fetch_full_text(_doc(pmcid=None, doi=PREPRINT_DOI))
+    assert result.basis == "summary"
+    assert result.route is None
+    assert sum(sent) <= fulltext.MAX_BODY_BYTES + 1_000

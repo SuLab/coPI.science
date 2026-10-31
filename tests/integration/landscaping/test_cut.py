@@ -17,9 +17,11 @@ import pytest_asyncio
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.config import get_settings
 from src.landscaping import batches, comparator, epochs
 from src.landscaping.batches import BatchOutcome
 from src.landscaping.comparator import ingest_tournament_outcomes, tournament_complete
+from src.landscaping.criteria import load_criteria
 from src.landscaping.stages import cut as cut_stage
 from src.landscaping.stages.cut import finish_cut, run_cut
 from src.models.landscape import (
@@ -52,6 +54,8 @@ class _FakeBatches:
 
 
 class _Inputs:
+    criteria = load_criteria()
+
     def system(self, stage: str) -> str:
         return f"Invented {stage} system prompt."
 
@@ -66,8 +70,9 @@ def fake(monkeypatch):
     monkeypatch.setattr(batches, "_RECONCILER", batches._Reconciler())
     monkeypatch.setattr(batches, "_batches_client", lambda: client)
 
-    # The cut's epochs store no snapshot: the tie-break's prompt and model are patched in, so
-    # the requests are independent of the prompt files on disk.
+    # The cut's epochs store no snapshot: the tie-break's prompt and model and the criteria the
+    # pool is ranked with are patched in, so the requests are independent of the prompt files
+    # on disk.
     async def _inputs(db, epoch_id):
         return _Inputs()
 
@@ -320,6 +325,21 @@ async def test_k_is_ceil_one_percent_of_unfolded(db_factory):
     await _idea(db_factory, epoch_id, score=0.5)
     cut = await _cut(db_factory, await run_cut(db_factory, epoch_id))
     assert (cut.n, cut.k) == (101, 2)
+
+
+@pytest.mark.asyncio
+async def test_k_follows_the_cut_fraction_setting_exactly(db_factory, monkeypatch):
+    monkeypatch.setattr(get_settings(), "landscape_cut_fraction", 0.07)
+    # 100 × 0.07 is 7.000000000000001 in floating point; K must still be 7.
+    assert cut_stage._k(100) == 7
+    assert cut_stage._k(101) == 8
+
+    epoch_id = await _epoch(db_factory)
+    for i in range(100):
+        await _idea(db_factory, epoch_id, score=4.9 - i * 0.01)
+
+    cut = await _cut(db_factory, await run_cut(db_factory, epoch_id))
+    assert (cut.n, cut.k) == (100, 7)
 
 
 @pytest.mark.asyncio

@@ -14,7 +14,9 @@ helpers (``src.services.landscape_view``), so the chat never disagrees with the 
 
 * the Verdict document goes through ``hide_assessment``: an undecided card of a blind batch
   loses its scores, band, rank and both rationale fields (L53, D56); on the viewer's own
-  unsubmitted expert-sample item S9's calls go too (D63);
+  unsubmitted expert-sample item S9's calls go too (D63). Its rank is the page's
+  (``landscape_view.shown_rank``), so no card of an unsuperseded blind batch has one (F2);
+* each member's S6 record is the one the page shows (``landscape_view.member_deep``);
 * the Disease profile, Evidence and Panel documents take S6's values through ``hide_deep``,
   and the Panel document leaves out the specialist opinions while the expert hiding holds;
 * the Reviews document holds only what ``visible_votes`` returns (independent votes, L50);
@@ -47,7 +49,6 @@ from src.models.landscape import (
     LandscapeAssessment,
     LandscapeConsult,
     LandscapeDecision,
-    LandscapeDeep,
     LandscapeDocument,
     LandscapeExtraction,
     LandscapeIdea,
@@ -55,7 +56,6 @@ from src.models.landscape import (
     LandscapeIdeaEvidence,
     LandscapeLab,
     LandscapeOpportunityVersion,
-    LandscapeRanking,
     LandscapeReview,
     LandscapeReviewEvent,
 )
@@ -164,7 +164,7 @@ class _Member:
     """One member idea as the record shows it to one viewer."""
 
     idea: Any
-    #: S6's values after ``hide_deep``; None when the idea has no ``done`` S6 record.
+    #: S6's values after ``hide_deep``; None when the idea has no passed S6 record.
     deep: Mapping[str, Any] | None
     #: (domain, opinion) pairs; empty while the expert hiding holds.
     consults: tuple[tuple[str, Any], ...]
@@ -694,19 +694,8 @@ async def _quotes(
     )
 
 
-async def _member(
-    db: AsyncSession, epoch_id: uuid.UUID, idea: LandscapeIdea, hiding: Any
-) -> _Member:
-    deep_row = await db.scalar(
-        select(LandscapeDeep)
-        .where(
-            LandscapeDeep.epoch_id == epoch_id,
-            LandscapeDeep.idea_id == idea.id,
-            LandscapeDeep.status == "done",
-        )
-        .order_by(LandscapeDeep.created_at.desc(), LandscapeDeep.id.desc())
-        .limit(1)
-    )
+async def _member(db: AsyncSession, idea: LandscapeIdea, hiding: Any) -> _Member:
+    deep_row = await landscape_view.member_deep(db, idea)
     deep = landscape_view.hide_deep(_values(deep_row), hiding) if deep_row is not None else None
     consults: tuple[tuple[str, Any], ...] = ()
     if deep_row is not None and not getattr(hiding, "expert", False):
@@ -726,24 +715,20 @@ async def _member(
 
 
 async def _members_and_rank(
-    db: AsyncSession, assessment: LandscapeAssessment, keys: list[str], hiding: Any
+    db: AsyncSession, assessment: LandscapeAssessment,
+    version: LandscapeOpportunityVersion | None, hiding: Any,
 ) -> tuple[list[_Member], int | None]:
-    """Each member idea in ``idea_key`` order (one per idea, a missing one skipped), and the
-    best member's S7 position (``LandscapeAssessment.rank`` is never written)."""
+    """Each member idea in ``idea_key`` order (one per idea, a missing one skipped), resolved in
+    the assessment's epoch, and the page's rank for the opportunity
+    (``landscape_view.shown_rank``; ``LandscapeAssessment.rank`` is never written)."""
+    keys = list(version.member_idea_keys or []) if version is not None else []
     ideas: dict[uuid.UUID, LandscapeIdea] = {}
     for key in sorted(keys):
         idea = await _idea_for_key(db, assessment.epoch_id, key)
         if idea is not None:
             ideas.setdefault(idea.id, idea)
-    members = [await _member(db, assessment.epoch_id, idea, hiding) for idea in ideas.values()]
-    rank = None
-    if ideas:
-        rank = await db.scalar(
-            select(LandscapeRanking.position).where(
-                LandscapeRanking.epoch_id == assessment.epoch_id,
-                LandscapeRanking.idea_id.in_(list(ideas)),
-            ).order_by(LandscapeRanking.position).limit(1)
-        )
+    members = [await _member(db, idea, hiding) for idea in ideas.values()]
+    rank = await landscape_view.shown_rank(db, assessment.opportunity_id, version, list(ideas))
     return members, rank
 
 
@@ -791,9 +776,8 @@ async def build_landscape_chat_record(
             LandscapeOpportunityVersion.version == assessment.opportunity_version,
         )
     )
-    keys = list(version.member_idea_keys or []) if version is not None else []
     hiding = await landscape_view.hiding_for(db, user, opportunity_id)
-    members, rank = await _members_and_rank(db, assessment, keys, hiding)
+    members, rank = await _members_and_rank(db, assessment, version, hiding)
     values = _values(assessment)
     values["rank"] = rank
     verdict = dict(landscape_view.hide_assessment(values, hiding))

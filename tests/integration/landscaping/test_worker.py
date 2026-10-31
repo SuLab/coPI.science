@@ -60,6 +60,8 @@ from src.models.landscape import (
     LandscapeIdeaEvidence,
     LandscapeOpportunity,
     LandscapeOpportunityVersion,
+    LandscapeRegressionRun,
+    LandscapeRegressionSet,
     LandscapeReport,
     LandscapeReviewBatch,
     LandscapeReviewBatchItem,
@@ -536,6 +538,46 @@ async def test_daily_cap_defers_llm_work_only(db_factory, settings, calls):
     assert calls.args("reconcile_orphans") == [((db_factory,), {"may_submit": False})]
 
 
+@pytest.mark.asyncio
+async def test_daily_cap_reached_mid_loop_skips_remaining_sync_tasks(
+    db_factory, settings, calls, monkeypatch,
+):
+    stub = calls.stub("run_fallbacks", 0)
+
+    async def fallbacks_then_cap(*args, **kwargs):
+        calls.results["over_daily_cap"] = True
+        return await stub(*args, **kwargs)
+
+    monkeypatch.setattr(batches, "run_fallbacks", fallbacks_then_cap)
+    await _set(db_factory, "landscape_phase", "continuous")
+    epoch_id = await _epoch(db_factory, "active")
+    await _idea(db_factory, epoch_id, deep_status="pending")
+    await worker.run_once(db_factory, worker.WorkerState(), now=NOW)
+
+    assert len(worker._fallback_adapters("continuous")) > 1
+    assert calls.names().count("run_fallbacks") == 1
+    assert not set(calls.names()) & {"run_deep", "update_rankings", "judge_similarity"}
+
+
+@pytest.mark.asyncio
+async def test_daily_cap_reached_between_stages_skips_next_submission(
+    db_factory, settings, calls, monkeypatch,
+):
+    stub = calls.stub("submit_screen_batch", 0)
+
+    async def screen_then_cap(*args, **kwargs):
+        calls.results["over_daily_cap"] = True
+        return await stub(*args, **kwargs)
+
+    monkeypatch.setattr(screen_stage, "submit_screen_batch", screen_then_cap)
+    await _set(db_factory, "landscape_phase", "continuous")
+    epoch_id = await _epoch(db_factory, "active")
+    await worker.run_once(db_factory, worker.WorkerState(), now=NOW)
+
+    assert calls.epochs_given("submit_screen_batch") == {epoch_id}
+    assert not set(calls.names()) & {"submit_extract_batch", "submit_triage_batch"}
+
+
 # --- routing ----------------------------------------------------------------------------------
 
 
@@ -886,6 +928,31 @@ async def test_unpassed_candidate_gets_no_submissions(db_factory, settings, call
         given |= calls.epochs_given(name)
     assert active in given
     assert candidate not in given
+
+
+@pytest.mark.asyncio
+async def test_passed_regression_is_not_run_again(db_factory, settings, calls):
+    await _set(db_factory, "landscape_phase", "continuous")
+    active = await _epoch(db_factory, "active")
+    candidate = await _epoch(db_factory, "candidate", built_from_epoch_id=active)
+    await _report(db_factory, "bakeoff", {"recommended_settings": {}})
+    async with db_factory() as db:
+        version = (await db.scalar(select(func.max(LandscapeRegressionSet.version))) or 0) + 1
+        db.add(LandscapeRegressionSet(version=version))
+        await db.flush()
+        run = LandscapeRegressionRun(epoch_id=candidate, set_version=version, status="passed")
+        db.add(run)
+        await db.flush()
+        await db.execute(
+            update(LandscapeEpoch).where(LandscapeEpoch.id == candidate)
+            .values(regression_set_version=version, regression_run_id=run.id)
+        )
+        await db.commit()
+
+    await worker.run_once(db_factory, worker.WorkerState(), now=NOW)
+
+    assert "run_regression" not in calls.names()
+    assert (await _epoch_row(db_factory, candidate)).rejudge_started_at is not None
 
 
 async def _active_state(db_factory, epoch_id: uuid.UUID) -> dict:

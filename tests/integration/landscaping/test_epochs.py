@@ -7,7 +7,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from src.config import get_settings
@@ -342,6 +342,40 @@ async def test_mark_drained_ignores_items_after_rejudge_start(db_session):
     assert new_screen.status == "pending"
 
 
+async def test_mark_drained_waits_for_screened_in_document_without_extraction(db_session):
+    start = datetime(2026, 10, 1, tzinfo=UTC)
+    candidate = await _epoch(db_session, "candidate", rejudge_started_at=start)
+    await _set_phase(db_session, "continuous")
+    doc = await _document(db_session, created_at=start - timedelta(days=1))
+    db_session.add(LandscapeScreen(
+        document_id=doc.id, epoch_id=candidate.id, status="done", decision="yes",
+    ))
+    await db_session.flush()
+    assert await mark_drained(db_session, epoch_id=candidate.id) is False
+
+    db_session.add(LandscapeExtraction(
+        document_id=doc.id, epoch_id=candidate.id, basis="summary", status="done",
+        raw={"ideas": []},
+    ))
+    await db_session.flush()
+    assert await mark_drained(db_session, epoch_id=candidate.id) is True
+
+
+async def test_mark_drained_waits_for_old_document_without_screen(db_session):
+    start = datetime(2026, 10, 1, tzinfo=UTC)
+    candidate = await _epoch(db_session, "candidate", rejudge_started_at=start)
+    await _set_phase(db_session, "continuous")
+    old_doc = await _document(db_session, created_at=start - timedelta(days=1))
+    await _document(db_session, created_at=start + timedelta(hours=1))
+    assert await mark_drained(db_session, epoch_id=candidate.id) is False
+
+    db_session.add(LandscapeScreen(
+        document_id=old_doc.id, epoch_id=candidate.id, status="done", decision="no",
+    ))
+    await db_session.flush()
+    assert await mark_drained(db_session, epoch_id=candidate.id) is True
+
+
 async def test_fallback_audit_and_chat_models_are_not_components(monkeypatch):
     base = epochs.current_components()
     assert set(base) == set(STAGE_INPUTS)
@@ -541,3 +575,35 @@ async def test_copy_forward_never_writes_active_rows(db_session, components):
                   "landscape_deep", "landscape_rankings"):
         assert len(copied[table]) == len(before[table]) > 0, table
     assert len(copied["consults"]) == len(before["consults"]) == 1
+
+
+async def test_copied_ranking_takes_copied_deep_id(db_session, components):
+    active = await _epoch(db_session, "active")
+    await _judged_rows(db_session, active)
+    source_deep = (await db_session.execute(
+        select(LandscapeDeep).where(LandscapeDeep.epoch_id == active.id)
+    )).scalar_one()
+    # S7 places a ranking row on its S6 record: the row's id is the record's id.
+    await db_session.execute(
+        update(LandscapeRanking).where(LandscapeRanking.epoch_id == active.id)
+        .values(id=source_deep.id)
+    )
+    await db_session.flush()
+
+    components["value"] = _components(**{"final.md": "invented-2"})
+    candidate = await ensure_candidate(db_session)
+    unchanged = tuple(s for s in ALL_STAGES if s not in candidate.changed_stages)
+    assert {"deep", "rerank"} <= set(unchanged)
+    await copy_forward(db_session, from_epoch=active.id, to_epoch=candidate.id, stages=unchanged)
+
+    deep_ids = {
+        deep.idea_id: deep.id for deep in (await db_session.execute(
+            select(LandscapeDeep).where(LandscapeDeep.epoch_id == candidate.id)
+        )).scalars()
+    }
+    rankings = (await db_session.execute(
+        select(LandscapeRanking).where(LandscapeRanking.epoch_id == candidate.id)
+    )).scalars().all()
+    assert rankings
+    for ranking in rankings:
+        assert ranking.id == deep_ids[ranking.idea_id] != source_deep.id
