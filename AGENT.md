@@ -35,7 +35,7 @@ status-overview digest (`check_and_send_status_overviews`, called from the worke
 All specs are in `/specs/`:
 - `tech-stack.md` — FastAPI, SQLAlchemy 2.0 async, Postgres, Slack Bolt, Docker Compose
 - `data-model.md` — User, ResearcherProfile, Publication, Job, SimulationRun, AgentMessage, AgentChannel
-- `auth-and-user-management.md` — ORCID OAuth via Authlib, session cookies
+- `auth-and-user-management.md` — ORCID OAuth via Authlib, optional linked Microsoft sign-in, session cookies
 - `profile-ingestion.md` — 9-step pipeline, ORCID → PubMed → PMC → LLM
 - `admin-dashboard.md` — read-only, server-rendered, impersonation
 - `agent-system.md` — Slack Bolt, Socket Mode, two-phase LLM calls, simulation engine
@@ -48,7 +48,7 @@ All specs are in `/specs/`:
 | Web framework | FastAPI + Jinja2 templates |
 | ORM | SQLAlchemy 2.0 async |
 | Migrations | Alembic |
-| Auth | Authlib (ORCID OAuth 2.0) |
+| Auth | Authlib + joserfc (ORCID OAuth 2.0; linked Microsoft Entra ID sign-in) |
 | Database | PostgreSQL |
 | Job queue | PostgreSQL-backed (jobs table) |
 | LLM | Anthropic Claude (Opus for profiles, Sonnet for agents) |
@@ -97,8 +97,12 @@ Decisions made autonomously during implementation are recorded here for human re
 
 ### 2026-03-20: Session storage
 **Decision:** Use `itsdangerous`-signed cookies via Starlette's `SessionMiddleware` (in-memory, cookie-based) rather than server-side sessions.
-**Reason:** Simplest approach that is production-safe at pilot scale. No Redis dependency. Session data is minimal (user_id only).
+**Reason:** Simplest approach that is production-safe at pilot scale. No Redis dependency. The session holds the user id, an `epoch` checked against `users.session_epoch`, and sign-in stamps (`signed_in_at`, `signed_in_via`), plus short-lived OAuth flow data.
 **Risk:** Rotating SECRET_KEY invalidates all sessions. Acceptable for pilot.
+
+### 2026-10-21: Session epoch
+**Decision:** `users.session_epoch` (nullable, NULL = 0) is stored in the session at sign-in and checked by `get_current_user`; logout, a user's Microsoft unlink and an admin's removal bump it. Every sign-in also starts a fresh session.
+**Reason:** Signed cookies cannot be revoked individually; the epoch ends every session of an account without server-side session storage. Rolling back the code, or turning Microsoft sign-in off, does not end sessions unless `SECRET_KEY` is rotated.
 
 ### 2026-03-20: Job queue polling interval
 **Decision:** Worker polls every 5 seconds.

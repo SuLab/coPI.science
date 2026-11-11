@@ -119,6 +119,10 @@ ROUTE_ALLOWLIST: dict[tuple[str, str], str] = {
         "ORCID OAuth redirect_uri — the caller is orcid.org. The value we register with "
         "ORCID is settings.orcid_redirect_uri (src/config.py), not a link in this app."
     ),
+    ("GET", "/auth/microsoft/callback"): (
+        "Microsoft Entra redirect_uri — the caller is login.microsoftonline.com. The value "
+        "registered is settings.microsoft_redirect_uri (src/config.py), not a link in this app."
+    ),
     ("GET", "/cabo-graph"): (
         "Public collaboration-graph page shared by URL (retreat handout / email), "
         "deliberately unlinked from the nav. nginx/nginx.conf:111 whitelists it "
@@ -138,9 +142,15 @@ ROUTE_ALLOWLIST: dict[tuple[str, str], str] = {
     ),
 }
 
-# Optional third-party imports that are allowed to be absent at test time. Empty
-# today: every `try:`-guarded import in src/ resolves in the app image.
-GUARDED_IMPORT_ALLOWLIST: dict[str, str] = {}
+# Optional third-party imports that are allowed to be absent at test time. Every other
+# `try:`-guarded import in src/ resolves in the app image.
+GUARDED_IMPORT_ALLOWLIST: dict[str, str] = {
+    "httpx2": (
+        "Optional: authlib 1.8 builds its OAuth client on httpx2 when installed "
+        "(src/services/microsoft_identity.py TOKEN_HTTP); absent under requirements.lock, "
+        "which pins anthropic<1.0 on httpx."
+    ),
+}
 
 # Targets of any template reference we cannot resolve statically (a dynamic
 # `{% include some_var %}`). Empty today — test_no_dynamic_template_references keeps it

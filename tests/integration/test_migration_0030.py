@@ -158,7 +158,8 @@ async def test_0030_adds_two_columns_backfills_handled_at_and_downgrades_back_ou
     finally:
         await engine.dispose()
 
-    _run_alembic(scratch_db, "head")
+    # Pinned to 0030, not "head": a later migration must not change what this test sees.
+    _run_alembic(scratch_db, "0030")
 
     engine = create_async_engine(scratch_db, poolclass=NullPool)
     try:
@@ -259,7 +260,8 @@ async def test_0030_adds_two_columns_backfills_handled_at_and_downgrades_back_ou
 async def test_0030_downgrade_is_idempotent_when_the_columns_are_already_gone(scratch_db):
     """The 0022+ convention: downgrades are ``if_exists``-guarded, so a half-applied
     or hand-repaired database does not abort the downgrade mid stop-the-world window."""
-    _run_alembic(scratch_db, "head")
+    # Pinned to 0030, not "head": a later migration must not change what this test sees.
+    _run_alembic(scratch_db, "0030")
 
     engine = create_async_engine(scratch_db, poolclass=NullPool)
     try:
@@ -280,11 +282,12 @@ async def test_0030_downgrade_is_idempotent_when_the_columns_are_already_gone(sc
         await engine.dispose()
 
 
-def test_0030_is_the_only_head():
-    alembic = os.path.join(os.path.dirname(sys.executable), "alembic")
-    r = subprocess.run(
-        [alembic, "heads"], cwd=str(_REPO_ROOT), capture_output=True, text=True,
-    )
-    assert r.returncode == 0, r.stdout + r.stderr
-    heads = [ln.split()[0] for ln in r.stdout.splitlines() if ln.strip()]
-    assert heads == ["0030"], r.stdout
+# "0030 is the only head" was checked here until migration 0031 landed and
+# made it false by construction — 0030 is now an interior revision, not the
+# head. That single-head property is exactly the thing
+# test_migration_0031.py::test_0031_is_the_only_head (and
+# tests/unit/test_migration_checks.py's `test_alembic_scripts_agrees_with_the_
+# real_tree`, which reads `pf.DEFAULT_TARGET` rather than a literal) exist to
+# keep current for whichever revision is actually the head, so it is not
+# re-pinned here under a name that would go stale again at the next
+# migration.

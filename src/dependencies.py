@@ -11,8 +11,11 @@ from sqlalchemy.orm import selectinload
 
 from src.database import get_db
 from src.models import User
+from src.services.session_epoch import current_epoch, epoch_in_session
 
 logger = logging.getLogger(__name__)
+
+IMPERSONATE_COOKIE = "copi-impersonate"
 
 
 def _login_location(request: Request) -> str:
@@ -33,13 +36,11 @@ def _login_location(request: Request) -> str:
     return f"/login?next={quote(target, safe='')}"
 
 
-async def get_current_user(
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-) -> User:
-    """
-    Auth dependency. Checks session cookie for user_id.
-    Handles impersonation via copi-impersonate cookie (admin only).
+async def session_account(request: Request, db: AsyncSession) -> User:
+    """The account holding the session cookie, never an impersonated one.
+
+    Raises the 302 to /login when there is no session user, the id is malformed or
+    unknown, the account is not allowed, or the session's epoch is stale.
     """
     user_id_str = request.session.get("user_id")
     if not user_id_str:
@@ -91,8 +92,31 @@ async def get_current_user(
             headers={"Location": "/login"},
         )
 
+    # The epoch belongs to the account holding the session, so it is checked here,
+    # before impersonation: an admin whose own session was revoked (logout, the
+    # user's unlink, the admin's removal bump it) loses the impersonation with it.
+    if epoch_in_session(request.session) != current_epoch(session_user):
+        request.session.clear()
+        raise HTTPException(
+            status_code=status.HTTP_302_FOUND,
+            headers={"Location": _login_location(request)},
+        )
+
+    return session_user
+
+
+async def get_current_user(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    """
+    Auth dependency: the session account (see session_account).
+    Handles impersonation via copi-impersonate cookie (admin only).
+    """
+    session_user = await session_account(request, db)
+
     # Impersonation: admin can view as another user
-    impersonate_id = request.cookies.get("copi-impersonate")
+    impersonate_id = request.cookies.get(IMPERSONATE_COOKIE)
     if impersonate_id and session_user.is_admin:
         try:
             imp_uuid = uuid.UUID(impersonate_id)
@@ -109,6 +133,25 @@ async def get_current_user(
             logger.warning("Invalid impersonate cookie: %s", exc)
 
     return session_user
+
+
+def refuse_impersonation(current_user: User, detail: str) -> None:
+    """403 when the session is impersonating. `detail` names the refused action."""
+    if getattr(current_user, "_is_impersonated", False):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
+def account_of(current_user: User) -> User:
+    """The account that holds the session: the real admin when impersonating."""
+    if getattr(current_user, "_is_impersonated", False):
+        return current_user._real_admin  # type: ignore[attr-defined]
+    return current_user
+
+
+def impersonating(request: Request, account: User) -> bool:
+    """True when an admin's request carries an impersonation cookie, even one that
+    names no user (get_current_user then falls back to the admin's own account)."""
+    return bool(account.is_admin) and bool(request.cookies.get(IMPERSONATE_COOKIE))
 
 
 async def get_agent_with_access(

@@ -1,7 +1,7 @@
 """Task 7 — the first-run experience: onboarding, profile and settings.
 
-Fifteen HTTP endpoints across ``src/routers/onboarding.py`` (5),
-``src/routers/profile.py`` (6) and ``src/routers/settings.py`` (4) had no direct
+Sixteen HTTP endpoints across ``src/routers/onboarding.py`` (5),
+``src/routers/profile.py`` (6) and ``src/routers/settings.py`` (5) had no direct
 coverage, and ``src/services/profile_export.py`` had no test referencing it at all.
 
 (It was seventeen until ``POST /onboarding/complete`` and ``GET /onboarding/done``
@@ -24,6 +24,7 @@ is paired with the same request producing the effect it is supposed to produce.
 import base64
 import json
 import re
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -44,6 +45,7 @@ from src.models import (
     Publication,
     ResearcherProfile,
     User,
+    UserMicrosoftIdentity,
 )
 from src.routers import onboarding as onboarding_router
 from src.routers import profile as profile_router
@@ -51,8 +53,12 @@ from src.routers import settings as settings_router
 from src.services import profile_export
 from src.services.email_notifications import _generate_unsubscribe_token
 from tests import factories
+from tests.oidc_fakes import OID, TENANT, make_config
 
 pytestmark = pytest.mark.integration
+
+# A second Microsoft object id (differs from OID in the last digit) for the attacker's link.
+OTHER_OID = OID[:-1] + ("0" if OID[-1] != "0" else "1")
 
 
 # ---------------------------------------------------------------------------
@@ -203,8 +209,20 @@ async def _prefs(db, uid) -> dict:
     return {c: (e, f) for c, e, f in rows}
 
 
+async def _link_microsoft(db, user, object_id: str, sign_in_name: str):
+    db.add(
+        UserMicrosoftIdentity(
+            user_id=user.id,
+            tenant_id=uuid.UUID(TENANT),
+            object_id=uuid.UUID(object_id),
+            sign_in_name=sign_in_name,
+        )
+    )
+    await db.flush()
+
+
 async def _snapshot(db, uid):
-    """Everything the 13 session-authenticated endpoints between them can change.
+    """Everything the 14 session-authenticated endpoints between them can change.
 
     One tuple, so a single equality covers "this endpoint touched the victim in
     any way at all" without the sweep needing per-endpoint knowledge.
@@ -218,9 +236,24 @@ async def _snapshot(db, uid):
         prof_t = tuple(
             tuple(v) if isinstance(v, list) else v for v in prof.values()
         )
-    return (tuple(user.values()), prof_t, await _job_count(db, uid), tuple(sorted(
-        (await _prefs(db, uid)).items()
-    )))
+    epoch = (await db.execute(select(User.session_epoch).where(User.id == uid))).scalar_one()
+    link = (
+        await db.execute(
+            select(
+                UserMicrosoftIdentity.tenant_id,
+                UserMicrosoftIdentity.object_id,
+                UserMicrosoftIdentity.sign_in_name,
+            ).where(UserMicrosoftIdentity.user_id == uid)
+        )
+    ).first()
+    return (
+        tuple(user.values()),
+        prof_t,
+        await _job_count(db, uid),
+        tuple(sorted((await _prefs(db, uid)).items())),
+        epoch,
+        tuple(link) if link is not None else None,
+    )
 
 
 # --- rendered-settings readers ---------------------------------------------
@@ -271,6 +304,9 @@ class Ep:
     build_data: Callable | None = None
     auth: str = "session"  # "session" | "token" (unsubscribe links carry no session)
     onboarding_complete: bool = True  # state the actor needs for this route to render
+    microsoft_link: bool = False  # the actor needs a linked Microsoft account to act
+    # "refused": an admin's copi-impersonate cookie gets a 403, not the victim's data.
+    impersonation: str = "honoured"  # "honoured" | "refused"
 
     @property
     def label(self) -> str:
@@ -308,11 +344,18 @@ ENDPOINTS: list[Ep] = [
     Ep("POST", "/profile/refresh", lambda u: {}),
     Ep("GET", "/profile/delete-account"),
     Ep("POST", "/profile/delete-account", lambda u: {"confirm": "delete"}),
-    # --- src/routers/settings.py (4) ---
+    # --- src/routers/settings.py (5) ---
     Ep("GET", "/settings"),
     Ep("POST", "/settings/save", lambda u: _all_on()),
     Ep("GET", "/settings/unsubscribe/{token}", auth="token"),
     Ep("POST", "/settings/unsubscribe/{token}", auth="token"),
+    Ep(
+        "POST",
+        "/settings/microsoft/unlink",
+        lambda u: {},
+        microsoft_link=True,
+        impersonation="refused",
+    ),
 ]
 
 _ID = {e: e.label for e in ENDPOINTS}
@@ -335,7 +378,7 @@ def test_the_endpoint_inventory_is_the_whole_first_run_surface():
     """The sweeps below are only as complete as this list.
 
     Read the routes off the three routers rather than trusting a hand-count, so
-    a 16th endpoint fails here loudly instead of quietly escaping the
+    a 17th endpoint fails here loudly instead of quietly escaping the
     authorization sweeps.
     """
     live = set()
@@ -355,7 +398,7 @@ def test_the_endpoint_inventory_is_the_whole_first_run_surface():
         f"missing from the tests: {sorted(live - declared)}; "
         f"no longer in the code: {sorted(declared - live)}"
     )
-    assert len(ENDPOINTS) == 15
+    assert len(ENDPOINTS) == 16
 
     # The two exemptions below are asserted, not assumed: unsubscribe links are
     # clicked from an email client with no session.
@@ -1785,7 +1828,7 @@ async def test_unsubscribe_handles_a_token_for_a_user_that_no_longer_exists(
 
 @pytest.mark.parametrize("ep", ENDPOINTS, ids=_ID.get)
 async def test_every_endpoint_that_needs_a_session_redirects_a_logged_out_caller(
-    client, db_session, ep
+    client, db_session, asgi_app, ep
 ):
     """Half one of the sweep, per endpoint.
 
@@ -1803,6 +1846,9 @@ async def test_every_endpoint_that_needs_a_session_redirects_a_logged_out_caller
         access_status="allowed",
     )
     await factories.make_profile(db_session, user=u)
+    asgi_app.state.microsoft_sign_in = make_config()
+    if ep.microsoft_link:
+        await _link_microsoft(db_session, u, OID, "actor-ms@actor.example")
     await db_session.flush()
     token = _generate_unsubscribe_token(str(u.id))
 
@@ -1836,7 +1882,9 @@ async def test_every_endpoint_that_needs_a_session_redirects_a_logged_out_caller
 
 
 @pytest.mark.parametrize("ep", ENDPOINTS, ids=_ID.get)
-async def test_no_logged_in_user_can_read_or_write_another_users_data(client, db_session, ep):
+async def test_no_logged_in_user_can_read_or_write_another_users_data(
+    client, db_session, asgi_app, ep
+):
     """Half two, the one worth most, per endpoint.
 
     None of these routes takes a target user id, so the only handle a caller has
@@ -1890,6 +1938,12 @@ async def test_no_logged_in_user_can_read_or_write_another_users_data(client, db
     db_session.add(
         Job(type="generate_profile", status="completed", user_id=attacker.id, payload={})
     )
+    # The feature is on and the victim always has a link, so every endpoint is
+    # swept with a Microsoft identity at stake and its sign-in name is a leak marker.
+    asgi_app.state.microsoft_sign_in = make_config()
+    await _link_microsoft(db_session, victim, OID, "victim-ms@victim.example")
+    if ep.microsoft_link:
+        await _link_microsoft(db_session, attacker, OTHER_OID, "attacker-ms@attacker.example")
     await db_session.flush()
 
     victim_before = await _snapshot(db_session, victim.id)
@@ -1937,7 +1991,8 @@ async def test_no_logged_in_user_can_read_or_write_another_users_data(client, db
     if ep.method == "GET":
         assert r.status_code == 200, f"{ep.label} did not render for the attacker"
         for leaked in ("Viewing as Victim Alpha", "VICTIM-SECRET-SUMMARY",
-                       "VICTIM-PRIVATE-SECRET", "Victim Institute"):
+                       "VICTIM-PRIVATE-SECRET", "Victim Institute",
+                       "victim-ms@victim.example"):
             assert leaked not in r.text, (
                 f"AUTHORIZATION HOLE: {ep.label} showed a non-admin {leaked!r}"
             )
@@ -1956,7 +2011,13 @@ async def test_no_logged_in_user_can_read_or_write_another_users_data(client, db
     r2 = await _send(client, ep, victim, _auth_as(admin.id, victim.id))
     control_after = await _snapshot(db_session, victim.id)
 
-    if ep.method == "GET":
+    if ep.impersonation == "refused":
+        assert r2.status_code == 403, (
+            f"{ep.label} did not refuse an admin impersonating another user; a 302 "
+            "would mean the cookie was ignored and the admin acted on themselves"
+        )
+        assert control_after == control_before, f"{ep.label} acted for an impersonated user"
+    elif ep.method == "GET":
         assert r2.status_code == 200, ep.label
         assert "Viewing as Victim Alpha" in r2.text, (
             "the copi-impersonate cookie is inert even for an admin, so the "

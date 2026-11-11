@@ -21,7 +21,7 @@ CoPI is a Python web application deployed via Docker Compose. PostgreSQL for str
 
 - **API:** FastAPI route handlers
 - **ORM:** SQLAlchemy 2.0 (async) with Alembic for migrations
-- **Auth:** ORCID OAuth 2.0 via Authlib
+- **Auth:** ORCID OAuth 2.0 and Microsoft Entra ID (OIDC) via Authlib and joserfc
 - **Worker:** Separate process for long-running jobs (profile generation)
 - **Agent system:** Slack Web API polling via `slack-sdk` (Python), running as a separate process
 - **GrantBot:** Separate scheduler process for daily funding opportunity discovery

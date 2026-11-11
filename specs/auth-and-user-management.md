@@ -38,7 +38,7 @@ See `admin-dashboard.md` for the `/admin/waitlist` page (list, CSV export, mark-
 
 ## Authentication
 
-CoPI uses ORCID OAuth exclusively. No email/password authentication. ORCID cannot be unlinked.
+ORCID is the only way to create an account and is always available; it cannot be unlinked. A user may also link one work or school Microsoft account (Microsoft Entra ID) as a second way to sign in (see Microsoft sign-in below). No email/password authentication.
 
 ### ORCID OAuth Flow
 
@@ -55,6 +55,14 @@ CoPI uses ORCID OAuth exclusively. No email/password authentication. ORCID canno
 
 HTTP-only signed session cookie using FastAPI's `SessionMiddleware` (backed by `SECRET_KEY`). Sessions expire after 30 days of inactivity.
 
+### Sessions
+
+- Sign-in stores the account's `users.session_epoch` (NULL reads as 0) in the session as `epoch`. `get_current_user` refuses, and clears, a session whose epoch differs from the stored value.
+- Logout, the user's own Microsoft unlink and an admin's removal of a Microsoft link bump the epoch, which ends every session the account holds on every device. Sessions issued before the epoch existed carry none and the column is NULL, so nobody is signed out by the deploy.
+- Every sign-in (ORCID or Microsoft) starts a fresh session that keeps only a vetted `post_login_redirect` and a `pending_invite_token`, and deletes the `copi-impersonate` cookie, so a new sign-in does not inherit an impersonation.
+- The remembered `next` destination is at most 1024 characters, each printable ASCII other than `"` and `\`, and never starts with `//`; anything else is not remembered. This keeps the session cookie plus the redirect to Microsoft inside nginx's 4 KB upstream-header buffer.
+- The invite routes (`GET /invite/{token}`, `POST /invite/{token}/accept`) resolve the signed-in account through the same checks as `get_current_user`, so they honour revocation.
+
 ### Implementation
 
 Use **Authlib** for the OAuth 2.0 flow. Register ORCID as an OAuth provider with:
@@ -62,6 +70,67 @@ Use **Authlib** for the OAuth 2.0 flow. Register ORCID as an OAuth provider with
 - Token URL: `https://orcid.org/oauth/token`
 - Scope: `/authenticate`
 - User info from: `https://pub.orcid.org/v3.0/{ORCID-ID}/record`
+
+## Microsoft sign-in
+
+Any existing account can link one work or school Microsoft account and use it as a second login, through the same access gate and landing logic as ORCID (pending invite, onboarding, saved destination, `/profile`). Microsoft never creates an account, never writes `users.email` or `users.name`, and the access gate (`users.access_status`) is the only eligibility rule. Only members (`acct` = 0) of the tenants in `MICROSOFT_ALLOWED_TENANT_IDS` are accepted: no personal accounts, no guests. A link is looked up by `(tid, oid)`, never by email.
+
+The feature is off until `MICROSOFT_CLIENT_ID` is set. The routes are always registered and return 404 while it is off.
+
+### Flows
+
+| Route | Purpose |
+|---|---|
+| `GET /auth/microsoft/start` | Begin sign-in (button on `/login`) |
+| `GET /auth/microsoft/link` | Begin linking (link on `/settings`) |
+| `GET /auth/microsoft/callback` | The single redirect URI for both |
+| `GET /login/start?reauth=1` | ORCID re-sign-in before linking |
+| `POST /settings/microsoft/unlink` | User removes their link |
+| `POST /admin/users/{user_id}/microsoft/unlink` | Admin removes a user's link |
+
+- **Sign-in.** Authorization-code flow with PKCE, `state` and `nonce` held in the session that started it. The callback validates the ID token (signature from the tenant's keys, issuer, audience, expiry, nonce, `tid` in the allowlist, `oid`, `acct`), finds the link by `(tid, oid)` and ends in the shared sign-in tail. No link → `/login?error=microsoft_not_linked`.
+- **Linking** needs a proven ORCID re-sign-in: `/login/start?reauth=1` asks ORCID for `prompt=login`, and the returned ID token's `auth_time` must be at most 300 s old, for the same ORCID iD. The link must then start and complete within 15 minutes of it. Linking and the re-sign-in are refused while an admin is impersonating. One link per user; a Microsoft account can be linked to one CoPI account only.
+- **Unlink.** The user's unlink and an admin's removal delete the link and end every session of the account. An admin can view and remove a link, never create one. Settings shows the section to any signed-in, non-impersonated account while the feature is on; the admin removal is on `/admin/users/{id}`.
+- Results are fixed codes in the redirect URL (`/login?error=<code>`, `/settings?microsoft=<code>`) mapped to fixed text in code; an unknown code renders nothing.
+
+### Settings
+
+| Setting | Meaning |
+|---|---|
+| `MICROSOFT_CLIENT_ID` | Application (client) ID. Empty = feature off. |
+| `MICROSOFT_REDIRECT_URI` | `<BASE_URL>/auth/microsoft/callback`; must equal the registered URI exactly (case-sensitive). |
+| `MICROSOFT_ALLOWED_TENANT_IDS` | Comma-separated tenant GUIDs. |
+| `MICROSOFT_CERTIFICATE_B64` | Base64 of the PEM certificate uploaded to the registration. |
+| `MICROSOFT_PRIVATE_KEY_B64` | Base64 of the unencrypted PEM RSA private key (at least 2048 bits, matching the certificate); masked in `repr`. |
+
+`create_app()` validates them when `MICROSOFT_CLIENT_ID` is set; an invalid configuration stops the web app at start. The worker, agent and grantbot are unaffected. An expired or not-yet-valid certificate logs an ERROR (Microsoft sign-ins fail, ORCID is unaffected); one within 30 days of expiry logs a WARNING. A change to `.env` needs the `app` container recreated.
+
+### Open decision: admin exposure
+
+Every existing account may link, admins included. Whoever controls a linked Microsoft account, including that tenant's own IT administrators, can therefore sign in as the CoPI account, an admin's too, and impersonate any user. The turn-on precondition is that each allowed tenant enforces MFA for this app. Whether to exclude `is_admin` accounts from Microsoft sign-in is an open owner decision (a one-line change).
+
+### Turn on (runbook)
+
+1. Decide where the app registration lives and list the allowed tenants. For each allowed tenant, confirm with its IT team that it enforces MFA for this app (Conditional Access), and how its consent policy treats `openid profile` for an app from another tenant (users may consent, or an admin must: AADSTS90094).
+2. Create the registration: supported account types "Accounts in any organizational directory (multitenant)", platform Web, redirect URI `<BASE_URL>/auth/microsoft/callback` only (https; case-sensitive), implicit grant off. Since June 2026 the "Enable property lock" setting is Enabled by default for new applications; confirm it. Add the optional claim `acct` to the ID token (Token configuration → Add optional claim → ID).
+3. Outside the repository: `d=$(mktemp -d) && openssl req -x509 -newkey rsa:2048 -sha256 -days 365 -nodes -keyout "$d/key.pem" -out "$d/cert.pem" -subj "/CN=copi-microsoft-signin"`; upload `$d/cert.pem` under Certificates & secrets → Certificates.
+4. Put the five settings in `.env` (`base64 -w0 "$d/cert.pem"`, `base64 -w0 "$d/key.pem"`); `chmod 600 .env`; `rm -r "$d"`.
+5. Recreate the web container with both prod compose files (`docker compose -f docker-compose.prod.yml -f docker-compose.override.yml up -d --force-recreate app`), then reload nginx (`... exec -T nginx nginx -s reload`), as `scripts/redeploy.sh` does after recreating `app`.
+6. Verify the live checks below with one link and sign-in per allowed organisation before announcing the feature.
+7. Calendar reminder 30 days before the certificate expires.
+
+### Live checks before turn-on
+
+- Microsoft accepts the client assertion: PS256, `x5t#S256`, `aud` = the `organizations` token endpoint, `client_id` in the body.
+- Microsoft echoes the `nonce` in the code-flow ID token (a missing nonce fails every sign-in closed).
+- `acct` arrives once configured, and its JSON type.
+- The ID token's JWS header holds only registered members (an unknown member fails every sign-in closed).
+- What a user sees under each allowed organisation's consent setting, and whether a refusal ever comes back to the redirect URI.
+- ORCID: with an active ORCID session in the browser, `/login/start?reauth=1` shows the password page; the returned `auth_time` is the moment the password was entered (not `iat`); the nonce and `aud` (our client ID) are present. Do not turn linking on unless all hold.
+
+### Renew, move to CA-signed, roll back
+
+Renew: upload the new certificate (a registration holds several), change the two `.env` values, recreate `app`, delete the old certificate. Turn the feature off: clear `MICROSOFT_CLIENT_ID`, recreate `app`; links stay, unused; sessions already signed in through Microsoft stay valid until they expire. If the reason is a flaw in Microsoft sign-in, also rotate `SECRET_KEY`. Roll back the code (or downgrade migration `0031`): the previous image ignores `epoch`, so every session revoked by logout, unlink or removal in the last 30 days works again; rotate `SECRET_KEY` with it if those revocations must hold. Rotating `SECRET_KEY` signs everyone out and invalidates outstanding unsubscribe links.
 
 ## Access Gate (Pre-Release)
 

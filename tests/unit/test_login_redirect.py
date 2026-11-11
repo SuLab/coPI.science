@@ -74,3 +74,10 @@ def test_rejects_open_redirects_and_junk(target):
 )
 def test_rejects_nonpages_and_sensitive_endpoints(target):
     assert is_safe_next_url(_req(), target) is False
+
+
+def test_the_length_bound_is_1024_characters():
+    at_the_bound = "/profile?q=" + "x" * 1013
+    assert len(at_the_bound) == 1024
+    assert is_safe_next_url(_req(), at_the_bound) is True
+    assert is_safe_next_url(_req(), at_the_bound + "x") is False

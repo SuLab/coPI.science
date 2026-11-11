@@ -58,3 +58,6 @@ docs/specs
 # code in a shell inside the container.
 docs/plans
 docs/superpowers
+# Private keys never belong in an image layer
+**/*.pem
+**/*.key

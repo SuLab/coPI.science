@@ -14,8 +14,9 @@ async def test_container_is_migrated(engine):
         # 0023 researcher_profiles synthesis provenance, 0024 agents.role column,
         # 0025 publications unique (user_id, pmid), 0026 pcm user FK cascade,
         # 0027 FK-target + badge-count indexes, 0028 thread_decisions.reopened_at,
-        # 0030 agent_messages.sender_user_id + pi_dm_messages.handled_at (0029: pi_engaged_at + pi_inbound_state)
-        assert v == "0030"
+        # 0029 pi_engaged_at + pi_inbound_state, 0030 agent_messages.sender_user_id +
+        # pi_dm_messages.handled_at, 0031 users.session_epoch + user_microsoft_identities
+        assert v == "0031"
 
 
 async def test_writes_are_rolled_back_part1(db_session):

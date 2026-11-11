@@ -20,12 +20,17 @@
                 automatically generate your research profile.
             </p>
 
-            {% if error %}
+            {% if notice %}
+            <div class="bg-blue-50 border border-blue-200 rounded-md p-3 mb-4 text-sm text-blue-700">
+                {{ notice }}
+            </div>
+            {% elif error %}
             <div class="bg-red-50 border border-red-200 rounded-md p-3 mb-4 text-sm text-red-700">
                 {% if error == 'oauth_error' %}Authentication was cancelled or failed. Please try again.
                 {% elif error == 'no_code' %}No authorization code received. Please try again.
                 {% elif error == 'state_mismatch' %}Security check failed. Please try again.
                 {% elif error == 'token_error' %}Could not complete authentication. Please try again.
+                {% elif error_message %}{{ error_message }}
                 {% else %}Sign in failed. Please try again.{% endif %}
             </div>
             {% endif %}
@@ -37,6 +42,13 @@
                 </svg>
                 Sign in with ORCID
             </a>
+
+            {% if microsoft_enabled %}
+            <a href="/auth/microsoft/start"
+               class="mt-3 flex min-h-11 w-full items-center justify-center gap-3 rounded-lg border border-gray-300 bg-white px-6 py-3 font-medium text-gray-700 transition-colors duration-200 hover:bg-gray-50 sm:min-h-6">
+                Sign in with Microsoft
+            </a>
+            {% endif %}
 
             <p class="text-center text-sm text-gray-400 mt-4">
                 Don't have an ORCID? <a href="https://orcid.org/register" target="_blank" class="text-indigo-500 hover:underline">Create one for free</a>

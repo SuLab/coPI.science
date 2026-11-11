@@ -60,6 +60,14 @@ def test_empty_secret_not_labeled_redacted():
     assert args["slack_bot_token_su"] == "***REDACTED***"  # non-empty -> masked
 
 
+def test_the_microsoft_private_key_is_masked():
+    s = Settings(_env_file=None, microsoft_private_key_b64="LEAKME-private-key")
+    for rendered in (repr(s), str(s)):
+        assert "LEAKME-private-key" not in rendered
+    assert dict(s.__repr_args__())["microsoft_private_key_b64"] == "***REDACTED***"
+    assert s.microsoft_private_key_b64 == "LEAKME-private-key"
+
+
 # --- credentials embedded in a URL/DSN --------------------------------------------
 
 
@@ -142,6 +150,10 @@ NON_SECRET_STR_FIELDS = {
     "environment",
     "orcid_client_id",       # OAuth *public* client id; ships in the browser redirect
     "orcid_redirect_uri",
+    "microsoft_client_id",   # the app registration's public Application (client) ID
+    "microsoft_redirect_uri",
+    "microsoft_allowed_tenant_ids",
+    "microsoft_certificate_b64",  # the PUBLIC certificate; the private key is name-masked
     "database_url",          # a plain sentinel has no userinfo -> nothing to mask
     "ncbi_contact_email",
     "base_url",

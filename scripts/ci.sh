@@ -134,7 +134,7 @@ MIGCHECK_CONTAINER="copi-ci-migcheck"
 MIGRATION_FLOOR="${MIGRATION_FLOOR:-0018}"
 
 LINT_TARGETS=(
-  tests/conftest.py tests/factories.py tests/fakes.py
+  tests/conftest.py tests/factories.py tests/fakes.py tests/oidc_fakes.py tests/session_support.py
   tests/unit tests/integration tests/characterization tests/contract
   # Two of tests/e2e's nine tests need no server and run in the offline suite, so
   # it is gate-relevant either way.

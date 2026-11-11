@@ -144,9 +144,21 @@ EXPECTED_COLUMNS: tuple[tuple[str, str, str, bool, str | None], ...] = (
     # (outbound, or not yet processed), so the column stays declared nullable.
     ("agent_messages", "sender_user_id", "uuid", True, ""),
     ("pi_dm_messages", "handled_at", "timestamp with time zone", True, ""),
+    # 0031 — session_epoch is nullable with no default and no backfill: NULL reads as 0.
+    ("users", "session_epoch", "integer", True, ""),
+    ("user_microsoft_identities", "id", "uuid", False, None),
+    ("user_microsoft_identities", "user_id", "uuid", False, None),
+    ("user_microsoft_identities", "tenant_id", "uuid", False, None),
+    ("user_microsoft_identities", "object_id", "uuid", False, None),
+    ("user_microsoft_identities", "sign_in_name", "character varying", True, ""),
+    ("user_microsoft_identities", "linked_at", "timestamp with time zone", False, "now()"),
+    ("user_microsoft_identities", "last_sign_in_at", "timestamp with time zone", True, ""),
 )
 
-EXPECTED_TABLES = ("pi_dm_messages", "cohorts", "cohort_memberships", "cohort_audit_events")
+EXPECTED_TABLES = (
+    "pi_dm_messages", "cohorts", "cohort_memberships", "cohort_audit_events",
+    "user_microsoft_identities",
+)
 
 #: The only tables the 0019..0023 chain creates, so the only ones legitimately absent
 #: from a preflight row-count snapshot. Derived from preflight.PLANNED_OBJECTS rather
@@ -203,6 +215,9 @@ EXPECTED_INDEXES: dict[str, str] = {
     "ix_thread_decisions_agent_b_outcome": "USING btree (agent_b, outcome)",
     # 0030
     "ix_agent_messages_sender_user_id": "USING btree (sender_user_id)",
+    # 0031 — the two UNIQUE constraints' backing indexes.
+    "uq_user_microsoft_identities_user_id": "USING btree (user_id)",
+    "uq_user_microsoft_identities_tenant_object": "USING btree (tenant_id, object_id)",
 }
 
 #: constraint name -> (table, pg_get_constraintdef)
@@ -232,6 +247,19 @@ EXPECTED_CONSTRAINTS: dict[str, tuple[str, str]] = {
     "agent_messages_sender_user_id_fkey": (
         "agent_messages",
         "FOREIGN KEY (sender_user_id) REFERENCES users(id) ON DELETE SET NULL",
+    ),
+    # 0031
+    "user_microsoft_identities_user_id_fkey": (
+        "user_microsoft_identities",
+        "FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE",
+    ),
+    "uq_user_microsoft_identities_user_id": (
+        "user_microsoft_identities",
+        "UNIQUE (user_id)",
+    ),
+    "uq_user_microsoft_identities_tenant_object": (
+        "user_microsoft_identities",
+        "UNIQUE (tenant_id, object_id)",
     ),
 }
 

@@ -110,6 +110,20 @@ class Settings(BaseSettings):
     orcid_client_secret: str = ""
     orcid_redirect_uri: str = "http://localhost:8000/auth/callback"
 
+    # Microsoft sign-in (docs/specs/2026-10-21-microsoft-sign-in-design.md §5.2). Plain
+    # strings: src/services/microsoft_identity.py::load_config validates them in
+    # create_app() only, so a bad value stops the web app but never the worker or the agent,
+    # which load the same .env. An empty MICROSOFT_CLIENT_ID keeps the feature off.
+    microsoft_client_id: str = ""
+    microsoft_redirect_uri: str = ""
+    # Comma-separated tenant GUIDs. A str, not a list: pydantic-settings JSON-decodes list
+    # fields from the environment, and "a,b" would stop every process.
+    microsoft_allowed_tenant_ids: str = ""
+    # Base64 of the PEM certificate uploaded to the app registration (public).
+    microsoft_certificate_b64: str = ""
+    # Base64 of the PEM RSA private key. Masked in repr by its name ("key").
+    microsoft_private_key_b64: str = ""
+
     # Database
     database_url: str = "postgresql+asyncpg://copi:copi@localhost:5432/copi"
 

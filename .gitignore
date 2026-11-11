@@ -126,3 +126,7 @@ scripts/_*
 
 # Subagent-driven-development scratch (ledger, briefs, review packages)
 .superpowers/
+
+# Private keys and certificates (Microsoft sign-in key material lives in .env, never in the tree)
+*.pem
+*.key

@@ -29,6 +29,13 @@ it. Add a fresh scratch DB with
 suites distinct names so they do not migrate each other's schema mid-run. Never
 point `TEST_DATABASE_URL` at `copi`, the dev database.
 
+## Sign-in
+
+- Microsoft sign-in is a linked second login keyed by `(tid, oid)`, never email. ORCID stays the only way to create an account. It is off until `MICROSOFT_CLIENT_ID` is set.
+- `.env` changes need the `app` container recreated, not restarted. An invalid `MICROSOFT_*` configuration stops the web app at start (not the worker, agent or grantbot).
+- Rolling back the code or turning the feature off does not end sessions unless `SECRET_KEY` is rotated.
+- Runbook, flows and the open admin-exposure decision: `specs/auth-and-user-management.md`.
+
 ## Stylesheet build (Tailwind v4, compiled — no CDN)
 
 `templates/` use a compiled Tailwind v4 stylesheet at `static/css/app.min.css`
