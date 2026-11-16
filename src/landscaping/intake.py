@@ -41,7 +41,7 @@ import logging
 import random
 import re
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -115,6 +115,9 @@ GRANT_LINKS_REFRESH = timedelta(days=7)
 PREPRINT_MATCH_DAYS = 730
 #: Upserts per committed chunk of a slice (§12.2: each unit commits on its own).
 _STORE_CHUNK = 100
+#: Values per ``IN`` list: asyncpg refuses a query with more than 32,767 parameters, and the
+#: grants' PMIDs passed that on 2026-11-16.
+_IN_CHUNK = 10_000
 
 _WORK_KINDS = ("work", "preprint")
 _MONTH_SOURCES = ("openalex", "pubmed", "nsf", "datacite", "geo")
@@ -959,6 +962,13 @@ async def _refresh_grant_pmids(grants: list[LandscapeDocument], now: datetime) -
         grant.details = details
 
 
+def _in_chunks(values: set[str]) -> Iterator[list[str]]:
+    """``values`` sorted, in slices of at most `_IN_CHUNK`, one ``IN`` list each."""
+    ordered = sorted(values)
+    for start in range(0, len(ordered), _IN_CHUNK):
+        yield ordered[start:start + _IN_CHUNK]
+
+
 async def link_grants(db: AsyncSession) -> int:
     """Link qualifying grants to the stored papers RePORTER says they produced
     (``publications_for_cores``, spec §6.1), as ``grant_cites`` links (``doc_a`` the grant),
@@ -972,10 +982,10 @@ async def link_grants(db: AsyncSession) -> int:
     await _refresh_grant_pmids(grants, datetime.now(UTC))
     pmids = {p for g in grants for p in (g.details or {}).get("cited_pmids") or []}
     papers = {}
-    if pmids:
-        papers = {d.pmid: d for d in (await db.execute(
-            select(D).where(D.pmid.in_(pmids), D.merged_into.is_(None), D.kind.in_(_WORK_KINDS))
-        )).scalars()}
+    for chunk in _in_chunks(pmids):
+        papers.update({d.pmid: d for d in (await db.execute(
+            select(D).where(D.pmid.in_(chunk), D.merged_into.is_(None), D.kind.in_(_WORK_KINDS))
+        )).scalars()})
     created = 0
     for grant in grants:
         for pmid in (grant.details or {}).get("cited_pmids") or []:
@@ -1007,11 +1017,11 @@ async def link_datasets(db: AsyncSession) -> int:
     live = (D.merged_into.is_(None), D.kind != "dataset")
     by_doi: dict[str, uuid.UUID] = {}
     by_pmid: dict[str, uuid.UUID] = {}
-    if dois:
-        by_doi = dict((await db.execute(select(D.doi, D.id).where(D.doi.in_(dois), *live))).all())
-    if pmids:
-        by_pmid = dict(
-            (await db.execute(select(D.pmid, D.id).where(D.pmid.in_(pmids), *live))).all()
+    for chunk in _in_chunks(dois):
+        by_doi.update((await db.execute(select(D.doi, D.id).where(D.doi.in_(chunk), *live))).all())
+    for chunk in _in_chunks(pmids):
+        by_pmid.update(
+            (await db.execute(select(D.pmid, D.id).where(D.pmid.in_(chunk), *live))).all()
         )
     created = 0
     for ds_id, rel in related:

@@ -588,6 +588,29 @@ async def test_link_grants_links_and_unifies(db_session, monkeypatch):
     assert calls == [["R01XX000050"]]
 
 
+async def test_link_grants_past_the_query_parameter_limit(db_session, monkeypatch):
+    """asyncpg refuses more than 32,767 query parameters; the grants' PMIDs passed that on
+    2026-11-16, so the stored papers are looked up in chunks."""
+    db = db_session
+    grant = await upsert_document(db, _grant("R01XX000052", name="Ada Quill", profile="9000006"))
+    paper = await upsert_document(db, _openalex(
+        "W4400000052", doi="10.1234/inv.5200", pmid="39100052", name="Ada Quill",
+        oa="A5000000052"))
+    await db.commit()
+    cited = {str(30_000_000 + i) for i in range(40_000)} | {"39100052"}
+
+    async def fake_publications(cores):
+        return {"R01XX000052": cited}
+
+    monkeypatch.setattr(nih_reporter, "publications_for_cores", fake_publications)
+
+    assert await link_grants(db) == 1
+    links = set((await db.execute(select(
+        LandscapeDocumentLink.doc_a, LandscapeDocumentLink.doc_b
+    ).where(LandscapeDocumentLink.link_kind == "grant_cites"))).all())
+    assert links == {(grant, paper)}
+
+
 async def test_link_datasets(db_session):
     db = db_session
     by_doi = await upsert_document(db, _openalex("W4400000060", doi="10.1234/inv.6000"))
