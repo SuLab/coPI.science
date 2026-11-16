@@ -46,6 +46,14 @@ ADMIN_INVARIANT_LOCK_KEY: int = fixed_key("admin_invariant")
 #: activations cannot both see "no other active hub" (spec §6.8 C-05, D14).
 HUB_ROSTER_LOCK_KEY: int = fixed_key("hub_roster")
 
+#: Held by the one running landscaping worker (spec §9.1).
+LANDSCAPE_WORKER_LOCK_KEY: int = fixed_key("landscape_worker")
+
+
+def landscape_rerank_lock_key(epoch_id: uuid.UUID) -> int:
+    """One S7 rerank lock per judgment epoch (spec §7.8)."""
+    return fixed_key(f"landscape_rerank:{epoch_id}")
+
 
 def entity_key_sql(namespace: str) -> str:
     """SQL for a per-entity key, bound through ``:id`` (for example

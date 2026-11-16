@@ -68,16 +68,6 @@ result.</p>
     lists the messages you may see, what they mean and what to do.</li>
 </ul>
 
-<h3>Finishing</h3>
-{% if impersonation_banner %}
-<p>While an admin is viewing the app as another user, <strong>Back to Help</strong> below
-replaces <strong>Finish</strong> and records nothing.</p>
-{% else %}
-<p><strong>Finish</strong> below ends the tutorial, stops the "New to Blackbird?" box from
-appearing and takes you to the Help overview.</p>
-{% endif %}
-<p>The tutorial stays under Help, so you can come back to any step.</p>
-
 <p>More detail: <a href="{{ page_url(request, 'help_page', slug='pis', fragment='directory') }}">The PI directory</a>
 and <a href="{{ page_url(request, 'help_page', slug='pis', fragment='detail') }}">A PI's page</a>.</p>
 

@@ -880,7 +880,9 @@ def test_route_table_is_fully_enumerated():
     which FastAPI builds by its own traversal."""
     app = create_app()
     from_openapi = set(app.openapi()["paths"])
-    from_walk = {r.path for r in http_routes()}
+    # OpenAPI drops a path parameter's converter (`{opportunity_id:uuid}` is listed as
+    # `{opportunity_id}`), so the walked paths are compared the same way.
+    from_walk = {re.sub(r"\{(\w+):\w+\}", r"{\1}", r.path) for r in http_routes()}
     missing = from_openapi - from_walk
     assert not missing, f"walker missed routes that OpenAPI knows about: {sorted(missing)}"
     assert len(http_routes()) > 50, f"suspiciously few routes: {len(http_routes())}"
@@ -1058,10 +1060,13 @@ def test_static_link_resolution_coverage_is_reported():
     # The Projects details page (2026-10-26) adds two: each source's `{{ source.url }}` (PubMed or ClinicalTrials.gov) and the admin's `{{ project.calls_url }}`.
     # The Projects redesign (2026-10-27) adds fifteen same-page `#…` links: eleven on the
     # details page (its jump nav and the brief's count links) and four on the Projects help page.
+    # The Landscape pages (2026-10-30) add four: a member idea's lab links to ORCID and
+    # OpenAlex (`{{ lab.orcid_url }}`, `{{ lab.openalex_url }}`) and two same-page
+    # `#reviewing` links on the Landscape help page.
     unresolvable = len(values) - len(resolvable)
-    assert unresolvable <= 82, (
+    assert unresolvable <= 86, (
         f"{unresolvable} of {len(values)} href/action values do not resolve to a "
-        "checkable local path (was 82) — the matcher probably regressed, or a new "
+        "checkable local path (was 86) — the matcher probably regressed, or a new "
         "link is built from a variable"
     )
 

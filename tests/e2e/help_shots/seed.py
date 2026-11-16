@@ -540,6 +540,109 @@ async def _seed_run(s, users: dict, *, now: datetime) -> dict:
             "lab_main": "whitcombe", "prompt_suggestion": str(suggestion.id)}
 
 
+#: The Landscape demo (spec 2026-10-30 §13.1): (headline, target, disease, modality, scores).
+#: Invented ideas; the first two are issued in last week's batch, the last two in this week's
+#: blind batch, whose last card is a probe.
+_LANDSCAPE = (
+    ("Blocking a scar-forming kinase in lung fibroblasts slows fibrosis in two mouse models",
+     "FBK1", "idiopathic pulmonary fibrosis", "small molecule", (4, 4, 5, 3, 4, 4)),
+    ("An antibody that clears inflammatory monocytes from inflamed joints",
+     "MCR7", "rheumatoid arthritis", "antibody", (4, 3, 4, 3, 3, 4)),
+    ("Restoring a neuronal chloride pump calms seizures in a childhood epilepsy model",
+     "NCP2", "childhood absence epilepsy", "gene therapy", (3, 4, 3, 3, 4, 3)),
+    ("A peptide that keeps kidney filter cells attached in diabetic kidney disease",
+     "PDX9", "diabetic kidney disease", "peptide", (3, 3, 2, 3, 3, 3)),
+)
+
+
+async def _seed_landscape(s, *, now: datetime) -> dict:
+    """An active epoch with a cut, four assessed opportunities in rank order, last week's
+    batch and this week's blind batch (spec 2026-10-30 §13.1, §10.6). Returns ids."""
+    import tomllib
+    from pathlib import Path
+
+    from src.landscaping import epochs
+    from src.landscaping.structured_lines import structured_line
+    from src.models.landscape import (
+        LandscapeAssessment,
+        LandscapeCut,
+        LandscapeEpoch,
+        LandscapeIdea,
+        LandscapeOpportunity,
+        LandscapeOpportunityVersion,
+        LandscapeRanking,
+        LandscapeReviewBatch,
+        LandscapeReviewBatchItem,
+    )
+    from src.services.assessment_detail import KEY_POINT_GROUPS
+    from src.services.blackbird_rubric import RUBRIC_CONTENT_HASH, RUBRIC_VERSION, RUBRIC_WEIGHTS
+
+    dims = list(RUBRIC_WEIGHTS)
+    gates = list(tomllib.loads(Path("prompts/rubric/blackbird-rubric.toml").read_text())["gating"])
+    snapshot = epochs.build_snapshot()
+    epoch = LandscapeEpoch(
+        status="active", components=epochs.current_components(), snapshot=snapshot,
+        prompt_set_version=snapshot["prompt_set_version"], activated_at=now - timedelta(days=30))
+    s.add(epoch)
+    await s.flush()
+    cut = LandscapeCut(epoch_id=epoch.id, n=len(_LANDSCAPE) * 25, k=len(_LANDSCAPE) - 1,
+                       completed_at=now - timedelta(days=8))
+    s.add(cut)
+    await s.flush()
+
+    opportunities = []
+    for i, (headline, target, disease, modality, values) in enumerate(_LANDSCAPE):
+        probe = i == len(_LANDSCAPE) - 1
+        idea_fields = dict(
+            idea_type="biology", direction="inhibit", targets=[{"symbol": target}],
+            disease={"label": disease}, modality_variants=[modality])
+        idea = LandscapeIdea(
+            epoch_id=epoch.id, idea_key=f"demo:{target.lower()}", stage="preclinical",
+            evidence_grade="in vivo", jhu_group_count=1, in_current_cut=not probe, **idea_fields)
+        opportunity = LandscapeOpportunity(version_counter=1)
+        s.add_all([idea, opportunity])
+        await s.flush()
+        s.add_all([
+            LandscapeRanking(epoch_id=epoch.id, idea_id=idea.id, position=i + 1),
+            LandscapeOpportunityVersion(
+                opportunity_id=opportunity.id, version=1, epoch_id=epoch.id,
+                cut_id=None if probe else cut.id, member_idea_keys=[idea.idea_key],
+                label=target, is_probe=probe, status="done"),
+            LandscapeAssessment(
+                opportunity_id=opportunity.id, opportunity_version=1, epoch_id=epoch.id,
+                status="done", company_or_project=f"{target} program", headline=headline,
+                elevator_pitch=f"{headline}. The lab has published the mouse data and holds "
+                               "the tool compounds. A first study in human tissue is the next step.",
+                key_points={key: [f"{label}: drawn from the lab's papers."]
+                            for key, label in KEY_POINT_GROUPS},
+                claim_support={key: ["estimate"] for key, _ in KEY_POINT_GROUPS},
+                structured_lines=[structured_line(idea_fields)],
+                score_rationale="Strong biology with an early but credible path to patients.",
+                dimension_rationales={key: "Supported by the lab's papers." for key in dims},
+                gating={key: "met" for key in gates},
+                gating_rationales={key: "Established in the lab's papers." for key in gates},
+                red_flags=[], rationale="A credible target with in vivo support.",
+                recommended_next_experiment="Confirm the effect in patient-derived tissue.",
+                rubric_version=RUBRIC_VERSION, rubric_content_hash=RUBRIC_CONTENT_HASH,
+                **_scored({key: values[n % len(values)] for n, key in enumerate(dims)})),
+        ])
+        opportunities.append(opportunity)
+
+    week = LandscapeReviewBatch(issued_on=(now - timedelta(days=7)).date(), blind=False)
+    blind = LandscapeReviewBatch(issued_on=now.date(), blind=True)
+    s.add_all([week, blind])
+    await s.flush()
+    s.add_all([LandscapeReviewBatchItem(batch_id=week.id, opportunity_id=o.id)
+               for o in opportunities[:2]])
+    # Shuffled order: the probe first.
+    s.add_all([LandscapeReviewBatchItem(batch_id=blind.id, opportunity_id=o.id, position=n,
+                                        is_probe=o is opportunities[-1])
+               for n, o in enumerate(reversed(opportunities[2:]))])
+    await s.flush()
+    return {"landscape_opportunity": str(opportunities[0].id),
+            "landscape_blind_opportunity": str(opportunities[2].id)}
+
+
 async def main() -> None:
     if not os.environ.get("DATABASE_URL", "").endswith("/" + DB_NAME):
         sys.exit(f"refusing to seed: DATABASE_URL must name {DB_NAME}")
@@ -565,12 +668,13 @@ async def main() -> None:
                    for key in ("manager", "reviewer")])
         pis = await _seed_pis(s, users, now=now)
         run = await _seed_run(s, users, now=now)
+        landscape = await _seed_landscape(s, now=now)
         await s.commit()
         for user_id in pis.pop("pi_with_profiles"):
             await write_persona_files(s, uuid.UUID(user_id))
         ids = {
             **{key: str(users[key].id) for key in ACCOUNT_ROLES},
-            **pis, **run,
+            **pis, **run, **landscape,
             "staff_preview_orcid": STAFF_PREVIEW_ORCID,
             # tests/e2e/ui_audit/harness.py classifies 404s against this key.
             "bad_uuid": str(uuid.UUID(int=0)),

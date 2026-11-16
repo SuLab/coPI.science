@@ -4,7 +4,9 @@ for them. Feedback/status writes now ALLOW an impersonated session (F4,
 2026-09-10) and attribute the write to the impersonated user, with the real
 admin recorded via ``recorded_by``; assign/unassign, suggestion-status and
 the project-review and project-assignment writes still refuse impersonation
-outright.
+outright. The landscaping writes (``/landscape/...``) follow the assessment
+ones, and also refuse impersonation on the expert judgment; every one keyed by
+an opportunity answers 404 unless ``landscape_view.can_view`` admits the user.
 
 Dependencies are module-level singletons (``_DB``/``_REVIEW``/``_STAFF``/
 ``_ADMIN``) rather than inline ``Depends(...)`` calls in argument defaults,
@@ -34,6 +36,8 @@ from src.dependencies import (
 )
 from src.models import AssessmentReview, OpportunityAssessment, PromptChangeSuggestion, User
 from src.models.hub_project import HubProject, HubProjectReview
+from src.models.landscape import LandscapeDecision, LandscapeOpportunity, LandscapeReview
+from src.services import landscape_reviews, landscape_view
 from src.services.assessment_reviews import (
     DuplicateFeedbackError,
     assign_reviewer,
@@ -926,3 +930,366 @@ async def project_unassign(
         surface=_PROJECT_DETAIL_SURFACE,
         state=_project_form_state(await request.form()),
     )
+
+
+# Landscaping decisions and reviews (spec §13.3, §10.6). Keyed on the stable opportunity;
+# recorded, never learned from (D21). Every route keyed by an opportunity id answers 404 when
+# the user may not see it (D50), so a reviewer cannot write outside the issued batches and their
+# own expert sample. Each returns to the landscaping detail page.
+
+#: The quick decision's multi-valued tag field.
+_REASON_TAGS_FIELD = "reason_tags"
+#: Prefixes of the expert-judgment form's per-gate and per-deal-breaker fields; the dimension
+#: scores use ``dim_<key>`` as the review form does.
+_GATE_FIELD_PREFIX = "gate_"
+_DEAL_BREAKER_FIELD_PREFIX = "deal_breaker_"
+
+
+def _landscape_redirect(opportunity_id: uuid.UUID) -> RedirectResponse:
+    return RedirectResponse(f"/workspace/landscape/{opportunity_id}", status_code=303)
+
+
+async def _require_viewable(db: AsyncSession, user: User, opportunity_id: uuid.UUID) -> None:
+    """404 unless the opportunity exists and ``user`` may see it (D50, D63)."""
+    if await db.get(LandscapeOpportunity, opportunity_id) is None or not (
+        await landscape_view.can_view(db, user, opportunity_id)
+    ):
+        raise HTTPException(status_code=404, detail="Opportunity not found")
+
+
+async def _shown_assessment(
+    db: AsyncSession, form: FormData, opportunity_id: uuid.UUID
+) -> uuid.UUID | None:
+    """The assessment the form's page showed (its ``assessment_id`` field), or the current one."""
+    raw = _form_str(form, "assessment_id")
+    posted = _optional_uuid(raw) if raw else None
+    return await landscape_reviews.shown_assessment_id(db, opportunity_id, posted)
+
+
+def _reason_tags(form: FormData) -> list[str]:
+    tags = []
+    for raw in form.getlist(_REASON_TAGS_FIELD):
+        if not isinstance(raw, str):
+            raise HTTPException(status_code=400, detail="Malformed reason tag")
+        if raw.strip():
+            tags.append(raw.strip())
+    return tags
+
+
+def _prefixed_choices(form: FormData, prefix: str) -> dict[str, str]:
+    """The non-blank ``<prefix><key>`` fields as ``{key: value}``; values are checked by the
+    service. A file part is a 400, as in ``_parse_dimension_scores``."""
+    calls: dict[str, str] = {}
+    for field, raw in form.multi_items():
+        if not field.startswith(prefix):
+            continue
+        if not isinstance(raw, str):
+            raise HTTPException(status_code=400, detail=f"Malformed value for {field}")
+        if raw.strip():
+            calls[field[len(prefix) :]] = raw.strip()
+    return calls
+
+
+async def _load_landscape_decision(db: AsyncSession, decision_id: uuid.UUID) -> LandscapeDecision:
+    row = await db.scalar(
+        select(LandscapeDecision).where(LandscapeDecision.id == decision_id).with_for_update()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Decision not found")
+    return row
+
+
+async def _load_landscape_review(db: AsyncSession, review_id: uuid.UUID) -> LandscapeReview:
+    row = await db.scalar(
+        select(LandscapeReview).where(LandscapeReview.id == review_id).with_for_update()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Review not found")
+    return row
+
+
+@router.post("/landscape/{opportunity_id}/decision")
+async def landscape_decision_submit(
+    opportunity_id: uuid.UUID,
+    request: Request,
+    decision: str = Form(...),
+    reason: str = Form(""),
+    db: AsyncSession = _DB,
+    current_user: User = _REVIEW,
+):
+    """The quick decision (L39): ``decision`` pursue|pass, repeated ``reason_tags``, ``reason``,
+    and the shown ``assessment_id``. A second submit by the same reviewer writes nothing."""
+    await _require_viewable(db, current_user, opportunity_id)
+    form = await request.form()
+    try:
+        await landscape_reviews.submit_decision(
+            db,
+            opportunity_id=opportunity_id,
+            reviewer=current_user,
+            decision=decision,
+            reason_tags=_reason_tags(form),
+            reason=reason,
+            landscape_assessment_id=await _shown_assessment(db, form, opportunity_id),
+            recorded_by=recorded_by(current_user),
+        )
+    except landscape_reviews.DuplicateLandscapeDecisionError:
+        flash(request, "You have already decided on this opportunity; edit your decision.", "info")
+        return _landscape_redirect(opportunity_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    logger.info(
+        "Landscape decision by %s (%s) on opportunity %s: %s",
+        current_user.name, current_user.id, opportunity_id, decision,
+    )
+    flash(request, "Decision saved.", "success")
+    return _landscape_redirect(opportunity_id)
+
+
+@router.post("/landscape-decisions/{decision_id}/edit")
+async def landscape_decision_edit(
+    decision_id: uuid.UUID,
+    request: Request,
+    decision: str = Form(...),
+    reason: str = Form(""),
+    db: AsyncSession = _DB,
+    current_user: User = _REVIEW,
+):
+    row = await _load_landscape_decision(db, decision_id)
+    if row.reviewer_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the author may edit this decision")
+    form = await request.form()
+    try:
+        await landscape_reviews.edit_decision(
+            db,
+            row=row,
+            decision=decision,
+            reason_tags=_reason_tags(form),
+            reason=reason,
+            landscape_assessment_id=await _shown_assessment(db, form, row.opportunity_id),
+            recorded_by=recorded_by(current_user),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    opportunity_id = row.opportunity_id
+    await db.commit()
+    logger.info(
+        "Landscape decision %s edited by %s (%s): %s",
+        decision_id, current_user.name, current_user.id, decision,
+    )
+    flash(request, "Decision updated.", "success")
+    return _landscape_redirect(opportunity_id)
+
+
+@router.post("/landscape/{opportunity_id}/review")
+async def landscape_review_submit(
+    opportunity_id: uuid.UUID,
+    request: Request,
+    score: int = Form(...),
+    comment: str = Form(""),
+    db: AsyncSession = _DB,
+    current_user: User = _REVIEW,
+):
+    """The optional full review: ``score``, ``comment``, ``dim_<key>`` and the shown
+    ``assessment_id``. A second submit by the same reviewer writes nothing."""
+    await _require_viewable(db, current_user, opportunity_id)
+    form = await request.form()
+    dimension_scores = _parse_dimension_scores(form)
+    try:
+        await landscape_reviews.submit_review(
+            db,
+            opportunity_id=opportunity_id,
+            reviewer=current_user,
+            score=score,
+            comment=comment,
+            dimension_scores=dimension_scores,
+            landscape_assessment_id=await _shown_assessment(db, form, opportunity_id),
+            recorded_by=recorded_by(current_user),
+        )
+    except landscape_reviews.DuplicateLandscapeReviewError:
+        flash(request, "You have already reviewed this opportunity; edit your review.", "info")
+        return _landscape_redirect(opportunity_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    logger.info(
+        "Landscape review by %s (%s) on opportunity %s: score=%s dims=%d",
+        current_user.name, current_user.id, opportunity_id, score, len(dimension_scores),
+    )
+    flash(request, "Review saved.", "success")
+    return _landscape_redirect(opportunity_id)
+
+
+@router.post("/landscape-reviews/{review_id}/edit")
+async def landscape_review_edit(
+    review_id: uuid.UUID,
+    request: Request,
+    score: int = Form(...),
+    comment: str = Form(""),
+    db: AsyncSession = _DB,
+    current_user: User = _REVIEW,
+):
+    review = await _load_landscape_review(db, review_id)
+    if review.reviewer_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the author may edit this review")
+    form = await request.form()
+    # Always passed through, even `{}`: the form re-posts every dimension, so a cleared one
+    # must clear on the row.
+    dimension_scores = _parse_dimension_scores(form)
+    try:
+        await landscape_reviews.edit_review(
+            db,
+            review=review,
+            score=score,
+            comment=comment,
+            dimension_scores=dimension_scores,
+            landscape_assessment_id=await _shown_assessment(db, form, review.opportunity_id),
+            recorded_by=recorded_by(current_user),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    opportunity_id = review.opportunity_id
+    await db.commit()
+    logger.info(
+        "Landscape review %s edited by %s (%s): score=%s dims=%d",
+        review_id, current_user.name, current_user.id, score, len(dimension_scores),
+    )
+    flash(request, "Review updated.", "success")
+    return _landscape_redirect(opportunity_id)
+
+
+@router.post("/landscape-reviews/{review_id}/delete")
+async def landscape_review_delete(
+    review_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = _DB,
+    current_user: User = _ADMIN,
+):
+    review = await _load_landscape_review(db, review_id)
+    opportunity_id = review.opportunity_id
+    recorder = recorded_by(current_user)
+    await db.delete(review)
+    await db.commit()
+    logger.info(
+        "Landscape review %s deleted by %s (%s) recorded_by=%s",
+        review_id, current_user.name, current_user.id, getattr(recorder, "id", None),
+    )
+    flash(request, "Review deleted.", "success")
+    return _landscape_redirect(opportunity_id)
+
+
+@router.post("/landscape/{opportunity_id}/status")
+async def landscape_status(
+    opportunity_id: uuid.UUID,
+    request: Request,
+    action: str = Form(...),
+    db: AsyncSession = _DB,
+    current_user: User = _REVIEW,
+):
+    """``action`` approved|disapproved|cleared, with the shown ``assessment_id``."""
+    await _require_viewable(db, current_user, opportunity_id)
+    form = await request.form()
+    try:
+        await landscape_reviews.record_status_event(
+            db,
+            opportunity_id=opportunity_id,
+            actor=current_user,
+            action=action,
+            landscape_assessment_id=await _shown_assessment(db, form, opportunity_id),
+            recorded_by=recorded_by(current_user),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    logger.info(
+        "Landscape status %s recorded by %s (%s) on opportunity %s",
+        action, current_user.name, current_user.id, opportunity_id,
+    )
+    return _landscape_redirect(opportunity_id)
+
+
+@router.post("/landscape/{opportunity_id}/assign")
+async def landscape_assign(
+    opportunity_id: uuid.UUID,
+    assignee_user_id: str = Form(...),
+    db: AsyncSession = _DB,
+    current_user: User = _STAFF,
+):
+    refuse_impersonation(current_user)
+    await _require_viewable(db, current_user, opportunity_id)
+    assignee = await _load_assignee(db, _parse_assignee_id(assignee_user_id))
+    await landscape_reviews.assign_reviewer(
+        db, opportunity_id=opportunity_id, assignee=assignee, assigned_by=current_user
+    )
+    await db.commit()
+    logger.info(
+        "Landscape opportunity %s assigned to %s (%s) by %s (%s)",
+        opportunity_id, assignee.name, assignee.id, current_user.name, current_user.id,
+    )
+    return _landscape_redirect(opportunity_id)
+
+
+@router.post("/landscape/{opportunity_id}/unassign")
+async def landscape_unassign(
+    opportunity_id: uuid.UUID,
+    assignee_user_id: str = Form(...),
+    db: AsyncSession = _DB,
+    current_user: User = _STAFF,
+):
+    refuse_impersonation(current_user)
+    await _require_viewable(db, current_user, opportunity_id)
+    assignee_id = _parse_assignee_id(assignee_user_id)
+    await landscape_reviews.unassign_reviewer(
+        db, opportunity_id=opportunity_id, assignee_user_id=assignee_id
+    )
+    await db.commit()
+    logger.info(
+        "Landscape opportunity %s unassigned from user %s by %s (%s)",
+        opportunity_id, assignee_id, current_user.name, current_user.id,
+    )
+    return _landscape_redirect(opportunity_id)
+
+
+@router.post("/landscape/{opportunity_id}/expert-judgment")
+async def landscape_expert_judgment(
+    opportunity_id: uuid.UUID,
+    request: Request,
+    recommendation: str = Form(""),
+    comment: str = Form(""),
+    db: AsyncSession = _DB,
+    current_user: User = _REVIEW,
+):
+    """A marked expert's own calls on an item of their sample (L55, D63): ``gate_<key>``,
+    ``dim_<key>``, ``deal_breaker_<key>``, ``recommendation`` and ``comment``.
+
+    Refuses impersonation: the judgment measures the expert's own calls and its table has no
+    ``recorded_by`` column. An item outside the user's own sample, or a user who is not a marked
+    expert, is a 404 like an unviewable opportunity.
+    """
+    refuse_impersonation(current_user)
+    await _require_viewable(db, current_user, opportunity_id)
+    if not await landscape_reviews.is_marked_expert(db, current_user):
+        raise HTTPException(status_code=404, detail="Not in your expert sample")
+    form = await request.form()
+    try:
+        await landscape_reviews.submit_expert_judgment(
+            db,
+            opportunity_id=opportunity_id,
+            expert=current_user,
+            gates=_prefixed_choices(form, _GATE_FIELD_PREFIX),
+            scores=_parse_dimension_scores(form),
+            deal_breakers=_prefixed_choices(form, _DEAL_BREAKER_FIELD_PREFIX),
+            recommendation=recommendation.strip() or None,
+            comment=comment,
+        )
+    except landscape_reviews.NotInExpertSample as exc:
+        raise HTTPException(status_code=404, detail="Not in your expert sample") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    logger.info(
+        "Landscape expert judgment by %s (%s) on opportunity %s",
+        current_user.name, current_user.id, opportunity_id,
+    )
+    flash(request, "Judgment submitted.", "success")
+    return _landscape_redirect(opportunity_id)

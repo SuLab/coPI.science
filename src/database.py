@@ -21,7 +21,7 @@ class Base(DeclarativeBase):
 
 EngineRole = Literal[
     "web", "worker", "agent", "supervisor", "agent_roster", "cli", "heartbeat", "advisory_lock",
-    "provision_lock",
+    "provision_lock", "landscape",
 ]
 
 
@@ -37,6 +37,9 @@ def engine_kwargs(role: EngineRole) -> dict[str, Any]:
         return {"echo": False, "pool_size": 5, "max_overflow": 10,
                 "pool_pre_ping": True, "pool_recycle": 1800}
     if role == "worker":
+        return {"echo": False}
+    if role == "landscape":
+        # The landscaping worker (spec §9.1): same shape as the main worker's engine.
         return {"echo": False}
     if role == "agent":
         s = get_settings()

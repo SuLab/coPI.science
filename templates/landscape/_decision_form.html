@@ -1,0 +1,37 @@
+{# The quick decision (spec §13.3, L39): Pursue or Pass, reason tags from the criteria file
+   (`reason_tag_choices`, L49) and a short reason. Included with `opportunity_id`,
+   `assessment_id` (the assessment the page shows; always posted, so the decision records
+   what it was made on, D50), `decision` (the viewer's own decision dict or none) and
+   `form_id` (a unique id prefix). A first decision posts to
+   /reviews/landscape/<id>/decision, an edit to /reviews/landscape-decisions/<id>/edit;
+   both redirect to the opportunity's page (src/routers/reviews.py). #}
+<details class="landscape-decision mt-3 border-t border-gray-100 pt-3"{% if not decision %} open{% endif %}>
+    <summary class="cursor-pointer text-sm font-medium text-indigo-700">{% if decision %}Your decision: {{ 'Pursue' if decision.decision == 'pursue' else 'Pass' }} — change it{% else %}Quick decision{% endif %}</summary>
+    {% if decision %}
+    <form method="post" action="/reviews/landscape-decisions/{{ decision.id }}/edit" class="mt-2 space-y-2">
+    {% else %}
+    <form method="post" action="/reviews/landscape/{{ opportunity_id }}/decision" class="mt-2 space-y-2">
+    {% endif %}
+        <input type="hidden" name="assessment_id" value="{{ assessment_id or '' }}">
+        <fieldset>
+            <legend class="text-sm font-medium text-gray-700">Decision</legend>
+            <div class="flex items-center gap-4 text-sm text-gray-700">
+                <span><input type="radio" id="{{ form_id }}pursue" name="decision" value="pursue" required {% if decision and decision.decision == 'pursue' %}checked{% endif %}> <label for="{{ form_id }}pursue">Pursue</label></span>
+                <span><input type="radio" id="{{ form_id }}pass" name="decision" value="pass" {% if decision and decision.decision == 'pass' %}checked{% endif %}> <label for="{{ form_id }}pass">Pass</label></span>
+            </div>
+        </fieldset>
+        {% if reason_tag_choices %}
+        <fieldset>
+            <legend class="text-sm font-medium text-gray-700">Reason tags</legend>
+            <div class="flex flex-wrap gap-x-4 gap-y-1 text-sm text-gray-700">
+                {% for tag in reason_tag_choices %}
+                <span><input type="checkbox" id="{{ form_id }}tag-{{ loop.index }}" name="reason_tags" value="{{ tag }}" {% if decision and tag in (decision.reason_tags or []) %}checked{% endif %}> <label for="{{ form_id }}tag-{{ loop.index }}">{{ tag }}</label></span>
+                {% endfor %}
+            </div>
+        </fieldset>
+        {% endif %}
+        <label for="{{ form_id }}reason" class="block text-sm font-medium text-gray-700">Reason (optional, up to 1,000 characters)</label>
+        <textarea id="{{ form_id }}reason" name="reason" maxlength="1000" rows="2" class="w-full border rounded px-2 py-1 text-sm">{{ decision.reason if decision and decision.reason else '' }}</textarea>
+        <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">{{ 'Save decision' if decision else 'Record decision' }}</button>
+    </form>
+</details>

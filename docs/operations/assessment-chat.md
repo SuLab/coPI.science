@@ -241,3 +241,40 @@ Everything above holds unless this section says otherwise.
       SELECT date_trunc('day', created_at) AS day, status, count(*),
              sum(input_tokens), sum(output_tokens)
       FROM assessment_chat_usage WHERE subject = 'project' GROUP BY 1, 2 ORDER BY 1 DESC;
+
+## Landscaping chat (migration `0078`)
+
+A landscaping opportunity's page, `/workspace/landscape/{id}`, carries an "Ask about this
+opportunity" drawer from the same partial (`chat_kind="landscape"`) and script, over the
+opportunity's current assessment in the active epoch. Design:
+`docs/specs/2026-10-30-blackbird-landscaping-design.md` §13.5. Everything above holds unless
+this section says otherwise.
+
+- **Routes** (`src/routers/landscape_chat.py`): `GET /landscape-chat/{id}`, and `POST`
+  `/landscape-chat/{id}/messages`, `/clear`, `/opened`. Refusals in order: 403
+  `impersonating`, 403 `forbidden`, 503 `disabled` (both switches), 404 `not_found` (an
+  unknown opportunity, one the viewer may not see, or one with no completed assessment in
+  the active epoch), 415; asking then answers 503 `prompt_unrecorded` while
+  `prompts/landscaping/chat.md` does not match its recorded hash.
+- **Switch:** `LANDSCAPE_CHAT_ENABLED`, default false; `ASSESSMENT_CHAT_ENABLED=false` also
+  turns it off. Recreate `blackbird-app` after changing either.
+- **Model:** `settings.llm_landscape_chat_model` (default `claude-opus-5`), chosen per subject;
+  the assessment and project chats keep theirs.
+- **Limits.** The per-user limits and the one-answer-in-flight rule are shared with the other
+  chats. Landscaping spend also has its own 24 h sub-cap, `landscape_chat_daily_usd_limit`:
+  past it, asking answers 429 `landscape_spend_limit`, and the other chats go on.
+- **The record** (`src/services/landscape_chat_record.py`): six documents — Verdict,
+  Evidence, Disease profile, Panel, Reviews and Rubric (the epoch's own rubric). It applies the
+  page's hiding rules through `src/services/landscape_view.py`: blind-batch hiding in the
+  Verdict, the expert-sample hiding in the Verdict, Panel, Disease profile and Evidence, and the
+  independent-votes rule in Reviews.
+- **Storage (`0078`).** `landscape_opportunity_id` on `assessment_chat_turns` (ON DELETE
+  CASCADE; the one-subject check now covers three columns), on `assessment_chat_usage` and
+  on `assessment_chat_opens` (ON DELETE SET NULL), and the subject value `landscape`. The
+  downgrade deletes landscaping turns and clears the landscaping subject on the ledger and
+  opens rows.
+
+      -- landscaping chat questions and spend per day
+      SELECT date_trunc('day', created_at) AS day, status, count(*),
+             sum(input_tokens), sum(output_tokens)
+      FROM assessment_chat_usage WHERE subject = 'landscape' GROUP BY 1, 2 ORDER BY 1 DESC;

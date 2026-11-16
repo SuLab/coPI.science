@@ -45,6 +45,17 @@ from src.models import (
     SpecialistConsult,
 )
 from src.models.hub_project import STATUS_READY, HubProject, HubProjectReview
+from src.models.landscape import (
+    LandscapeAssessment,
+    LandscapeConsult,
+    LandscapeDeep,
+    LandscapeEpoch,
+    LandscapeIdea,
+    LandscapeOpportunity,
+    LandscapeOpportunityVersion,
+    LandscapeReviewBatch,
+    LandscapeReviewBatchItem,
+)
 from tests import factories
 from tests.assessment_chat_support import seed_interview
 from tests.integration.test_manager_access import auth_headers
@@ -67,6 +78,7 @@ class GateWorld:
     suggestion: Any
     invite_token: str
     project_id: uuid.UUID
+    landscape_opportunity_id: uuid.UUID
 
 
 PAGES: dict[str, Callable[[GateWorld], str]] = {
@@ -80,6 +92,10 @@ PAGES: dict[str, Callable[[GateWorld], str]] = {
     "/workspace/interviews": lambda w: "/workspace/interviews",
     "/workspace/projects": lambda w: "/workspace/projects",
     "/workspace/projects/{project_id}": lambda w: f"/workspace/projects/{w.project_id}",
+    "/workspace/landscape": lambda w: "/workspace/landscape",
+    "/workspace/landscape/pipeline": lambda w: "/workspace/landscape/pipeline",
+    "/workspace/landscape/{opportunity_id:uuid}":
+        lambda w: f"/workspace/landscape/{w.landscape_opportunity_id}",
     "/workspace/activity/{run_id}": lambda w: f"/workspace/activity/{w.run.id}",
     "/admin/activity/{run_id}/llm-calls": lambda w: f"/admin/activity/{w.run.id}/llm-calls",
     "/admin/agents": lambda w: "/admin/agents",
@@ -145,6 +161,7 @@ SKIPPED: dict[str, str] = {
     "/auth/microsoft/callback": "Microsoft OAuth redirect target; redirects, renders no page",
     "/assessment-chat/{assessment_id}": "JSON for static/js/assessment_chat.js",
     "/project-chat/{project_id}": "JSON for static/js/assessment_chat.js",
+    "/landscape-chat/{opportunity_id}": "JSON for static/js/assessment_chat.js",
     "/api/health": "JSON health probe",
     "/admin/activity/{run_id}/llm-calls/{call_id}/bodies": "HTML fragment for the llm_calls page; no layout",
     "/help/tutorials/{tutorial}": "redirects to step 1",
@@ -472,6 +489,73 @@ async def seed_unreviewed_project(db, *, run, lab_agent_id: str) -> HubProject:
     return project
 
 
+async def seed_landscape_opportunity(db) -> uuid.UUID:
+    """One landscaping opportunity in a normal batch issued today, so every role that can
+    review opens its page: an active epoch, one member idea with its S6 record (disease
+    profile, target biology, a flag review and one panel opinion), a ``done`` assessment with
+    key points, gates and scores, and the idea's deal-breaker flags. Every name is invented."""
+    epoch = LandscapeEpoch(id=uuid.uuid4(), status="active", criteria_version="gate-1",
+                           prompt_set_version="gate-1")
+    db.add(epoch)
+    await db.flush()
+    idea = LandscapeIdea(
+        id=uuid.uuid4(), epoch_id=epoch.id, idea_key="biology;gate-target;gate-fibrosis",
+        idea_type="biology", direction="inhibit", stage="preclinical", evidence_grade="animal",
+        targets=[{"hgnc_id": "HGNC:90009", "symbol": "GATEK"}],
+        disease={"mondo_id": "MONDO:9999990", "label": "gate fibrosis"}, version_hash="v1",
+        evidence_summary={"trials": [], "note": "Gate evidence"},
+        data_flags={"target_essential": {"evidence": "Gate essentiality screen"}},
+    )
+    opp = LandscapeOpportunity(id=uuid.uuid4(), version_counter=1)
+    db.add_all([idea, opp])
+    await db.flush()
+    db.add(LandscapeOpportunityVersion(
+        opportunity_id=opp.id, version=1, epoch_id=epoch.id, member_idea_keys=[idea.idea_key],
+        label="Gate programme", theme="Gate theme", status="done",
+    ))
+    deep = LandscapeDeep(
+        id=uuid.uuid4(), idea_id=idea.id, idea_version="v1", epoch_id=epoch.id, status="done",
+        gating={"novelty": "met"}, gating_rationales={"novelty": "Gate S6 reason."},
+        flags_reviewed={"target_essential": {"status": "cleared", "reason": "Gate reason."}},
+        provisional_scores={"scientific_merit": 4}, provisional_weighted_score=3.9,
+        dimension_rationales={"scientific_merit": "Gate S6 dimension reason."},
+        disease_profile={"prevalence": {"value": "Rare", "support": "estimate"},
+                         "standard_of_care": {"value": "None", "support": ["doc:gate"]}},
+        target_biology=[{"line": "GATEK drives fibrosis.", "support": ["doc:gate"]}],
+        summary="Gate S6 summary.",
+    )
+    db.add(deep)
+    await db.flush()
+    db.add(LandscapeConsult(
+        deep_id=deep.id, domain="scientific", raw_text="Gate raw opinion",
+        opinion={"verdict_signal": "adequate", "confidence": "moderate",
+                 "concerns": ["Gate concern"], "established": ["Gate finding"],
+                 "questions_to_ask": ["Gate question?"]},
+    ))
+    db.add(LandscapeAssessment(
+        id=uuid.uuid4(), epoch_id=epoch.id, opportunity_id=opp.id, opportunity_version=1,
+        status="done", headline="A gate headline",
+        elevator_pitch="First gate sentence. Second gate sentence. Third.",
+        weighted_score=4.1, band="advance", recommendation="advance", confidence="moderate",
+        scores={"scientific_merit": 4}, score_rationale="Gate score rationale.",
+        dimension_rationales={"scientific_merit": "Gate dimension reason."},
+        gating={"novelty": "met"}, gating_rationales={"novelty": "Gate gate reason."},
+        rationale="Gate rationale.", red_flags=["Gate red flag"],
+        recommended_next_experiment="A gate experiment.",
+        key_points={"why_it_matters": ["A gate point."]},
+        claim_support={"why_it_matters": ["doc:gate"]},
+        structured_lines=["Inhibit GATEK · gate fibrosis · small molecule"],
+        strengths=["Gate strength"], risks=["Gate risk"],
+        raw_verdict={"headline": "A gate headline"},
+    ))
+    batch = LandscapeReviewBatch(id=uuid.uuid4(), issued_on=datetime.now(UTC).date())
+    db.add(batch)
+    await db.flush()
+    db.add(LandscapeReviewBatchItem(batch_id=batch.id, opportunity_id=opp.id))
+    await db.flush()
+    return opp.id
+
+
 @pytest.fixture
 async def gate_world(db_session) -> GateWorld:
     users = {
@@ -540,6 +624,7 @@ async def gate_world(db_session) -> GateWorld:
         users=users, agent=agent, run=run, assessment_id=interview.assessment_id,
         root_ts=interview.root_ts, cohort=cohort, suggestion=suggestion,
         invite_token="gate-invite-token", project_id=project.id,
+        landscape_opportunity_id=await seed_landscape_opportunity(db_session),
     )
 
 

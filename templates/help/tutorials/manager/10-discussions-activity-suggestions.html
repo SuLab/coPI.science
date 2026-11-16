@@ -72,15 +72,6 @@ assessments again.</p>
 file, and setting another status replaces them.</p>
 {% endcall %}
 
-<h3 id="finishing">Finishing the tutorial</h3>
-{% if impersonation_banner %}
-<p><strong>Back to Help</strong> below returns to the Help overview. While an admin is viewing the
-site as someone else, finishing the tutorial is not recorded.</p>
-{% else %}
-<p><strong>Finish</strong> below records that you have taken the tutorial, stops the tutorial prompt
-on Workspace pages, and takes you to the Help overview, where the tutorials and reference pages
-stay available.</p>
-{% endif %}
 <p>More detail: <a href="{{ page_url(request, 'help_page', slug='discussions-activity', fragment='discussions') }}">Discussions</a>,
 <a href="{{ page_url(request, 'help_page', slug='discussions-activity', fragment='activity') }}">Activity</a>,
 <a href="{{ page_url(request, 'help_page', slug='discussions-activity', fragment='run-detail') }}">A run's page</a>

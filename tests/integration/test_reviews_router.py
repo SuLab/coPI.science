@@ -58,10 +58,12 @@ def test_the_reviews_router_posts_are_an_explicit_allowlist():
     for the auto-enqueue ``submit_feedback``/``edit_feedback`` used to do as a
     side effect. The BlackbirdBot projects prototype plan (2026-10-26, +3) added the
     project-review submit, edit and delete, and the projects pages redesign plan
-    (2026-10-27, +2) the project assign and unassign. Final size 13.
+    (2026-10-27, +2) the project assign and unassign, and the landscaping plan
+    (2026-10-30, +9) the landscaping decision, review, status, assignment and expert-judgment
+    writes. Final size 22.
     ``/suggestions/generate`` is listed here rather than left implicit because that one
     route is the only thing in the system that spends a 70-90k-token Opus call on a
-    human's say-so: a fourteenth path appearing without a review is exactly what this
+    human's say-so: a new path appearing without a review is exactly what this
     test exists to stop."""
     allowed = {
         "/assessments/{assessment_id}/feedback",
@@ -77,6 +79,15 @@ def test_the_reviews_router_posts_are_an_explicit_allowlist():
         "/project-reviews/{review_id}/delete",
         "/projects/{project_id}/assign",
         "/projects/{project_id}/unassign",
+        "/landscape/{opportunity_id}/decision",
+        "/landscape-decisions/{decision_id}/edit",
+        "/landscape/{opportunity_id}/review",
+        "/landscape-reviews/{review_id}/edit",
+        "/landscape-reviews/{review_id}/delete",
+        "/landscape/{opportunity_id}/status",
+        "/landscape/{opportunity_id}/assign",
+        "/landscape/{opportunity_id}/unassign",
+        "/landscape/{opportunity_id}/expert-judgment",
     }
     methods = {m for r in reviews_router.router.routes for m in getattr(r, "methods", ())}
     assert methods == {"POST"}

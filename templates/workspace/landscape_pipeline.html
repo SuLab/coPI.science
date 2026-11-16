@@ -1,0 +1,234 @@
+{% extends "base.html" %}
+{% from "help/_link.html" import help_link %}
+{% block title %}Workspace — Landscape pipeline — Blackbird{% endblock %}
+{% block extra_head %}{% include "assessments/_head.html" %}{% endblock %}
+{% block content %}<div class="max-w-6xl mx-auto">
+{# The staff pipeline page (spec §13.4), from landscape_view.pipeline_view. Every control
+   posts to /landscape/... (src/routers/landscape.py), which refuses impersonation, so the
+   controls are not rendered while impersonating. Each control form carries a
+   `data-confirm` sentence saying what it does (static/js/confirm.js). The metrics and
+   reports are JSON whose keys come from data, shown as stored. Probe flags appear only for
+   superseded blind batches (F2); the read model decides that. #}
+{% set can_act = not impersonation_banner %}
+{% set admin = permissions.admin and can_act %}
+{% macro json_block(value) %}<pre class="mt-1 text-sm bg-gray-50 p-3 rounded-lg overflow-x-auto max-h-96 overflow-y-auto whitespace-pre-wrap">{{ value | tojson(indent=2) }}</pre>{% endmacro %}
+{% macro rescue_form(fields, form_id) %}
+<form method="post" action="/landscape/rescue" class="mt-1 flex flex-wrap items-center gap-2" data-confirm="Rescue this item? It goes back into the pipeline at the next stage, recorded with your name and reason. This cannot be undone from the page.">
+    <input type="hidden" name="item_kind" value="{{ fields.item_kind }}">
+    <input type="hidden" name="item_id" value="{{ fields.item_id }}">
+    <input type="hidden" name="stage" value="{{ fields.stage }}">
+    <input type="hidden" name="expected_status" value="{{ fields.expected_status }}">
+    <label for="{{ form_id }}" class="text-sm text-gray-700">Reason</label>
+    <input type="text" id="{{ form_id }}" name="reason" required maxlength="1000" class="border rounded px-2 py-0.5 text-sm">
+    <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Rescue</button>
+</form>
+{% endmacro %}
+
+<a href="{{ page_url(request, 'workspace_landscape') }}" class="text-sm text-indigo-700 hover:underline">← Landscape</a>
+<div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 mt-1 mb-4"><h1 class="text-2xl font-bold text-gray-900">Landscape pipeline</h1>{{ help_link(request, effective_user, 'landscape', 'pipeline') }}</div>
+{% if impersonation_banner %}<p class="mb-4 text-sm text-gray-600">The controls are unavailable while impersonating.</p>{% endif %}
+
+<section class="landscape-state bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-2">State</h2>
+    <p class="text-sm text-gray-800">Phase: <span class="font-semibold">{{ phase }}</span> · {% if paused %}<span class="font-semibold text-amber-800">paused</span>{% else %}running{% endif %}</p>
+    {% if can_act %}
+    <div class="mt-3 flex flex-wrap items-center gap-2">
+        {% if paused %}
+        <form method="post" action="/landscape/resume" data-confirm="Resume the pipeline? It starts new work again, for everyone, at once.">
+            <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-3 py-1 rounded hover:bg-indigo-700">Resume</button>
+        </form>
+        {% else %}
+        <form method="post" action="/landscape/pause" data-confirm="Pause the pipeline? It stops starting new work, for everyone, at once; work already sent finishes. Resume undoes it.">
+            <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-3 py-1 rounded hover:bg-indigo-700">Pause</button>
+        </form>
+        {% endif %}
+        {% if admin and phase == 'pilot' %}
+        <form method="post" action="/landscape/backfill/start" data-confirm="Start the backfill? The pipeline leaves the pilot phase and reads the full back catalogue. This needs a stored pilot report.">
+            <button type="submit" class="text-sm rounded border border-indigo-300 px-3 py-1 text-indigo-700 hover:bg-indigo-50">Start backfill</button>
+        </form>
+        {% endif %}
+        {% if admin %}
+        <form method="post" action="/landscape/bakeoff/run" data-confirm="Re-run the model comparison? It queues a new bake-off, which spends on model calls.">
+            <button type="submit" class="text-sm rounded border border-indigo-300 px-3 py-1 text-indigo-700 hover:bg-indigo-50">Re-run bake-off</button>
+        </form>
+        {% endif %}
+    </div>
+    {% endif %}
+</section>
+
+<section class="landscape-epochs bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-2">Judging criteria</h2>
+    {% if epochs %}
+    <ul class="space-y-3 text-sm text-gray-800">
+        {% for e in epochs %}
+        <li class="rounded-lg border border-gray-200 px-4 py-2">
+            <p><span class="font-semibold">{{ e.status }}</span> · criteria {{ e.criteria_version or '—' }} · prompts {{ e.prompt_set_version or '—' }} · created {{ e.created_at | ts }}{% if e.activated_at %} · activated {{ e.activated_at | ts }}{% endif %}{% if e.retired_at %} · retired {{ e.retired_at | ts }}{% endif %}</p>
+            {% if e.changed_stages %}<p class="text-gray-700">Changed stages: {{ e.changed_stages | join(', ') }}</p>{% endif %}
+            {% if e.hold_reason %}<p class="text-amber-800">Held: {{ e.hold_reason }}</p>{% endif %}
+            {% if e.override_reason %}<p class="text-gray-700">Overridden {{ e.override_at | ts }}: {{ e.override_reason }}</p>{% endif %}
+            {% if e.regression_run %}
+            <p class="text-gray-700">Regression run: {{ e.regression_run.status }} (set {{ e.regression_run.set_version or '—' }}){% if e.regression_run.finished_at %}, finished {{ e.regression_run.finished_at | ts }}{% endif %}</p>
+            {% if e.regression_run.results %}<details><summary class="cursor-pointer text-sm text-gray-600">Results</summary>{{ json_block(e.regression_run.results) }}</details>{% endif %}
+            {% endif %}
+            {% if admin and e.status == 'held' %}
+            <form method="post" action="/landscape/epochs/{{ e.id }}/override" class="mt-2 flex flex-wrap items-center gap-2" data-confirm="Override the hold? This set of criteria goes ahead despite its checks, recorded with your name and reason.">
+                <label for="override-{{ e.id }}" class="text-sm text-gray-700">Reason</label>
+                <input type="text" id="override-{{ e.id }}" name="reason" required maxlength="1000" class="border rounded px-2 py-0.5 text-sm">
+                <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Override</button>
+            </form>
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}<p class="text-sm text-gray-600">No sets of criteria yet.</p>{% endif %}
+</section>
+
+<section class="landscape-sources bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-2">Sources</h2>
+    {% if sources %}
+    <div class="overflow-x-auto">
+    <table class="min-w-full text-sm text-gray-800">
+        <thead><tr class="text-left text-gray-700"><th class="pr-4 py-1">Source</th><th class="pr-4 py-1">Enabled</th><th class="pr-4 py-1">Completeness</th><th class="pr-4 py-1">Last success</th><th class="pr-4 py-1">Next due</th><th class="pr-4 py-1">Last fetch</th></tr></thead>
+        <tbody>
+            {% for s in sources %}
+            <tr class="border-t border-gray-100">
+                <td class="pr-4 py-1">{{ s.source }}</td>
+                <td class="pr-4 py-1">{{ 'yes' if s.enabled else 'no' }}</td>
+                <td class="pr-4 py-1">{{ ('%.0f%%' | format(s.completeness * 100)) if s.completeness is not none else '—' }}</td>
+                <td class="pr-4 py-1">{{ s.last_success_at | ts if s.last_success_at else '—' }}</td>
+                <td class="pr-4 py-1">{{ s.next_due_at | ts if s.next_due_at else '—' }}</td>
+                <td class="pr-4 py-1">{% if s.last_fetch %}{{ s.last_fetch.status }} · {{ s.last_fetch.slice_key }} · {{ s.last_fetch.received_count if s.last_fetch.received_count is not none else '—' }} of {{ s.last_fetch.expected_count if s.last_fetch.expected_count is not none else '—' }}{% else %}—{% endif %}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    </div>
+    {% else %}<p class="text-sm text-gray-600">No sources registered.</p>{% endif %}
+    <h3 class="mt-4 text-sm font-semibold text-gray-900">Incomplete slices</h3>
+    {% if incomplete_slices %}
+    <ul class="mt-1 space-y-1 text-sm text-gray-800">
+        {% for f in incomplete_slices %}<li>{{ f.source }} · {{ f.slice_key }} · {{ f.status }} · {{ f.received_count if f.received_count is not none else '—' }} of {{ f.expected_count if f.expected_count is not none else '—' }} · {{ f.started_at | ts }}{% if f.error %} · {{ f.error }}{% endif %}</li>{% endfor %}
+    </ul>
+    {% else %}<p class="mt-1 text-sm text-gray-600">None.</p>{% endif %}
+</section>
+
+<section class="landscape-metrics bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-2">Metrics</h2>
+    {% set m = metrics or {} %}
+    {% if m.latest_cut %}<p class="text-sm text-gray-800">Latest cut: {{ m.latest_cut | tojson }}</p>{% else %}<p class="text-sm text-gray-600">No cut yet.</p>{% endif %}
+    {% for key, value in m.items() %}
+    {% if key not in ('latest_cut', 'epoch_id') %}
+    <details class="mt-2"><summary class="cursor-pointer text-sm font-medium text-gray-800">{{ key | replace('_', ' ') }}</summary>{{ json_block(value) }}</details>
+    {% endif %}
+    {% endfor %}
+</section>
+
+<section class="landscape-reports bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-2">Reports</h2>
+    {% for key, title in [('bakeoff', 'Bake-off (model comparison)'), ('pilot', 'Pilot'), ('probes', 'Probes')] %}
+    {% set r = (reports or {}).get(key) %}
+    <h3 class="mt-3 text-sm font-semibold text-gray-900">{{ title }}</h3>
+    {% if r %}<details><summary class="cursor-pointer text-sm text-gray-600">Stored {{ r.created_at | ts }}</summary>{{ json_block(r.payload) }}</details>{% else %}<p class="text-sm text-gray-600">None stored.</p>{% endif %}
+    {% if key == 'bakeoff' %}<p class="text-sm text-gray-700">Picks applied: {{ 'yes' if picks_applied else 'no' }}</p>{% endif %}
+    {% endfor %}
+    <h3 class="mt-3 text-sm font-semibold text-gray-900">Positive-control trace</h3>
+    {% if positive_control_trace %}{{ json_block(positive_control_trace) }}{% else %}<p class="text-sm text-gray-600">None.</p>{% endif %}
+    <h3 class="mt-3 text-sm font-semibold text-gray-900">Drift</h3>
+    {% if drift %}{{ json_block(drift) }}{% else %}<p class="text-sm text-gray-600">None.</p>{% endif %}
+</section>
+
+<section class="landscape-blind bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-2">Superseded blind batches</h2>
+    {% if blind_batches %}
+    {% for b in blind_batches %}
+    <h3 class="mt-2 text-sm font-semibold text-gray-900">Issued {{ b.issued_on }}</h3>
+    <ul class="mt-1 space-y-0.5 text-sm text-gray-800">{% for c in b.cards %}<li>{{ c.position or '—' }}. <a href="{{ page_url(request, 'workspace_landscape_detail', opportunity_id=c.opportunity_id) }}" class="text-indigo-700 hover:underline">{{ c.label or 'Untitled opportunity' }}</a>{% if c.probe %} <span class="px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700">probe</span>{% endif %}</li>{% endfor %}</ul>
+    {% endfor %}
+    {% else %}<p class="text-sm text-gray-600">None yet.</p>{% endif %}
+</section>
+
+<section class="landscape-no-assessment bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-2">Cards without a completed assessment</h2>
+    {% if no_assessment_cards %}
+    <ul class="space-y-1 text-sm text-gray-800">{% for c in no_assessment_cards %}<li><a href="{{ page_url(request, 'workspace_landscape_detail', opportunity_id=c.opportunity_id) }}" class="text-indigo-700 hover:underline">{{ c.label or c.headline or 'Untitled opportunity' }}</a>{% if c.failure %} · {{ c.failure.status }}{% if c.failure.error %}: {{ c.failure.error }}{% endif %}{% endif %}</li>{% endfor %}</ul>
+    {% else %}<p class="text-sm text-gray-600">None.</p>{% endif %}
+</section>
+
+<section class="landscape-audit bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-2">Reject audit disagreements</h2>
+    {% if audit_disagreements %}
+    <ul class="space-y-2 text-sm text-gray-800">
+        {% for d in audit_disagreements %}
+        <li class="rounded-lg border border-gray-200 px-4 py-2">
+            <p>{{ d.item_kind }} {{ d.item_id }} · stage said {{ d.original_decision }}, audit said {{ d.audit_decision }} · {{ d.at | ts }}</p>
+            {% if d.reason %}<p class="text-gray-700">{{ d.reason }}</p>{% endif %}
+            {% if d.rescue and can_act %}{{ rescue_form(d.rescue, 'rescue-audit-' ~ loop.index) }}{% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}<p class="text-sm text-gray-600">None.</p>{% endif %}
+</section>
+
+<section class="landscape-filtered bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-2">Filtered items</h2>
+    {% if filtered %}
+    {% for stage, group in filtered.items() %}
+    <h3 class="mt-3 text-sm font-semibold text-gray-900">{{ stage | replace('_', ' ') }} ({{ group.count }})</h3>
+    {% if group['items'] %}
+    <ul class="mt-1 space-y-2 text-sm text-gray-800">
+        {% set stage_loop = loop.index %}
+        {% for item in group['items'] %}
+        <li class="rounded-lg border border-gray-200 px-4 py-2">
+            <p>{{ item.label or item.item_id }} · {{ item.expected_status }}{% if item.at %} · {{ item.at | ts }}{% endif %}</p>
+            {% if item.reason %}<p class="text-gray-700">{{ item.reason }}</p>{% endif %}
+            {% if can_act %}{{ rescue_form(item, 'rescue-' ~ stage_loop ~ '-' ~ loop.index) }}{% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}<p class="mt-1 text-sm text-gray-600">None.</p>{% endif %}
+    {% endfor %}
+    {% else %}<p class="text-sm text-gray-600">No criteria in use yet.</p>{% endif %}
+</section>
+
+<section class="landscape-controls-lists bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+    <h2 class="text-base font-semibold text-gray-900 mb-2">Positive controls</h2>
+    <p class="text-sm text-gray-700">{{ positive_controls | length }} stored.</p>
+    {% if can_act %}
+    <form method="post" action="/landscape/positive-controls" class="mt-2 space-y-2" data-confirm="Replace the positive-control list with these identifiers? It takes effect at once; a blank list clears it.">
+        <label for="landscape-controls" class="block text-sm font-medium text-gray-700">DOIs or PubMed ids, one per line</label>
+        <textarea id="landscape-controls" name="identifiers" rows="5" class="w-full border rounded px-2 py-1 text-sm">{{ (positive_controls or []) | join('\n') }}</textarea>
+        <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Save positive controls</button>
+    </form>
+    {% elif positive_controls %}
+    <ul class="mt-1 text-sm text-gray-800">{% for c in positive_controls %}<li>{{ c }}</li>{% endfor %}</ul>
+    {% endif %}
+
+    <h2 class="mt-6 text-base font-semibold text-gray-900 mb-2">Experts</h2>
+    {% if experts %}
+    <ul class="space-y-1 text-sm text-gray-800">
+        {% for u in experts %}
+        <li class="flex items-center gap-2">{{ u.name }} <span class="text-gray-600">({{ u.user_role }})</span>
+            {% if can_act %}
+            <form method="post" action="/landscape/experts" class="inline" data-confirm="Unmark {{ u.name }} as an expert? It takes effect at once; you can mark them again.">
+                <input type="hidden" name="user_id" value="{{ u.id }}">
+                <input type="hidden" name="action" value="unmark">
+                <button type="submit" class="text-sm text-red-600 hover:text-red-800" aria-label="Unmark {{ u.name }}">Unmark</button>
+            </form>
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}<p class="text-sm text-gray-600">No experts marked.</p>{% endif %}
+    {% set candidates = (review_users or []) | rejectattr('expert') | list %}
+    {% if can_act and candidates %}
+    <form method="post" action="/landscape/experts" class="mt-2 flex flex-wrap items-center gap-2" data-confirm="Mark this account as an expert? It takes effect at once; you can unmark it again.">
+        <input type="hidden" name="action" value="mark">
+        <label for="landscape-expert-user" class="text-sm text-gray-700">Mark as expert</label>
+        <select id="landscape-expert-user" name="user_id" class="border rounded px-1 py-0.5 text-sm">
+            {% for u in candidates %}<option value="{{ u.id }}">{{ u.name }} ({{ u.user_role }})</option>{% endfor %}
+        </select>
+        <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Mark</button>
+    </form>
+    {% endif %}
+</section>
+</div>{% endblock %}

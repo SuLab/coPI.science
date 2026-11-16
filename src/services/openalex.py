@@ -12,11 +12,13 @@ names one of the PI's institutions or the publisher's metadata carries the ORCID
 fetches each work's identifiers and year, plus the title, type, venue, abstract and
 retraction flag that non-PubMed corpus reads, and offers the free single-DOI lookup
 (``fetch_work_by_doi``). It RAISES on failure (a silent empty result is a thin corpus, not
-an answer — audit M5).
+an answer — audit M5). The landscaping intake uses its uncapped paging (``iter_works``) and
+the free single-work lookup (``fetch_work``) (spec 2026-10-30 §6.1).
 """
 
 import logging
 import re
+from collections.abc import AsyncIterator
 from urllib.parse import quote
 
 import httpx
@@ -254,3 +256,79 @@ async def fetch_work_by_doi(
         resp.raise_for_status()
         body = resp.json()
     return _work_record(body) if isinstance(body, dict) else None
+
+
+#: An OpenAlex work id, bare (``W<digits>``); ``fetch_work`` also takes the
+#: ``https://openalex.org/`` URL form and sends nothing for anything else.
+_WORK_ID_RE = re.compile(r"W\d+")
+
+
+def _contact_params() -> dict[str, str]:
+    contact = getattr(get_settings(), "ncbi_contact_email", None)
+    return {"mailto": contact} if contact else {}
+
+
+async def iter_works(
+    filter_: str, select: str, *, per_page: int = 200,
+) -> AsyncIterator[tuple[list[dict], int]]:
+    """Every work a list filter matches, one cursor page at a time, as
+    ``(page_rows, meta_count)``: the page's results (the ``select`` fields) and OpenAlex's
+    reported total for the whole filter. Unlike ``_list_works`` there is no page cap, so a
+    caller can compare the rows it received with the total (landscaping spec §6.1, §12.4).
+    The first page is yielded even when empty, so a zero total still arrives.
+
+    Each page is a charged request: the request budget is checked before every attempt,
+    retries included (``openalex_budget.check_request_budget``, which may raise
+    ``JobDeferred``). Transient statuses and transport errors are retried; any other
+    failure RAISES."""
+    cursor: str | None = "*"
+    async with _make_client() as client:
+        while cursor:
+            params = {
+                "filter": filter_,
+                "per-page": str(per_page),
+                "cursor": cursor,
+                "select": select,
+                **_contact_params(),
+            }
+
+            async def attempt(page_params=params):
+                await openalex_budget.check_request_budget()
+                return await client.get(OPENALEX_WORKS_URL, params=page_params)
+
+            resp = await with_retries(
+                attempt,
+                attempts=3, backoff=lambda a: 1.0 * (2 ** a),
+                retry_statuses=TRANSIENT_STATUSES, retry_exceptions=(httpx.TransportError,),
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            rows = data.get("results") or []
+            meta = data.get("meta") or {}
+            yield rows, int(meta.get("count") or 0)
+            # An empty page ends the walk even if a cursor came back, so a misbehaving
+            # cursor cannot loop forever.
+            cursor = meta.get("next_cursor") if rows else None
+
+
+async def fetch_work(openalex_id: str, select: str) -> dict | None:
+    """One OpenAlex work by id (``W<digits>`` or its ``https://openalex.org/`` URL) with the
+    ``select`` fields, as OpenAlex returns it. A singleton lookup returns every authorship,
+    where a list response caps them at 100, and is free on the meter, so the request budget
+    is not consulted. None when the id is malformed (no request is made) or OpenAlex has no
+    such work (400, 404, 410); transient failures are retried, any other failure RAISES."""
+    work_id = openalex_id.strip().rsplit("/", 1)[-1] if isinstance(openalex_id, str) else ""
+    if not _WORK_ID_RE.fullmatch(work_id):
+        return None
+    params = {"select": select, **_contact_params()}
+    async with _make_client() as client:
+        resp = await with_retries(
+            lambda: client.get(f"{OPENALEX_WORKS_URL}/{work_id}", params=params),
+            attempts=3, backoff=lambda a: 1.0 * (2 ** a),
+            retry_statuses=TRANSIENT_STATUSES, retry_exceptions=(httpx.TransportError,),
+        )
+        if resp.status_code in _NO_SUCH_WORK:
+            return None
+        resp.raise_for_status()
+        body = resp.json()
+    return body if isinstance(body, dict) else None

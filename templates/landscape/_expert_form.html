@@ -1,0 +1,66 @@
+{# The expert judgment (L55, D63): rendered by the detail page only on the viewer's own open
+   expert-sample item (`expert_item`), and never while impersonating, which the route
+   refuses. Its choices are the sets /reviews/landscape/<id>/expert-judgment validates:
+   the live rubric's gates (`expert_gates`) and dimensions (`review_dimensions`), the
+   criteria file's deal-breakers (`expert_deal_breakers`) and the S9 recommendation
+   vocabulary (`expert_recommendations`). A blank choice is not posted as a call.
+   Submitting lifts the hiding of S9's and S6's calls on this opportunity. #}
+<form method="post" action="/reviews/landscape/{{ opportunity_id }}/expert-judgment" class="landscape-expert-form space-y-3" data-confirm="Submit your expert judgment? Once submitted it cannot be changed, and the pipeline's own calls on this opportunity appear.">
+    {% if expert_gates %}
+    <fieldset>
+        <legend class="text-sm font-medium text-gray-700">Gates</legend>
+        <div class="space-y-1">
+            {% for gate in expert_gates %}
+            <div class="flex flex-wrap items-center justify-between gap-2">
+                <label for="expert-gate-{{ gate.key }}" class="text-sm text-gray-700">{{ gate.title }}</label>
+                <select id="expert-gate-{{ gate.key }}" name="gate_{{ gate.key }}" class="text-sm border border-gray-300 rounded-md shadow-sm">
+                    <option value="">—</option>
+                    {% for value, text in [('met', 'Met'), ('not_met', 'Not met'), ('unconfirmed', 'Unconfirmed')] %}<option value="{{ value }}">{{ text }}</option>{% endfor %}
+                </select>
+            </div>
+            {% endfor %}
+        </div>
+    </fieldset>
+    {% endif %}
+    {% if review_dimensions %}
+    <fieldset>
+        <legend class="text-sm font-medium text-gray-700">Dimension scores</legend>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1">
+            {% for dim in review_dimensions %}
+            <div class="flex items-center justify-between gap-2">
+                <label for="expert-dim-{{ dim.key }}" class="text-sm text-gray-700">{{ dim.title }}</label>
+                <select id="expert-dim-{{ dim.key }}" name="dim_{{ dim.key }}" class="text-sm border border-gray-300 rounded-md shadow-sm">
+                    <option value="">—</option>
+                    {% for n in range(review_scale_min, review_scale_max + 1) %}<option value="{{ n }}">{{ n }}</option>{% endfor %}
+                </select>
+            </div>
+            {% endfor %}
+        </div>
+    </fieldset>
+    {% endif %}
+    {% if expert_deal_breakers %}
+    <fieldset>
+        <legend class="text-sm font-medium text-gray-700">Deal-breakers</legend>
+        <div class="space-y-1">
+            {% for flag in expert_deal_breakers %}
+            <div class="flex flex-wrap items-center justify-between gap-2">
+                <label for="expert-flag-{{ flag.key }}" class="text-sm text-gray-700">{{ flag.description or flag.key }}</label>
+                <select id="expert-flag-{{ flag.key }}" name="deal_breaker_{{ flag.key }}" class="text-sm border border-gray-300 rounded-md shadow-sm">
+                    <option value="">—</option>
+                    <option value="confirmed">Confirmed</option>
+                    <option value="cleared">Cleared</option>
+                </select>
+            </div>
+            {% endfor %}
+        </div>
+    </fieldset>
+    {% endif %}
+    <label for="expert-recommendation" class="block text-sm font-medium text-gray-700">Recommendation</label>
+    <select id="expert-recommendation" name="recommendation" class="text-sm border border-gray-300 rounded-md shadow-sm">
+        <option value="">—</option>
+        {% for value in expert_recommendations %}<option value="{{ value }}">{{ value }}</option>{% endfor %}
+    </select>
+    <label for="expert-comment" class="block text-sm font-medium text-gray-700">Comment</label>
+    <textarea id="expert-comment" name="comment" rows="4" maxlength="10000" class="w-full text-sm border border-gray-300 rounded-md shadow-sm"></textarea>
+    <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Submit judgment</button>
+</form>

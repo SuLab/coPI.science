@@ -252,6 +252,80 @@ someone else. You can edit only your own, and only an admin can delete a review.
 <a href="{{ page_url(request, 'help_page', slug='troubleshooting', fragment='assessments') }}">Assessments</a>
 apply to project reviews too.</p>
 
+<h2 id="landscape">Landscape</h2>
+<p>These are the refusals the Landscape pages and their forms can give.</p>
+
+<h3>"The Landscape pages are not available yet: the database has not been migrated."</h3>
+<p><strong>What it means:</strong> the pipeline's data has not been set up on this server yet,
+so the pages cannot show anything.</p>
+<p><strong>What to do:</strong> tell an administrator.</p>
+
+<h3>"Opportunity not found"</h3>
+<p><strong>What it means:</strong> the opportunity does not exist, or you cannot open it. A
+reviewer can open an opportunity only once it has been issued in a weekly batch, or when it is
+one of their own expert opportunities. A decision, review or status change sent for any other
+opportunity is refused the same way.</p>
+<p><strong>What to do:</strong> open it from your Landscape page once it appears there.</p>
+
+<h3>"unknown reason tag: …"</h3>
+<p><strong>What it means:</strong> a reason tag sent with a decision is not on the current
+list, usually because the page was open while the list changed. A reason longer than the form
+allows is refused the same way, with a message saying the reason is too long. Nothing was
+saved.</p>
+<p><strong>What to do:</strong> reload the page, choose tags from the list it shows, shorten the
+reason, and submit again.</p>
+
+<h3>A full review is refused</h3>
+<p><strong>What it means:</strong> the rating is not a whole number from 1 to 5, the comment is
+longer than 10,000 characters, or a dimension score does not fit the rubric. The messages are the
+same as for assessment feedback, listed under
+<a href="{{ page_url(request, 'help_page', slug='troubleshooting', fragment='assessments') }}">Assessments</a>.</p>
+<p><strong>What to do:</strong> correct it and submit again.</p>
+
+<h3>"The landscaping chat is switched off."</h3>
+<p><strong>What it means:</strong> the chat on Landscape opportunities has been turned off.</p>
+<p><strong>What to do:</strong> read the opportunity's page instead, and try the chat later.</p>
+
+<h3>"This opportunity has no current assessment, or you cannot open it."</h3>
+<p><strong>What it means:</strong> the chat answers only about an opportunity's completed
+assessment under the current criteria, and only for someone who can open its page.</p>
+<p><strong>What to do:</strong> read the opportunity's page; ask again once it shows a completed
+assessment.</p>
+
+<h3>"The landscaping chat has reached today's spending limit."</h3>
+<p><strong>What it means:</strong> the Landscape chat has its own daily spending limit, so it
+cannot use up the assessment chat's. The assessment chat still works.</p>
+<p><strong>What to do:</strong> try again tomorrow.</p>
+
+<h3>"The chat's instructions were changed without being recorded. Tell an administrator."</h3>
+<p><strong>What it means:</strong> the chat's instructions were edited without the change being
+recorded, so the chat stops answering until they are.</p>
+<p><strong>What to do:</strong> tell an administrator. The other chat messages, listed under
+<a href="{{ page_url(request, 'help_page', slug='troubleshooting', fragment='assessment-chat') }}">Assessment chat</a>,
+apply here too.</p>
+
+{% if permissions.staff %}
+<h3>"A reason is required"</h3>
+<p><strong>What it means:</strong> a rescue was sent without a reason. Nothing was recorded.</p>
+<p><strong>What to do:</strong> write why the item should go on, and press <strong>Rescue</strong>
+again.</p>
+
+<h3>A rescue says the item "is no longer" in the state the page showed</h3>
+<p><strong>What it means:</strong> the item's status changed after the page loaded, for example
+because someone else rescued it first. Nothing was recorded.</p>
+<p><strong>What to do:</strong> reload the pipeline page and check the item's current state.</p>
+
+<h3>"Neither a DOI nor a PMID: …"</h3>
+<p><strong>What it means:</strong> one of the positive controls is not a DOI or a PubMed ID. The
+list was not saved.</p>
+<p><strong>What to do:</strong> correct or remove that entry and press <strong>Save positive
+controls</strong> again.</p>
+
+<p>Only an admin can use <strong>Start backfill</strong>, <strong>Re-run bake-off</strong> and
+<strong>Override</strong>.{% if permissions.admin %} No control works while an admin is viewing
+the site as someone else.{% endif %}</p>
+{% endif %}
+
 <h2 id="assessment-chat">Assessment chat</h2>
 <p>These appear in red under the question box in the chat.</p>
 

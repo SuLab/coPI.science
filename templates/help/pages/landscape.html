@@ -1,0 +1,232 @@
+{% extends "help/_layout.html" %}
+{% from "help/_callouts.html" import careful, note %}
+{% block help_body %}
+<h1>Landscape</h1>
+<p>The <a href="{{ page_url(request, 'workspace_landscape') }}">Landscape</a> page shows
+<strong>opportunities</strong> that Blackbird finds by reading research from Johns Hopkins
+labs: papers, preprints, grants, patents and technology listings. A pipeline of AI stages
+reads each new item, keeps the ones that describe a way to treat a human disease, groups
+related ideas, ranks them, and keeps only the strongest few, the <strong>cut</strong>. Ideas in
+the cut that belong together become one opportunity, and BlackbirdBot writes an assessment of
+each, in the same form as an interview's assessment: headline, key points, verdict, gates,
+scores and rationale.</p>
+<p>Each week a new <strong>batch</strong> of opportunities is issued, the same for everyone. You
+read each card and record a quick decision: pursue or pass. Unfamiliar terms are in the
+<a href="{{ page_url(request, 'help_page', slug='glossary') }}">Glossary</a>.</p>
+<p>Landscape opportunities are not interviews and not projects. No lab agent pitched them, and
+the labs behind them are not on Blackbird's PI roster, so their names do not link to PI pages.
+The assessments are written by AI: check them against the sources before relying on them.</p>
+
+<h2 id="list">The Landscape page</h2>
+<p>Open <strong>Workspace → Landscape</strong>. Admins, managers and reviewers can open it; PIs
+cannot.</p>
+<h3>This week's batch</h3>
+<p>The first section is <strong>This week's batch</strong>: the opportunities issued this
+week, never shown in an earlier batch. They are in rank order, the strongest first, except in a
+blind batch (below). A batch can be smaller than usual, or empty, when the pipeline has few new
+opportunities to issue.</p>
+<h3>Carried over</h3>
+<p>Below it come the cards from earlier batches that <em>you</em> have not decided on yet,
+grouped by batch, newest batch first. A card stays there until you record your decision, so
+nothing is lost if you miss a week. Your carried-over cards are your own: another person's
+decision never removes a card from your view.</p>
+<ul>
+    <li>A card marked <strong>changed since your decision</strong> is one you decided on whose
+    assessment has since been rewritten, for example because a new paper joined the
+    opportunity. Your decision still stands; read the new assessment, then confirm or change
+    it.</li>
+    <li>A card that says it has no completed assessment is waiting for its assessment to be
+    rewritten. Its page lists the last earlier assessment under <strong>History</strong>.</li>
+    <li>An opportunity the pipeline has retired leaves your carried-over cards. Its page stays
+    readable as history.</li>
+</ul>
+<p>Every reviewer and manager also sees the <strong>Earlier batches</strong> in full.</p>
+<h3>Blind batches</h3>
+<p>Some weeks the batch is <strong>blind</strong>. Its cards are shuffled rather than ranked, and
+each card, its page and its chat hide the score, the band, the dimension scores and the
+rationales for them until you have recorded your decision on that card. Decide from the
+headline, the key points and the evidence; once you decide, they appear. The ranks stay hidden
+until the next batch is issued, so that no card stands out.</p>
+<h3>A card</h3>
+<p>Each card is meant to be read in under a minute. It shows:</p>
+<ul>
+    <li>BlackbirdBot's headline;</li>
+    <li>one structured line for each idea in the opportunity: what it acts on, the disease and
+    the kind of medicine;</li>
+    <li>the start of the elevator pitch;</li>
+    <li>the labs behind it, by the person who leads each;</li>
+    <li>the band and score, except on a blind card you have not decided;</li>
+    <li>the quick decision (see <a href="#reviewing">Deciding and reviewing</a>).</li>
+</ul>
+<p>The card's link opens the opportunity's page.</p>
+{% if permissions.staff %}
+<h3>Current and All assessed</h3>
+<p>Managers and admins also get two lists. <strong>Current</strong> holds every opportunity in
+the current cut, and <strong>All assessed</strong> every opportunity that has an assessment,
+issued or not. Both have the <strong>Unreviewed</strong>, <strong>Reviewed</strong> and
+<strong>All</strong> tabs, which here are yours alone: <strong>Unreviewed</strong> means you
+have no quick decision on the card, <strong>Reviewed</strong> that you have one. No tab and no
+count reflects anyone else's decisions.</p>
+<p>While you have undecided cards in a blind batch, both lists leave out every card of that
+batch, so the lists cannot show you what the blind cards hide.</p>
+{% else %}
+<p>A manager can also see every opportunity the pipeline has assessed, issued or not.</p>
+{% endif %}
+<h3>Being re-judged</h3>
+<p>When Blackbird changes the criteria the pipeline judges by, the opportunities are judged
+again under the new criteria. Until that finishes, the page says "Being re-judged under new
+criteria" and keeps showing the last complete set of assessments.</p>
+
+<h2 id="detail">An opportunity's page</h2>
+<p>The page shows the opportunity's current assessment. Older assessments of the same
+opportunity are linked as history and are never shown as current.</p>
+<h3>The opportunity's sections, in page order</h3>
+<dl>
+    <dt>Brief</dt>
+    <dd>The headline, the structured lines, the elevator pitch and the key points. Each key
+    point carries a badge: <strong>sourced</strong> when it rests on a cited source, or
+    <strong>estimate</strong> when it is BlackbirdBot's own judgement.</dd>
+    <dt>Evidence summary</dt>
+    <dd>What the specialist panel found, grouped as on an assessment.</dd>
+    <dt>The ask</dt>
+    <dd>The experiment BlackbirdBot recommends doing next.</dd>
+    <dt>Verdict</dt>
+    <dd>The score and band, with the rubric's note that they are provisional and advisory, and
+    which set of judging criteria produced them.</dd>
+    <dt>Gating, red flags, rationale and dimension scores</dt>
+    <dd>As on an assessment: see
+    <a href="{{ page_url(request, 'help_page', slug='assessments', fragment='detail') }}">The assessment detail page</a>.</dd>
+    <dt>Deal-breaker flags</dt>
+    <dd>Each deal-breaker the pipeline raised, with its evidence, and whether the deeper
+    analysis confirmed or cleared it.</dd>
+    <dt>Human review</dt>
+    <dd>Your decision and review, and others' once you have decided (see
+    <a href="#reviewing">Deciding and reviewing</a>).</dd>
+</dl>
+<h3>The ideas in it</h3>
+<p>Then comes one section for each idea in the opportunity; the first is open and the rest are
+closed until you open them. Each has:</p>
+<ul>
+    <li>its structured line, and its type, stage and evidence grade;</li>
+    <li><strong>Target biology</strong>: what is known about the target and how it works;</li>
+    <li><strong>Disease profile</strong>: the disease, the patients and what treats them today,
+    each field with a badge saying what supports it;</li>
+    <li>the specialist panel's opinions;</li>
+    <li>the evidence: quotes checked against the full text or the summary of each source,
+    grouped by section, with the evidence grade;</li>
+    <li><strong>Sources</strong>: every document, with its role basis (why it counts as the
+    lab's own work), its licence and its text basis (whether the full text or only the summary
+    was read);</li>
+    <li><strong>Labs</strong>: the labs behind it, with links to each person's OpenAlex and
+    ORCID records.</li>
+</ul>
+<h3>Asking about an opportunity</h3>
+<p>When an admin has switched the chat on, the page has the same chat drawer as an assessment.
+It answers questions from what the page shows, and it hides what the page hides: on a blind
+card you have not decided, it knows no score or band either, and until the next batch is
+issued it knows no rank of a blind card. It shares the daily limits of
+the assessment and project chats, and the bottom of the drawer shows your usage. See
+<a href="{{ page_url(request, 'help_page', slug='assessments', fragment='chat') }}">Asking the assessment chat</a>
+for how to use it.</p>
+
+<h2 id="reviewing">Deciding and reviewing</h2>
+<h3>The quick decision</h3>
+<p>Every card and every opportunity's page carries the quick decision:</p>
+<ul>
+    <li><strong>Pursue</strong> or <strong>Pass</strong>, required;</li>
+    <li>reason tags, chosen from the list the form shows;</li>
+    <li>a short reason in your own words.</li>
+</ul>
+<p>Each person has one decision per opportunity, and you can edit yours. A decision belongs to
+the opportunity, not to one assessment of it, so it carries over when the assessment is
+rewritten; the card then says <strong>changed since your decision</strong> until you confirm or
+change it.</p>
+<h3>Your decision comes first</h3>
+<p>Until you have recorded your own quick decision on an opportunity, you see nobody else's:
+no decisions, no reviews, no approvals and no counts of them, on the card, on the page or in the
+chat. This holds for managers and admins too. A full review does not lift it; only the quick
+decision does. Once you have decided, everyone's decisions and reviews appear, and they stay
+visible when the assessment is rewritten.</p>
+<h3>The full review</h3>
+<p>On the opportunity's page you can also write a full review, as for an assessment:</p>
+<ul>
+    <li><strong>Rating</strong>: a whole number from 1 (weak) to 5 (strong);</li>
+    <li>dimension scores, optional, on the rubric's dimensions;</li>
+    <li>a comment, up to 10,000 characters.</li>
+</ul>
+<p>You can also mark the opportunity approved or disapproved, or clear that mark.</p>
+{% call careful() %}
+<p>Decisions and reviews are saved under your name, and everyone who has made their own decision
+on the opportunity can read them. You can edit your own; only an admin can delete a review.</p>
+{% endcall %}
+{% call note("What decisions are used for") %}
+<p>Decisions, tags and reasons are recorded for a later version of the pipeline. Nothing learns
+from them now: they do not change the pipeline's judgements, and they never reach the
+prompt-suggestion bot.</p>
+{% endcall %}
+<h3>Expert judgments</h3>
+<p>A manager can mark some accounts as experts. Now and then an expert is given a few
+opportunities of their own to judge in full, listed on their Landscape page. On those, the page
+hides the pipeline's own calls (gates, scores, band, recommendation, red flags, the panel's
+opinions and the rationales) until the expert submits, so the expert's judgement is their own.
+The expert's form asks for gate calls, dimension scores, deal-breaker calls and a
+recommendation.</p>
+{% if permissions.staff %}
+<h3>Assigning</h3>
+<p>Managers and admins can assign an opportunity to a person from its page and remove the
+assignment again. Assignments are workflow labels only: they grant no access and send no
+notification.</p>
+{% call careful() %}
+<p><strong>Assign</strong> adds the person to the opportunity's assigned list, which everyone
+who can open it sees. Removing the assignment undoes it.</p>
+{% endcall %}
+{% endif %}
+<p>A reviewer can open an opportunity once it has been issued in a batch, or when it is one of
+their own expert opportunities.</p>
+
+<h2 id="pipeline">The pipeline page</h2>
+{% if permissions.staff %}
+<p>Managers and admins open the pipeline from the Landscape page, or directly:
+<a href="{{ page_url(request, 'workspace_landscape_pipeline') }}">the pipeline page</a>. It
+shows how the pipeline is running:</p>
+<ul>
+    <li>the phase (<strong>pilot</strong>, <strong>backfill</strong> or
+    <strong>continuous</strong>) and whether it is paused;</li>
+    <li>the sets of judging criteria: the one in use, and any new set being checked or held,
+    with the results of its checks;</li>
+    <li>for each source, how complete its intake is and when it last fetched;</li>
+    <li>counts by stage and source, refusals, spend by day, the cost per useful opportunity,
+    and how well quotes and names were checked;</li>
+    <li>the latest cut: how many ideas it chose from, how many it kept, and when;</li>
+    <li>the reports: the model comparison, the positive-control trace and the drift report;</li>
+    <li>incomplete intake slices;</li>
+    <li>the audit of rejected items, with every disagreement, and the items each stage filtered
+    out, with the reason.</li>
+</ul>
+<p>Blind batches also carry a few opportunities from below the cut, to check that the ranking
+works. Which cards those were, and the blind comparison's result, appear here only after the
+next batch replaces the blind one.</p>
+<h3>Controls</h3>
+<p>Each control asks you to confirm before it acts.</p>
+<ul>
+    <li><strong>Pause</strong> and <strong>Resume</strong>: pausing stops the pipeline from
+    starting new work; work already sent finishes. Resume starts it again.</li>
+    <li><strong>Rescue</strong>: puts an item a stage filtered out back into the pipeline at
+    the next stage, with your reason. It then competes like any other item.</li>
+    <li><strong>Positive controls</strong>: the papers behind Blackbird's past positive
+    decisions, by DOI or PubMed id. The pipeline traces each one and reports where it was
+    dropped.</li>
+    <li><strong>Experts</strong>: mark or unmark an account as an expert.</li>
+</ul>
+{% call careful() %}
+<p>Pause and Resume act at once for everyone, and each undoes the other. A rescue is recorded
+with your name and reason and cannot be undone from the page. Changes to the positive controls
+and the experts take effect at once; you can change them back.</p>
+{% endcall %}
+<p>Only an admin can use <strong>Start backfill</strong>, <strong>Re-run bake-off</strong> and
+<strong>Override</strong>, which lets a held set of criteria go ahead.</p>
+{% else %}
+<p>A manager can open the pipeline page, which shows how the pipeline that finds the
+opportunities is running.</p>
+{% endif %}
+{% endblock %}

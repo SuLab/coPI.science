@@ -1,0 +1,58 @@
+{% extends "help/_layout.html" %}
+{% from "help/_callouts.html" import careful, note %}
+{% block help_body %}
+<p class="text-sm text-gray-600">Manager tutorial</p>
+<h1>{{ step.title }}</h1>
+
+<h2 id="where">Where</h2>
+<p><strong>Workspace → Landscape</strong>, and from there the pipeline page.</p>
+
+<h2 id="what-it-means">What it means</h2>
+<p>Landscape opportunities come from a pipeline that reads Johns Hopkins research, keeps the
+strongest therapeutic ideas and has BlackbirdBot assess them. Each week everyone gets the same
+batch, and records a quick decision on each card: pursue or pass. A manager decides like a
+reviewer does; the
+<a href="{{ page_url(request, 'help_tutorial', tutorial='reviewer') }}">Reviewer tutorial</a>
+walks through the batch and the decision.</p>
+
+<h3 id="lists">Current and All assessed</h3>
+<p>Managers also get <strong>Current</strong>, every opportunity in the current cut, and
+<strong>All assessed</strong>, every opportunity with an assessment. Their
+<strong>Unreviewed</strong> and <strong>Reviewed</strong> tabs are yours alone: they say whether
+<em>you</em> have decided. Until you decide on an opportunity you see nobody else's decisions or
+reviews of it, as a reviewer does, and while you have undecided cards in a blind batch both lists
+leave that batch's cards out.</p>
+
+<h3 id="pipeline">The pipeline page</h3>
+<p>It shows the phase and whether the pipeline is paused, the sets of judging criteria and their
+checks, each source's intake, the running counts and spend, the latest cut, the reports, and the
+items each stage filtered out.</p>
+<ul>
+    <li><strong>Pause</strong> and <strong>Resume</strong> stop and restart new work.</li>
+    <li><strong>Rescue</strong> returns a filtered-out item to the pipeline, with your
+    reason.</li>
+    <li><strong>Positive controls</strong> lists papers behind Blackbird's past positive
+    decisions, so the pipeline can report where each was dropped.</li>
+    <li><strong>Experts</strong> marks the accounts that judge sample opportunities in full.</li>
+</ul>
+{% call careful("Careful: pipeline controls") %}
+<p>Each control asks you to confirm, then acts at once for everyone. Pause and Resume undo each
+other, and the positive controls and experts can be changed back; a rescue is recorded with your
+name and reason and cannot be undone from the page.</p>
+{% endcall %}
+<p>Only an admin can use <strong>Start backfill</strong>, <strong>Re-run bake-off</strong> and
+<strong>Override</strong>, which lets a held set of criteria go ahead.</p>
+
+<h3 id="finishing">Finishing the tutorial</h3>
+{% if impersonation_banner %}
+<p><strong>Back to Help</strong> below returns to the Help overview. While an admin is viewing the
+site as someone else, finishing the tutorial is not recorded.</p>
+{% else %}
+<p><strong>Finish</strong> below records that you have taken the tutorial, stops the tutorial prompt
+on Workspace pages, and takes you to the Help overview, where the tutorials and reference pages
+stay available.</p>
+{% endif %}
+<p>More detail: <a href="{{ page_url(request, 'help_page', slug='landscape', fragment='list') }}">The Landscape page</a>
+and <a href="{{ page_url(request, 'help_page', slug='landscape', fragment='pipeline') }}">The pipeline page</a>.</p>
+{% include "help/_step_nav.html" %}
+{% endblock %}

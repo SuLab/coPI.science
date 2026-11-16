@@ -104,7 +104,7 @@ async def journey_reviewer_tutorial(h) -> dict:
     uid = _new_account(h, "reviewer", "Tutorial Reviewer", 1)
     ctx, page, log, csp = await _open_as(h, uid)
     try:
-        walk = await _walk_tutorial(h, page, csp, "reviewer", "/workspace/assessments", 8)
+        walk = await _walk_tutorial(h, page, csp, "reviewer", "/workspace/assessments", 9)
         clean = _healthy(log, csp)
     finally:
         await ctx.close()
@@ -139,7 +139,7 @@ async def journey_manager_tutorial(h) -> dict:
     ctx, page, log, csp = await _open_as(h, uid)
     links: dict[str, dict] = {}
     try:
-        walk = await _walk_tutorial(h, page, csp, "manager", "/workspace/pis", 10)
+        walk = await _walk_tutorial(h, page, csp, "manager", "/workspace/pis", 11)
         for source, target in _help_link_pages(h):
             await _goto(h, page, source, csp)
             link = page.locator(_HELP_LINK)

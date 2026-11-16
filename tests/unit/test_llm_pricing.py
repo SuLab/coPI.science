@@ -2,7 +2,13 @@
 import re
 from decimal import Decimal
 
-from src.services.llm_pricing import AS_OF, PRICES, cost_for_tokens
+from src.services.llm_pricing import (
+    AS_OF,
+    BATCH_MULTIPLIER,
+    PRICES,
+    cost_for_request,
+    cost_for_tokens,
+)
 
 
 def test_cost_for_tokens_hand_computed_case():
@@ -87,3 +93,47 @@ def test_opus_5_5_hand_computed_case():
 def test_opus_4_8_is_priced_like_opus_5():
     args = dict(input_tokens=123_456, output_tokens=7_890, cache_read=50_000, cache_creation=20_000)
     assert cost_for_tokens("claude-opus-4-8", **args) == cost_for_tokens("claude-opus-5", **args)
+
+
+_KW = dict(output_tokens=0, cache_read=0, cache_creation=0)
+
+
+def test_cost_for_request_haiku_tiers():
+    short = cost_for_request("claude-haiku-5-5", input_tokens=100_000, batch=False, **_KW)
+    long = cost_for_request("claude-haiku-5-5", input_tokens=100_001, batch=False, **_KW)
+    assert short == Decimal("0.01")
+    assert long == Decimal(100_001) * Decimal("0.50") / Decimal(1_000_000)
+    # The tier counts cache tokens toward the prompt length.
+    mixed = cost_for_request(
+        "claude-haiku-5-5", input_tokens=50_000, output_tokens=0,
+        cache_read=40_000, cache_creation=10_001, batch=False,
+    )
+    assert mixed == (
+        Decimal(50_000) * Decimal("0.50") + Decimal(40_000) * Decimal("0.05")
+        + Decimal(10_001) * Decimal("0.625")
+    ) / Decimal(1_000_000)
+
+
+def test_cost_for_request_batch_halves():
+    kw = dict(input_tokens=1_000, output_tokens=500, cache_read=200, cache_creation=100)
+    full = cost_for_request("claude-sonnet-5-5", batch=False, **kw)
+    assert full is not None
+    assert cost_for_request("claude-sonnet-5-5", batch=True, **kw) == full * BATCH_MULTIPLIER
+    assert BATCH_MULTIPLIER == Decimal("0.5")
+
+
+def test_unpriced_model_returns_none():
+    assert cost_for_request("claude-nonexistent", input_tokens=1, batch=True, **{
+        "output_tokens": 1, "cache_read": 0, "cache_creation": 0}) is None
+
+
+def test_cost_for_tokens_unchanged():
+    # 1M input + 1M output on claude-opus-5 at $5 / $25.
+    assert cost_for_tokens(
+        "claude-opus-5", input_tokens=1_000_000, output_tokens=1_000_000,
+        cache_read=0, cache_creation=0,
+    ) == Decimal("30")
+    assert cost_for_request(
+        "claude-opus-5", input_tokens=1_000_000, output_tokens=1_000_000,
+        cache_read=0, cache_creation=0, batch=False,
+    ) == Decimal("30")

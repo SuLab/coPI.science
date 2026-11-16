@@ -7,6 +7,7 @@ import httpx
 
 from src.config import get_settings
 from src.services import openalex_budget
+from src.services.authorship_roles import ROLE_RANK, at_institution, role
 from src.services.http_pacing import TRANSIENT_STATUSES, Pacer, with_retries
 from src.services.identifiers import normalize_orcid
 from src.services.industry_sources import JHU_OPENALEX_IDS, EvidenceItem, Paged
@@ -52,10 +53,6 @@ def _oaid(url: str | None) -> str:
     return (url or "").rsplit("/", 1)[-1]
 
 
-#: Seniority of a `_role`, most senior first; any other role ranks last.
-_ROLE_RANK = {"corresponding": 0, "last": 1, "first": 2}
-
-
 def _printed_as(raw_name: str | None, pi: PersonName) -> int:
     """How strongly an authorship's printed name is the PI's (P15): 0 when the surname keys
     do not intersect or the first given names disagree; 2 when they agree and both given
@@ -86,19 +83,13 @@ def _pi_authorship(work: dict, pi_orcid: str, pi_name: str | None = None) -> dic
     if best == 0:
         return mine[0]
     strongest = [a for a, score in zip(mine, scores, strict=True) if score == best]
-    return min(strongest, key=lambda a: _ROLE_RANK.get(_role(a), len(_ROLE_RANK)))
+    return min(strongest, key=lambda a: ROLE_RANK.get(role(a), len(ROLE_RANK)))
 
 
 def _pi_at_jhu(auth: dict) -> bool:
-    if any(_oaid(i.get("id")) in JHU_OPENALEX_IDS for i in auth.get("institutions") or []):
-        return True
-    return any(is_hopkins_affiliation(s) for s in auth.get("raw_affiliation_strings") or [])
-
-
-def _role(auth: dict) -> str:
-    if auth.get("is_corresponding"):
-        return "corresponding"
-    return auth.get("author_position") or "middle"
+    """A JHU institution id, or any raw affiliation string naming Hopkins, even when
+    institutions are listed."""
+    return at_institution(auth, JHU_OPENALEX_IDS, is_hopkins_affiliation, raw_strings="always")
 
 
 def evidence_from_work(work: dict, pi_orcid: str, tenure_start: int | None, *, company_funder_ids: set[str],
@@ -125,12 +116,12 @@ def evidence_from_work(work: dict, pi_orcid: str, tenure_start: int | None, *, c
                 continue
             seen.add(cid)
             items.append(EvidenceItem("openalex", "coauthor_company", f"{wid}:{cid}", inst.get("display_name"), cid,
-                                      classify_company(inst.get("display_name", ""), "company"), year, _role(me), True, dict(base)))
+                                      classify_company(inst.get("display_name", ""), "company"), year, role(me), True, dict(base)))
     for f in work.get("funders") or []:
         fid = _oaid(f.get("id"))
         if fid in company_funder_ids:
             items.append(EvidenceItem("openalex", "company_funder", f"{wid}:{fid}", f.get("display_name"), fid,
-                                      classify_company(f.get("display_name", ""), "company"), year, _role(me), True, dict(base)))
+                                      classify_company(f.get("display_name", ""), "company"), year, role(me), True, dict(base)))
     return items
 
 
