@@ -7,6 +7,7 @@ import pytest
 
 from src.landscaping import normalize
 from src.landscaping.criteria import load_criteria
+from src.landscaping.evidence import mondo
 
 HGNC = {
     "KINX": [{"hgnc_id": "HGNC:9001", "symbol": "KINX", "ensembl_gene_id": "ENSG0000009001"}],
@@ -47,6 +48,10 @@ def lookups(monkeypatch):
         calls["label"].append(text)
         return {"invented fibrosis": "MONDO:0000002"}.get(text)
 
+    async def ensure_loaded():
+        return None
+
+    monkeypatch.setattr(normalize, "ensure_loaded", ensure_loaded)
     monkeypatch.setattr(normalize, "hgnc_lookup", hgnc_lookup)
     monkeypatch.setattr(normalize, "ot_target", ot_target)
     monkeypatch.setattr(normalize, "mondo_from_mesh", mondo_from_mesh)
@@ -165,6 +170,36 @@ async def test_disease_mesh_to_mondo_exact_only(lookups):
 
     empty = await normalize.normalize_disease({"as_written": ""}, pubtator=pubtator)
     assert empty == {"as_written": ""}
+
+
+_MONDO_OBO = """format-version: 1.2
+
+[Term]
+id: MONDO:0000002
+name: invented fibrosis
+"""
+_MONDO_SSSOM = "subject_id\tsubject_label\tpredicate_id\tobject_id\tobject_label\n"
+
+
+async def test_disease_without_pubtator_loads_mondo_first(monkeypatch):
+    """A disease PubTator3 did not tag reaches the synchronous label match with no async Mondo
+    lookup before it; in a fresh process that raised MondoNotLoaded and ended the first
+    bake-off (2026-11-16). The real lookups run here, over an installed invented release."""
+    monkeypatch.setattr(mondo, "_data", None)
+    monkeypatch.setattr(mondo, "_checked_at", 0.0)
+    loads = []
+
+    async def ensure_loaded():
+        loads.append(True)
+        mondo.install(mondo.build("v2099-01-01", _MONDO_OBO, _MONDO_SSSOM))
+        return mondo._data
+
+    monkeypatch.setattr(normalize, "ensure_loaded", ensure_loaded)
+    disease = await normalize.normalize_disease({"as_written": "Invented Fibrosis"}, pubtator=[])
+
+    assert loads == [True]
+    assert disease["mondo_id"] == "MONDO:0000002"
+    assert disease["label"] == "invented fibrosis"
 
 
 async def test_normalized_disease_carries_label_orpha_and_mesh(lookups, monkeypatch):

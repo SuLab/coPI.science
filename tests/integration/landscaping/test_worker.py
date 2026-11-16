@@ -37,6 +37,7 @@ from src.landscaping import (
 )
 from src.landscaping.batches import BatchOutcome
 from src.landscaping.eval import bakeoff, regression, reject_audit
+from src.landscaping.evidence import mondo
 from src.landscaping.schemas import GATING_KEYS
 from src.landscaping.stages import cut as cut_stage
 from src.landscaping.stages import deep as deep_stage
@@ -102,6 +103,7 @@ DEEP_WORK = frozenset({
 })
 
 STUBS = (
+    (mondo, "ensure_loaded", None),
     (batches, "reconcile_orphans", 0),
     (batches, "mark_ingested", None),
     (batches, "run_fallbacks", 0),
@@ -521,6 +523,26 @@ async def test_disabled_polls_only(db_factory, settings, calls, monkeypatch):
 
     assert set(calls.names()) == {"over_daily_cap", "reconcile_orphans", "poll", "mark_ingested"}
     assert calls.args("reconcile_orphans") == [((db_factory,), {"may_submit": False})]
+
+
+@pytest.mark.asyncio
+async def test_no_mondo_release_ends_the_pass_after_intake(db_factory, settings, calls, monkeypatch):
+    """The cut, the data flags and S8 read Mondo synchronously, so a pass that cannot load the
+    release runs intake and stops (2026-11-16: the first bake-off died on MondoNotLoaded)."""
+    async def unreachable():
+        calls.log.append(("ensure_loaded", (), {}))
+        raise RuntimeError("GitHub unreachable")
+
+    monkeypatch.setattr(mondo, "ensure_loaded", unreachable)
+    calls.results["schedule_due"] = [("openalex", "daily:2026-10-30")]
+    await _epoch(db_factory, "active")
+    await _set(db_factory, "landscape_phase", "continuous")
+    await worker.run_once(db_factory, worker.WorkerState(), now=NOW)
+
+    names = calls.names()
+    assert {"run_slice", "link_grants", "ensure_loaded"} <= set(names)
+    assert names.index("ensure_loaded") > names.index("link_grants")
+    assert not set(names) & (SUBMISSIONS | SYNC_LLM | DEEP_WORK | {"pipeline_metrics"})
 
 
 @pytest.mark.asyncio

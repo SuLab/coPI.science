@@ -17,7 +17,9 @@ batch reconciliation before returning stale ``running`` rows to ``pending``.
   ended S5 tie-break tournament finishes its cut here (it asks nothing); an ended S7 rebuild
   is landed only by the synchronous step, whose insertions ask the model.
 - Only while ``landscape_enabled`` is true and ``app_settings.landscape_paused`` is not, in §12.2
-  order: intake (and the D69 flip to ``continuous``); evidence assembly and S2-S4 submissions;
+  order: intake (and the D69 flip to ``continuous``); loading the Mondo release, without which
+  the pass ends there (the cut, the data flags and S8 read it synchronously);
+  evidence assembly and S2-S4 submissions;
   synchronous work (S6, S7, similarity judgments, fallback chains) while no simulation run is
   live; the cut, S8, labels and S9, then the weekly batch and reports; epochs; the reject audit;
   probes; the expert sample; the bake-off and the pilot's measurements.
@@ -75,6 +77,7 @@ from src.landscaping import (
 from src.landscaping.batches import BatchOutcome, FallbackAdapter
 from src.landscaping.criteria import load_criteria
 from src.landscaping.eval import bakeoff, regression, reject_audit
+from src.landscaping.evidence import mondo
 from src.landscaping.prompt_set import load_blackbird_extracts, load_prompt_set
 from src.landscaping.schema_check import schema_ready
 from src.landscaping.stages import cut as cut_stage
@@ -350,6 +353,8 @@ async def run_once(db_factory, state: WorkerState, *, now: datetime) -> None:
     if not running:
         return
     phase = await _step("intake", _intake_step(db_factory, phase, now), default=phase)
+    if not await _step("mondo", _mondo_ready(), default=False):
+        return
     loop = _Loop(
         now=now, phase=phase, llm=not over_cap, funnel=await _funnel_open(db_factory, phase),
     )
@@ -368,6 +373,14 @@ async def run_once(db_factory, state: WorkerState, *, now: datetime) -> None:
         await _step("probes", _probe_step(db_factory, now))
         await _step("expert sample", _expert_step(db_factory, state, now))
     await _step("evaluation", _evaluation_step(db_factory, state, loop))
+
+
+async def _mondo_ready() -> bool:
+    """Load the Mondo release (a weekly re-check after the first). The synchronous lookups
+    (``is_ancestor`` in the cut and the data flags, ``mondo_parents`` in S8) raise or, in S8,
+    silently find no parents in a process that has not loaded it."""
+    await mondo.ensure_loaded()
+    return True
 
 
 async def _working_epochs(db_factory) -> list[uuid.UUID]:

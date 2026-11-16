@@ -23,6 +23,11 @@ BASE = "https://api.reporter.nih.gov/v2"
 PAGE = 500
 _PACE_INTERVAL = 0.35
 _PACER = Pacer(_PACE_INTERVAL)
+#: The highest ``offset`` RePORTER accepts: past it a search answers HTTP 400 "System doesn't
+#: support offset value greater than 9,999" (measured 2026-11-16), so paging reaches at most
+#: ``_REACH`` rows of one search.
+MAX_OFFSET = 9_999
+_REACH = MAX_OFFSET // PAGE * PAGE + PAGE
 
 #: Criteria keys each endpoint honours. RePORTER SILENTLY IGNORES an unknown key, and the
 #: two endpoints differ: projects/search ignores core_project_nums (meta.total 2,983,191
@@ -95,21 +100,40 @@ async def publications_for_cores(core_project_nums: list[str]) -> dict[str, set[
         return links
     async with httpx.AsyncClient(timeout=30) as client:
         for i in range(0, len(core_project_nums), 50):
-            chunk = core_project_nums[i:i + 50]
-            criteria = {"core_project_nums": chunk}
-            _check_criteria(criteria, PUBLICATIONS_CRITERIA, "publications/search")
-            offset = 0
-            while True:
-                data = await _post(client, "publications/search", {
-                    "criteria": criteria, "offset": offset, "limit": PAGE,
-                })
-                for r in data.get("results") or []:
-                    links.setdefault(r["coreproject"], set()).add(str(r["pmid"]))
-                total = int(data.get("meta", {}).get("total", 0))
-                offset += PAGE
-                if offset >= total:
-                    break
+            await _publications_into(client, core_project_nums[i:i + 50], links)
     return links
+
+
+async def _publications_into(
+    client: httpx.AsyncClient, cores: list[str], links: dict[str, set[str]]
+) -> None:
+    """Add the publications of ``cores`` to ``links``. A search matching more rows than paging
+    reaches (``_REACH``) is split in half and each half searched again; a single project past
+    the reach keeps the rows paging reaches, with a warning."""
+    criteria = {"core_project_nums": cores}
+    _check_criteria(criteria, PUBLICATIONS_CRITERIA, "publications/search")
+    offset = 0
+    while True:
+        data = await _post(client, "publications/search", {
+            "criteria": criteria, "offset": offset, "limit": PAGE,
+        })
+        total = int(data.get("meta", {}).get("total", 0))
+        if offset == 0 and total > _REACH and len(cores) > 1:
+            half = len(cores) // 2
+            await _publications_into(client, cores[:half], links)
+            await _publications_into(client, cores[half:], links)
+            return
+        for r in data.get("results") or []:
+            links.setdefault(r["coreproject"], set()).add(str(r["pmid"]))
+        offset += PAGE
+        if offset >= total:
+            return
+        if offset > MAX_OFFSET:
+            logger.warning(
+                "RePORTER lists %d publications for %s; paging reaches only the first %d",
+                total, cores[0], offset,
+            )
+            return
 
 
 async def profile_id_exists(profile_id: int) -> bool:

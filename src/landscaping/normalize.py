@@ -14,6 +14,7 @@ from __future__ import annotations
 from src.landscaping.evidence.chembl import chembl_molecule
 from src.landscaping.evidence.hgnc import hgnc_lookup
 from src.landscaping.evidence.mondo import (
+    ensure_loaded,
     mondo_from_mesh,
     mondo_label,
     mondo_label_match,
@@ -199,6 +200,9 @@ async def normalize_disease(disease: dict, *, pubtator: list[dict]) -> dict:
     as_written = str(disease.get("as_written") or "")
     if not as_written.strip():
         return result
+    # The label match and `_add_mondo_fields` read Mondo synchronously; only the MeSH path
+    # loads it, so a disease PubTator3 did not tag must not be the first to reach them.
+    await ensure_loaded()
     mesh = _single(
         _field(a, "identifier") for a in _pubtator_matches(pubtator, "Disease", as_written)
     )
