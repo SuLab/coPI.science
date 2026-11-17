@@ -198,6 +198,21 @@ record for landscaping: `llm_call_logs` does not see it.
 similarity judgments, fallback chains) only while no simulation run is live, so a live run
 delays them. Do not stop or start a run for it.
 
+**Sync batch mode.** This organization's Anthropic API key is HIPAA-configured, and the
+Message Batches endpoint refuses it ("not available for HIPAA-configured organizations",
+2026-11-16). With `LANDSCAPE_BATCH_MODE=sync` in `.env`, each batch item is sent as its own
+Messages call. The worker's poll runs them in chunks of 50, `LANDSCAPE_SYNC_CONCURRENCY` at a
+time (default 4). Before each chunk it checks again that it is enabled, unpaused, under the cap
+and that no simulation run is live, so a local batch waits while a run is live. A shutdown
+starts no new call. A rate-limit, overload or connection error leaves the rest for the next
+poll (`LANDSCAPE_BATCH_POLL_SECONDS`, default 300). Each call is ledgered as soon as it
+answers, at the full synchronous rate, about twice the batch rate. The bake-off report's cost
+figures are at the batch rate. Everything else (stage rows, ingestion, refusal fallbacks)
+works as in batch mode. A restart in the middle of a local batch sends its unanswered items
+back to `pending`, where their stage batches them again. Answers paid for but not yet
+ingested are lost then, at most one chunk. Switch modes only while no API batch is in flight.
+`src/landscaping/batches.py` documents the protocol.
+
 **The kill switch.** Set `LANDSCAPE_ENABLED=false` in `.env`, then recreate:
 
     $DC --profile landscape up -d --force-recreate landscape-worker

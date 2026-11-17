@@ -13,7 +13,9 @@ batch reconciliation before returning stale ``running`` rows to ``pending``.
 **Each loop** (``run_once``):
 
 - Always, even while disabled or paused: batch reconciliation, then polling ended batches and
-  ingesting them chunk by chunk, each batch marked ingested after its last chunk (§9.5). An
+  ingesting them chunk by chunk, each batch marked ingested after its last chunk (§9.5). In
+  sync mode (``landscape_batch_mode``) the poll also makes a local batch's calls, but only
+  while enabled, unpaused, under the cap and with no simulation run live. An
   ended S5 tie-break tournament finishes its cut here (it asks nothing); an ended S7 rebuild
   is landed only by the synchronous step, whose insertions ask the model.
 - Only while ``landscape_enabled`` is true and ``app_settings.landscape_paused`` is not, in §12.2
@@ -46,6 +48,7 @@ loop goes on with the next one, so a failure never rolls back finished work.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import signal
@@ -349,7 +352,7 @@ async def run_once(db_factory, state: WorkerState, *, now: datetime) -> None:
         db_factory, may_submit=running and not over_cap,
     ))
     if state.poll_due(now, settings.landscape_batch_poll_seconds):
-        await _step("poll", ingest_ended(db_factory))
+        await _step("poll", ingest_ended(db_factory, run_local=running))
     if not running:
         return
     phase = await _step("intake", _intake_step(db_factory, phase, now), default=phase)
@@ -373,6 +376,20 @@ async def run_once(db_factory, state: WorkerState, *, now: datetime) -> None:
         await _step("probes", _probe_step(db_factory, now))
         await _step("expert sample", _expert_step(db_factory, state, now))
     await _step("evaluation", _evaluation_step(db_factory, state, loop))
+
+
+async def _local_calls_allowed(db_factory) -> bool:
+    """Whether a sync-mode batch may make calls now, read again before each chunk: no
+    shutdown, enabled, unpaused, under the cap and, like every synchronous call, no simulation
+    run live."""
+    if _shutdown or not get_settings().landscape_enabled:
+        return False
+    async with db_factory() as db:
+        if (await _app_setting(db, "landscape_paused") or "").lower() in _TRUE:
+            return False
+        if await ledger.over_daily_cap(db):
+            return False
+        return not await liveness.simulation_live(db)
 
 
 async def _mondo_ready() -> bool:
@@ -435,15 +452,20 @@ async def _funnel_open(db_factory, phase: str) -> bool:
 # --- polling and ingestion --------------------------------------------------------------------
 
 
-async def ingest_ended(db_factory) -> int:
+async def ingest_ended(db_factory, *, run_local: bool = False) -> int:
     """Poll ended batches and route each chunk's outcomes through ``INGESTERS``; a batch is
     marked ingested after its last chunk, then a completed S5 tie-break finishes its cut
     (``_after_tournament``). A batch
     whose chunk fails is left unmarked and read again on the next poll (the compare-and-set
-    makes the replay harmless). Returns the number of batches marked ingested."""
+    makes the replay harmless). ``run_local`` lets a sync-mode batch make calls, each chunk
+    only while ``_local_calls_allowed``; a shutdown stops new calls at once. Returns the
+    number of batches marked ingested."""
     ingested = 0
     broken: set[uuid.UUID] = set()
-    async for batch_id, outcomes, is_last in batches.poll(db_factory):
+    may_run = functools.partial(_local_calls_allowed, db_factory) if run_local else None
+    async for batch_id, outcomes, is_last in batches.poll(
+        db_factory, may_run=may_run, should_stop=lambda: _shutdown,
+    ):
         if batch_id in broken:
             continue
         try:

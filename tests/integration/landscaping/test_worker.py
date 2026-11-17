@@ -182,8 +182,8 @@ def calls(monkeypatch):
     for module, name, default in STUBS:
         monkeypatch.setattr(module, name, recorded.stub(name, default))
 
-    async def fake_poll(db_factory, *, chunk_size=1000):
-        recorded.log.append(("poll", (), {}))
+    async def fake_poll(db_factory, *, chunk_size=1000, **kwargs):
+        recorded.log.append(("poll", (), kwargs))
         for chunk in recorded.chunks:
             yield chunk
 
@@ -522,6 +522,7 @@ async def test_disabled_polls_only(db_factory, settings, calls, monkeypatch):
     await worker.run_once(db_factory, worker.WorkerState(), now=NOW)
 
     assert set(calls.names()) == {"over_daily_cap", "reconcile_orphans", "poll", "mark_ingested"}
+    assert [kw["may_run"] is not None for _, kw in calls.args("poll")] == [False]
     assert calls.args("reconcile_orphans") == [((db_factory,), {"may_submit": False})]
 
 
@@ -540,9 +541,25 @@ async def test_no_mondo_release_ends_the_pass_after_intake(db_factory, settings,
     await worker.run_once(db_factory, worker.WorkerState(), now=NOW)
 
     names = calls.names()
+    assert [kw["may_run"] is not None for _, kw in calls.args("poll")] == [True]
     assert {"run_slice", "link_grants", "ensure_loaded"} <= set(names)
     assert names.index("ensure_loaded") > names.index("link_grants")
     assert not set(names) & (SUBMISSIONS | SYNC_LLM | DEEP_WORK | {"pipeline_metrics"})
+
+
+@pytest.mark.asyncio
+async def test_local_calls_allowed_rereads_pause_cap_and_simulation(db_factory, settings, calls):
+    """Sync mode's per-chunk gate (review finding): a pause, the cap or a live simulation
+    stops a local batch's calls while it runs."""
+    assert await worker._local_calls_allowed(db_factory) is True
+    calls.results["simulation_live"] = True
+    assert await worker._local_calls_allowed(db_factory) is False
+    calls.results["simulation_live"] = False
+    calls.results["over_daily_cap"] = True
+    assert await worker._local_calls_allowed(db_factory) is False
+    calls.results["over_daily_cap"] = False
+    await _set(db_factory, "landscape_paused", "true")
+    assert await worker._local_calls_allowed(db_factory) is False
 
 
 @pytest.mark.asyncio

@@ -28,6 +28,7 @@ def test_landscape_defaults():
     assert s.landscape_batch_min_items == 500
     assert s.landscape_batch_max_wait_minutes == 60
     assert s.landscape_batch_poll_seconds == 300
+    assert s.landscape_batch_mode == "api"
     assert s.landscape_sync_concurrency == 4
     assert s.landscape_running_stale_minutes == 30
     assert s.landscape_reject_audit_size == 100

@@ -464,6 +464,10 @@ class Settings(BaseSettings):
     landscape_batch_min_items: int = 500
     landscape_batch_max_wait_minutes: int = 60
     landscape_batch_poll_seconds: int = 300
+    # "api" sends the batched stages as Message Batches; "sync" runs each batch item as its own
+    # Messages call at the full rate (src/landscaping/batches.py), for an organization whose
+    # Batches endpoint is unavailable (HIPAA-configured, measured 2026-11-16).
+    landscape_batch_mode: Literal["api", "sync"] = "api"
     landscape_sync_concurrency: int = 4
     landscape_running_stale_minutes: int = 30
     landscape_reject_audit_size: int = 100

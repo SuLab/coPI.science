@@ -9,11 +9,14 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+import anthropic
+import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.config import get_settings
 from src.landscaping import batches
 from src.landscaping.llm_client import CallResult
 from src.models.landscape import (
@@ -750,3 +753,229 @@ async def test_fallback_ledger_stage_passed_to_call_sync(db_factory, fake, monke
         assert await batches.run_fallbacks(db_factory, adapter) == 1
 
     assert seen == [("screen", None), ("screen", "audit")]
+
+
+# --- sync mode (landscape_batch_mode = "sync"; the Batches endpoint refused, 2026-11-16) ----
+
+
+@pytest.fixture
+def sync_mode(monkeypatch, fake):
+    """Sync mode with a fake Messages call; each request's user message is the stop reason to
+    answer with, or "raise". Returns the requests sent, in order."""
+    monkeypatch.setattr(get_settings(), "landscape_batch_mode", "sync")
+    # One at a time: every session of a test shares one connection (savepoints).
+    monkeypatch.setattr(get_settings(), "landscape_sync_concurrency", 1)
+    sent: list[dict] = []
+
+    async def abeta_create(client, **request):
+        sent.append(request)
+        stop = request["messages"][0]["content"]
+        if stop == "raise":
+            raise RuntimeError("invented API failure")
+        if stop == "ratelimit":
+            raise anthropic.RateLimitError(
+                "invented rate limit",
+                response=httpx.Response(429, request=httpx.Request("POST", "https://invalid.test")),
+                body=None,
+            )
+        return _message(stop)
+
+    monkeypatch.setattr(batches.llm, "abeta_create", abeta_create)
+    monkeypatch.setattr(batches.llm, "get_anthropic_client", lambda: object())
+    return sent
+
+
+async def _submit_stops(db_factory, ids: list[uuid.UUID], stops: list[str]) -> uuid.UUID:
+    return await batches.submit(
+        db_factory, stage="screen", row_model=LandscapeScreen,
+        items=[
+            (row_id, {**_request(), "messages": [{"role": "user", "content": stop}]})
+            for row_id, stop in zip(ids, stops, strict=True)
+        ],
+    )
+
+
+async def _drain_local(db_factory, *, run: bool = True, should_stop=None) -> list:
+    """Every chunk one poll yields, ingesting none of them."""
+    async def may_run():
+        return run
+
+    return [
+        chunk async for chunk in batches.poll(db_factory, may_run=may_run, should_stop=should_stop)
+    ]
+
+
+async def _ingest_all(db_factory, outcomes) -> None:
+    for outcome in outcomes:
+        apply = _apply_done if outcome.kind == "succeeded" else _apply_generic
+        assert await apply(db_factory, outcome)
+
+
+async def test_sync_mode_runs_items_in_poll_at_the_full_rate(db_factory, fake, sync_mode):
+    ids = await _screens(db_factory, 4)
+    batch_id = await _submit_stops(db_factory, ids, ["end_turn", "refusal", "max_tokens", "raise"])
+    batch = await _batch(db_factory, batch_id)
+    assert fake.create_calls == 0
+    assert sync_mode == []
+    assert batch.api_batch_id == f"local:{batch_id}"
+    assert batch.status == "submitted"
+    assert await _statuses(db_factory, ids) == ["submitted"] * 4
+
+    [(got, outcomes, is_last)] = await _drain_local(db_factory)
+    assert got == batch_id and is_last
+    assert [o.kind for o in outcomes] == ["succeeded", "refusal", "truncated", "errored"]
+    assert [o.row_id for o in outcomes] == ids
+    assert len(sync_mode) == 4
+    assert (await _batch(db_factory, batch_id)).status == "ended"
+    async with db_factory() as db:
+        ledger = (await db.scalars(
+            select(LandscapeLlmCall).where(LandscapeLlmCall.batch_id == batch_id)
+            .order_by(LandscapeLlmCall.item_seq)
+        )).all()
+        kinds = (await db.scalars(
+            select(LandscapeBatchItem.result_kind).where(LandscapeBatchItem.batch_id == batch_id)
+            .order_by(LandscapeBatchItem.item_seq)
+        )).all()
+    assert [(c.item_seq, c.batch) for c in ledger] == [(1, False), (2, False), (3, False), (4, False)]
+    assert ledger[0].cost_usd == cost_for_request(
+        MODEL, input_tokens=100, output_tokens=20, cache_read=0, cache_creation=0, batch=False
+    )
+    assert kinds == ["succeeded", "refusal", "truncated", "errored"]
+
+    await _ingest_all(db_factory, outcomes)
+    await batches.mark_ingested(db_factory, batch_id)
+    assert (await _batch(db_factory, batch_id)).status == "ingested"
+    assert await _drain_local(db_factory) == []
+    assert len(sync_mode) == 4
+
+
+async def test_sync_mode_calls_nothing_unless_allowed(db_factory, fake, sync_mode):
+    ids = await _screens(db_factory, 2)
+    batch_id = await _submit_stops(db_factory, ids, ["end_turn", "end_turn"])
+
+    assert await _drain_local(db_factory, run=False) == []
+    assert await _drain_local(db_factory, should_stop=lambda: True) == []
+    assert sync_mode == []
+    assert (await _batch(db_factory, batch_id)).status == "submitted"
+    assert await _statuses(db_factory, ids) == ["submitted", "submitted"]
+
+
+async def test_sync_mode_replays_answers_without_calling_again(db_factory, fake, sync_mode):
+    """A chunk whose ingestion failed is read again from memory, as an API batch's results
+    are re-read: nothing is paid for twice."""
+    ids = await _screens(db_factory, 2)
+    batch_id = await _submit_stops(db_factory, ids, ["end_turn", "refusal"])
+    [(_, first, _)] = await _drain_local(db_factory)
+    [(_, again, is_last)] = await _drain_local(db_factory, run=False)
+
+    assert is_last
+    assert [(o.item_seq, o.kind) for o in again] == [(o.item_seq, o.kind) for o in first]
+    assert len(sync_mode) == 2
+    async with db_factory() as db:
+        assert await db.scalar(
+            select(func.count()).select_from(LandscapeLlmCall)
+            .where(LandscapeLlmCall.batch_id == batch_id)
+        ) == 2
+
+
+async def test_sync_mode_stops_between_chunks_and_a_restart_releases_the_rest(
+    db_factory, fake, sync_mode, monkeypatch
+):
+    monkeypatch.setattr(batches, "_LOCAL_CHUNK", 2)
+    ids = await _screens(db_factory, 4)
+    batch_id = await _submit_stops(db_factory, ids, ["end_turn"] * 4)
+
+    chunks = await _drain_local(db_factory, should_stop=lambda: len(sync_mode) >= 2)
+    assert [(len(outcomes), is_last) for _, outcomes, is_last in chunks] == [(2, False)]
+    await _ingest_all(db_factory, chunks[0][1])
+
+    _restart(monkeypatch)
+    assert await _drain_local(db_factory) == []
+    assert len(sync_mode) == 2
+    assert await _statuses(db_factory, ids) == ["done", "done", "pending", "pending"]
+    assert (await _batch(db_factory, batch_id)).status == "ingested"
+
+
+async def test_sync_mode_reconcile_releases_unconfirmed_rows_without_listing(
+    db_factory, fake, monkeypatch
+):
+    """The Batches endpoint refused the create (HIPAA-configured organization); in sync mode
+    the row is released at once, and the API is never listed."""
+    ids = await _screens(db_factory, 2)
+    fake.create_error = RuntimeError(
+        "this endpoint is not available for HIPAA-configured organizations"
+    )
+    batch_id = await _submit(db_factory, ids)
+    assert (await _batch(db_factory, batch_id)).create_failures == 1
+
+    def no_listing(**_kw):
+        raise AssertionError("sync mode must not list API batches")
+
+    monkeypatch.setattr(fake, "list", no_listing)
+    monkeypatch.setattr(get_settings(), "landscape_batch_mode", "sync")
+    assert await batches.reconcile_orphans(db_factory, may_submit=True) == 0
+
+    assert await _statuses(db_factory, ids) == ["pending", "pending"]
+    assert (await _batch(db_factory, batch_id)).status == "ingested"
+    assert fake.create_calls == 1
+
+
+async def _ledger_count(db_factory, batch_id: uuid.UUID) -> int:
+    async with db_factory() as db:
+        return await db.scalar(
+            select(func.count()).select_from(LandscapeLlmCall)
+            .where(LandscapeLlmCall.batch_id == batch_id)
+        )
+
+
+async def test_sync_mode_a_stop_ends_new_calls_and_each_call_is_ledgered_at_once(
+    db_factory, fake, sync_mode, monkeypatch
+):
+    """A shutdown inside a chunk starts no further call, and every call already answered has
+    its ledger row and is yielded (review finding: nothing paid may go unrecorded)."""
+    ids = await _screens(db_factory, 3)
+    batch_id = await _submit_stops(db_factory, ids, ["end_turn"] * 3)
+
+    chunks = await _drain_local(db_factory, should_stop=lambda: len(sync_mode) >= 1)
+    assert [([o.item_seq for o in outcomes], is_last) for _, outcomes, is_last in chunks] == [
+        ([1], False)
+    ]
+    assert len(sync_mode) == 1
+    assert await _ledger_count(db_factory, batch_id) == 1
+
+
+async def test_sync_mode_rate_limit_leaves_the_rest_for_the_next_poll(
+    db_factory, fake, sync_mode, monkeypatch
+):
+    """A 429 does not become an ``errored`` outcome (which would use up the row's retry): the
+    item stays unanswered, nothing is ledgered for it, and no further call starts."""
+    ids = await _screens(db_factory, 3)
+    batch_id = await _submit_stops(db_factory, ids, ["end_turn", "ratelimit", "end_turn"])
+
+    chunks = await _drain_local(db_factory)
+    assert [([o.item_seq for o in outcomes], is_last) for _, outcomes, is_last in chunks] == [
+        ([1], False)
+    ]
+    assert len(sync_mode) == 2
+    assert await _ledger_count(db_factory, batch_id) == 1
+    assert await _statuses(db_factory, ids) == ["submitted"] * 3
+
+
+async def test_sync_mode_rereads_may_run_before_each_chunk(
+    db_factory, fake, sync_mode, monkeypatch
+):
+    """A pause, kill switch or live simulation that starts while a local batch runs stops it
+    at the next chunk (review finding)."""
+    monkeypatch.setattr(batches, "_LOCAL_CHUNK", 2)
+    ids = await _screens(db_factory, 4)
+    await _submit_stops(db_factory, ids, ["end_turn"] * 4)
+    allowed = iter([True, False])
+
+    async def may_run():
+        return next(allowed)
+
+    async for _, outcomes, _ in batches.poll(db_factory, may_run=may_run):
+        await _ingest_all(db_factory, outcomes)
+
+    assert len(sync_mode) == 2
+    assert await _statuses(db_factory, ids) == ["done", "done", "submitted", "submitted"]

@@ -19,6 +19,19 @@ The protocol, in order:
 This module owns the protocol and the generic non-success transitions (``transition``,
 ``run_fallbacks``); each stage module owns its ``succeeded`` handling.
 
+**Sync mode** (``landscape_batch_mode = "sync"``) is for an organization whose Batches endpoint
+is unavailable (a HIPAA-configured one, measured 2026-11-16). The batch row, its items and the
+stage rows are written as above, but ``submit`` makes no API call: it stores
+``local:<row id>`` as the API id and keeps the requests in memory. ``poll`` then runs each
+unanswered item as its own Messages call, a chunk at a time, on the batch's model only (a
+refusal still goes to ``run_fallbacks``). Each answer is ledgered at the synchronous rate with
+the batch id and ``item_seq`` (insert-ignore), and its outcome goes through the same ingestion.
+Answers stay in memory until ``mark_ingested``, so a chunk whose ingestion failed is replayed,
+not paid for again. A restart loses the requests: the batch's rows still ``submitted`` go back
+to ``pending`` for their stage to batch again. No API batch exists in this mode, so
+reconciliation lists nothing and releases every unconfirmed row to ``pending``. Switch modes
+only while no API batch is in flight.
+
 The SDK client is synchronous, so every API call runs on a worker thread. Only
 ``create``/``retrieve``/``results``/``list`` are used: they exist in both the test venv's and
 the images' ``anthropic``.
@@ -40,6 +53,7 @@ from sqlalchemy import String, Table, any_, bindparam, func, insert, select, upd
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.config import get_settings
 from src.database import Base
 from src.landscaping.ledger import record_call, usage_from
 from src.landscaping.llm_client import CallResult, call_sync, require_priced
@@ -59,6 +73,19 @@ _MAX_CREATE_FAILURES = 3
 _LIST_SKEW = timedelta(minutes=10)
 _LIST_PAGE_SIZE = 100
 _CUSTOM_ID = re.compile(r"b(\d+)-(\d+)")
+#: The ``api_batch_id`` prefix of a batch run in-process (sync mode).
+LOCAL_PREFIX = "local:"
+#: Items per sync-mode chunk: each is called, ledgered and yielded for ingestion before the
+#: next starts, so a stop between chunks loses no answer.
+_LOCAL_CHUNK = 50
+
+
+def _sync_mode() -> bool:
+    return get_settings().landscape_batch_mode == "sync"
+
+
+def _is_local(batch: LandscapeBatch) -> bool:
+    return (batch.api_batch_id or "").startswith(LOCAL_PREFIX)
 
 
 def _batches_client() -> Any:
@@ -111,6 +138,10 @@ class _Reconciler:
         self.scans: list[_Scan] = []
         #: Requests of rows whose create failed in this process, kept for their re-create.
         self.requests: dict[uuid.UUID, list[dict]] = {}
+        #: Sync mode: each local batch's requests by ``item_seq``, and the answers it has had,
+        #: ``item_seq`` → ``(kind, message)``, kept until the batch is marked ingested.
+        self.local_requests: dict[uuid.UUID, dict[int, dict]] = {}
+        self.local_answers: dict[uuid.UUID, dict[int, tuple[str, Any | None]]] = {}
 
     def rearm(self, batch_row_id: uuid.UUID) -> None:
         """Give the row a scan of its own, listed on its next advance. Earlier scans drop it:
@@ -137,6 +168,7 @@ async def submit(
     fallback chain is never batched (D42); ``ValueError`` when none qualifies. The intent rows
     commit before ``create``. A ``create`` that raises is not re-raised: the rows stay
     ``submitting``, ``create_failures`` grows and reconciliation is re-armed for the row.
+    In sync mode nothing is sent: the row is adopted under a ``local:`` id for ``poll`` to run.
     Returns the ``landscape_batches`` row id.
     """
     if not items:
@@ -189,6 +221,12 @@ async def submit(
             .values(status="submitting", batch_item_id=items_t.c.id, **_touch(table))
         )
         await db.commit()
+    if _sync_mode():
+        _RECONCILER.local_requests[batch_id] = {
+            n: request for n, (_, request) in enumerate(kept, start=1)
+        }
+        await _store_created(db_factory, batch_id, f"{LOCAL_PREFIX}{batch_id}")
+        return batch_id
     requests = [
         {"custom_id": _custom_id(seq, n), "params": request}
         for n, (_, request) in enumerate(kept, start=1)
@@ -240,7 +278,8 @@ async def _adopt(db: AsyncSession, batch: LandscapeBatch, api_batch_id: str) -> 
 
 
 async def _move_stage_rows(
-    db: AsyncSession, batch: LandscapeBatch, status: str, *, error: str | None = None
+    db: AsyncSession, batch: LandscapeBatch, status: str, *, error: str | None = None,
+    from_status: str = "submitting",
 ) -> None:
     table = Base.metadata.tables[batch.row_table]
     items_t = LandscapeBatchItem.__table__
@@ -252,7 +291,7 @@ async def _move_stage_rows(
         .where(
             table.c.batch_item_id == items_t.c.id,
             items_t.c.batch_id == batch.id,
-            table.c.status == "submitting",
+            table.c.status == from_status,
         )
         .values(**values)
     )
@@ -285,8 +324,15 @@ async def reconcile_orphans(db_factory, *, may_submit: bool) -> int:
     (never while disabled, paused or over the daily cap, §9.5): re-created from its kept
     requests, or, after a restart has lost them, released to ``pending`` for its stage to
     batch again. A scan that raises is retried next call. Returns the number adopted.
+
+    In sync mode no API batch can exist, so nothing is listed: every unconfirmed row is
+    released to ``pending`` at once, and 0 is returned.
     """
     state = _RECONCILER
+    if _sync_mode():
+        await _release_unconfirmed(db_factory)
+        state.scans = []
+        return 0
     if not state.started:
         await _arm_startup_scan(db_factory, state)
     adopted = 0
@@ -297,6 +343,25 @@ async def reconcile_orphans(db_factory, *, may_submit: bool) -> int:
             logger.exception("batch reconciliation scan failed; retrying next loop")
     state.scans = [scan for scan in state.scans if scan.rows]
     return adopted
+
+
+async def _release_unconfirmed(db_factory) -> None:
+    """Sync mode: settle every ``submitting`` row with no API id by releasing its stage rows
+    to ``pending``."""
+    async with db_factory() as db:
+        rows = (
+            await db.scalars(
+                select(LandscapeBatch)
+                .where(LandscapeBatch.status == "submitting", LandscapeBatch.api_batch_id.is_(None))
+                .with_for_update()
+            )
+        ).all()
+        for batch in rows:
+            await _close(db, batch, "pending")
+            _RECONCILER.requests.pop(batch.id, None)
+            _RECONCILER.local_requests.pop(batch.id, None)
+            logger.info("batch row %s released to pending (sync mode)", batch.id)
+        await db.commit()
 
 
 async def _arm_startup_scan(db_factory, state: _Reconciler) -> None:
@@ -466,19 +531,24 @@ class BatchOutcome:
     usage: dict
 
 
+def _message_kind(message: Any) -> str:
+    """``refusal`` or ``truncated`` for a reply that stopped on ``refusal`` or ``max_tokens``,
+    else ``succeeded``."""
+    stop = getattr(message, "stop_reason", None)
+    if stop == "refusal":
+        return "refusal"
+    if stop == "max_tokens":
+        return "truncated"
+    return "succeeded"
+
+
 def _outcome_kind(result: Any) -> tuple[str, Any | None]:
     """``(kind, message)`` for one result. A succeeded result that stopped on ``refusal`` or
     ``max_tokens`` is ``refusal`` or ``truncated``; an unknown result type counts as
     ``errored``."""
     kind = getattr(result, "type", None)
     if kind == "succeeded":
-        message = result.message
-        stop = getattr(message, "stop_reason", None)
-        if stop == "refusal":
-            return "refusal", message
-        if stop == "max_tokens":
-            return "truncated", message
-        return "succeeded", message
+        return _message_kind(result.message), result.message
     if kind in ("errored", "expired", "canceled"):
         return kind, None
     logger.warning("unknown batch result type %r counted as errored", kind)
@@ -486,7 +556,9 @@ def _outcome_kind(result: Any) -> tuple[str, Any | None]:
 
 
 async def poll(
-    db_factory, *, chunk_size: int = 1000
+    db_factory, *, chunk_size: int = 1000,
+    may_run: Callable[[], Awaitable[bool]] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> AsyncIterator[tuple[uuid.UUID, list[BatchOutcome], bool]]:
     """Yield ``(batch_row_id, outcomes, is_last_chunk)`` for each ended, not-yet-ingested
     batch, one batch at a time, in chunks of at most ``chunk_size`` results.
@@ -497,6 +569,11 @@ async def poll(
     The caller applies each chunk (``apply_result``) and calls ``mark_ingested`` after the
     last one (§12.2); an unmarked batch is read again on the next poll, which the
     compare-and-set makes harmless. A batch with no results yields one empty last chunk.
+
+    A local batch (sync mode) is run by ``_run_local``. Its calls are made only while
+    ``await may_run()`` is true, re-read before every chunk (None never calls; the worker
+    passes its enabled, unpaused, under-cap, no-live-simulation check), and no new call starts
+    once ``should_stop()`` is true. Answers already had are replayed either way.
     """
     client = _batches_client()
     async with db_factory() as db:
@@ -511,10 +588,182 @@ async def poll(
             )
         ).all()
     for batch in batches:
+        if _is_local(batch):
+            async for chunk in _run_local(
+                db_factory, batch, may_run=may_run, should_stop=should_stop
+            ):
+                yield chunk
+            continue
         if batch.status == "submitted" and not await _mark_ended(db_factory, client, batch):
             continue
         async for chunk in _ingest(db_factory, client, batch, chunk_size):
             yield chunk
+
+
+#: Failures that say "not now" rather than "this request is bad": the item stays unanswered for
+#: the next poll instead of taking an ``errored`` outcome (the Batches API absorbs these).
+_TRANSIENT = (anthropic.RateLimitError, anthropic.InternalServerError, anthropic.APIConnectionError)
+
+
+async def _run_local(
+    db_factory, batch: LandscapeBatch, *, may_run: Callable[[], Awaitable[bool]] | None,
+    should_stop: Callable[[], bool] | None,
+) -> AsyncIterator[tuple[uuid.UUID, list[BatchOutcome], bool]]:
+    """Yield a local batch's outcomes in chunks of ``_LOCAL_CHUNK`` items, calling the API for
+    each item not answered yet in this process (module docstring, sync mode).
+
+    Before a chunk with unanswered items, ``may_run`` is awaited; false ends the batch's turn.
+    A chunk yields only its answered items, and is the last only when every item of the batch
+    is answered; the batch is marked ``ended`` just before, so ``mark_ingested`` takes it. The
+    turn also ends when a chunk was cut short (a stop, or a transient API failure), or when
+    none of a yielded chunk's rows left ``submitted`` (the caller did not ingest it), so no
+    answer is paid for that nobody reads. With its requests lost to a restart, a batch's rows
+    still ``submitted`` are released to ``pending`` and it is marked ``ingested``.
+    """
+    requests = _RECONCILER.local_requests.get(batch.id)
+    if requests is None:
+        await _release_local(db_factory, batch.id)
+        return
+    async with db_factory() as db:
+        items = (
+            await db.execute(
+                select(LandscapeBatchItem.item_seq, LandscapeBatchItem.id, LandscapeBatchItem.row_id)
+                .where(LandscapeBatchItem.batch_id == batch.id)
+                .order_by(LandscapeBatchItem.item_seq)
+            )
+        ).all()
+    if not items:
+        await _mark_local_ended(db_factory, batch.id)
+        yield batch.id, [], True
+        return
+    answers = _RECONCILER.local_answers.setdefault(batch.id, {})
+    for start in range(0, len(items), _LOCAL_CHUNK):
+        chunk = items[start:start + _LOCAL_CHUNK]
+        todo = [item for item in chunk if item.item_seq not in answers]
+        if todo:
+            if may_run is None or not await may_run():
+                return
+            await _call_local(db_factory, batch, todo, requests, answers, should_stop)
+        answered = [item for item in chunk if item.item_seq in answers]
+        complete = len(answered) == len(chunk)
+        is_last = complete and start + _LOCAL_CHUNK >= len(items)
+        if is_last:
+            await _mark_local_ended(db_factory, batch.id)
+        if answered:
+            yield batch.id, [
+                BatchOutcome(
+                    batch_row_id=batch.id, batch_item_id=item.id, item_seq=item.item_seq,
+                    row_id=item.row_id, stage=batch.stage, kind=answers[item.item_seq][0],
+                    model=batch.model, message=answers[item.item_seq][1],
+                    usage=usage_from(answers[item.item_seq][1]),
+                )
+                for item in answered
+            ], is_last
+            if not is_last and not await _any_ingested(db_factory, batch, answered):
+                return
+        if not complete:
+            return
+
+
+async def _any_ingested(db_factory, batch: LandscapeBatch, items: list) -> bool:
+    """Whether any of ``items``' stage rows has left ``submitted`` (been ingested)."""
+    table = Base.metadata.tables[batch.row_table]
+    async with db_factory() as db:
+        still = await db.scalar(
+            select(func.count()).select_from(table).where(
+                table.c.batch_item_id == _uuid_array("item_ids", [item.id for item in items]),
+                table.c.status == "submitted",
+            )
+        )
+    return still < len(items)
+
+
+async def _call_local(
+    db_factory, batch: LandscapeBatch, todo: list, requests: dict[int, dict],
+    answers: dict[int, tuple[str, Any | None]], should_stop: Callable[[], bool] | None,
+) -> None:
+    """One synchronous call per item of ``todo``, ``landscape_sync_concurrency`` at a time, on
+    the batch's model only. Each answer goes into ``answers`` as soon as it arrives, then its
+    ledger row (synchronous rate, insert-ignore on ``(batch_id, item_seq)``) and its item's
+    ``result_kind`` commit, one call at a time. A call that raises is ``errored``, except a
+    transient failure (``_TRANSIENT``): that item stays unanswered, writes nothing, and no
+    further call starts. No call starts once ``should_stop()`` is true."""
+    client = llm.get_anthropic_client()
+    gate = asyncio.Semaphore(max(1, get_settings().landscape_sync_concurrency))
+    halted = False
+
+    async def one(item: Any) -> None:
+        nonlocal halted
+        async with gate:
+            if halted or (should_stop is not None and should_stop()):
+                return
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+            try:
+                message = await llm.abeta_create(client, **requests[item.item_seq])
+                kind = _message_kind(message)
+            except _TRANSIENT as exc:
+                halted = True
+                logger.warning(
+                    "batch %s item %d: %s; the rest wait for the next poll",
+                    batch.seq, item.item_seq, exc,
+                )
+                return
+            except Exception as exc:  # noqa: BLE001 - any other failure is an errored outcome
+                logger.warning("batch %s item %d: call failed: %s", batch.seq, item.item_seq, exc)
+                message, kind = None, "errored"
+            latency_ms = int((loop.time() - started) * 1000)
+            answers[item.item_seq] = (kind, message)
+            # Inside the gate, so at most `landscape_sync_concurrency` sessions are open.
+            async with db_factory() as db:
+                await record_call(
+                    db, stage=batch.stage, model=batch.model, batch_id=batch.id,
+                    item_seq=item.item_seq, custom_id=_custom_id(batch.seq, item.item_seq),
+                    usage=usage_from(message) if message is not None else {},
+                    refusal_category=(
+                        llm.refusal_category(message) if message is not None else None
+                    ),
+                    served_by=getattr(message, "model", None) if message is not None else None,
+                    batch=False, latency_ms=latency_ms,
+                    item_ref=f"{batch.row_table}:{item.row_id}",
+                )
+                await db.execute(
+                    update(LandscapeBatchItem)
+                    .where(LandscapeBatchItem.id == item.id)
+                    .values(result_kind=kind)
+                )
+                await db.commit()
+
+    results = await asyncio.gather(*(one(item) for item in todo), return_exceptions=True)
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+
+
+async def _mark_local_ended(db_factory, batch_row_id: uuid.UUID) -> None:
+    async with db_factory() as db:
+        await db.execute(
+            update(LandscapeBatch)
+            .where(LandscapeBatch.id == batch_row_id, LandscapeBatch.status == "submitted")
+            .values(status="ended", ended_at=func.now(), updated_at=func.now())
+        )
+        await db.commit()
+
+
+async def _release_local(db_factory, batch_row_id: uuid.UUID) -> None:
+    """A local batch whose requests a restart lost: its rows still ``submitted`` go back to
+    ``pending`` (their stage batches them again) and the batch is marked ``ingested``."""
+    async with db_factory() as db:
+        batch = await db.get(LandscapeBatch, batch_row_id, with_for_update=True)
+        if batch is None or batch.status == "ingested":
+            return
+        await _move_stage_rows(db, batch, "pending", from_status="submitted")
+        batch.status = "ingested"
+        batch.ingested_at = func.now()
+        batch.updated_at = func.now()
+        await db.commit()
+    _RECONCILER.local_answers.pop(batch_row_id, None)
+    logger.warning("local batch %s: requests lost to a restart; rows released", batch_row_id)
 
 
 async def _mark_ended(db_factory, client: Any, batch: LandscapeBatch) -> bool:
@@ -625,6 +874,8 @@ async def mark_ingested(db_factory, batch_row_id: uuid.UUID) -> None:
             .values(status="ingested", ingested_at=func.now(), updated_at=func.now())
         )
         await db.commit()
+    _RECONCILER.local_requests.pop(batch_row_id, None)
+    _RECONCILER.local_answers.pop(batch_row_id, None)
 
 
 async def apply_result(
