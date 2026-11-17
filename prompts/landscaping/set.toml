@@ -1,13 +1,13 @@
 # Written by `python -m src.landscaping.prompt_set --stamp <version>`; do not edit
 # by hand. [files] holds the sha256 of every other file in this directory.
-version = "1.1.0"
+version = "1.2.0"
 
 [files]
 "chat.md" = "64d4ce8dd5d3ce4b29fcff6e2000f428e09b2640d448964424875194fedba1eb"
 "cluster_label.md" = "b05e376fbc883c5dc659b4f947a9187ebe2dc0a7a26b4da6d6c600e18058ee6b"
 "criteria.toml" = "f5cff6f897cef9e956de9eb7c9751c972e9637cde7aebb5dfd32fe0d88b45c5b"
 "deep.md" = "7d2ca40e6e1708090236ad6172116e3d950a3f6258677ed85f7577c352d45bd4"
-"extract.md" = "5816dfb96225d529c3d25a9b6a022050e9fdfd3e854fd86f7aa703e281f34de1"
+"extract.md" = "71639fe4c97d089c56640c341137fbcb98ec622de39c181f7efac4d88f91db25"
 "final.md" = "3013eec6dc68e399902cdfb2d882d660f2bcb369f3b03019f3e5bf73b293c1fa"
 "rerank.md" = "5f38f0ec033bb622b4ce43d2fd4897c3c7cd2701f2dee94ef1bc74e80dc7ea3f"
 "screen.md" = "8c731e4f72b267bfaef517e93e9475210ef1bfeacce411fb984053581184b289"

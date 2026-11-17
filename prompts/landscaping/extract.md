@@ -31,14 +31,24 @@ document with no in-scope idea gives an empty `ideas` array.
 ## Fields of each idea
 
 - `idea_type`: `biology` or `chemistry`.
-- `targets`: each with `as_written`, `kind` (`gene`, `protein`, `rna`, `complex`,
-  `pathway_node` or `cell_population`) and `species` (`human`, `mouse`, `rat`, `other` or
-  `unstated`).
+- `targets`: each with `as_written`, `hgnc_symbol`, `kind` (`gene`, `protein`, `rna`,
+  `complex`, `pathway_node` or `cell_population`) and `species` (`human`, `mouse`, `rat`,
+  `other` or `unstated`). `hgnc_symbol`: for a `gene`, `protein` or `rna` target that is the
+  product of one gene, the HGNC-approved symbol of that human gene (`PDCD1` for PD-1, `IL6`
+  for interleukin-6, `MAPT` for tau; for a mouse or rat gene, its human ortholog's symbol).
+  Leave it empty for a complex, a pathway node, a cell population, or anything that is not
+  one gene.
 - `direction`: what the intervention does to the target; `unknown` when the text does not
   say.
 - `agent`: `as_written` and `kind`. Leave `as_written` empty, with kind `other`, when the idea
   names no agent.
-- `disease`: `as_written`, empty when none is named.
+- `disease`: `as_written`, empty when none is named, and `standard_name`: the disease's
+  standard name as a disease ontology such as Mondo lists it, in full, with no abbreviation,
+  parenthetical, stage, line of therapy or patient group (`amyotrophic lateral sclerosis`,
+  not `ALS` or `amyotrophic lateral sclerosis (ALS)`), at the specificity the document
+  studies (`triple-negative breast cancer` stays as it is); empty when `as_written` is empty.
+- `hgnc_symbol` and `standard_name` give the same target or disease the same identity in
+  every document; `as_written` stays exactly as the text writes it.
 - `modality`: `as_written` and `basis`: `tested` when the document reports results with it,
   `proposed` when it only suggests it, `none` (with `as_written` empty) when it names none.
 - `stage`: how far the idea has come in this document.

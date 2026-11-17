@@ -12,13 +12,13 @@ from __future__ import annotations
 
 import re
 import time
-import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 import httpx
 
 from src.landscaping import evidence
+from src.landscaping.quotes import fold_text
 from src.services.http_pacing import Pacer
 
 LATEST_RELEASE_URL = "https://api.github.com/repos/monarch-initiative/mondo/releases/latest"
@@ -58,8 +58,10 @@ _checked_at = 0.0
 
 
 def fold(text: str) -> str:
-    """Label comparison form: NFKC, case-folded, whitespace collapsed."""
-    return " ".join(unicodedata.normalize("NFKC", text).casefold().split())
+    """Label comparison form: ``quotes.fold_text`` (NFKC, typographic quote marks made
+    ASCII, case-folded, whitespace collapsed), the form provisional keys use, so a written
+    "Alzheimer’s disease" meets the label "Alzheimer's disease"."""
+    return fold_text(text)
 
 
 def _mesh_key(mesh_id: str) -> str:

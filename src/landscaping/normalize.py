@@ -6,6 +6,11 @@ one; anything else is left unmatched rather than guessed. An unmatched target or
 gets a ``provisional_key`` instead, which a later resolution can merge through an alias
 (D36).
 
+S3 also asks the model for a gene target's HGNC-approved symbol (``hgnc_symbol``) and a
+disease's standard name (``standard_name``), so that the same entity worded two ways gets one
+identity (D73). Each is tried first, and names the provisional key when nothing matches;
+``as_written`` is never changed.
+
 PubTator3 annotations are read in the flat shape ``evidence.pubtator.pubtator_annotations``
 returns: ``type``, ``text``, ``identifier`` and ``name`` keys on each mention.
 """
@@ -64,8 +69,15 @@ def _single(values) -> str | None:
 
 
 async def _single_gene(symbol: str) -> dict | None:
-    """The one HGNC record ``symbol`` maps to by symbol, alias or previous symbol, else None."""
+    """The one HGNC record ``symbol`` names: the gene whose approved symbol it is (compared
+    case-insensitively), else the one gene it is an alias or previous symbol of; None when
+    there is none or more than one. An approved symbol wins over another gene's alias of the
+    same spelling (``XBP1``, ``SPP1``)."""
     records = [r for r in await hgnc_lookup(symbol) if isinstance(r, dict) and r.get("hgnc_id")]
+    wanted = symbol.casefold()
+    approved = [r for r in records if str(r.get("symbol") or "").casefold() == wanted]
+    if len({r["hgnc_id"] for r in approved}) == 1:
+        return approved[0]
     if len({r["hgnc_id"] for r in records}) != 1:
         return None
     return records[0]
@@ -116,11 +128,28 @@ async def _from_lookup(as_written: str, species: str, criteria) -> dict | None:
     return await _single_gene(as_written.strip())
 
 
+def _claimed_symbol(target: dict) -> str:
+    """The HGNC symbol the model gave a gene, protein or RNA target (D73); ``""`` for any
+    other kind, whose symbol is never used."""
+    if target.get("kind") not in _GENE_KINDS:
+        return ""
+    return str(target.get("hgnc_symbol") or "").strip()
+
+
 async def _target_gene(target: dict, pubtator: list[dict], criteria) -> dict | None:
-    """The human gene's HGNC record ``target`` names, or None."""
+    """The human gene's HGNC record ``target`` names, or None. The model's ``hgnc_symbol``
+    is looked up first, as a human symbol whatever the species, since the model gives the
+    human ortholog's; then the written name."""
     as_written = str(target.get("as_written") or "")
     species = str(target.get("species") or "").casefold()
     if target.get("kind") not in _GENE_KINDS:
+        return None
+    claimed = _claimed_symbol(target)
+    if claimed:
+        record = await _single_gene(claimed)
+        if record:
+            return record
+    if not as_written.strip():
         return None
     annotations = _pubtator_matches(pubtator, "Gene", as_written)
     if annotations:
@@ -141,18 +170,21 @@ async def normalize_targets(targets: list[dict], *, pubtator: list[dict], criter
     ``gene_group``.
 
     ``pubtator`` is the document's PubTator3 annotations; ``criteria`` a ``Criteria``. The
-    first choice is the document's PubTator3 gene annotation of the same text, resolved to
-    an approved HGNC symbol. The fallback is an HGNC symbol, alias or previous-symbol lookup
+    first choice is the model's ``hgnc_symbol`` (D73), looked up as a human gene. Then the
+    document's PubTator3 gene annotation of the same text, resolved to an approved HGNC
+    symbol. The fallback is an HGNC symbol, alias or previous-symbol lookup of ``as_written``
     that yields exactly one gene, never for a word on ``criteria.ambiguous_gene_words``. A
-    mouse, rat or other-species gene maps to the human gene only when that gene's Open
-    Targets ``homologues`` confirm the ortholog. Only gene, protein and RNA targets are
-    matched. A target with an empty ``as_written`` is returned unchanged.
+    mouse, rat or other-species written name maps to the human gene only when that gene's
+    Open Targets ``homologues`` confirm the ortholog. Only gene, protein and RNA targets are
+    matched. An unmatched target's provisional key is built from its ``hgnc_symbol`` when it
+    has one, else from ``as_written``. A target with neither is returned unchanged.
     """
     out = []
     for target in targets:
         result = dict(target)
         as_written = str(target.get("as_written") or "")
-        if as_written.strip():
+        claimed = _claimed_symbol(target)
+        if as_written.strip() or claimed:
             record = await _target_gene(target, pubtator, criteria)
             if record:
                 result["hgnc_id"] = record["hgnc_id"]
@@ -165,7 +197,7 @@ async def normalize_targets(targets: list[dict], *, pubtator: list[dict], criter
                 if uniprot:
                     result["uniprot_id"] = uniprot
             else:
-                result["provisional_key"] = provisional_key("target", as_written)
+                result["provisional_key"] = provisional_key("target", claimed or as_written)
         out.append(result)
     return out
 
@@ -188,33 +220,40 @@ def _add_mondo_fields(result: dict, mondo_id: str) -> None:
 async def normalize_disease(disease: dict, *, pubtator: list[dict]) -> dict:
     """A copy of ``disease`` with ``mondo_id`` or ``provisional_key`` added.
 
-    The document's PubTator3 disease annotation of the same text gives a MeSH id, kept as
-    ``mesh_id`` (``MESH:…``) and mapped to Mondo only by an exact SSSOM match; else an exact
-    Mondo label or synonym match on ``as_written``; else unmatched. A matched disease also
-    takes the Mondo term's name as ``label``, its one exact Orphanet mapping as
-    ``orpha_code`` (``ORPHA:…``) and, when PubTator3 gave no MeSH id, its one exact MeSH
-    mapping as ``mesh_id``; each is absent when Mondo gives none or more than one. A disease
-    with an empty ``as_written`` is returned unchanged.
+    The first choice is an exact Mondo label or synonym match on the model's
+    ``standard_name`` (D73), which a grant and a paper share whether or not PubTator3 can
+    read them. Then the document's PubTator3 disease annotation of the same text gives a MeSH
+    id, kept as ``mesh_id`` (``MESH:…``) whichever path matches, and mapped to Mondo only by
+    an exact SSSOM match; else an exact Mondo label or synonym match on ``as_written``; else
+    unmatched, with the provisional key built from ``standard_name`` when given, else from
+    ``as_written``. A matched disease also takes the Mondo term's name as ``label``, its one
+    exact Orphanet mapping as ``orpha_code`` (``ORPHA:…``) and, when PubTator3 gave no MeSH
+    id, its one exact MeSH mapping as ``mesh_id``; each is absent when Mondo gives none or
+    more than one. A disease with neither name is returned unchanged.
     """
     result = dict(disease)
     as_written = str(disease.get("as_written") or "")
-    if not as_written.strip():
+    standard = str(disease.get("standard_name") or "").strip()
+    if not as_written.strip() and not standard:
         return result
     # The label match and `_add_mondo_fields` read Mondo synchronously; only the MeSH path
     # loads it, so a disease PubTator3 did not tag must not be the first to reach them.
     await ensure_loaded()
     mesh = _single(
         _field(a, "identifier") for a in _pubtator_matches(pubtator, "Disease", as_written)
-    )
+    ) if as_written.strip() else None
     if mesh:
         result["mesh_id"] = _mesh_curie(mesh)
-    mondo_id = await mondo_from_mesh(_mesh_curie(mesh)) if mesh else None
-    mondo_id = mondo_id or mondo_label_match(as_written)
+    mondo_id = mondo_label_match(standard) if standard else None
+    if not mondo_id and mesh:
+        mondo_id = await mondo_from_mesh(_mesh_curie(mesh))
+    if not mondo_id and as_written.strip():
+        mondo_id = mondo_label_match(as_written)
     if mondo_id:
         result["mondo_id"] = mondo_id
         _add_mondo_fields(result, mondo_id)
     else:
-        result["provisional_key"] = provisional_key("disease", as_written)
+        result["provisional_key"] = provisional_key("disease", standard or as_written)
     return result
 
 

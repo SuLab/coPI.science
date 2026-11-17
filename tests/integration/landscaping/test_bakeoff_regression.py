@@ -723,3 +723,85 @@ async def test_set_versioned_additions_do_not_change_running_candidate(db_factor
         )
     assert run.set_version == first
     assert first_items == 10
+
+
+# --- S3 against the reference asked again (D74) --------------------------------------------------
+
+
+def _extraction_naming(i: int, gene: int) -> dict:
+    """``_extraction(i)``, its quote and disease kept, naming gene ``INV{gene}`` instead."""
+    reply = _extraction(i)
+    reply["ideas"][0]["targets"] = [{"as_written": f"INV{gene}", "kind": "gene",
+                                     "species": "human", "hgnc_id": f"HGNC:9{gene:04d}"}]
+    return reply
+
+
+async def _extract_items(db_factory) -> list[dict]:
+    async with db_factory() as db:
+        docs = (await db.scalars(select(LandscapeDocument))).all()
+    return [
+        {"item_kind": "extract",
+         "item_ref": {"document_id": str(doc.id), "user": f"Title: {doc.title}"},
+         "expected": {"keys": [[f"HGNC:9{i:04d}", "inhibit", "MONDO:9999999"]]}}
+        for doc in docs
+        if (i := _index(doc.title)) is not None
+    ]
+
+
+@pytest.mark.parametrize(("reference_misses", "passed"), [(False, False), (True, True)])
+async def test_extract_bar_follows_the_reference_asked_again(
+    db_factory, models, offline, reference_misses, passed
+):
+    """Keys stored before D74 are read back as identities. The candidate names the wrong gene
+    on half the documents (agreement 0.75: each disease, half the genes): below 0.9 of a
+    reference that repeats itself, at the bar of one that misses the same way."""
+    await _documents(db_factory, 4)
+    await _seed_set(db_factory, await _extract_items(db_factory))
+    epoch_id = await _epoch(db_factory, changed=["extract"])
+
+    def extract(model, user):
+        i = _index(user)
+        wrong = i % 2 == 0 and (model != REFERENCE or reference_misses)
+        return _extraction_naming(i, i + 50 if wrong else i)
+
+    models.routes["extract"] = extract
+
+    assert await regression.run_regression(db_factory, epoch_id) is passed
+
+    async with db_factory() as db:
+        run = await db.scalar(
+            select(LandscapeRegressionRun).where(LandscapeRegressionRun.epoch_id == epoch_id)
+        )
+    found = run.results["stages"]["extract"]
+    assert found["agreement"] == 0.75
+    assert found["reference_agreement"] == (0.75 if reference_misses else 1.0)
+    assert found["reference_repeated"] == 4
+    asked = sorted(model for stage, model, _ in models.calls if stage == "extract")
+    assert asked.count(REFERENCE) == 4 and len(asked) == 8
+
+
+async def test_bakeoff_asks_the_reference_again_and_stores_identities(db_factory, models, offline):
+    await _epoch(db_factory)
+    await _documents(db_factory, 10)
+    _all_agree(models)
+
+    payload = await _report(
+        db_factory, await bakeoff.run_bakeoff(db_factory, sample_sizes=(10, 5, 5))
+    )
+
+    stage = payload["stages"]["extract"]
+    assert stage["reference_agreement"] == 1.0
+    assert stage["reference_repeated"] == 5
+    assert all(c["agreement_bar"] == bakeoff.EXTRACT_MIN_RELATIVE
+               for c in stage["candidates"].values())
+    reference_extracts = [c for c in models.calls if c[0] == "extract" and c[1] == REFERENCE]
+    # every kept document once (the S4 pool), the S3 sample once more
+    assert len(reference_extracts) == stage["pool"] + 5
+    async with db_factory() as db:
+        item = await db.scalar(select(LandscapeRegressionItem).where(
+            LandscapeRegressionItem.set_version == payload["regression_set_version"],
+            LandscapeRegressionItem.item_kind == "extract",
+        ).limit(1))
+    [idea] = item.expected["ideas"]
+    assert idea["disease"] == ["MONDO:9999999", "inventedcarcinoma"]
+    assert item.expected["keys"]

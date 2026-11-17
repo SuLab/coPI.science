@@ -98,6 +98,9 @@ _EXTRACT_IDEA = _object({
     "idea_type": {"type": "string", "enum": ["biology", "chemistry"]},
     "targets": _array(_object({
         "as_written": _STRING,
+        # The human gene's HGNC-approved symbol the model names (D73); normalization looks it
+        # up first and keeps `symbol` for the one HGNC confirms.
+        "hgnc_symbol": _STRING,
         "kind": {"type": "string", "enum": [
             "gene", "protein", "rna", "complex", "pathway_node", "cell_population",
         ]},
@@ -105,7 +108,8 @@ _EXTRACT_IDEA = _object({
     })),
     "direction": _STRING,
     "agent": _object({"as_written": _STRING, "kind": _STRING}),
-    "disease": _object({"as_written": _STRING}),
+    # `standard_name`: the disease's full ontology name the model gives (D73).
+    "disease": _object({"as_written": _STRING, "standard_name": _STRING}),
     "modality": _object({
         "as_written": _STRING,
         "basis": {"type": "string", "enum": ["proposed", "tested", "none"]},

@@ -189,6 +189,15 @@ nothing is given up and the batch waits. A restart forgets the counts.
 it go ahead from the pipeline page, with a reason; the override is recorded with the admin
 and the reason. An active or retired epoch cannot be overridden.
 
+**The S3 check** (D74). S3 passes the bake-off and the regression gate when its agreement with
+the Opus 5 references, by the targets and diseases named, is at least 90% of Opus 5's own
+agreement with them when asked again. So every bake-off and every regression run that touches
+S3 asks Opus 5 the S3 items a second time: about 60 calls, about $4 at the synchronous rate.
+The stage summary shows `reference_agreement`, `agreement_bar` and target and disease recall
+and precision. Measured 2026-11-17 with the D73 fields, Sonnet 5.5 reached about 0.80-0.84 of
+Opus 5's agreement with itself, so an S3 change on Sonnet 5.5 is held until an admin
+overrides it or the S3 model changes.
+
 **Rescue.** Staff can rescue an item a stage excluded (screen, triage, or the deep gate),
 from the pipeline page, with a reason. It re-enters at the next stage and competes
 normally. A rescue is refused when the item's status changed since the page loaded; reload

@@ -260,3 +260,80 @@ async def test_pubtator_client_output_is_the_shape_normalize_reads(lookups):
     )
     assert target["hgnc_id"] == "HGNC:9001"
     assert lookups["hgnc"] == ["KINX"]
+
+
+# --- the model's identifiers (D73) ---------------------------------------------------------------
+
+
+async def test_claimed_hgnc_symbol_first_as_a_human_gene(lookups):
+    """The model's ``hgnc_symbol`` is looked up before PubTator3 and the written name, as the
+    human gene whatever the species (the model gives the human ortholog's symbol)."""
+    [target] = await normalize.normalize_targets(
+        [{"as_written": "the invented kinase", "hgnc_symbol": "KINX", "kind": "protein",
+          "species": "mouse"}],
+        pubtator=[_gene("the invented kinase", "OTHER")], criteria=load_criteria(),
+    )
+    assert target["hgnc_id"] == "HGNC:9001"
+    assert target["symbol"] == "KINX"
+    assert target["as_written"] == "the invented kinase"
+    assert lookups["hgnc"] == ["KINX"]
+
+
+async def test_unmatched_claimed_symbol_names_the_provisional_key(lookups):
+    criteria = load_criteria()
+    [unknown, cells] = await normalize.normalize_targets(
+        [
+            {"as_written": "Invented Protein (IP)", "hgnc_symbol": "NOPE1", "kind": "protein",
+             "species": "human"},
+            # a symbol on a non-gene kind is never used
+            {"as_written": "Invented T cells", "hgnc_symbol": "KINX",
+             "kind": "cell_population", "species": "human"},
+        ],
+        pubtator=[], criteria=criteria,
+    )
+    assert unknown["provisional_key"] == "prov:target:nope1"
+    assert cells["provisional_key"] == "prov:target:invented t cells"
+    assert "hgnc_id" not in cells
+    assert lookups["hgnc"] == ["NOPE1", "Invented Protein (IP)"]
+
+
+async def test_approved_symbol_wins_over_another_genes_alias(lookups, monkeypatch):
+    monkeypatch.setitem(HGNC, "SPLX", [
+        {"hgnc_id": "HGNC:9010", "symbol": "SPLX", "ensembl_gene_id": "ENSG0000009010"},
+        {"hgnc_id": "HGNC:9011", "symbol": "OTHR", "ensembl_gene_id": "ENSG0000009011"},
+    ])
+    [target] = await normalize.normalize_targets(
+        [{"as_written": "SPLX", "kind": "gene", "species": "human"}],
+        pubtator=[], criteria=load_criteria(),
+    )
+    assert target["hgnc_id"] == "HGNC:9010"
+    # an alias shared by two genes, neither of them its approved symbol, still matches none
+    [dual] = await normalize.normalize_targets(
+        [{"as_written": "DUAL1", "kind": "gene", "species": "human"}],
+        pubtator=[], criteria=load_criteria(),
+    )
+    assert "hgnc_id" not in dual
+
+
+async def test_standard_name_first_for_a_disease(lookups):
+    """The model's ``standard_name`` is matched before PubTator3's MeSH id, which is still
+    kept; an unmatched one names the provisional key."""
+    pubtator = [{"type": "Disease", "text": "IF (invented fibrosis)",
+                 "identifier": "MESH:D000001", "database": "ncbi_mesh", "name": None}]
+    matched = await normalize.normalize_disease(
+        {"as_written": "IF (invented fibrosis)", "standard_name": "invented fibrosis"},
+        pubtator=pubtator,
+    )
+    assert matched["mondo_id"] == "MONDO:0000002"
+    assert matched["mesh_id"] == "MESH:D000001"
+    assert matched["as_written"] == "IF (invented fibrosis)"
+    assert lookups["mesh"] == []
+
+    unmatched = await normalize.normalize_disease(
+        {"as_written": "IA (invented ail)", "standard_name": "invented ail"}, pubtator=[]
+    )
+    assert unmatched["provisional_key"] == "prov:disease:invented ail"
+
+
+def test_mondo_fold_straightens_curly_quotes():
+    assert mondo.fold("Invented’s  Disease") == mondo.fold("invented's disease")

@@ -254,6 +254,8 @@ The owner may override any of these. Each names the section that carries it.
 | D70 | No candidate activates while the phase is `pilot` or `backfill`, and a candidate activates only when the readiness rule of §7.11 step 4 holds: its S2-S4 work has drained in phase `continuous`, it has a complete cut taken after that (then frozen), and S6, S8 and S9 have ended on that cut. Until the first activation the pages show no opportunities, and no review batch is issued. | The pilot's cut covers only the pilot sample and must not go live; a cut taken before the drain is partial. Final check F8; scoped re-check M1. | 7.11, 15 |
 | D71 | A batch result whose ingestion keeps raising while others of its batch ingest is recorded as `errored` (one resubmission, then `failed:errored`) at its third failed poll, and, for an outage-like error, only after two hours of failures; the rest of its batch is ingested meanwhile. When no result of the batch ingests, none is given up. | On 2026-11-17 one extracted name that HGNC's fetch rejected held a batch of 1,877 extractions for almost four hours. An outage, or a fault in an ingester, fails every result and must wait for a fix rather than fail rows. | 7.1 |
 | D72 | S6 and S9 send their output schema with each repeated subschema moved into `$defs` and referenced by `$ref`. The other stages send their schema inline, as they were judged. | Inlined, both schemas compile to a grammar larger than the API accepts ("The compiled grammar is too large", on Opus 5 and Sonnet 5.5, measured 2026-11-17): every S6 call of the first pilot cut failed. Shared, both compile. | 9.2 |
+| D73 | S3 asks for each gene, protein or RNA target's HGNC-approved symbol (`hgnc_symbol`) and the disease's standard name (`standard_name`) beside the names as written; normalization tries them first and builds a provisional key from them. An approved symbol wins over another gene's alias, and Mondo labels fold quote marks. | Measured 2026-11-17 (`docs/audits/2026-11-17-extraction-agreement-rca/`): with free text only, 25% of names reached an id and only 7 of 984 pilot ideas spanned more than one document. With the two fields, ids reach 81-89% of genes and diseases, and Sonnet 5.5's exact-key agreement with Opus 5 triples (0.06-0.07 to 0.21-0.25). | 7.4 |
+| D74 | S3 agreement matches the targets and diseases each side names, by any shared id or folded name, and passes at 90% of the reference model's agreement with itself, measured by asking it the sample again; the regression gate asks it again on the stored items. | The exact (targets, direction, disease) key measured sampling noise: Opus 5 scored 0.31-0.36 against its own earlier answers, so no model could reach the absolute 0.90, and every epoch failed the gate. | 10.1, 10.4 |
 
 ## 4. Constraints
 
@@ -780,11 +782,12 @@ F3).
    ```json
    {"ideas": [{
       "idea_type": "biology | chemistry",
-      "targets": [{"as_written": "", "kind": "gene|protein|rna|complex|pathway_node|cell_population",
+      "targets": [{"as_written": "", "hgnc_symbol": "",
+                   "kind": "gene|protein|rna|complex|pathway_node|cell_population",
                    "species": "human|mouse|rat|other|unstated"}],
       "direction": "inhibit|activate|degrade|replace|edit|deliver_to|modulate|unknown",
       "agent": {"as_written": "", "kind": "small_molecule|antibody|peptide|oligonucleotide|gene_therapy|cell_therapy|degrader|vaccine|delivery_technology|other"},
-      "disease": {"as_written": ""},
+      "disease": {"as_written": "", "standard_name": ""},
       "modality": {"as_written": "", "basis": "proposed|tested|none"},
       "stage": "association|target_validation|tool_or_hit|lead|preclinical_candidate|clinical|repurposing",
       "evidence_grade": "correlation|in_vitro|in_vivo|patient_material|human_genetics|clinical",
@@ -805,6 +808,11 @@ F3).
    - **Vocabularies and grade order.** The `direction`, `stage`, `evidence_grade` and
      `agent.kind` values, and the evidence-grade order (correlation < in vitro < in vivo <
      patient material < human genetics < clinical), come from the criteria file (§8.1).
+   - **Identifiers** (D73). Beside each name as written, the model gives a gene, protein or
+     RNA target's HGNC-approved symbol (`hgnc_symbol`, the human ortholog's for a mouse or rat
+     gene; empty for any other kind) and the disease's standard name as Mondo lists it
+     (`standard_name`, in full, with no abbreviation, parenthetical, stage, line of therapy or
+     patient group). `as_written` stays exactly as the text writes it.
    - **Which fields each type needs.** A chemistry idea needs `agent`; its `targets` and
      `disease` may be empty (a delivery technology has neither). A biology idea needs
      `targets` and `disease`; `agent` may be empty.
@@ -823,14 +831,21 @@ F3).
    - S4 sees only verified quotes (anti-goal F13).
 4. **Normalization** (deterministic; analysis F5; leave unmatched rather than guess).
    - **Targets → HGNC ids.**
-     - First choice: the PubTator3 gene annotations of the same document.
+     - First choice: the model's `hgnc_symbol` (D73), looked up as a human gene.
+     - Then the PubTator3 gene annotations of the same document.
      - Fallback: an HGNC symbol, alias or previous-symbol lookup, used only when the name maps
-       to exactly one approved gene and is not on the criteria file's ambiguous-word list.
-     - Anything else stays unmatched, with a provisional key.
+       to exactly one approved gene and is not on the criteria file's ambiguous-word list. A
+       name that is one gene's approved symbol maps to that gene even when it is also another
+       gene's alias.
+     - Anything else stays unmatched, with a provisional key built from the `hgnc_symbol`
+       when there is one, else from the name as written.
      - Non-human gene ids map to the human ortholog through Open Targets `homologues` (field
        verified live 2026-10-30) or HGNC HCOP. Phase 0 picks the route.
-   - **Diseases → Mondo ids.** PubTator3 MeSH annotation → Mondo SSSOM exact match; else an
-     exact Mondo label or synonym match; else unmatched.
+   - **Diseases → Mondo ids.** An exact Mondo label or synonym match on the model's
+     `standard_name` (D73); else PubTator3 MeSH annotation → Mondo SSSOM exact match; else an
+     exact label or synonym match on the name as written; else unmatched, with a provisional
+     key built from the `standard_name` when there is one. Labels compare after Unicode NFKC
+     folding, ASCII quote marks, case folding and whitespace collapse.
    - **Agents → ChEMBL ids**, when the name resolves to exactly one ChEMBL molecule; else
      unmatched.
 5. **Database evidence and data flags**, per idea, cached per source release:
@@ -1481,8 +1496,22 @@ Opus 5 is the reference on each.
 | Stage | A candidate passes when |
 |---|---|
 | S2 | refusal rate ≤ 2%, **and** recall of the reference's `yes` + `unsure` ≥ 0.95, **and** precision ≥ 0.6 |
-| S3 | after normalization, target, direction and disease agree with the reference on ≥ 90% of ideas, **and** quote verification ≥ 95% |
+| S3 | after normalization, its agreement with the reference (below) is ≥ 90% of the reference's own agreement with itself, **and** quote verification ≥ 95% |
 | S4 | all three gates agree on ≥ 90%, **and** each score is within ±1 on ≥ 90% |
+
+**S3 agreement** (D74). Per document, the targets and diseases each side names are matched one
+to one by any shared name: an HGNC or Mondo id, the approved symbol or Mondo label, the
+model's `hgnc_symbol` or `standard_name`, or a name as written, compared folded, with Greek
+letters in Latin and only letters and digits kept, and each parenthetical taken on its own as
+well. Within one document, entities that share a name count once. Agreement is twice the
+matches over all the entities both sides named, pooled over the documents, so a missed and an
+invented entity both count against it and how ideas are split does not. Target and disease
+recall and precision, the same agreement over each idea's (target, disease) pairs, and the
+direction agreement of the matched pairs are reported beside it. The reference is asked the
+S3 sample a second time; its agreement with its first answers (an item it refuses the second
+time is left out) sets the bar. Measured 2026-11-17 on the bake-off's 60 documents, Opus 5
+agrees with itself at 0.83-0.89 by this measure; by the exact-key measure it replaced, at
+0.31-0.36.
 
 **Choosing.**
 - The cheapest passing model becomes the stage setting.
@@ -1551,7 +1580,7 @@ Additions create a new set version, so "fixed" means fixed per version.
 
 | Stage | The candidate passes when |
 |---|---|
-| S2-S4 | the §10.1 thresholds, against the stored references |
+| S2-S4 | the §10.1 thresholds, against the stored references. For S3 the reference model is asked the same items again, with the candidate's prompts, and its agreement with the stored references sets the bar; an item stored before D74 is read back from its stored keys. |
 | S6 | all three gates agree on ≥ 90% of S6 items, and each provisional score is within ±1 on ≥ 90% |
 | S7 (also the S5 tie-break) | on 30 frozen comparison pairs from the active epoch, the winner agrees on ≥ 80% |
 | S8 | on 30 frozen similarity pairs, the verdict agrees on ≥ 85%. Labels are wording only and are not scored. |

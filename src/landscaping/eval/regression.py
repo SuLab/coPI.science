@@ -42,10 +42,13 @@ from src.landscaping import comparator, epochs, intake
 from src.landscaping.epochs import EpochInputs
 from src.landscaping.eval.bakeoff import (
     KEPT,
+    REFERENCE_MODEL,
     TRIAGE_MIN_GATES,
     TRIAGE_MIN_SCORES,
     Answer,
     ask_all,
+    expected_identities,
+    extract_agreement,
     extract_metrics,
     gate_score_metrics,
     new_set_version,
@@ -484,26 +487,33 @@ async def _set_version_for(db: AsyncSession, epoch: LandscapeEpoch) -> int:
 
 
 async def _ask_stage(
-    stage: str, requests: dict[str, dict], *, inputs: EpochInputs, db_factory
+    stage: str, requests: dict[str, dict], *, inputs: EpochInputs, db_factory,
+    reference: bool = False,
 ) -> dict[str, Answer]:
+    prefix = f"regression:{inputs.epoch_id}" + (":reference" if reference else "")
     return await ask_all(
-        stage, requests, db_factory=db_factory, ref_prefix=f"regression:{inputs.epoch_id}"
+        stage, requests, db_factory=db_factory, ref_prefix=prefix, only_model=reference
     )
 
 
 async def _ask_users(
-    stage: str, items: list[LandscapeRegressionItem], *, inputs: EpochInputs, db_factory
+    stage: str, items: list[LandscapeRegressionItem], *, inputs: EpochInputs, db_factory,
+    model: str | None = None,
 ) -> dict[str, Answer]:
     """Each item's stored user message sent with the candidate's own ``stage`` prompt and
-    model; keyed by item id."""
-    model, system = inputs.model(stage), inputs.system(stage)
+    model; keyed by item id. ``model`` asks that model instead, alone, as the bake-off asks
+    its reference (no fallback chain)."""
+    system = inputs.system(stage)
     requests = {
         str(item.id): stage_request(
-            stage, item.item_ref["user"], model=model, system=system, rubric=inputs.rubric
+            stage, item.item_ref["user"], model=model or inputs.model(stage), system=system,
+            rubric=inputs.rubric,
         )
         for item in items
     }
-    return await _ask_stage(stage, requests, inputs=inputs, db_factory=db_factory)
+    return await _ask_stage(
+        stage, requests, inputs=inputs, db_factory=db_factory, reference=model is not None
+    )
 
 
 def _agreement(pairs: list[tuple[Any, Any]], minimum: float) -> dict:
@@ -529,14 +539,29 @@ async def _check_screen(items, *, inputs, db_factory, docs) -> dict:
 
 
 async def _check_extract(items, *, inputs, db_factory, docs) -> dict:
+    """S3 against the stored references (D74): the candidate's S3 model, and the reference
+    model asked the same requests alone, whose agreement with the stored references sets the
+    bar. An item the reference refuses or leaves unusable is left out of the bar."""
     items = [item for item in items if item.item_ref.get("document_id") in docs]
     answers = await _ask_users("extract", items, inputs=inputs, db_factory=db_factory)
-    pairs = []
+    again = await _ask_users(
+        "extract", items, inputs=inputs, db_factory=db_factory, model=REFERENCE_MODEL
+    )
+    pairs, repeat = [], []
     for item in items:
         doc = docs[item.item_ref["document_id"]]
+        expected = expected_identities(item.expected)
         got = await prepare_extraction(answers[str(item.id)].parsed, doc, inputs.criteria)
-        pairs.append((frozenset(tuple(k) for k in item.expected.get("keys") or []), got))
-    return {**extract_metrics(pairs), "cost_usd": str(total_cost(answers.values()))}
+        pairs.append((expected, got))
+        ref = await prepare_extraction(again[str(item.id)].parsed, doc, inputs.criteria)
+        if ref is not None:
+            repeat.append((expected, ref))
+    reference_agreement = extract_agreement(repeat)["agreement"]
+    return {
+        **extract_metrics(pairs, reference_agreement=reference_agreement),
+        "reference_repeated": len(repeat),
+        "cost_usd": str(total_cost(answers.values()) + total_cost(again.values())),
+    }
 
 
 async def _check_triage(items, *, inputs, db_factory, docs) -> dict:
@@ -678,7 +703,8 @@ async def run_regression(db_factory, epoch_id: uuid.UUID) -> bool:
 
     The epoch is judged on its set version (``_set_version_for``), for the item kinds of the
     stages its change touches (``kinds_to_check``; S2-S4 only while no epoch is active), each
-    stage against its threshold: S2-S4 the §10.1 ones; S6 gates and scores ±1 ≥ 90%; S7 and
+    stage against its threshold: S2-S4 the §10.1 ones (S3's relative to the reference model
+    asked the same items again, ``_check_extract``, D74); S6 gates and scores ±1 ≥ 90%; S7 and
     the S5 tie-break the winner ≥ 80%; S8 the verdict ≥ 85%; S9 the recommendation ≥ 80%,
     gates and scores ±1 ≥ 90%; expert items at least as often as the active epoch. A touched
     kind the version holds no items of fails its stage (``{"items": 0, "checks": {"items":

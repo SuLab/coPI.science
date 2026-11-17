@@ -8,7 +8,9 @@ prompts (``epochs.epoch_inputs``, §7.11):
 - **S2:** ``sample_sizes[0]`` documents (``screen.user_message``).
 - **S3:** ``sample_sizes[1]`` of the documents the reference kept (``yes`` or ``unsure``).
   Answers are quote-checked and normalized as S3 does (``extract._prepare``) before they are
-  compared.
+  compared by the targets and diseases they name (``extract_agreement``). The reference is
+  asked a second time on the sample, and a candidate passes at ``EXTRACT_MIN_RELATIVE`` of
+  the reference's agreement with itself (D74).
 - **S4:** ``sample_sizes[2]`` ideas. The reference's S3 answers on every kept document are
   grouped in memory (``ideas.group_candidates``), each group's evidence comes from
   ``ideas.evidence_payload`` and its dossier from ``triage.triage_dossier``.
@@ -25,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import re
 import uuid
 from collections import defaultdict
 from collections.abc import Callable, Hashable, Iterable
@@ -40,6 +43,7 @@ from src.landscaping import epochs, ideas
 from src.landscaping.criteria import Criteria
 from src.landscaping.epochs import EpochInputs
 from src.landscaping.llm_client import STAGE_SPECS, build_request, call_sync
+from src.landscaping.quotes import fold_text
 from src.landscaping.schemas import stage_schema
 from src.landscaping.scoring import TRIAGE_DIMENSIONS, excluded_reason
 from src.landscaping.stages import extract, screen
@@ -64,7 +68,9 @@ CANDIDATE_MODELS = ("claude-haiku-5-5", "claude-sonnet-5", "claude-sonnet-5-5")
 SCREEN_MAX_REFUSAL = 0.02
 SCREEN_MIN_RECALL = 0.95
 SCREEN_MIN_PRECISION = 0.6
-EXTRACT_MIN_AGREEMENT = 0.90
+#: S3 agreement passes at this share of the reference model's agreement with itself on the
+#: same items (D74): an absolute bar measured the reference's own sampling noise.
+EXTRACT_MIN_RELATIVE = 0.90
 EXTRACT_MIN_QUOTES = 0.95
 TRIAGE_MIN_GATES = 0.90
 TRIAGE_MIN_SCORES = 0.90
@@ -197,23 +203,107 @@ def screen_metrics(scored: list[tuple[bool, Answer]], every: list[Answer]) -> di
 
 @dataclass(frozen=True)
 class Extraction:
-    """One S3 answer as S3 stores it: quote-checked and normalized (``extract._prepare``)."""
+    """One S3 answer as S3 stores it: quote-checked and normalized (``extract._prepare``).
+    ``identities`` holds ``idea_identities`` of each candidate, in order."""
 
     candidates: list[dict]
     keys: frozenset[tuple[str, str, str]]
+    identities: tuple[dict, ...]
     verified: int
     dropped: int
 
 
 def facet_key(candidate: dict) -> tuple[str, str, str]:
-    """What S3 agreement compares after normalization (§10.1): the targets, the direction and
-    the disease, by the identities the idea key uses (HGNC / Mondo ids, else the provisional
-    or folded name)."""
+    """A normalized candidate's targets, direction and disease by the identities the idea key
+    uses (HGNC / Mondo ids, else the provisional or folded name). Stored with each regression
+    item; agreement compares ``idea_identities`` (D74)."""
     return (
         ideas._target_ids(candidate.get("targets")),
         ideas._direction(candidate),
         ideas._disease_id(candidate.get("disease")),
     )
+
+
+# --- S3 identities (D74) --------------------------------------------------------------------------
+
+_PARENTHETICAL = re.compile(r"\(([^)]*)\)")
+_NON_ALNUM = re.compile(r"[\W_]+")
+_GREEK = str.maketrans({"α": "a", "β": "b", "γ": "g", "δ": "d", "ε": "e", "κ": "k"})
+#: Prefixes of a ``facet_key`` identity that carries a name rather than an id.
+_NAME_PREFIXES = ("prov:target:", "prov:disease:", "unmatched:")
+#: The empty side of a (target, disease) pair: an idea with no target, or no disease.
+_NONE = frozenset({"-"})
+
+
+def _compact(text: str) -> str:
+    """``text`` folded (``fold_text``), Greek letters in Latin, letters and digits only, so
+    ``IL-6`` meets ``IL6`` and ``TNF-α`` meets ``TNFa``."""
+    return _NON_ALNUM.sub("", fold_text(text).translate(_GREEK))
+
+
+def _text_names(text: str) -> set[str]:
+    """``text`` as names to match on: whole without its parentheticals, and each parenthetical
+    on its own (the abbreviation written after a full name, or the full name after a symbol).
+    Names shorter than two characters are dropped."""
+    folded = fold_text(text)
+    names = {_compact(_PARENTHETICAL.sub(" ", folded))}
+    names.update(_compact(inner) for inner in _PARENTHETICAL.findall(folded))
+    return {name for name in names if len(name) >= 2}
+
+
+def _item_names(item: object, id_field: str, fields: tuple[str, ...]) -> frozenset[str]:
+    """A normalized target's or disease's names: its id, and the names of each of ``fields``
+    it has (the HGNC symbol or Mondo label, the model's symbol or standard name, the name as
+    written)."""
+    if not isinstance(item, dict):
+        return frozenset()
+    names: set[str] = set()
+    if item.get(id_field):
+        names.add(str(item[id_field]))
+    for field in fields:
+        if item.get(field):
+            names |= _text_names(str(item[field]))
+    return frozenset(names)
+
+
+def idea_identities(candidate: dict) -> dict:
+    """One normalized S3 candidate as agreement compares it (§10.1, D74), JSON-ready: a sorted
+    name list per target, the disease's sorted names and the direction."""
+    targets = [
+        sorted(names) for target in candidate.get("targets") or []
+        if (names := _item_names(target, "hgnc_id", ("symbol", "hgnc_symbol", "as_written")))
+    ]
+    disease = _item_names(
+        candidate.get("disease"), "mondo_id", ("label", "standard_name", "as_written")
+    )
+    return {"targets": targets, "disease": sorted(disease), "direction": ideas._direction(candidate)}
+
+
+def _key_names(identity: str) -> set[str]:
+    for prefix in _NAME_PREFIXES:
+        if identity.startswith(prefix):
+            return _text_names(identity[len(prefix):])
+    return {identity} if identity else set()
+
+
+def key_identities(key: list | tuple) -> dict:
+    """``idea_identities`` read back from a stored ``facet_key``, for a regression item seeded
+    before D74, which stored only keys: an HGNC or Mondo id is itself, a provisional or
+    unmatched identity is the names its text gives."""
+    targets, direction, disease = key
+    return {
+        "targets": [sorted(names) for t in str(targets).split(",") if (names := _key_names(t))],
+        "disease": sorted(_key_names(str(disease))),
+        "direction": direction,
+    }
+
+
+def expected_identities(expected: dict | None) -> list[dict]:
+    """A stored S3 reference's identities: its ``ideas``, else read from its ``keys``."""
+    expected = expected or {}
+    if isinstance(expected.get("ideas"), list):
+        return expected["ideas"]
+    return [key_identities(key) for key in expected.get("keys") or []]
 
 
 async def prepare_extraction(
@@ -227,32 +317,131 @@ async def prepare_extraction(
     return Extraction(
         candidates=prepared.candidates,
         keys=frozenset(facet_key(c) for c in prepared.candidates),
+        identities=tuple(idea_identities(c) for c in prepared.candidates),
         verified=prepared.verified,
         dropped=prepared.dropped,
     )
 
 
-def extract_metrics(pairs: list[tuple[frozenset, Extraction | None]]) -> dict:
-    """S3 against the reference: per document, the reference's facet keys and the candidate's
-    extraction. Agreement is the shared keys over all keys either side named, summed over the
-    documents, so a missed idea and an invented one both count against it."""
-    shared = union = verified = checked = 0
-    for expected, got in pairs:
-        keys = got.keys if got is not None else frozenset()
-        shared += len(expected & keys)
-        union += len(expected | keys)
+def _merged(groups: Iterable[frozenset[str]]) -> list[frozenset[str]]:
+    """One document's identities, any two that share a name merged into one, so an entity
+    named in two ideas, or by two names that meet, counts once."""
+    out: list[set[str]] = []
+    for group in groups:
+        if not group:
+            continue
+        joined = set(group)
+        rest = []
+        for other in out:
+            if other & joined:
+                joined |= other
+            else:
+                rest.append(other)
+        out = [*rest, joined]
+    return [frozenset(group) for group in out]
+
+
+def _matched(want: list, got: list, same: Callable[[Any, Any], bool]) -> list[tuple[Any, Any]]:
+    """Greedy one-to-one pairs of ``want`` and ``got`` items that are ``same``."""
+    used: set[int] = set()
+    pairs = []
+    for a in want:
+        for j, b in enumerate(got):
+            if j not in used and same(a, b):
+                used.add(j)
+                pairs.append((a, b))
+                break
+    return pairs
+
+
+def _entities(identities: Iterable[dict]) -> tuple[list, list]:
+    """A document's distinct targets and diseases."""
+    identities = list(identities)
+    targets = _merged(frozenset(t) for i in identities for t in i.get("targets") or [])
+    diseases = _merged(frozenset(i.get("disease") or ()) for i in identities)
+    return targets, diseases
+
+
+def _pairs(identities: Iterable[dict]) -> list[tuple[frozenset, frozenset, str]]:
+    """A document's (target, disease, direction) pairs: each idea's targets with its disease
+    (``_NONE`` standing for no target or no disease)."""
+    out = []
+    for identity in identities:
+        disease = frozenset(identity.get("disease") or ()) or _NONE
+        for target in identity.get("targets") or [None]:
+            out.append((frozenset(target) if target else _NONE, disease, identity.get("direction")))
+    return out
+
+
+def _pair_same(a: tuple, b: tuple) -> bool:
+    return bool(a[0] & b[0]) and bool(a[1] & b[1])
+
+
+def extract_agreement(pairs: list[tuple[list[dict], Extraction | None]]) -> dict:
+    """S3 against a reference (§10.1, D74): per document, the reference's ``idea_identities``
+    and an extraction (None counts as extracting nothing). Targets and diseases are matched
+    by any shared name (an HGNC or Mondo id, a symbol, label or standard name, or a written
+    name folded without punctuation), one to one.
+
+    ``agreement`` is the Dice share of matched targets and diseases, pooled over the
+    documents: twice the matches over all the entities both sides named, so a missed and an
+    invented one both count against it, and how the ideas are split does not. Target and
+    disease recall and precision, ``pair_agreement`` (the same over each idea's (target,
+    disease) pairs) and ``direction_agreement`` (the matched pairs whose direction agrees) are
+    reported beside it. ``quote_verification`` is the extraction's verified quotes."""
+    matched = named = 0
+    counts = defaultdict(int)
+    verified = checked = 0
+    for want, got in pairs:
+        have = list(got.identities) if got is not None else []
         if got is not None:
             verified += got.verified
             checked += got.verified + got.dropped
-    agreement, quotes = _share(shared, union), _share(verified, checked)
-    checks = {"agreement": agreement >= EXTRACT_MIN_AGREEMENT, "quotes": quotes >= EXTRACT_MIN_QUOTES}
+        for kind, w, g in zip(("target", "disease"), _entities(want), _entities(have), strict=True):
+            hits = len(_matched(w, g, lambda a, b: bool(a & b)))
+            counts[f"{kind}_hits"] += hits
+            counts[f"{kind}_want"] += len(w)
+            counts[f"{kind}_got"] += len(g)
+            matched += hits
+            named += len(w) + len(g)
+        pw, pg = _pairs(want), _pairs(have)
+        hit_pairs = _matched(pw, pg, _pair_same)
+        counts["pair_hits"] += len(hit_pairs)
+        counts["pair_named"] += len(pw) + len(pg)
+        counts["direction_same"] += sum(1 for a, b in hit_pairs if a[2] == b[2])
     return {
         "items": len(pairs),
-        "agreement": agreement,
-        "quote_verification": quotes,
+        "agreement": _share(2 * matched, named),
+        "target_recall": _share(counts["target_hits"], counts["target_want"]),
+        "target_precision": _share(counts["target_hits"], counts["target_got"]),
+        "disease_recall": _share(counts["disease_hits"], counts["disease_want"]),
+        "disease_precision": _share(counts["disease_hits"], counts["disease_got"]),
+        "pair_agreement": _share(2 * counts["pair_hits"], counts["pair_named"]),
+        "direction_agreement": _share(counts["direction_same"], counts["pair_hits"]),
+        "quote_verification": _share(verified, checked),
+    }
+
+
+def extract_metrics(
+    pairs: list[tuple[list[dict], Extraction | None]], *, reference_agreement: float
+) -> dict:
+    """``extract_agreement`` with the §10.1 verdict (D74): agreement at least
+    ``EXTRACT_MIN_RELATIVE`` of ``reference_agreement``, the reference model's own agreement
+    with the same references when asked again, and quote verification at least
+    ``EXTRACT_MIN_QUOTES``."""
+    found = extract_agreement(pairs)
+    bar = EXTRACT_MIN_RELATIVE * reference_agreement
+    checks = {
+        "agreement": found["agreement"] >= bar,
+        "quotes": found["quote_verification"] >= EXTRACT_MIN_QUOTES,
+    }
+    return {
+        **found,
+        "reference_agreement": reference_agreement,
+        "agreement_bar": bar,
         "checks": checks,
         "passed": all(checks.values()),
-        "quality": agreement + quotes,
+        "quality": found["agreement"] + found["quote_verification"],
     }
 
 
@@ -481,7 +670,9 @@ async def _extract_round(
     rng: random.Random, order: tuple[str, ...],
 ) -> tuple[_Round, dict[str, tuple[LandscapeDocument, Extraction]]]:
     """S3: the reference on every kept document (the S4 pool), the candidates on a stratified
-    ``n`` of them. Also returns the reference's extraction of each kept document."""
+    ``n`` of them, and the reference once more on the sample: its agreement with its own first
+    answers sets the candidates' bar (D74). Also returns the reference's extraction of each
+    kept document."""
     docs = {str(doc.id): doc for doc in kept}
     users = {key: screen.user_message(doc) for key, doc in docs.items()}
     reference_answers = await _answers(
@@ -494,6 +685,26 @@ async def _extract_round(
     }
     usable = [doc for doc in kept if reference[str(doc.id)] is not None]
     sample = [str(doc.id) for doc in stratified_sample(usable, _stratum, n, rng)]
+    again_answers = await ask_all(
+        "extract",
+        {
+            key: stage_request(
+                "extract", users[key], model=REFERENCE_MODEL, system=inputs.system("extract"),
+                rubric=inputs.rubric,
+            )
+            for key in sample
+        },
+        db_factory=db_factory, ref_prefix="bakeoff:reference-again", only_model=True,
+    )
+    again = {
+        key: await prepare_extraction(again_answers[key].parsed, docs[key], inputs.criteria)
+        for key in sample
+    }
+    # An item the second asking refused or left unusable says nothing of the reference's
+    # repeatability: it is left out of the bar, not counted as a miss.
+    repeat = [(list(reference[key].identities), again[key]) for key in sample
+              if again[key] is not None]
+    reference_agreement = extract_agreement(repeat)["agreement"]
     results = {}
     for model in order:
         answers = await _answers(
@@ -505,19 +716,25 @@ async def _extract_round(
             for key in sample
         }
         results[model] = {
-            **extract_metrics([(reference[key].keys, got[key]) for key in sample]),
+            **extract_metrics(
+                [(list(reference[key].identities), got[key]) for key in sample],
+                reference_agreement=reference_agreement,
+            ),
             **_refusals(answers.values()),
         }
     items = [
         {"item_kind": "extract", "origin": "bakeoff",
          "item_ref": {"document_id": key, "user": users[key]},
-         "expected": {"keys": sorted(list(k) for k in reference[key].keys)}}
+         "expected": {"keys": sorted(list(k) for k in reference[key].keys),
+                      "ideas": list(reference[key].identities)}}
         for key in sample
     ]
     summary = _round_summary(
         results, order, sample=len(sample), pool=len(usable),
         reference_refused=sum(a.refused_before for a in reference_answers.values()),
         reference_unusable=len(docs) - len(usable),
+        reference_agreement=reference_agreement, reference_repeated=len(repeat),
+        reference_repeat_cost_usd=str(total_cost(again_answers.values())),
     )
     pool = {key: (docs[key], ex) for key, ex in reference.items() if ex is not None}
     return _Round(summary, items), pool
