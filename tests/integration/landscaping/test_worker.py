@@ -1256,3 +1256,15 @@ async def test_never_touches_jobs_table(db_factory, engine, settings, calls, mon
 
     assert statements
     assert [s for s in statements if re.search(r"\bjobs\b", s, re.IGNORECASE)] == []
+
+
+@pytest.mark.asyncio
+async def test_the_poll_stops_starting_calls_at_its_budget(db_factory, settings, calls):
+    """D75: the poll stops starting sync-mode calls once its budget has run out, so the loop's
+    submissions run and each stage's newly due work joins the next poll."""
+    await worker.ingest_ended(db_factory)
+    await worker.ingest_ended(db_factory, budget=timedelta(0))
+
+    [(_, default), (_, spent)] = calls.args("poll")
+    assert default["should_stop"]() is False
+    assert spent["should_stop"]() is True

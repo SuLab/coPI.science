@@ -220,7 +220,10 @@ delays them. Do not stop or start a run for it.
 Message Batches endpoint refuses it ("not available for HIPAA-configured organizations",
 2026-11-16). With `LANDSCAPE_BATCH_MODE=sync` in `.env`, each batch item is sent as its own
 Messages call. The worker's poll runs them in chunks of 50, `LANDSCAPE_SYNC_CONCURRENCY` at a
-time (default 4). Before each chunk it checks again that it is enabled, unpaused, under the cap
+time (default 4) per stage: each stage's batches run in a lane of their own, beside the other
+stages' (D75), so up to four times that many calls can be in flight at once. A poll starts no
+new call after 15 minutes and returns, so the loop's submissions run, and the next poll
+resumes where it stopped. Before each chunk it checks again that it is enabled, unpaused, under the cap
 and that no simulation run is live, so a local batch waits while a run is live. A shutdown
 starts no new call. A rate-limit, overload or connection error leaves the rest for the next
 poll (`LANDSCAPE_BATCH_POLL_SECONDS`, default 300). Each call is ledgered as soon as it
@@ -228,7 +231,7 @@ answers, at the full synchronous rate, about twice the batch rate. The bake-off 
 figures are at the batch rate. Everything else (stage rows, ingestion, refusal fallbacks)
 works as in batch mode. A restart in the middle of a local batch sends its unanswered items
 back to `pending`, where their stage batches them again. Answers paid for but not yet
-ingested are lost then, at most one chunk. Switch modes only while no API batch is in flight.
+ingested are lost then, at most one chunk per stage. Switch modes only while no API batch is in flight.
 `src/landscaping/batches.py` documents the protocol.
 
 **The kill switch.** Set `LANDSCAPE_ENABLED=false` in `.env`, then recreate:

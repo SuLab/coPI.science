@@ -16,7 +16,9 @@ batch reconciliation before returning stale ``running`` rows to ``pending``.
   ingesting them chunk by chunk, each batch marked ingested after its last chunk (§9.5); an
   outcome whose ingestion keeps raising is recorded as ``errored`` (D71). In
   sync mode (``landscape_batch_mode``) the poll also makes a local batch's calls, but only
-  while enabled, unpaused, under the cap and with no simulation run live. An
+  while enabled, unpaused, under the cap and with no simulation run live; each stage's
+  batches run beside the other stages', and the poll starts no new call after
+  ``_LOCAL_POLL_BUDGET`` (D75). An
   ended S5 tie-break tournament finishes its cut here (it asks nothing); an ended S7 rebuild
   is landed only by the synchronous step, whose insertions ask the model.
 - Only while ``landscape_enabled`` is true and ``app_settings.landscape_paused`` is not, in §12.2
@@ -172,6 +174,11 @@ INGESTERS: dict[str, Callable[[Any, list[BatchOutcome]], Awaitable[None]]] = {
     "final": final_stage.ingest_final_outcomes,
     "audit": reject_audit.ingest_audit_outcomes,
 }
+
+#: How long one poll keeps starting sync-mode calls (D75). The poll then returns, so the loop's
+#: intake and submissions run and each stage's newly due work joins the next poll; no answer is
+#: paid for twice, and chunks already ingested are not replayed.
+_LOCAL_POLL_BUDGET = timedelta(minutes=15)
 
 #: An outcome whose ingestion keeps raising while others of its batch ingest is routed again as
 #: ``errored`` (D71), so its own stage moves its row on and the rest of its batch is not held
@@ -479,12 +486,14 @@ async def _funnel_open(db_factory, phase: str) -> bool:
 async def ingest_ended(
     db_factory, *, run_local: bool = False,
     failures: dict[uuid.UUID, _IngestFailures] | None = None, now: datetime | None = None,
+    budget: timedelta = _LOCAL_POLL_BUDGET,
 ) -> int:
     """Poll ended batches and route each chunk's outcomes through ``INGESTERS``; a batch is
     marked ingested after its last chunk, then a completed S5 tie-break finishes its cut
     (``_after_tournament``). ``run_local`` lets a sync-mode batch make calls, each chunk only
-    while ``_local_calls_allowed``; a shutdown stops new calls at once. Returns the number of
-    batches marked ingested.
+    while ``_local_calls_allowed``; a shutdown stops new calls at once, and so does the end of
+    ``budget`` (D75), after which the batches left resume at the next poll. Returns the number
+    of batches marked ingested.
 
     A chunk whose routing raises is routed again one outcome at a time (``_route_alone``), so
     one bad outcome does not hold the rest of its batch (D71). A batch with an outcome still
@@ -501,8 +510,11 @@ async def ingest_ended(
     #: Batches with an outcome routed this poll: the evidence that a failing one is bad alone.
     healthy: set[uuid.UUID] = set()
     may_run = functools.partial(_local_calls_allowed, db_factory) if run_local else None
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + budget.total_seconds()
     async for batch_id, outcomes, is_last in batches.poll(
-        db_factory, may_run=may_run, should_stop=lambda: _shutdown,
+        db_factory, may_run=may_run,
+        should_stop=lambda: _shutdown or loop.time() >= deadline,
     ):
         if batch_id in stopped:
             continue

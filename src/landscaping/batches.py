@@ -24,7 +24,8 @@ is unavailable (a HIPAA-configured one, measured 2026-11-16). The batch row, its
 stage rows are written as above, but ``submit`` makes no API call: it stores
 ``local:<row id>`` as the API id and keeps the requests in memory. ``poll`` then runs each
 unanswered item as its own Messages call, a chunk at a time, on the batch's model only (a
-refusal still goes to ``run_fallbacks``). Each answer is ledgered at the synchronous rate with
+refusal still goes to ``run_fallbacks``), each stage's batches in a lane of their own beside
+the other stages' (D75). Each answer is ledgered at the synchronous rate with
 the batch id and ``item_seq`` (insert-ignore), and its outcome goes through the same ingestion.
 Answers stay in memory until ``mark_ingested``, so a chunk whose ingestion failed is replayed,
 not paid for again. A restart loses the requests: the batch's rows still ``submitted`` go back
@@ -561,7 +562,7 @@ async def poll(
     should_stop: Callable[[], bool] | None = None,
 ) -> AsyncIterator[tuple[uuid.UUID, list[BatchOutcome], bool]]:
     """Yield ``(batch_row_id, outcomes, is_last_chunk)`` for each ended, not-yet-ingested
-    batch, one batch at a time, in chunks of at most ``chunk_size`` results.
+    batch, in chunks of at most ``chunk_size`` results.
 
     A ``submitted`` batch is retrieved first and skipped while the API still runs it. Each
     chunk's ledger rows (``batch=True``, insert-ignore) and the items' ``result_kind`` commit
@@ -574,10 +575,17 @@ async def poll(
     ``await may_run()`` is true, re-read before every chunk (None never calls; the worker
     passes its enabled, unpaused, under-cap, no-live-simulation check), and no new call starts
     once ``should_stop()`` is true. Answers already had are replayed either way.
+
+    Local batches run side by side, one lane per stage (D75): each lane takes its stage's
+    batches in ``seq`` order, so a long screening batch does not hold extraction or triage
+    back. Every other batch is read in one lane, in ``seq`` order, one batch at a time. Chunks
+    still reach the caller one at a time, and a lane goes on past its chunk only once the
+    caller asks for the next one, so each lane sees its chunk ingested before it decides
+    whether to go on (``_run_local``).
     """
     client = _batches_client()
     async with db_factory() as db:
-        batches = (
+        ready = (
             await db.scalars(
                 select(LandscapeBatch)
                 .where(
@@ -587,17 +595,74 @@ async def poll(
                 .order_by(LandscapeBatch.seq)
             )
         ).all()
-    for batch in batches:
-        if _is_local(batch):
-            async for chunk in _run_local(
-                db_factory, batch, may_run=may_run, should_stop=should_stop
-            ):
+    lanes: dict[str, list[LandscapeBatch]] = {}
+    for batch in ready:
+        lanes.setdefault(f"local:{batch.stage}" if _is_local(batch) else "api", []).append(batch)
+
+    async def lane(batches: list[LandscapeBatch]):
+        for batch in batches:
+            if _is_local(batch):
+                async for chunk in _run_local(
+                    db_factory, batch, may_run=may_run, should_stop=should_stop
+                ):
+                    yield chunk
+                continue
+            if batch.status == "submitted" and not await _mark_ended(db_factory, client, batch):
+                continue
+            async for chunk in _ingest(db_factory, client, batch, chunk_size):
                 yield chunk
-            continue
-        if batch.status == "submitted" and not await _mark_ended(db_factory, client, batch):
-            continue
-        async for chunk in _ingest(db_factory, client, batch, chunk_size):
+
+    if len(lanes) == 1:
+        [only] = lanes.values()
+        async for chunk in lane(only):
             yield chunk
+        return
+    async for chunk in _side_by_side([lane(batches) for batches in lanes.values()]):
+        yield chunk
+
+
+async def _side_by_side(streams: list[AsyncIterator[Any]]) -> AsyncIterator[Any]:
+    """Run ``streams`` concurrently and yield their items one at a time, in arrival order. A
+    stream moves past an item only once the consumer asks for the next one, so the consumer
+    handles each item before its stream goes on. A stream that raises stops alone; the first
+    error is raised once every other stream has ended. Streams still running when the
+    consumer stops early are cancelled."""
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def pump(stream: AsyncIterator[Any]) -> None:
+        try:
+            async for item in stream:
+                handled = asyncio.Event()
+                await queue.put(("item", item, handled))
+                await handled.wait()
+        except Exception as exc:  # noqa: BLE001 - handed to the consumer, which raises it
+            await queue.put(("error", exc, None))
+        else:
+            await queue.put(("done", None, None))
+
+    tasks = [asyncio.create_task(pump(stream)) for stream in streams]
+    running, error = len(tasks), None
+    try:
+        while running:
+            kind, item, handled = await queue.get()
+            if kind == "item":
+                try:
+                    yield item
+                finally:
+                    handled.set()
+                continue
+            running -= 1
+            if kind == "error" and error is None:
+                error = item
+            elif kind == "error":
+                logger.error("a second poll lane failed too: %r", item)
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    if error is not None:
+        raise error
 
 
 #: Failures that say "not now" rather than "this request is bad": the item stays unanswered for
@@ -647,6 +712,11 @@ async def _run_local(
         answered = [item for item in chunk if item.item_seq in answers]
         complete = len(answered) == len(chunk)
         is_last = complete and start + _LOCAL_CHUNK >= len(items)
+        # A chunk answered on an earlier turn whose every row has left `submitted` has nothing
+        # left to ingest: it is not replayed (D75). A row an ingestion failure left
+        # `submitted` keeps its chunk in the replay; the last chunk is always yielded.
+        if not todo and not is_last and not await _still_submitted(db_factory, batch, chunk):
+            continue
         if is_last:
             await _mark_local_ended(db_factory, batch.id)
         if answered:
@@ -665,17 +735,21 @@ async def _run_local(
             return
 
 
-async def _any_ingested(db_factory, batch: LandscapeBatch, items: list) -> bool:
-    """Whether any of ``items``' stage rows has left ``submitted`` (been ingested)."""
+async def _still_submitted(db_factory, batch: LandscapeBatch, items: list) -> int:
+    """How many of ``items``' stage rows are still ``submitted`` (not ingested yet)."""
     table = Base.metadata.tables[batch.row_table]
     async with db_factory() as db:
-        still = await db.scalar(
+        return await db.scalar(
             select(func.count()).select_from(table).where(
                 table.c.batch_item_id == _uuid_array("item_ids", [item.id for item in items]),
                 table.c.status == "submitted",
             )
-        )
-    return still < len(items)
+        ) or 0
+
+
+async def _any_ingested(db_factory, batch: LandscapeBatch, items: list) -> bool:
+    """Whether any of ``items``' stage rows has left ``submitted`` (been ingested)."""
+    return await _still_submitted(db_factory, batch, items) < len(items)
 
 
 async def _call_local(

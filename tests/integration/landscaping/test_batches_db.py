@@ -4,6 +4,7 @@ The API is a fake ``messages.batches`` resource; a "restart" is a fresh in-proce
 reconciler, which is all a worker restart loses. Every session shares one connection whose
 outer transaction rolls back, so the commits the protocol makes are savepoint releases.
 """
+import asyncio
 import contextlib
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -979,3 +980,105 @@ async def test_sync_mode_rereads_may_run_before_each_chunk(
 
     assert len(sync_mode) == 2
     assert await _statuses(db_factory, ids) == ["done", "done", "submitted", "submitted"]
+
+
+# --- lanes (D75): each stage's local batches beside the other stages' ---------------------------
+
+
+def _one_session_at_a_time(db_factory):
+    """``db_factory`` with one session open at a time: every session of a test shares one
+    connection, which takes one statement at a time, while lanes overlap their calls."""
+    lock = asyncio.Lock()
+
+    @contextlib.asynccontextmanager
+    async def factory():
+        async with lock, db_factory() as session:
+            yield session
+
+    return factory
+
+
+async def test_sync_mode_runs_each_stage_beside_the_others(
+    db_factory, fake, sync_mode, monkeypatch
+):
+    """The screening batch comes first in ``seq``, and its call waits for the extraction
+    batch's call to start: run one batch at a time, it would time out and be errored."""
+    extract_started = asyncio.Event()
+
+    async def abeta_create(client, **request):
+        if request["messages"][0]["content"] == "screen":
+            await asyncio.wait_for(extract_started.wait(), timeout=5)
+        else:
+            extract_started.set()
+        return _message("end_turn")
+
+    monkeypatch.setattr(batches.llm, "abeta_create", abeta_create)
+    factory = _one_session_at_a_time(db_factory)
+    first, second = await _screens(db_factory, 2)
+    screen_id = await batches.submit(
+        factory, stage="screen", row_model=LandscapeScreen,
+        items=[(first, {**_request(), "messages": [{"role": "user", "content": "screen"}]})],
+    )
+    extract_id = await batches.submit(
+        factory, stage="extract", row_model=LandscapeScreen,
+        items=[(second, {**_request(), "messages": [{"role": "user", "content": "extract"}]})],
+    )
+
+    chunks = await _drain_local(factory)
+
+    assert {batch_id: [o.kind for o in outcomes] for batch_id, outcomes, _ in chunks} == {
+        screen_id: ["succeeded"], extract_id: ["succeeded"],
+    }
+    assert all(is_last for _, _, is_last in chunks)
+
+
+async def test_sync_mode_does_not_replay_a_chunk_already_ingested(
+    db_factory, fake, sync_mode, monkeypatch
+):
+    monkeypatch.setattr(batches, "_LOCAL_CHUNK", 2)
+    ids = await _screens(db_factory, 4)
+    await _submit_stops(db_factory, ids, ["end_turn"] * 4)
+    [(_, first, _)] = await _drain_local(db_factory, should_stop=lambda: len(sync_mode) >= 2)
+
+    # not ingested yet: read again from memory
+    [(_, again, is_last)] = await _drain_local(db_factory, run=False)
+    assert [o.item_seq for o in again] == [1, 2] and not is_last
+    await _ingest_all(db_factory, first)
+
+    chunks = await _drain_local(db_factory)
+    assert [([o.item_seq for o in outcomes], is_last) for _, outcomes, is_last in chunks] == [
+        ([3, 4], True)
+    ]
+    assert len(sync_mode) == 4
+
+
+async def test_a_failing_lane_stops_alone(db_factory, fake, sync_mode, monkeypatch):
+    """An error in one lane is raised once the other lanes have ended."""
+    factory = _one_session_at_a_time(db_factory)
+    first, second = await _screens(db_factory, 2)
+    await batches.submit(
+        factory, stage="screen", row_model=LandscapeScreen,
+        items=[(first, {**_request(), "messages": [{"role": "user", "content": "end_turn"}]})],
+    )
+    extract_id = await batches.submit(
+        factory, stage="extract", row_model=LandscapeScreen,
+        items=[(second, {**_request(), "messages": [{"role": "user", "content": "end_turn"}]})],
+    )
+    real_run = batches._run_local
+
+    async def run_local(db_factory_, batch, **kwargs):
+        if batch.stage == "screen":
+            raise RuntimeError("invented lane failure")
+        async for chunk in real_run(db_factory_, batch, **kwargs):
+            yield chunk
+
+    monkeypatch.setattr(batches, "_run_local", run_local)
+    seen = []
+
+    async def may_run():
+        return True
+
+    with pytest.raises(RuntimeError, match="invented lane failure"):
+        async for chunk in batches.poll(factory, may_run=may_run):
+            seen.append(chunk)
+    assert [(batch_id, is_last) for batch_id, _, is_last in seen] == [(extract_id, True)]
