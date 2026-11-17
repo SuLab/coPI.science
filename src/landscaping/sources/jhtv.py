@@ -23,6 +23,7 @@ RSS_URL = "https://jhu.technologypublisher.com/rss.aspx"
 _TAG = re.compile(r"<[^>]+>")
 # RSS 2.0 `author` is "email (Name)"; the name is what the lab key needs.
 _EMAIL_AUTHOR = re.compile(r"^\s*\S+@\S+\s*\((?P<name>[^)]*)\)\s*$")
+_BARE_EMAIL = re.compile(r"^\s*\S+@\S+\s*$")
 
 
 def _make_client() -> httpx.AsyncClient:
@@ -66,8 +67,13 @@ def _pub_date(value: str) -> date | None:
 
 
 def _author(item: ET.Element) -> str:
+    """The item's author name; "" for a bare email address. JHU's feed gives every item the
+    same sender, ``techpub@inteummail.com`` (all 2,112 items on 2026-11-16), which names no
+    inventor and would give every listing one shared lab."""
     raw = _text(_child(item, "author")) or _text(_child(item, "creator"))
     match = _EMAIL_AUTHOR.match(raw)
+    if match is None and _BARE_EMAIL.match(raw):
+        return ""
     return " ".join((match.group("name") if match else raw).split())
 
 

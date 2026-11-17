@@ -61,6 +61,16 @@ async def test_jhtv_rss_parses_caseid_guid_pubdate(monkeypatch):
     assert {r.role_basis for r in result.rows} == {"jhtv"}
 
 
+def test_jhtv_bare_email_author_names_no_one():
+    """JHU's feed gives every item the sender ``techpub@inteummail.com`` (2026-11-16): a bare
+    address is no inventor, so the listing gets no senior name and no shared lab."""
+    rss = _RSS.replace("<author>Bo Imaginary</author>",
+                       "<author>techpub@example.org</author>")
+    first, second = (jhtv.to_document(item) for item in jhtv.parse_rss(rss))
+    assert first.senior_names[0]["name"] == "Ada Fictitious"
+    assert second.senior_names == []
+
+
 async def test_geo_inst_variants_query(monkeypatch):
     calls = []
 
