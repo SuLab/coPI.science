@@ -16,6 +16,10 @@ _PACER = Pacer(MIN_INTERVAL_S)
 _HEADERS = {"Accept": "application/json"}
 #: The fields searched, in the order a match is reported.
 SEARCH_FIELDS = ("symbol", "alias_symbol", "prev_symbol")
+#: Characters HGNC's fetch cannot take (measured 2026-11-17): it answers 400 to Solr wildcard
+#: and syntax characters and 500 to a quote, a trailing backslash or ``&&``. No HGNC symbol,
+#: alias or previous symbol contains one, so a name with one matches no gene.
+_UNFETCHABLE = frozenset('*[]{}^!#%"\\&')
 
 
 def _make_client() -> httpx.AsyncClient:
@@ -49,12 +53,21 @@ async def hgnc_release() -> str:
 async def hgnc_lookup(symbol: str) -> list[dict]:
     """Every gene whose approved symbol, alias or previous symbol is ``symbol`` (HGNC
     matches case-insensitively), one entry per HGNC id with ``matched_on`` the first field
-    that matched. The caller decides whether one approved gene is an unambiguous answer."""
+    that matched. The caller decides whether one approved gene is an unambiguous answer.
+    A name HGNC's fetch cannot take (`_UNFETCHABLE`, or any name it answers 400) matches
+    nothing; it is not an error, since an extracted name is free text."""
     found: dict[str, dict] = {}
+    if _UNFETCHABLE.intersection(symbol):
+        return []
     for field in SEARCH_FIELDS:
         url = f"{BASE_URL}/fetch/{field}/{quote(symbol, safe='')}"
-        body = await evidence.request_json(_make_client, url, pacer=_PACER, headers=_HEADERS,
-                                           none_on_404=True)
+        try:
+            body = await evidence.request_json(_make_client, url, pacer=_PACER,
+                                               headers=_HEADERS, none_on_404=True)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 400:
+                raise
+            body = None
         for doc in ((body or {}).get("response") or {}).get("docs") or []:
             hgnc_id = doc.get("hgnc_id")
             if hgnc_id and hgnc_id not in found:

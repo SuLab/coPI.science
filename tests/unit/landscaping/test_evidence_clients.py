@@ -11,6 +11,7 @@ from src.config import get_settings
 from src.landscaping.evidence import (
     cache,
     chembl,
+    hgnc,
     mondo,
     openfda,
     opentargets,
@@ -149,6 +150,35 @@ async def test_ot_target_fields_parsed(monkeypatch):
     assert bodies[0]["variables"]["id"] == "ENSG00000000001"
     assert assoc["overall"] == 0.42 and assoc["genetic"] == 0.31
     assert bodies[1]["variables"] == {"disease": "MONDO_0000002", "target": "ENSG00000000001"}
+
+
+# --- HGNC ---------------------------------------------------------------------------------
+
+
+async def test_hgnc_lookup_matches_nothing_for_a_name_its_fetch_rejects(monkeypatch):
+    """An extracted name such as "Poly (ADP-ribose) polymerase [PARP]" is never sent (HGNC
+    answers 400 to brackets), and a 400 on any other name is no match, not an error: one
+    such name used to fail the whole extraction batch's ingestion (2026-11-17)."""
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.path)
+        return httpx.Response(400, text="Wildcards are not to be used with fetch.")
+
+    monkeypatch.setattr(hgnc, "_make_client", _client_with(handler))
+    assert await hgnc.hgnc_lookup("Poly (ADP-ribose) polymerase [PARP]") == []
+    assert await hgnc.hgnc_lookup('say "PARP"') == []
+    assert seen == []
+
+    assert await hgnc.hgnc_lookup("PARP1") == []
+    assert seen == [f"/fetch/{field}/PARP1" for field in hgnc.SEARCH_FIELDS]
+
+
+async def test_hgnc_lookup_still_raises_other_error_statuses(monkeypatch):
+    monkeypatch.setattr(hgnc, "_make_client",
+                        _client_with(lambda request: httpx.Response(403)))
+    with pytest.raises(httpx.HTTPStatusError):
+        await hgnc.hgnc_lookup("PARP1")
 
 
 # --- Mondo --------------------------------------------------------------------------------
