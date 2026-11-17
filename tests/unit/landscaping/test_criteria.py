@@ -19,8 +19,8 @@ def test_criteria_judging_hash_ignores_meta_and_reason_tags(tmp_path):
     base = load_criteria()
     unchanged = [
         ('"Correlation only",', '"Correlation only, renamed",'),
-        ("approved = false", "approved = true"),
-        ('version = "1.0.0"', 'version = "1.0.1"'),
+        ("approved = true", "approved = false"),
+        ('version = "1.1.0"', 'version = "1.1.1"'),
         ('"1.0.0 (2026-10-30): first version', '"1.0.0 (2026-10-31): first version'),
     ]
     for old, new in unchanged:
@@ -47,10 +47,10 @@ def test_criteria_vocabularies():
 
 def test_reason_tags_approval_flag_parsed(tmp_path):
     c = load_criteria()
-    assert c.reason_tags_approved is False
+    assert c.reason_tags_approved is True  # the owner approved them on 2026-11-17
     assert c.reason_tags
-    approved = load_criteria(_variant(tmp_path, "approved = false", "approved = true"))
-    assert approved.reason_tags_approved is True
+    unapproved = load_criteria(_variant(tmp_path, "approved = true", "approved = false"))
+    assert unapproved.reason_tags_approved is False
 
 
 def test_criteria_has_no_forbidden_phrases():
@@ -62,7 +62,7 @@ def test_criteria_has_no_forbidden_phrases():
 
 @pytest.mark.parametrize(("old", "new"), [
     ("dimension_share = 0.8", "dimension_share = 1.5"),
-    ("approved = false", 'approved = "no"'),
+    ("approved = true", 'approved = "no"'),
     ('test = "data"\ndescription = "Open Targets marks', 'test = "maybe"\ndescription = "Open Targets marks'),
 ])
 def test_invalid_criteria_raise(tmp_path, old, new):

@@ -250,14 +250,16 @@ async def test_chat_md_and_reason_tags_create_no_candidate(db_session, tmp_path,
     chat.write_text(chat.read_text(encoding="utf-8") + "\nAn invented closing line.\n", encoding="utf-8")
     criteria = work / "criteria.toml"
     text = criteria.read_text(encoding="utf-8")
-    marker = "[reason_tags]\napproved = false\ntags = [\n"
+    approved = load_criteria(criteria).reason_tags_approved
+    marker = f"[reason_tags]\napproved = {str(approved).lower()}\ntags = [\n"
     assert marker in text
     criteria.write_text(
-        text.replace(marker, '[reason_tags]\napproved = true\ntags = [\n  "An invented tag",\n'),
+        text.replace(marker, f'[reason_tags]\napproved = {str(not approved).lower()}\n'
+                             'tags = [\n  "An invented tag",\n'),
         encoding="utf-8",
     )
     stamp("invented-test-version", work)
-    assert load_criteria(work / "criteria.toml").reason_tags_approved is True
+    assert load_criteria(work / "criteria.toml").reason_tags_approved is (not approved)
 
     assert epochs.current_components() == before
     assert await ensure_candidate(db_session) is None

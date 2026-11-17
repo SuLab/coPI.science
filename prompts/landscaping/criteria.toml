@@ -11,9 +11,10 @@
 # changing one opens a new judgment epoch (D61).
 
 [meta]
-version = "1.0.0"
+version = "1.1.0"
 changelog = [
   "1.0.0 (2026-10-30): first version; reason tags drafted for owner approval.",
+  "1.1.0 (2026-11-17): reason tags approved by the owner (Alan Huebschen), unchanged.",
 ]
 
 # The therapeutic-scope definition (spec §5.4, L6, L22). Inlined into the prompts, so it
@@ -110,7 +111,7 @@ dimension_share = 0.8
 # titles and the deal-breakers. No review batch is issued while `approved` is false; the
 # owner sets it to true. Not a judging input: editing it re-judges nothing (D61).
 [reason_tags]
-approved = false
+approved = true
 tags = [
   "Differentiation & unmet need",
   "Scientific credibility & mechanism",
