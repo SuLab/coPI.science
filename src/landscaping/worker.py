@@ -13,7 +13,8 @@ batch reconciliation before returning stale ``running`` rows to ``pending``.
 **Each loop** (``run_once``):
 
 - Always, even while disabled or paused: batch reconciliation, then polling ended batches and
-  ingesting them chunk by chunk, each batch marked ingested after its last chunk (§9.5). In
+  ingesting them chunk by chunk, each batch marked ingested after its last chunk (§9.5); an
+  outcome whose ingestion keeps raising is recorded as ``errored`` (D71). In
   sync mode (``landscape_batch_mode``) the poll also makes a local batch's calls, but only
   while enabled, unpaused, under the cap and with no simulation run live. An
   ended S5 tie-break tournament finishes its cut here (it asks nothing); an ended S7 rebuild
@@ -55,12 +56,14 @@ import signal
 import sys
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+import httpx
 from sqlalchemy import and_, exists, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.config import get_settings
@@ -118,6 +121,7 @@ from src.models.landscape import (
 from src.services import pubmed
 from src.services.advisory_locks import LANDSCAPE_WORKER_LOCK_KEY, SessionAdvisoryLock
 from src.services.blackbird_rubric import load_rubric
+from src.services.job_queue import job_error_text
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +173,14 @@ INGESTERS: dict[str, Callable[[Any, list[BatchOutcome]], Awaitable[None]]] = {
     "audit": reject_audit.ingest_audit_outcomes,
 }
 
+#: An outcome whose ingestion keeps raising while others of its batch ingest is routed again as
+#: ``errored`` (D71), so its own stage moves its row on and the rest of its batch is not held
+#: behind it: after this many failed polls ...
+_GIVE_UP_FAILURES = 3
+#: ... and, when the error looks like an outage (``_outage``), only once the outcome has been
+#: failing for this long, so an outage of an evidence source waits instead of failing rows.
+_OUTAGE_GRACE = timedelta(hours=2)
+
 _shutdown = False
 
 
@@ -181,6 +193,14 @@ def _handle_signal(*_args: Any) -> None:
 class WorkerStartRefused(RuntimeError):
     """The worker must not run: another instance holds the lock, migration 0077 is missing, or
     a judging input failed validation."""
+
+
+@dataclass
+class _IngestFailures:
+    """One outcome's failed ingestions in this process: when the first was, and how many."""
+
+    first: datetime
+    count: int = 0
 
 
 @dataclass
@@ -200,6 +220,8 @@ class WorkerState:
     #: completed rebuild lands, whether its last answers came in a batch or through the fallback
     #: chain, so it lands each once; landing is idempotent, so a restart may land one again.
     landed: set[uuid.UUID] = field(default_factory=set)
+    #: Batch item id -> its outcome's failed ingestions (``ingest_ended``, D71).
+    ingest_failures: dict[uuid.UUID, _IngestFailures] = field(default_factory=dict)
 
     def poll_due(self, now: datetime, seconds: float) -> bool:
         if self.last_poll is not None and (now - self.last_poll).total_seconds() < seconds:
@@ -352,7 +374,9 @@ async def run_once(db_factory, state: WorkerState, *, now: datetime) -> None:
         db_factory, may_submit=running and not over_cap,
     ))
     if state.poll_due(now, settings.landscape_batch_poll_seconds):
-        await _step("poll", ingest_ended(db_factory, run_local=running))
+        await _step("poll", ingest_ended(
+            db_factory, run_local=running, failures=state.ingest_failures, now=now,
+        ))
     if not running:
         return
     phase = await _step("intake", _intake_step(db_factory, phase, now), default=phase)
@@ -452,34 +476,142 @@ async def _funnel_open(db_factory, phase: str) -> bool:
 # --- polling and ingestion --------------------------------------------------------------------
 
 
-async def ingest_ended(db_factory, *, run_local: bool = False) -> int:
+async def ingest_ended(
+    db_factory, *, run_local: bool = False,
+    failures: dict[uuid.UUID, _IngestFailures] | None = None, now: datetime | None = None,
+) -> int:
     """Poll ended batches and route each chunk's outcomes through ``INGESTERS``; a batch is
     marked ingested after its last chunk, then a completed S5 tie-break finishes its cut
-    (``_after_tournament``). A batch
-    whose chunk fails is left unmarked and read again on the next poll (the compare-and-set
-    makes the replay harmless). ``run_local`` lets a sync-mode batch make calls, each chunk
-    only while ``_local_calls_allowed``; a shutdown stops new calls at once. Returns the
-    number of batches marked ingested."""
+    (``_after_tournament``). ``run_local`` lets a sync-mode batch make calls, each chunk only
+    while ``_local_calls_allowed``; a shutdown stops new calls at once. Returns the number of
+    batches marked ingested.
+
+    A chunk whose routing raises is routed again one outcome at a time (``_route_alone``), so
+    one bad outcome does not hold the rest of its batch (D71). A batch with an outcome still
+    unsettled is left unmarked and read again on the next poll (the compare-and-set makes the
+    replay harmless); a chunk in which nothing routed, or that met an outage, also ends the
+    batch's turn for this poll.
+    ``failures`` carries each outcome's failed ingestions across polls (the worker passes
+    ``WorkerState.ingest_failures``; None starts afresh); ``now`` defaults to the clock."""
+    failures = {} if failures is None else failures
+    now = now or datetime.now(UTC)
     ingested = 0
-    broken: set[uuid.UUID] = set()
+    stopped: set[uuid.UUID] = set()
+    unsettled: set[uuid.UUID] = set()
+    #: Batches with an outcome routed this poll: the evidence that a failing one is bad alone.
+    healthy: set[uuid.UUID] = set()
     may_run = functools.partial(_local_calls_allowed, db_factory) if run_local else None
     async for batch_id, outcomes, is_last in batches.poll(
         db_factory, may_run=may_run, should_stop=lambda: _shutdown,
     ):
-        if batch_id in broken:
+        if batch_id in stopped:
             continue
-        try:
-            if outcomes:
+        if outcomes:
+            try:
                 await _route(db_factory, outcomes)
-        except Exception:  # noqa: BLE001 - the batch is retried on the next poll
-            logger.exception("ingesting batch %s failed; it is read again next poll", batch_id)
-            broken.add(batch_id)
-            continue
-        if is_last:
+            except Exception as exc:  # noqa: BLE001 - the chunk is routed again item by item
+                logger.warning(
+                    "ingesting a chunk of batch %s failed (%s); routing its %d outcomes one "
+                    "at a time", batch_id, job_error_text(exc), len(outcomes),
+                )
+                settled, routed, stop = await _route_alone(
+                    db_factory, outcomes, failures, now, healthy=batch_id in healthy,
+                )
+                if routed:
+                    healthy.add(batch_id)
+                if not settled:
+                    unsettled.add(batch_id)
+                if stop:
+                    stopped.add(batch_id)
+                    continue
+            else:
+                healthy.add(batch_id)
+                for outcome in outcomes:
+                    failures.pop(outcome.batch_item_id, None)
+        if is_last and batch_id not in unsettled:
             await batches.mark_ingested(db_factory, batch_id)
             ingested += 1
             await _step(f"tournament {batch_id}", _after_tournament(db_factory, batch_id))
     return ingested
+
+
+async def _route_alone(
+    db_factory, outcomes: list[BatchOutcome], failures: dict[uuid.UUID, _IngestFailures],
+    now: datetime, *, healthy: bool,
+) -> tuple[bool, bool, bool]:
+    """Route each outcome on its own; returns (every outcome settled, any outcome routed, the
+    batch's turn ends).
+
+    Each outcome that raises counts a failure in ``failures``; two outage-like errors in a row
+    (``_outage``) end the pass, and the outcomes after them wait for the next poll. Then a
+    failing outcome is routed again as ``errored`` (``_give_up``, D71) when another outcome of
+    its batch routed this poll (``healthy``, or one in this pass), so the fault is the
+    outcome's own, at its ``_GIVE_UP_FAILURES``th failure, and for an outage-like error only
+    once ``_OUTAGE_GRACE`` has passed since its first. When nothing routed, no outcome is given
+    up and the batch's turn ends: a fault that fails every outcome waits for a fix."""
+    failed: list[tuple[BatchOutcome, bool]] = []
+    routed = stop = False
+    outages_in_a_row = 0
+    for outcome in outcomes:
+        try:
+            await _route(db_factory, [outcome])
+        except Exception as exc:  # noqa: BLE001 - counted; the outcome is retried or given up
+            failure = failures.setdefault(outcome.batch_item_id, _IngestFailures(first=now))
+            failure.count += 1
+            outage = _outage(exc)
+            logger.exception(
+                "ingesting item %s (row %s) of batch %s failed (%d time(s)%s)",
+                outcome.item_seq, outcome.row_id, outcome.batch_row_id, failure.count,
+                ", like an outage" if outage else "",
+            )
+            failed.append((outcome, outage))
+            outages_in_a_row = outages_in_a_row + 1 if outage else 0
+            if outages_in_a_row >= 2:
+                stop = True
+                break
+            continue
+        routed = True
+        outages_in_a_row = 0
+        failures.pop(outcome.batch_item_id, None)
+    settled = not stop
+    for outcome, outage in failed:
+        failure = failures[outcome.batch_item_id]
+        due = (routed or healthy) and failure.count >= _GIVE_UP_FAILURES and (
+            not outage or now - failure.first >= _OUTAGE_GRACE
+        )
+        if due and await _give_up(db_factory, outcome, failure.count):
+            failures.pop(outcome.batch_item_id, None)
+            continue
+        settled = False
+    return settled, routed, stop or not (routed or healthy)
+
+
+async def _give_up(db_factory, outcome: BatchOutcome, count: int) -> bool:
+    """Route ``outcome`` again as an ``errored`` result (D71); whether that settled it."""
+    try:
+        await _route(db_factory, [replace(outcome, kind="errored", message=None)])
+    except Exception:  # noqa: BLE001 - the outcome stays unsettled and is read again next poll
+        logger.exception(
+            "recording item %s of batch %s as errored failed too; it is read again next poll",
+            outcome.item_seq, outcome.batch_row_id,
+        )
+        return False
+    logger.error(
+        "item %s (row %s) of batch %s could not be ingested after %d tries: recorded as errored",
+        outcome.item_seq, outcome.row_id, outcome.batch_row_id, count,
+    )
+    return True
+
+
+def _outage(exc: BaseException) -> bool:
+    """Whether ``exc`` looks like an outage rather than a bad outcome: a 429 or 5xx answer, a
+    network failure or timeout, or a lost database connection."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return status == 429 or status >= 500
+    if isinstance(exc, DBAPIError):
+        return bool(exc.connection_invalidated) or isinstance(exc.orig, OSError)
+    return isinstance(exc, (httpx.TransportError, TimeoutError, OSError))
 
 
 async def _route(db_factory, outcomes: list[BatchOutcome]) -> None:

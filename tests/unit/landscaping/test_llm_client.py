@@ -13,8 +13,11 @@ from src.landscaping.llm_client import (
     build_request,
     call_sync,
     require_priced,
+    share_subschemas,
 )
+from src.landscaping.schemas import stage_schema
 from src.services import llm
+from src.services.blackbird_rubric import load_rubric
 from tests.fakes import FakeAnthropic, text_response
 
 EFFORT = {
@@ -94,6 +97,66 @@ def test_build_request_shape():
         assert retry["max_tokens"] == STAGE_SPECS[stage].retry_max_tokens
         assert "format" not in retry["output_config"]
         assert "fallbacks" not in req and "fallbacks" not in retry
+
+
+def _resolve(schema: dict) -> dict:
+    """``schema`` with every ``$ref`` into its ``$defs`` replaced by the definition."""
+    defs = schema.get("$defs", {})
+
+    def walk(node):
+        if isinstance(node, dict):
+            if set(node) == {"$ref"}:
+                return walk(defs[node["$ref"].removeprefix("#/$defs/")])
+            return {key: walk(value) for key, value in node.items() if key != "$defs"}
+        if isinstance(node, list):
+            return [walk(value) for value in node]
+        return node
+
+    return walk(schema)
+
+
+def test_share_subschemas_moves_repeats_into_defs():
+    item = {"type": "object", "properties": {"value": {"type": "string"}},
+            "required": ["value"], "additionalProperties": False}
+    schema = {"type": "object", "properties": {"a": item, "b": {"type": "array", "items": item}},
+              "required": ["a", "b"], "additionalProperties": False}
+    original = repr(schema)
+
+    shared = share_subschemas(schema)
+
+    assert shared["$defs"] == {"s0": item}
+    assert shared["properties"]["a"] == {"$ref": "#/$defs/s0"}
+    assert shared["properties"]["b"]["items"] == {"$ref": "#/$defs/s0"}
+    assert _resolve(shared) == schema
+    assert repr(schema) == original
+    assert share_subschemas(SCHEMA) == SCHEMA
+
+
+@pytest.mark.parametrize("stage", ["deep", "final"])
+def test_deep_and_final_schemas_are_sent_shared(stage):
+    """D72: inlined, these schemas compile to a grammar the API refuses; shared, they are the
+    same schema, with no repeat left to share."""
+    schema = stage_schema(stage, load_rubric())
+    sent = build_request(
+        stage, model="claude-opus-5", system="s", user="u", schema=schema,
+    )["output_config"]["format"]["schema"]
+
+    assert sent["$defs"]
+    assert _resolve(sent) == schema
+    assert share_subschemas({key: v for key, v in sent.items() if key != "$defs"}) == {
+        key: v for key, v in sent.items() if key != "$defs"
+    }
+
+
+def test_only_deep_and_final_share_subschemas():
+    schema = stage_schema("deep", load_rubric())
+    for stage in STAGES:
+        sent = _request(stage, "claude-opus-5")["output_config"]["format"]["schema"]
+        assert sent == SCHEMA
+        shared = build_request(
+            stage, model="claude-opus-5", system="s", user="u", schema=schema,
+        )["output_config"]["format"]["schema"]
+        assert ("$defs" in shared) is (stage in ("deep", "final")), stage
 
 
 def test_effort_per_stage():

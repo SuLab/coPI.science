@@ -36,6 +36,7 @@ from src.models.landscape import (
 from src.services import project_search, simulation_control
 from src.services.advisory_locks import ENGINE_LOCK_KEY
 from src.services.blackbird_rubric import load_rubric
+from tests.unit.landscaping.test_llm_client import _resolve
 
 pytestmark = pytest.mark.integration
 
@@ -405,7 +406,7 @@ async def test_s6_validates_and_stores_in_the_epochs_rubric_terms(db_factory, fa
     )
     await deep.run_deep(db_factory, idea_id, epoch_id=epoch_id)
 
-    schema = _deep_requests(fakes)[0]["output_config"]["format"]["schema"]
+    schema = _resolve(_deep_requests(fakes)[0]["output_config"]["format"]["schema"])
     scores_schema = schema["properties"]["scores"]
     assert scores_schema["required"] == list(stored_keys)
     assert scores_schema["properties"][invented]["enum"] == list(range(1, 8))

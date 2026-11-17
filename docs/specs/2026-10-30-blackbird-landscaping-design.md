@@ -252,6 +252,8 @@ The owner may override any of these. Each names the section that carries it.
 | D68 | Phase 0 ingests one month from each window year, picked at random and recorded, from every enabled source, plus every positive-control document, through S1. The bake-off samples those documents; with its model picks applied, the whole funnel then runs on them, issuing nothing. The pilot report holds the bake-off, the probe results and the §10.2 measurements. | §10.1 samples "in-window JHU documents" before any backfill exists; the implementation-plan audit (M8) found the pilot report undefined; the round-six audit (M7) found random months would miss the positive controls. | 10.1, 15 |
 | D69 | The worker moves the phase from `backfill` to `continuous` by itself once the backfill has drained: every enabled source's backfill slices have a terminal fetch (complete, or incomplete after its retries and reported, §12.4), and no S2-S4 work is pending for documents first seen in the backfill. S5-S9 do not run in phase `backfill`, so the first full cut covers the whole window. | Nothing else would end the backfill and start the D17 cadence; a flip on fetches alone would cut a partial pool. Implementation-plan re-audit N1; final check F3. | 12.3, 15 |
 | D70 | No candidate activates while the phase is `pilot` or `backfill`, and a candidate activates only when the readiness rule of §7.11 step 4 holds: its S2-S4 work has drained in phase `continuous`, it has a complete cut taken after that (then frozen), and S6, S8 and S9 have ended on that cut. Until the first activation the pages show no opportunities, and no review batch is issued. | The pilot's cut covers only the pilot sample and must not go live; a cut taken before the drain is partial. Final check F8; scoped re-check M1. | 7.11, 15 |
+| D71 | A batch result whose ingestion keeps raising while others of its batch ingest is recorded as `errored` (one resubmission, then `failed:errored`) at its third failed poll, and, for an outage-like error, only after two hours of failures; the rest of its batch is ingested meanwhile. When no result of the batch ingests, none is given up. | On 2026-11-17 one extracted name that HGNC's fetch rejected held a batch of 1,877 extractions for almost four hours. An outage, or a fault in an ingester, fails every result and must wait for a fix rather than fail rows. | 7.1 |
+| D72 | S6 and S9 send their output schema with each repeated subschema moved into `$defs` and referenced by `$ref`. The other stages send their schema inline, as they were judged. | Inlined, both schemas compile to a grammar larger than the API accepts ("The compiled grammar is too large", on Opus 5 and Sonnet 5.5, measured 2026-11-17): every S6 call of the first pilot cut failed. Shared, both compile. | 9.2 |
 
 ## 4. Constraints
 
@@ -709,6 +711,13 @@ target and tractability lookups to the release's downloadable files instead (§1
        written in the same transaction, and only when the compare-and-set changed a row
        (N12).
      - A batch whose results are all ingested is marked `ingested` and is not read again.
+     - One result whose ingestion raises does not hold its batch (D71). The chunk is routed
+       again one result at a time, so the others land. A result that keeps failing while
+       others of its batch ingest is recorded as `errored` at its third failed poll; when the
+       error looks like an outage (a 429 or 5xx answer, a network failure, a lost database
+       connection), only once it has also been failing for two hours. When no result of the
+       batch ingests, none is given up. Its batch is marked `ingested` only when every result
+       has settled.
 - **Result types:**
   - `succeeded`: processed.
   - `refusal` (a succeeded result with `stop_reason: refusal`): goes down the D42 chain.
@@ -1381,6 +1390,8 @@ models that run classifiers. That is a reason to measure it, not proof (§10.1).
 
 - **Structured outputs** (`output_config.format` with a JSON schema) on every stage. All the
   candidate models support it. They cannot be combined with citations, which are not used.
+  S6 and S9 send their schema with each repeated subschema moved into `$defs` (D72); it
+  accepts the same documents.
 - **Batches API:** S2, S3, S4, the S5 boundary tie-break, the S7 rebuild, S8 labels, S9 and the
   reject audit. The tie-break and the rebuild run at effort `medium`. The audit is built by the
   audited stage's builder on `landscape_audit_model` (D66).

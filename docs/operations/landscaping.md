@@ -176,6 +176,15 @@ starts no new work (no intake, no submissions, no synchronous calls) but keeps p
 ingesting the batches it already submitted. `app_settings.landscape_phase` holds the phase
 as plain text: `pilot`, `backfill` or `continuous`, and unset means `pilot`.
 
+**A result that cannot be ingested** (D71). When a batch result's ingestion raises, the
+worker ingests the rest of its chunk one result at a time and retries the failing one at
+each poll. If other results of the batch ingest, then at its third failure, or after two
+hours when the error looks like an outage, it records the result as `errored`: the row is
+resubmitted once, then ends `failed:errored`. The log says `could not be ingested after N
+tries: recorded as errored`, with the item and row; fix the cause before the resubmission
+comes back. When no result of a batch ingests (an outage, or a fault in the ingester),
+nothing is given up and the batch waits. A restart forgets the counts.
+
 **Epoch overrides.** A candidate that fails its regression check is held. An admin can let
 it go ahead from the pipeline page, with a reason; the override is recorded with the admin
 and the reason. An active or retired epoch cannot be overridden.

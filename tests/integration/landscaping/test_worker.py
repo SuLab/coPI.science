@@ -15,6 +15,7 @@ import uuid
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 
+import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import event, func, select, update
@@ -664,6 +665,123 @@ async def test_outcomes_routed_by_stage(db_factory, settings, calls, monkeypatch
         ((db_factory,), {"epoch_id": cut_epoch, "tournament_batch_id": batch_ids["rerank"]})
     ]
     assert "finish_rebuild" not in calls.names()
+
+
+def _flaky(seen: list, bad: set, error: Exception):
+    """An ingester that records each outcome in order and raises ``error`` on a succeeded
+    outcome whose batch item is in ``bad``."""
+
+    async def ingest(db_factory_, outcomes):
+        for outcome in outcomes:
+            if outcome.batch_item_id in bad and outcome.kind == "succeeded":
+                raise error
+            seen.append(outcome)
+
+    return ingest
+
+
+def _status_error(status: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("GET", "https://invented.example/fetch")
+    return httpx.HTTPStatusError(
+        f"invented {status}", request=request, response=httpx.Response(status, request=request),
+    )
+
+
+async def _poll_at(db_factory, failures: dict, *minutes: float) -> list[int]:
+    return [
+        await worker.ingest_ended(
+            db_factory, failures=failures, now=NOW + timedelta(minutes=m),
+        )
+        for m in minutes
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_bad_outcome_does_not_hold_its_batch(db_factory, settings, calls, monkeypatch):
+    """D71: a chunk whose ingestion raises is routed again one outcome at a time, so the good
+    outcomes land; the bad one keeps its batch unmarked and, at its third failed poll, is
+    recorded as errored, which lets the batch be marked."""
+    batch_id = uuid.uuid4()
+    bad, good = _outcome(batch_id, "screen"), _outcome(batch_id, "screen")
+    seen: list[BatchOutcome] = []
+    monkeypatch.setitem(
+        worker.INGESTERS, "screen", _flaky(seen, {bad.batch_item_id}, ValueError("invented")),
+    )
+    calls.chunks = [(batch_id, [bad, good], True)]
+    failures: dict = {}
+
+    assert await _poll_at(db_factory, failures, 0) == [0]
+    assert seen == [good]
+    assert failures[bad.batch_item_id].count == 1
+    assert "mark_ingested" not in calls.names()
+
+    assert await _poll_at(db_factory, failures, 5, 10) == [0, 1]
+    assert [(o.kind, o.message) for o in seen if o.batch_item_id == bad.batch_item_id] == [
+        ("errored", None)
+    ]
+    assert [args[1] for args, _ in calls.args("mark_ingested")] == [batch_id]
+    assert failures == {}
+
+
+@pytest.mark.asyncio
+async def test_an_outage_like_error_alone_waits_its_grace(
+    db_factory, settings, calls, monkeypatch,
+):
+    """D71: one outcome failing with a 5xx while the rest of its batch lands is given up only
+    once it has failed three polls over at least ``_OUTAGE_GRACE``."""
+    batch_id = uuid.uuid4()
+    first, after, later = (_outcome(batch_id, "extract") for _ in range(3))
+    seen: list[BatchOutcome] = []
+    monkeypatch.setitem(
+        worker.INGESTERS, "extract", _flaky(seen, {first.batch_item_id}, _status_error(503)),
+    )
+    calls.chunks = [(batch_id, [first, after], False), (batch_id, [later], True)]
+    failures: dict = {}
+
+    assert await _poll_at(db_factory, failures, 0, 5, 10, 60) == [0, 0, 0, 0]
+    assert {o.batch_item_id for o in seen} == {after.batch_item_id, later.batch_item_id}
+    assert failures[first.batch_item_id].count == 4
+
+    grace = worker._OUTAGE_GRACE.total_seconds() / 60
+    assert await _poll_at(db_factory, failures, grace) == [1]
+    assert [o.kind for o in seen if o.batch_item_id == first.batch_item_id] == ["errored"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [_status_error(503), ValueError("invented")])
+async def test_a_fault_failing_every_outcome_gives_none_up(
+    db_factory, settings, calls, monkeypatch, error,
+):
+    """D71: when no outcome of a batch routes (an outage, or a fault in the ingester itself),
+    none is given up however long it lasts, and the batch's later chunks wait."""
+    batch_id = uuid.uuid4()
+    outcomes = [_outcome(batch_id, "triage") for _ in range(3)]
+    seen: list[BatchOutcome] = []
+    monkeypatch.setitem(
+        worker.INGESTERS, "triage", _flaky(seen, {o.batch_item_id for o in outcomes}, error),
+    )
+    calls.chunks = [(batch_id, outcomes[:2], False), (batch_id, outcomes[2:], True)]
+    failures: dict = {}
+
+    assert await _poll_at(db_factory, failures, 0, 5, 10, 60, 180, 600) == [0] * 6
+    assert seen == []
+    assert {key: f.count for key, f in failures.items()} == {
+        outcomes[0].batch_item_id: 6, outcomes[1].batch_item_id: 6,
+    }
+    assert "mark_ingested" not in calls.names()
+
+
+@pytest.mark.parametrize(("error", "outage"), [
+    (ValueError("invented"), False),
+    (_status_error(400), False),
+    (_status_error(404), False),
+    (_status_error(429), True),
+    (_status_error(503), True),
+    (httpx.ConnectError("invented"), True),
+    (TimeoutError(), True),
+])
+def test_outage_classification(error, outage):
+    assert worker._outage(error) is outage
 
 
 @pytest.mark.asyncio

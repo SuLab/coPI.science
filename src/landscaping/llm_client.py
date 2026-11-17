@@ -6,7 +6,10 @@ JSON is parsed by callers, through ``src.services.json_extract.extract_json``.
 """
 from __future__ import annotations
 
+import copy
+import json
 import time
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -54,6 +57,10 @@ class StageSpec:
     effort: str
     max_tokens: int
     retry_max_tokens: int
+    #: Send the schema through ``share_subschemas``. Inlined, the S6 and S9 schemas compile to
+    #: a grammar larger than the API accepts ("The compiled grammar is too large", measured
+    #: 2026-11-17 on every model, D72); the other stages keep the schema they were judged with.
+    shared_defs: bool = False
 
 
 # Effort per stage (D32, §9.2). The S6 full-text re-extraction runs on the deep model at
@@ -68,7 +75,7 @@ STAGE_SPECS: dict[str, StageSpec] = {
         StageSpec("triage", "landscape_triage_model", "medium",
                   TRIAGE_MAX_TOKENS, TRIAGE_RETRY_MAX_TOKENS),
         StageSpec("deep", "landscape_deep_model", "high",
-                  DEEP_MAX_TOKENS, DEEP_RETRY_MAX_TOKENS),
+                  DEEP_MAX_TOKENS, DEEP_RETRY_MAX_TOKENS, shared_defs=True),
         StageSpec("deep_extract", "landscape_deep_model", "high",
                   DEEP_EXTRACT_MAX_TOKENS, DEEP_EXTRACT_RETRY_MAX_TOKENS),
         StageSpec("rerank", "landscape_rerank_model", "medium",
@@ -78,7 +85,7 @@ STAGE_SPECS: dict[str, StageSpec] = {
         StageSpec("label", "landscape_label_model", "medium",
                   LABEL_MAX_TOKENS, LABEL_RETRY_MAX_TOKENS),
         StageSpec("final", "landscape_final_model", "high",
-                  FINAL_MAX_TOKENS, FINAL_RETRY_MAX_TOKENS),
+                  FINAL_MAX_TOKENS, FINAL_RETRY_MAX_TOKENS, shared_defs=True),
     )
 }
 
@@ -94,6 +101,64 @@ def require_priced(model: str) -> None:
         raise UnpricedModelError(f"model {model!r} is not priced in llm_pricing.PRICES")
 
 
+#: A repeated subschema whose canonical JSON is shorter than this stays inline.
+_SHARE_MIN_CHARS = 40
+
+
+def share_subschemas(schema: dict) -> dict:
+    """``schema`` with each subschema that appears more than once (canonical JSON of at least
+    ``_SHARE_MIN_CHARS`` characters) moved into ``$defs`` as ``s0``, ``s1``, ... and referenced
+    by ``$ref``, the largest first, so repeats nested in a definition are shared too (D72).
+
+    It accepts exactly the documents ``schema`` accepts. ``schema`` is not changed; one with no
+    such repeat, or that already has ``$defs``, comes back equal to it.
+    """
+    out = copy.deepcopy(schema)
+    if "$defs" in out:
+        return out
+    defs: dict[str, dict] = {}
+    while True:
+        counts: Counter[str] = Counter()
+        for root in (out, *defs.values()):
+            for node in _subschemas(root):
+                counts[json.dumps(node, sort_keys=True)] += 1
+        repeated = [key for key, n in counts.items() if n > 1 and len(key) >= _SHARE_MIN_CHARS]
+        if not repeated:
+            break
+        best = max(repeated, key=lambda key: (len(key), key))
+        name = f"s{len(defs)}"
+        for root in (out, *defs.values()):
+            _swap(root, best, {"$ref": f"#/$defs/{name}"})
+        defs[name] = json.loads(best)
+    if defs:
+        out["$defs"] = defs
+    return out
+
+
+def _subschemas(node: Any) -> Any:
+    """Every dict strictly below ``node``, depth first."""
+    children = node.values() if isinstance(node, dict) else node if isinstance(node, list) else ()
+    for child in children:
+        if isinstance(child, dict):
+            yield child
+        yield from _subschemas(child)
+
+
+def _swap(node: Any, key: str, ref: dict) -> None:
+    """Replace every dict strictly below ``node`` whose canonical JSON is ``key`` with ``ref``."""
+    if isinstance(node, dict):
+        items = list(node.items())
+    elif isinstance(node, list):
+        items = list(enumerate(node))
+    else:
+        return
+    for slot, child in items:
+        if isinstance(child, dict) and json.dumps(child, sort_keys=True) == key:
+            node[slot] = dict(ref)
+        else:
+            _swap(child, key, ref)
+
+
 def build_request(
     stage: str, *, model: str, system: str, user: str, schema: dict | None,
     tools: list[dict] | None = None, retry: bool = False,
@@ -102,13 +167,15 @@ def build_request(
     arguments of a synchronous call.
 
     Adaptive thinking and the stage's effort always; ``schema`` becomes a JSON-schema
-    ``output_config.format``. ``retry=True`` uses the stage's ``retry_max_tokens``, for the
+    ``output_config.format``, through ``share_subschemas`` for a stage with
+    ``StageSpec.shared_defs``. ``retry=True`` uses the stage's ``retry_max_tokens``, for the
     one re-run after a ``max_tokens`` stop. No sampling parameters are ever set (§9.2).
     """
     spec = STAGE_SPECS[stage]
     output_config: dict[str, Any] = {"effort": spec.effort}
     if schema is not None:
-        output_config["format"] = {"type": "json_schema", "schema": schema}
+        sent = share_subschemas(schema) if spec.shared_defs else schema
+        output_config["format"] = {"type": "json_schema", "schema": sent}
     request: dict[str, Any] = {
         "model": model,
         "max_tokens": spec.retry_max_tokens if retry else spec.max_tokens,
