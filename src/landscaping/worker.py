@@ -35,9 +35,10 @@ batch reconciliation before returning stale ``running`` rows to ``pending``.
 - ``pilot`` (D68): the pilot slices and positive controls, the bake-off once they are in, then
   S2-S9 on the pilot documents only once the stage model settings equal the bake-off's picks
   (no review batch), then the S4 repeatability run and the pilot report.
-- ``backfill``: S2-S4 only; S5-S9 wait. Once every enabled source's backfill slices have ended
-  and no S2-S4 work is owed, the worker sets the phase to ``continuous`` and stamps the current
-  candidate's ``drained_at`` (D69).
+- ``backfill``: S2-S4; S5-S9 wait, unless an admin asks for a preview (``PREVIEW_KEY``): the
+  next loop takes one cut, and S6-S9 then run on it (D77). Once every enabled source's backfill
+  slices have ended and no S2-S4 work is owed, the worker sets the phase to ``continuous`` and
+  stamps the current candidate's ``drained_at`` (D69).
 - ``continuous``: the whole funnel, review batches, probes and the expert sample.
 
 No candidate activates outside ``continuous`` (D70). While ``ledger.over_daily_cap`` is true, no
@@ -135,8 +136,14 @@ ASSEMBLY_PER_LOOP = 200
 #: Ideas assembled at once (D76). Each evidence source's own pacer still bounds its request
 #: rate; assembling ideas side by side overlaps their waits.
 ASSEMBLY_CONCURRENCY = 4
-#: Phases in which S5-S9 run (D69).
+#: Phases in which S5-S9 run, S5 on its daily schedule (D69).
 _DEEP_PHASES = ("pilot", "continuous")
+#: ``app_settings`` key of the backfill preview (D77). In phase ``backfill``, ``requested`` asks
+#: for one S5 cut, and the loop that takes it sets ``taken``; while either value stands, S6-S9
+#: run on the epoch's current cut. Any other value, no row, or another phase: no preview.
+PREVIEW_KEY = "landscape_preview_cut"
+PREVIEW_REQUESTED = "requested"
+PREVIEW_TAKEN = "taken"
 _ALL_STAGES = (
     "screen", "extract", "triage", "cut", "deep", "rerank", "similarity", "label", "final",
 )
@@ -257,6 +264,14 @@ class _Loop:
     llm: bool
     #: S2-S9 may run: always outside ``pilot``; in ``pilot`` once the bake-off's picks are applied.
     funnel: bool
+    #: Phase ``backfill`` only: the preview's state, ``PREVIEW_REQUESTED`` or ``PREVIEW_TAKEN``
+    #: (D77); None otherwise.
+    preview: str | None = None
+
+    @property
+    def deep(self) -> bool:
+        """S6-S9 run: in ``pilot`` and ``continuous``, and in ``backfill`` during a preview."""
+        return self.phase in _DEEP_PHASES or self.preview is not None
 
 
 async def _step(name: str, work: Awaitable[Any], default: Any = None) -> Any:
@@ -398,6 +413,7 @@ async def run_once(db_factory, state: WorkerState, *, now: datetime) -> None:
         return
     loop = _Loop(
         now=now, phase=phase, llm=not over_cap, funnel=await _funnel_open(db_factory, phase),
+        preview=await _preview(db_factory, phase),
     )
     work = await _working_epochs(db_factory)
     await _step("submissions", _submission_step(db_factory, state, loop, work))
@@ -485,6 +501,15 @@ async def _funnel_open(db_factory, phase: str) -> bool:
         return True
     async with db_factory() as db:
         return picks_applied(await _latest_report(db, "bakeoff"))
+
+
+async def _preview(db_factory, phase: str) -> str | None:
+    """The backfill preview's state (``PREVIEW_KEY``, D77); None outside phase ``backfill``."""
+    if phase != "backfill":
+        return None
+    async with db_factory() as db:
+        value = (await _app_setting(db, PREVIEW_KEY) or "").lower()
+    return value if value in (PREVIEW_REQUESTED, PREVIEW_TAKEN) else None
 
 
 # --- polling and ingestion --------------------------------------------------------------------
@@ -897,12 +922,14 @@ async def _over_cap(db_factory) -> bool:
 # --- step 3: synchronous work -----------------------------------------------------------------
 
 
-def _fallback_adapters(phase: str) -> tuple[FallbackAdapter, ...]:
+def _fallback_adapters(deep: bool) -> tuple[FallbackAdapter, ...]:
+    """The fallback chains to run: S2-S4 and the reject audit's, and with ``deep`` (``_Loop.deep``)
+    S5-S9's too."""
     early = (
         *screen_stage.FALLBACKS, *extract_stage.FALLBACKS, *triage_stage.FALLBACKS,
         *reject_audit.FALLBACKS,
     )
-    if phase not in _DEEP_PHASES:
+    if not deep:
         return early
     return (*early, *comparator.FALLBACKS, *s8.FALLBACKS, *final_stage.FALLBACKS)
 
@@ -920,9 +947,9 @@ async def _sync_step(db_factory, state: WorkerState, loop: _Loop, work: list) ->
             return
     tasks: list[tuple[str, Callable[[], Awaitable[Any]]]] = [
         (f"fallbacks {adapter.stage}", _fallback_thunk(db_factory, adapter))
-        for adapter in _fallback_adapters(loop.phase)
+        for adapter in _fallback_adapters(loop.deep)
     ]
-    if loop.phase in _DEEP_PHASES:
+    if loop.deep:
         for epoch_id in work:
             tasks += await _deep_tasks(db_factory, epoch_id)
             tasks += await _rerank_tasks(db_factory, state, epoch_id)
@@ -1088,8 +1115,8 @@ async def _s6_passed(db: AsyncSession, epoch_id: uuid.UUID, cut: LandscapeCut) -
 async def _cut_step(db_factory, state: WorkerState, loop: _Loop, work: list) -> None:
     """S5 when due (and every loop while a boundary tournament is pending), S8 once S6 has
     ended for the current cut, then the label and S9 batches. Only in ``pilot`` (picks applied)
-    and ``continuous`` (D69)."""
-    if loop.phase not in _DEEP_PHASES or not loop.funnel:
+    and ``continuous`` (D69), and in ``backfill`` during a preview (D77)."""
+    if not loop.deep or not loop.funnel:
         return
     for epoch_id in work:
         await _step(f"cut {epoch_id}", _cut_epoch(db_factory, loop, epoch_id))
@@ -1099,6 +1126,10 @@ async def _cut_step(db_factory, state: WorkerState, loop: _Loop, work: list) -> 
 
 
 async def _cut_epoch(db_factory, loop: _Loop, epoch_id: uuid.UUID) -> None:
+    """Advance a pending boundary tournament, or take a cut when one is due: on S5's daily
+    schedule (``cut_stage.cut_due``) in ``pilot`` and ``continuous``; in ``backfill`` only at a
+    preview request, which is then marked ``taken`` (D77). A failure leaves the request
+    standing for the next loop."""
     C, T, Idea = LandscapeCut, LandscapeTriage, LandscapeIdea
     async with db_factory() as db:
         pending = await db.scalar(select(exists().where(
@@ -1111,8 +1142,17 @@ async def _cut_epoch(db_factory, loop: _Loop, epoch_id: uuid.UUID) -> None:
                 T.idea_version == Idea.version_hash,
             )
         ) or 0
-    if pending or cut_stage.cut_due(now=loop.now, s4_pending=s4_pending, last_cut_at=last):
+    if loop.phase in _DEEP_PHASES:
+        due = cut_stage.cut_due(now=loop.now, s4_pending=s4_pending, last_cut_at=last)
+    else:
+        due = loop.preview == PREVIEW_REQUESTED
+    if pending or due:
         await cut_stage.run_cut(db_factory, epoch_id, may_submit=loop.llm)
+    if loop.preview == PREVIEW_REQUESTED:
+        async with db_factory() as db:
+            await _set_app_setting(db, PREVIEW_KEY, PREVIEW_TAKEN)
+            await db.commit()
+        logger.info("preview cut taken for epoch %s; S6-S9 run on it (D77)", epoch_id)
 
 
 async def _group_epoch(db_factory, state: WorkerState, epoch_id: uuid.UUID) -> None:

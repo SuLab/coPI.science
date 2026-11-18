@@ -98,7 +98,7 @@ SYNC_LLM = frozenset({
     "run_deep", "update_rankings", "judge_similarity", "run_fallbacks", "run_regression",
     "run_bakeoff", "run_s4_repeatability",
 })
-#: S5-S9 and review-batch work, none of which runs in phase backfill.
+#: S5-S9 and review-batch work, none of which runs in phase backfill without a preview (D77).
 DEEP_WORK = frozenset({
     "run_cut", "build_opportunities", "submit_label_batch", "submit_final_batch", "run_deep",
     "update_rankings", "judge_similarity", "issue_weekly_batch", "draw_probes", "expert_sample",
@@ -599,7 +599,7 @@ async def test_daily_cap_reached_mid_loop_skips_remaining_sync_tasks(
     await _idea(db_factory, epoch_id, deep_status="pending")
     await worker.run_once(db_factory, worker.WorkerState(), now=NOW)
 
-    assert len(worker._fallback_adapters("continuous")) > 1
+    assert len(worker._fallback_adapters(True)) > 1
     assert calls.names().count("run_fallbacks") == 1
     assert not set(calls.names()) & {"run_deep", "update_rankings", "judge_similarity"}
 
@@ -927,6 +927,52 @@ async def test_no_review_batch_before_backfill_cut(db_factory, settings, calls):
     assert await _phase(db_factory) == "backfill"
     async with db_factory() as db:
         assert await db.scalar(select(func.count()).select_from(LandscapeReviewBatch)) == 0
+
+
+@pytest.mark.asyncio
+async def test_backfill_preview_takes_one_cut_then_runs_s6_to_s9(db_factory, settings, calls):
+    await _set(db_factory, "landscape_phase", "backfill")
+    candidate = await _epoch(db_factory, "candidate", rejudge_started_at=NOW - timedelta(days=9))
+    await _document(db_factory)
+    await _set(db_factory, worker.PREVIEW_KEY, worker.PREVIEW_REQUESTED)
+    state = worker.WorkerState()
+
+    await worker.run_once(db_factory, state, now=NOW)
+    assert calls.args("run_cut") == [((db_factory, candidate), {"may_submit": True})]
+    async with db_factory() as db:
+        assert await worker._app_setting(db, worker.PREVIEW_KEY) == worker.PREVIEW_TAKEN
+
+    # run_cut is stubbed: the cut it would have taken, with its top idea queued for S6.
+    idea = await _idea(db_factory, candidate, deep_status="pending")
+    await _cut(db_factory, candidate, [idea], at=NOW)
+    await worker.run_once(db_factory, state, now=NOW + timedelta(days=1))
+
+    names = calls.names()
+    assert names.count("run_cut") == 1, "backfill takes no daily cut"
+    assert calls.args("run_deep") == [((db_factory, idea.id), {"epoch_id": candidate})]
+    assert {"update_rankings", "submit_label_batch", "submit_final_batch"} <= set(names)
+    assert not set(names) & {"issue_weekly_batch", "draw_probes", "expert_sample"}
+    assert await _phase(db_factory) == "backfill"
+    assert (await _epoch_row(db_factory, candidate)).status == "candidate"
+
+
+@pytest.mark.asyncio
+async def test_backfill_preview_over_cap_takes_the_cut_and_calls_nothing(
+    db_factory, settings, calls,
+):
+    calls.results["over_daily_cap"] = True
+    await _set(db_factory, "landscape_phase", "backfill")
+    candidate = await _epoch(db_factory, "candidate", rejudge_started_at=NOW - timedelta(days=9))
+    await _document(db_factory)
+    await _idea(db_factory, candidate, deep_status="pending")
+    await _set(db_factory, worker.PREVIEW_KEY, worker.PREVIEW_REQUESTED)
+
+    await worker.run_once(db_factory, worker.WorkerState(), now=NOW)
+
+    assert calls.args("run_cut") == [((db_factory, candidate), {"may_submit": False})]
+    assert not set(calls.names()) & (SUBMISSIONS | SYNC_LLM)
+    async with db_factory() as db:
+        assert await worker._app_setting(db, worker.PREVIEW_KEY) == worker.PREVIEW_TAKEN
 
 
 @pytest.mark.asyncio

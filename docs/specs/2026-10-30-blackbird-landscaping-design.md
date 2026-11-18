@@ -258,6 +258,7 @@ The owner may override any of these. Each names the section that carries it.
 | D74 | S3 agreement matches the targets and diseases each side names, by any shared id or folded name, and passes at 90% of the reference model's agreement with itself, measured by asking it the sample again; the regression gate asks it again on the stored items. | The exact (targets, direction, disease) key measured sampling noise: Opus 5 scored 0.31-0.36 against its own earlier answers, so no model could reach the absolute 0.90, and every epoch failed the gate. | 10.1, 10.4 |
 | D75 | In sync batch mode, the poll runs each stage's local batches in a lane of its own, side by side, each at `landscape_sync_concurrency` calls; ingestion stays one chunk at a time. A poll starts no new call after 15 minutes and returns, and a chunk already ingested is not replayed at the next. | One batch at a time, the backfill's 21,000-item screening batch would have held Opus extraction back about 15 hours, and the poll held the loop's submissions as long (2026-11-17). | 12.2 |
 | D76 | Due source fetches run beside the loop, one background task per source, each source's slices one at a time; a source whose task still runs starts no second. Evidence assembly takes four ideas at a time, and S3 ingestion normalizes four results of a chunk at once, then stores them one at a time in order. Each outside service keeps its own pacer. | The loop made no model call for 10-13 of every 25-28 minutes while it fetched (one failing JHTV slice waits six minutes between its tries), assembled evidence and normalized names one at a time; ingestion also held every stage's lane while it normalized, so extraction ran at about 260 documents an hour (2026-11-18). | 12.2 |
+| D77 | In phase `backfill`, an admin can ask for a preview (`app_settings.landscape_preview_cut` = `requested`): the next loop takes one S5 cut of the candidate's pool as triaged so far, marks the request `taken`, and S6-S9 then run on that cut under the daily cap. No further cut is taken before the drain. The preview's groupings stay provisional: activation still needs a cut taken after the drain (D70), which supersedes them, and S6 results and labels carry over to it where the ideas and groupings are unchanged. | The owner wanted early opportunities while the backfill was still about a day and a half from draining (2026-11-18). A one-off script cannot run S8's label and S9 batches in sync mode: the worker releases any local batch it did not submit itself. | 7.6, 15 |
 
 ## 4. Constraints
 
@@ -2299,7 +2300,10 @@ The rendered-page gate and the help-link test cover the new pages.
 2. **Phase 1, backfill.**
    - The 3-year window runs in monthly slices, oldest first. NCBI-heavy slices run during
      NCBI's off-peak hours (K8).
-   - S2-S4 run on every backfill document; S5-S9 wait for the phase to change.
+   - S2-S4 run on every backfill document; S5-S9 wait for the phase to change, except for
+     a preview an admin asks for: one cut of the pool triaged so far, with S6-S9 run on it.
+     Its groupings stay the candidate's and never activate; the post-drain cut replaces
+     them (D77).
 3. **Phase 2, continuous.** The worker enters it by itself once the backfill has drained (D69),
    and the D17 intake cadence starts. S5-S9 then run on the whole window; the first ready cut
    activates the first epoch (§7.11 step 4, D70), and the first weekly batch is issued

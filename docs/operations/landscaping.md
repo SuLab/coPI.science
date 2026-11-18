@@ -176,6 +176,23 @@ starts no new work (no intake, no submissions, no synchronous calls) but keeps p
 ingesting the batches it already submitted. `app_settings.landscape_phase` holds the phase
 as plain text: `pilot`, `backfill` or `continuous`, and unset means `pilot`.
 
+**A preview during the backfill** (D77). The cut, S6-S9 and the opportunities otherwise wait
+for the backfill to drain. To see opportunities earlier, set the preview flag:
+
+```sql
+INSERT INTO app_settings (key, value) VALUES ('landscape_preview_cut', 'requested')
+ON CONFLICT (key) DO UPDATE SET value = 'requested', updated_at = now();
+```
+
+The next loop takes one cut of the pool as triaged so far (the top 1%) and sets the value
+to `taken`. S6, S7, S8, the labels and S9 then run on that cut, under the daily cap like any
+other work, and their spend counts toward it (about $3 an idea for S6 and $0.60 an
+opportunity for S9). No second cut is taken before the drain; set `requested` again for a
+fresh one. Delete the row to stop the preview's work. The results are the candidate's
+provisional groupings and assessments: the Landscape page does not show them, and they never
+activate. The first cut after the drain replaces them, and it reuses S6 results and labels
+where the ideas and groupings are unchanged.
+
 **A result that cannot be ingested** (D71). When a batch result's ingestion raises, the
 worker ingests the rest of its chunk one result at a time and retries the failing one at
 each poll. If other results of the batch ingest, then at its third failure, or after two
