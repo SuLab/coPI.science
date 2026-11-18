@@ -12,6 +12,9 @@ MIN_INTERVAL_S = 0.5
 _PACER = Pacer(MIN_INTERVAL_S)
 PAGE_LIMIT = 1000
 _MOLECULE_FIELDS = "molecule_chembl_id,pref_name,max_phase,molecule_type"
+#: Attempts per molecule-name request: one retry (D81). Some names fail on ChEMBL's side again
+#: and again, and agent normalization takes a failure as no match.
+MOLECULE_ATTEMPTS = 2
 
 
 def _make_client() -> httpx.AsyncClient:
@@ -27,12 +30,14 @@ def _phase(value: object) -> float | None:
         return None
 
 
-async def _paged(path: str, key: str, params: dict) -> list[dict]:
+async def _paged(
+    path: str, key: str, params: dict, *, attempts: int = evidence.ATTEMPTS
+) -> list[dict]:
     rows: list[dict] = []
     offset = 0
     while True:
         body = await evidence.request_json(
-            _make_client, f"{BASE_URL}/{path}", pacer=_PACER,
+            _make_client, f"{BASE_URL}/{path}", pacer=_PACER, attempts=attempts,
             params={**params, "limit": PAGE_LIMIT, "offset": offset})
         page = body.get(key) or []
         rows.extend(page)
@@ -79,11 +84,13 @@ async def chembl_target_for_uniprot(accession: str) -> str | None:
 
 async def chembl_molecule(name: str) -> list[dict]:
     """Every molecule whose preferred name or a synonym equals ``name`` (case-insensitive),
-    one per ChEMBL id. The caller takes an id only when exactly one comes back."""
+    one per ChEMBL id. The caller takes an id only when exactly one comes back. Each request
+    is retried once (``MOLECULE_ATTEMPTS``)."""
     found: dict[str, dict] = {}
     for lookup in ("pref_name__iexact", "molecule_synonyms__molecule_synonym__iexact"):
         rows = await _paged("molecule.json", "molecules",
-                            {lookup: name, "only": _MOLECULE_FIELDS})
+                            {lookup: name, "only": _MOLECULE_FIELDS},
+                            attempts=MOLECULE_ATTEMPTS)
         for r in rows:
             chembl_id = r.get("molecule_chembl_id")
             if chembl_id and chembl_id not in found:

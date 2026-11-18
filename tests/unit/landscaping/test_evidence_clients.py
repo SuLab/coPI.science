@@ -310,6 +310,21 @@ async def test_chembl_target_for_uniprot_exact_one(monkeypatch):
     assert params[0]["organism"] == "Homo sapiens"
 
 
+async def test_chembl_molecule_retries_a_failing_name_once(monkeypatch):
+    """D81: a molecule-name request ChEMBL keeps failing is tried twice, then raises."""
+    calls = []
+
+    def handler(request):
+        calls.append(dict(request.url.params))
+        return httpx.Response(500, json={"error_message": "invented failure"})
+
+    monkeypatch.setattr(chembl, "_make_client", _client_with(handler))
+    with pytest.raises(httpx.HTTPStatusError):
+        await chembl.chembl_molecule("invented liposomes")
+    assert len(calls) == chembl.MOLECULE_ATTEMPTS == 2
+    assert all(c["pref_name__iexact"] == "invented liposomes" for c in calls)
+
+
 # --- pacing and budgets -------------------------------------------------------------------
 
 

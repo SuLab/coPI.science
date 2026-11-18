@@ -209,7 +209,10 @@ hours when the error looks like an outage, it records the result as `errored`: t
 resubmitted once, then ends `failed:errored`. The log says `could not be ingested after N
 tries: recorded as errored`, with the item and row; fix the cause before the resubmission
 comes back. When no result of a batch ingests (an outage, or a fault in the ingester),
-nothing is given up and the batch waits. A restart forgets the counts.
+nothing is given up and the batch waits. A restart forgets the counts. A ChEMBL drug-name
+lookup is the exception (D81): retried once, a 429, 5xx or network failure leaves the agent
+unmatched instead of failing the result (log: `ChEMBL lookup of agent … failed; left
+unmatched`), and the alias step looks it up again on a later day.
 
 **Epoch overrides.** A candidate that fails its regression check is held. An admin can let
 it go ahead from the pipeline page, with a reason; the override is recorded with the admin

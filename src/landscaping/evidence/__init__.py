@@ -38,10 +38,11 @@ async def request_json(
     json_body: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
     none_on_404: bool = False,
+    attempts: int = ATTEMPTS,
 ) -> Any:
-    """GET ``url`` (POST when ``json_body`` is given), paced and retried, and return the
-    decoded JSON. A 404 returns None when ``none_on_404``; any other error status after the
-    retries raises ``httpx.HTTPStatusError``."""
+    """GET ``url`` (POST when ``json_body`` is given), paced and retried up to ``attempts``
+    times in all, and return the decoded JSON. A 404 returns None when ``none_on_404``; any
+    other error status after the retries raises ``httpx.HTTPStatusError``."""
     async with client_factory() as client:
         if json_body is not None:
             def call():
@@ -50,7 +51,7 @@ async def request_json(
             def call():
                 return client.get(url, params=params, headers=headers)
         resp = await with_retries(
-            call, attempts=ATTEMPTS, backoff=backoff, retry_statuses=TRANSIENT_STATUSES,
+            call, attempts=attempts, backoff=backoff, retry_statuses=TRANSIENT_STATUSES,
             retry_exceptions=RETRYABLE_TRANSPORT, pacer=pacer,
         )
     if resp.status_code == 404 and none_on_404:

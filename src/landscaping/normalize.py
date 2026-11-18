@@ -11,10 +11,18 @@ disease's standard name (``standard_name``), so that the same entity worded two 
 identity (D73). Each is tried first, and names the provisional key when nothing matches;
 ``as_written`` is never changed.
 
+A ChEMBL molecule lookup that fails on ChEMBL's side (a 429 or 5xx after one retry, or a
+network failure) leaves the agent unmatched (D81), so an extraction is not held behind it;
+``ideas.resolve_aliases`` normalizes the provisional idea again on a later day.
+
 PubTator3 annotations are read in the flat shape ``evidence.pubtator.pubtator_annotations``
 returns: ``type``, ``text``, ``identifier`` and ``name`` keys on each mention.
 """
 from __future__ import annotations
+
+import logging
+
+import httpx
 
 from src.landscaping.evidence.chembl import chembl_molecule
 from src.landscaping.evidence.hgnc import hgnc_lookup
@@ -28,6 +36,9 @@ from src.landscaping.evidence.mondo import (
 )
 from src.landscaping.evidence.opentargets import ot_target
 from src.landscaping.quotes import fold_text
+from src.services.http_pacing import TRANSIENT_STATUSES
+
+logger = logging.getLogger(__name__)
 
 #: Target kinds that name one gene product; pathway nodes, complexes and cell populations
 #: are never matched to a single HGNC id.
@@ -260,12 +271,21 @@ async def normalize_disease(disease: dict, *, pubtator: list[dict]) -> dict:
 async def normalize_agent(agent: dict) -> dict:
     """A copy of ``agent`` with ``chembl_id`` added when its name resolves to exactly one
     ChEMBL molecule; otherwise unchanged (the chemistry key then uses the name, §7.4 step 7).
+    A lookup ChEMBL fails to answer counts as no match (D81, module docstring).
     """
     result = dict(agent)
     name = str(agent.get("as_written") or "").strip()
     if not name:
         return result
-    molecules = await chembl_molecule(name)
+    try:
+        molecules = await chembl_molecule(name)
+    except (httpx.HTTPStatusError, httpx.TransportError) as exc:
+        if isinstance(exc, httpx.HTTPStatusError) and (
+            exc.response.status_code not in TRANSIENT_STATUSES
+        ):
+            raise
+        logger.warning("ChEMBL lookup of agent %r failed (%s); left unmatched", name, exc)
+        return result
     chembl_id = _single(
         str(m.get("molecule_chembl_id") or "") for m in molecules if isinstance(m, dict)
     )

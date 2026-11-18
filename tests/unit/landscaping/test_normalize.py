@@ -3,6 +3,7 @@
 The evidence clients are replaced by in-memory fakes; every gene symbol, id and name below
 is invented except where a real HGNC/MeSH shape is needed.
 """
+import httpx
 import pytest
 
 from src.landscaping import normalize
@@ -244,6 +245,36 @@ async def test_agent_needs_exactly_one_chembl_molecule(monkeypatch):
     for name in ("invented mix", "unknownmab", ""):
         result = await normalize.normalize_agent({"as_written": name, "kind": "other"})
         assert "chembl_id" not in result
+
+
+@pytest.mark.parametrize("failure", [
+    httpx.HTTPStatusError(
+        "invented 500", request=httpx.Request("GET", "https://invented.test"),
+        response=httpx.Response(500),
+    ),
+    httpx.ConnectTimeout("invented timeout"),
+])
+async def test_agent_left_unmatched_when_chembl_fails(monkeypatch, failure):
+    """D81: a lookup ChEMBL fails to answer counts as no match instead of raising."""
+    async def chembl_molecule(name):
+        raise failure
+
+    monkeypatch.setattr(normalize, "chembl_molecule", chembl_molecule)
+    agent = {"as_written": "invented liposomes", "kind": "other"}
+    assert await normalize.normalize_agent(agent) == agent
+
+
+async def test_agent_lookup_rejected_by_chembl_still_raises(monkeypatch):
+    """A 4xx is not an outage: it raises, as before D81."""
+    async def chembl_molecule(name):
+        raise httpx.HTTPStatusError(
+            "invented 400", request=httpx.Request("GET", "https://invented.test"),
+            response=httpx.Response(400),
+        )
+
+    monkeypatch.setattr(normalize, "chembl_molecule", chembl_molecule)
+    with pytest.raises(httpx.HTTPStatusError):
+        await normalize.normalize_agent({"as_written": "invented", "kind": "other"})
 
 
 async def test_pubtator_client_output_is_the_shape_normalize_reads(lookups):
