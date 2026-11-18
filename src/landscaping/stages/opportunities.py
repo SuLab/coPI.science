@@ -25,7 +25,8 @@ change or a member's S6 record changed after its current version was made (the v
 stores member keys only, so the S6 record's ``created_at``/``updated_at`` is what is compared).
 
 **Labels** (stage ``label``) go through a Message Batch for groups of two or more; a single-idea
-group is labelled by its structured line (D29) with no call. Every request takes its system
+group is labelled by its structured line (D29) with no call, clipped to the ``label`` column
+(D80: a line with many modality variants runs past it). Every request takes its system
 prompt and model from the row's epoch's own inputs (``epochs.epoch_inputs``, spec §7.11).
 """
 from __future__ import annotations
@@ -82,6 +83,8 @@ SIMILARITY_STAGE = "similarity"
 LABEL_MAX_CHARS = 60
 THEME_MAX_CHARS = 200
 REASON_MAX_CHARS = 200
+#: Width of the ``label`` column on groupings and versions (D80).
+STORED_LABEL_MAX_CHARS = 200
 #: ``landscape_similarity.verdict`` values. ``refused``, ``truncated`` and ``invalid`` are
 #: stored too, so a pair that cannot be judged is not billed again at the same versions.
 SAME_PROGRAM = "same"
@@ -105,6 +108,11 @@ def _clip(text: Any, limit: int) -> str | None:
         return None
     text = " ".join(text.split())
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _line_label(idea: Any) -> str | None:
+    """The idea's structured line as a stored label (D29), clipped to the column (D80)."""
+    return _clip(structured_line(idea), STORED_LABEL_MAX_CHARS)
 
 
 def _follow(key: str, mapping: dict[str, str]) -> str:
@@ -530,7 +538,7 @@ class _Group:
         """A single idea is labelled by its structured line with no call (D29); a larger
         group waits for the label batch."""
         if len(self.members) == 1:
-            return {"label": structured_line(self.members[0].facts.idea), "status": "done"}
+            return {"label": _line_label(self.members[0].facts.idea), "status": "done"}
         return {"label": None, "theme": None, "platform_signal": None, "status": "pending"}
 
 
@@ -740,7 +748,7 @@ async def activate_groupings(
 async def make_probe(db_factory, *, epoch_id: uuid.UUID, idea_id: uuid.UUID) -> uuid.UUID:
     """A single-idea probe opportunity for a blind batch (spec §7.9, §10.6, D62); commits and
     returns its id. Its one version is flagged ``is_probe``, has no cut and is labelled by the
-    idea's structured line. A probe never joins S8 groups and takes no part in matching or
+    idea's structured line (clipped, D80). A probe never joins S8 groups and takes no part in matching or
     retirement. ``LookupError`` when the idea is not in the epoch."""
     async with db_factory() as db:
         idea = await db.scalar(
@@ -752,7 +760,7 @@ async def make_probe(db_factory, *, epoch_id: uuid.UUID, idea_id: uuid.UUID) -> 
         opportunity = await _new_opportunity(db)
         _mint(
             db, opportunity, epoch_id=epoch_id, cut_id=None, members=[idea.idea_key],
-            edge_kinds=(), label=structured_line(idea), is_probe=True, status="done",
+            edge_kinds=(), label=_line_label(idea), is_probe=True, status="done",
         )
         await db.commit()
         return opportunity.id

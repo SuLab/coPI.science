@@ -26,6 +26,7 @@ from src.landscaping.llm_client import CallResult
 from src.landscaping.schemas import SCHEMAS
 from src.landscaping.stages import opportunities
 from src.landscaping.stages.opportunities import (
+    STORED_LABEL_MAX_CHARS,
     activate_groupings,
     build_opportunities,
     idea_facts,
@@ -157,6 +158,7 @@ async def _idea(
     db_factory, epoch_id, *, lab: str = LAB_WREN, targets: tuple[str, ...] = (T1,),
     disease: str | None = D1, idea_type: str = "biology", key: str | None = None,
     version: str = "v1", deep: str | None = "done", agent: dict | None = None,
+    modality: tuple[str, ...] = ("invented antibody",),
 ) -> _Made:
     """One idea with one qualifying document of ``lab`` and, unless ``deep`` is None, an S6
     record of that status at ``version``."""
@@ -173,7 +175,7 @@ async def _idea(
             targets=[{"hgnc_id": t, "symbol": f"INV{t[-3:]}"} for t in targets] or None,
             disease={"mondo_id": disease, "as_written": f"invented disease {disease[-3:]}"}
             if disease else None,
-            agent=agent, modality_variants=["invented antibody"], jhu_group_count=1,
+            agent=agent, modality_variants=list(modality), jhu_group_count=1,
         )
         db.add_all([doc, idea])
         await db.flush()
@@ -565,6 +567,33 @@ async def test_singleton_label_is_structured_line(db_factory, fake):
     assert version.status == "done" and version.served_by_model is None
     assert await submit_label_batch(db_factory, epoch_id=epoch) == 0
     assert fake.created == [] and fake.sync_calls == []
+
+
+@pytest.mark.asyncio
+async def test_singleton_label_is_clipped_to_the_column(db_factory, fake):
+    """D80: a structured line past the ``label`` column (many modality variants) is clipped,
+    so S8 and a probe still write their rows."""
+    variants = tuple(f"invented small-molecule inhibitor variant {n} (oral)" for n in range(8))
+    candidate = await _epoch(db_factory, "candidate")
+    c = await _idea(db_factory, candidate, modality=variants)
+    active = await _epoch(db_factory, "active")
+    a = await _idea(db_factory, active, modality=variants)
+    p = await _idea(db_factory, active, modality=variants, disease=D2)
+
+    await _s8(db_factory, candidate, [c])
+    await _s8(db_factory, active, [a])
+    await make_probe(db_factory, epoch_id=active, idea_id=p.id)
+
+    (grouping,) = await _groupings(db_factory, candidate)
+    labels = {grouping.member_idea_keys[0]: grouping.label} | {
+        version.member_idea_keys[0]: version.label for _, version in await _live(db_factory)
+    }
+    for made in (c, a, p):
+        label = labels[made.key]
+        line = structured_line(await _get(db_factory, LandscapeIdea, made.id))
+        assert len(line) > STORED_LABEL_MAX_CHARS
+        assert len(label) <= STORED_LABEL_MAX_CHARS and label.endswith("…")
+        assert line.startswith(label[:-1])
 
 
 @pytest.mark.asyncio
