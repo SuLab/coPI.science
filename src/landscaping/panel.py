@@ -20,7 +20,7 @@ PANEL_CHEMISTRY = PANEL_BIOLOGY + ("technologic",)
 
 _STAGE_BAR_PLACEHOLDER = "{stage_bar}"
 
-#: Each domain's question about the idea; the dossier and the S6 summary follow it.
+#: Each domain's question about the idea, asked after the S6 summary and the dossier.
 DOMAIN_QUESTIONS = {
     "scientific": (
         "How rigorous and reproducible is the evidence for this idea, and how well do its "
@@ -75,11 +75,16 @@ def compose_persona(domain: str) -> str:
     return persona
 
 
-def consult_message(domain: str, *, dossier: str, summary: str) -> str:
-    """A consult's user message: the domain question, then the dossier S6 read, then the S6
-    summary (fenced as ``publication_abstract``, since it restates source material)."""
+def consult_record(*, dossier: str, summary: str) -> str:
+    """What every consult of one idea reads first, the same for each domain so the consults
+    share one cached prefix (D79): the S6 summary (fenced as ``publication_abstract``, since it
+    restates source material), then the dossier S6 read."""
     return (
-        f"## Question from Blackbird\n\n{DOMAIN_QUESTIONS[domain]}\n\n"
         f"## The analysis summary\n\n{delimit(summary, 'publication_abstract')}\n\n"
         f"## The dossier\n\n{dossier}"
     )
+
+
+def consult_question(domain: str) -> str:
+    """The domain's question, sent after the record with the domain's persona (D79)."""
+    return f"## Question from Blackbird\n\n{DOMAIN_QUESTIONS[domain]}"

@@ -28,6 +28,10 @@ Steps, each committing on its own (spec §12.2):
 4. **The panel** (``src.landscaping.panel``), for a row that is ``done``. A ``not_met`` gate
    gives ``excluded:deep_gate`` and no consults.
 
+Prompt caching (D79): each analysis round but the last marks the end of the conversation as a
+cache breakpoint, and the consults of one idea share a cached record (the S6 summary and the
+dossier) ahead of each domain's persona, which follows it as a mid-conversation system message.
+
 The system prompts, the panel personas, the rubric (the S6 output schema, the dimensions
 validated and kept, and the weights of the provisional scores) and the models come from the epoch's own inputs (``epochs.epoch_inputs``), never the files on disk or
 the current settings (spec §7.11); each persona was composed as the engine composes it
@@ -58,7 +62,7 @@ from src.landscaping.epochs import EpochInputs
 from src.landscaping.evidence import cache, hpa, openfda, opentargets, orphadata, uniprot
 from src.landscaping.ideas import dossier_documents
 from src.landscaping.llm_client import CallResult, build_request, call_sync
-from src.landscaping.panel import consult_message, panel_domains
+from src.landscaping.panel import consult_question, consult_record, panel_domains
 from src.landscaping.quotes import apply_quote_check
 from src.landscaping.schemas import DISEASE_PROFILE_KEYS, GATING_KEYS, SCHEMAS, stage_schema
 from src.landscaping.scoring import epoch_weighted_score
@@ -90,6 +94,9 @@ MAX_SEARCH_ROUNDS = 8
 FULL_TEXT_MAX_FETCHES = 3
 #: openFDA lookups per analysis; keyless openFDA allows 1,000 requests a day (§6.3).
 MAX_DRUG_LOOKUPS = 10
+#: A prompt-cache breakpoint, the default 5-minute lifetime (D79): analysis rounds and the
+#: consults of one idea follow each other within that.
+CACHE_BREAKPOINT = {"type": "ephemeral"}
 
 _PAPER_KINDS = frozenset({"work", "preprint"})
 _GATE_VALUES = frozenset({"met", "not_met", "unconfirmed"})
@@ -694,12 +701,30 @@ def _with_final_text(messages: list[dict]) -> list[dict]:
     return [*messages[:-1], {**last, "content": [*content, final]}]
 
 
+def _with_breakpoint(messages: list[dict]) -> list[dict]:
+    """``messages`` with a cache breakpoint on the last block of the last one (D79), so each
+    analysis round reads the conversation so far from the cache and writes only what the
+    previous round added (a round adds a few blocks, well inside the 20-block lookback).
+    ``messages`` itself is left unmarked."""
+    last = messages[-1]
+    content = last["content"]
+    blocks = (
+        [{"type": "text", "text": content}] if isinstance(content, str)
+        else [dict(block) for block in content]
+    )
+    blocks[-1] = {**blocks[-1], "cache_control": CACHE_BREAKPOINT}
+    return [*messages[:-1], {**last, "content": blocks}]
+
+
 async def _analysis(
     db_factory, inputs: EpochInputs, dossier: str, row_id: uuid.UUID
 ) -> tuple[CallResult, _Session]:
-    """The analysis conversation: tools while rounds remain, then the JSON answer."""
+    """The analysis conversation: tools while rounds remain, then the JSON answer. Every round
+    but the last marks a cache breakpoint at the end of the conversation (D79); the last sends
+    no tools, which changes the cached prefix, so it marks none."""
     session = _Session()
-    messages: list[dict] = [{"role": "user", "content": dossier}]
+    # Content blocks from the first round on, so every round sends the dossier in one shape.
+    messages: list[dict] = [{"role": "user", "content": [{"type": "text", "text": dossier}]}]
     while True:
         final = session.rounds >= MAX_SEARCH_ROUNDS
         request = build_request(
@@ -707,7 +732,7 @@ async def _analysis(
             schema=stage_schema(STAGE, inputs.rubric),
             tools=None if final else project_search.research_tool_definitions(),
         )
-        request["messages"] = _with_final_text(messages) if final else list(messages)
+        request["messages"] = _with_final_text(messages) if final else _with_breakpoint(messages)
         result = await call_sync(STAGE, request, db_factory=db_factory, item_ref=f"deep:{row_id}")
         blocks = list(getattr(result.message, "content", None) or [])
         tool_blocks = [b for b in blocks if getattr(b, "type", None) == "tool_use"]
@@ -838,18 +863,33 @@ def _judged_from(parsed: dict, refs: Mapping[str, Any], session: _Session, rubri
 # --- step 4: the panel -------------------------------------------------------------------------
 
 
+def _consult_request(inputs: EpochInputs, domain: str, record: str) -> dict:
+    """A consult's request (D79): the record every consult of the idea reads, marked as a
+    cache breakpoint, then the domain's persona and question as a mid-conversation system
+    message. No top-level ``system``, so the consults after the first read the record from the
+    cache instead of paying for it again under seven different system prompts."""
+    request = build_request(STAGE, model=inputs.model(STAGE), system="", user="", schema=None)
+    del request["system"]
+    request["messages"] = [
+        {"role": "user", "content": [
+            {"type": "text", "text": record, "cache_control": CACHE_BREAKPOINT},
+        ]},
+        {"role": "system", "content": f"{inputs.persona(domain)}\n\n{consult_question(domain)}"},
+    ]
+    return request
+
+
 async def _consults(
     db_factory, inputs: EpochInputs, row_id: uuid.UUID, idea_type: str | None,
     dossier: str, summary: str,
 ) -> list[dict]:
-    """One consult per panel domain (D12); a consult that errors, is refused or says nothing
+    """One consult per panel domain (D12), one after another, so each after the first reads
+    the shared record from the cache (D79); a consult that errors, is refused or says nothing
     is logged and left out."""
     consults = []
+    record = consult_record(dossier=dossier, summary=summary)
     for domain in panel_domains(idea_type):
-        request = build_request(
-            STAGE, model=inputs.model(STAGE), system=inputs.persona(domain),
-            user=consult_message(domain, dossier=dossier, summary=summary), schema=None,
-        )
+        request = _consult_request(inputs, domain, record)
         result = await call_sync(
             STAGE, request, db_factory=db_factory, item_ref=f"deep:{row_id}:{domain}"
         )

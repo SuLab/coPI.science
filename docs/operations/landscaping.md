@@ -193,6 +193,15 @@ provisional groupings and assessments: the Landscape page does not show them, an
 activate. The first cut after the drain replaces them, and it reuses S6 results and labels
 where the ideas and groupings are unchanged.
 
+**What S4 and S6 are sent** (D78, D79). The S4 dossier shows each Open Targets target cut
+down: depMap per tissue (cell-line count, lowest, median and highest gene effect), the 10
+furthest-advanced drug rows with the row count, the 10 highest-expression tissues with the row
+count, and no homologues; the data flags name the depMap summary instead of repeating it. The
+stored evidence and flags are unchanged, and so is what S6, S9 and the detail page show. S6
+caches its analysis rounds and sends its consults one shared, cached record, with each persona
+as a mid-conversation system message (supported on the S6 models, Opus 5 and its Opus 4.8
+fallback; not on Sonnet 5, so do not move S6 there without changing this).
+
 **A result that cannot be ingested** (D71). When a batch result's ingestion raises, the
 worker ingests the rest of its chunk one result at a time and retries the failing one at
 each poll. If other results of the batch ingest, then at its third failure, or after two

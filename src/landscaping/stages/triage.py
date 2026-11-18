@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import statistics
 import uuid
 from collections import defaultdict
 from typing import Any
@@ -61,8 +62,20 @@ _IDENTITY_KEYS = frozenset({
 })
 
 #: What the dossier's data flags show for a target's ``depMapEssentiality`` that the database
-#: evidence above already holds (D78).
-DEPMAP_SHOWN_ABOVE = "as in opentargets_target above"
+#: evidence above already holds (D78), summarized per tissue there (D79).
+DEPMAP_SHOWN_ABOVE = "summarized per tissue in opentargets_target above"
+#: The Open Targets rows a dossier shows per target (D79).
+DRUG_ROWS_SHOWN = 10
+DRUG_DISEASES_SHOWN = 5
+EXPRESSION_ROWS_SHOWN = 10
+#: ``maxClinicalStage`` values, furthest advanced first, for choosing the drug rows shown; an
+#: unknown value sorts last.
+_STAGE_ORDER = {
+    stage: rank for rank, stage in enumerate(reversed((
+        "APPROVAL", "PHASE_4", "PREAPPROVAL", "PHASE_3", "PHASE_2_3", "PHASE_2", "PHASE_1_2",
+        "PHASE_1", "IND", "WITHDRAWAL",
+    )), start=1)
+}
 
 # The model-output fields stored on the triage row as given.
 _STORED_FIELDS = (
@@ -112,7 +125,7 @@ def _idea_section(idea: dict, documents: list[dict]) -> list[str]:
 def _evidence_section(evidence: dict) -> list[str]:
     lines = ["", "# Database evidence"]
     summary = evidence.get("evidence_summary")
-    lines.append(_json(summary) if summary else "No database evidence was found.")
+    lines.append(_json(_summary_shown(summary)) if summary else "No database evidence was found.")
     status = evidence.get("evidence_status") or {}
     unavailable = sorted(
         source for source, entry in status.items()
@@ -127,6 +140,111 @@ def _evidence_section(evidence: dict) -> list[str]:
     flags = _flags_shown(evidence.get("data_flags") or {}, summary or {})
     lines += [f"- {key}: {_json(flags[key])}" for key in sorted(flags)] or ["- none computed"]
     return lines
+
+
+def _summary_shown(summary: dict) -> dict:
+    """The evidence summary as the dossier shows it (D79): each ``opentargets_target`` record
+    through ``_target_shown``; every other source as stored."""
+    ot = summary.get("opentargets_target") if isinstance(summary, dict) else None
+    if not isinstance(ot, dict):
+        return summary
+    shown = {
+        target: _target_shown(record) if isinstance(record, dict) else record
+        for target, record in ot.items()
+    }
+    return {**summary, "opentargets_target": shown}
+
+
+def _target_shown(record: dict) -> dict:
+    """One Open Targets target record cut to what S4 judges with (D79). Raw, these fields were
+    about 58% of the 2026-11-18 dossiers:
+
+    - ``depMapEssentiality``: per tissue, the number of cell lines and the lowest, median and
+      highest gene effect, in place of every cell line's value;
+    - ``drugAndClinicalCandidates``: the row count and the ``DRUG_ROWS_SHOWN`` furthest-advanced
+      rows (drug name, stage, up to ``DRUG_DISEASES_SHOWN`` disease names); the rows for the
+      idea's own disease are in the ``same_target_in_clinic`` flag;
+    - ``baselineExpression``: the row count and the ``EXPRESSION_ROWS_SHOWN`` rows with the
+      highest median;
+    - ``homologues``: left out (no prompt uses them).
+
+    Every other field is shown as stored."""
+    shown = {key: value for key, value in record.items() if key != "homologues"}
+    if isinstance(record.get("depMapEssentiality"), list):
+        shown["depMapEssentiality"] = _depmap_shown(record["depMapEssentiality"])
+    if isinstance(record.get("drugAndClinicalCandidates"), dict):
+        shown["drugAndClinicalCandidates"] = _drugs_shown(record["drugAndClinicalCandidates"])
+    if isinstance(record.get("baselineExpression"), dict):
+        shown["baselineExpression"] = _expression_shown(record["baselineExpression"])
+    return shown
+
+
+def _depmap_shown(tissues: list) -> list[dict]:
+    out = []
+    for tissue in tissues:
+        if not isinstance(tissue, dict):
+            continue
+        effects = sorted(
+            screen["geneEffect"] for screen in tissue.get("screens") or []
+            if isinstance(screen, dict) and isinstance(screen.get("geneEffect"), int | float)
+            and not isinstance(screen.get("geneEffect"), bool)
+        )
+        entry: dict[str, Any] = {"tissueName": tissue.get("tissueName"), "cellLines": len(effects)}
+        if effects:
+            entry["geneEffect"] = {
+                "lowest": round(effects[0], 2),
+                "median": round(statistics.median(effects), 2),
+                "highest": round(effects[-1], 2),
+            }
+        out.append(entry)
+    return out
+
+
+def _drugs_shown(candidates: dict) -> dict:
+    rows = [row for row in candidates.get("rows") or [] if isinstance(row, dict)]
+    rows.sort(key=lambda row: (
+        -_STAGE_ORDER.get(row.get("maxClinicalStage"), 0), _drug_name(row),
+    ))
+    shown = []
+    for row in rows[:DRUG_ROWS_SHOWN]:
+        names = [
+            name for entry in row.get("diseases") or [] if isinstance(entry, dict)
+            if (name := ((entry.get("disease") or {}).get("name") or entry.get("diseaseFromSource")))
+        ]
+        diseases = names[:DRUG_DISEASES_SHOWN]
+        if len(names) > DRUG_DISEASES_SHOWN:
+            diseases.append(f"and {len(names) - DRUG_DISEASES_SHOWN} more")
+        shown.append({
+            "drug": _drug_name(row), "maxClinicalStage": row.get("maxClinicalStage"),
+            "diseases": diseases,
+        })
+    count = candidates.get("count")
+    return {"count": count if isinstance(count, int) else len(rows), "rows": shown}
+
+
+def _drug_name(row: dict) -> str:
+    drug = row.get("drug")
+    return str((drug.get("name") if isinstance(drug, dict) else None) or "")
+
+
+def _expression_shown(expression: dict) -> dict:
+    rows = [row for row in expression.get("rows") or [] if isinstance(row, dict)]
+    rows.sort(key=lambda row: -(
+        row["median"] if isinstance(row.get("median"), int | float) else float("-inf")
+    ))
+    shown = [
+        {
+            "tissue": (row.get("tissueBiosample") or {}).get("biosampleName"),
+            "median": round(row["median"], 2) if isinstance(row.get("median"), int | float)
+            else row.get("median"),
+            "unit": row.get("unit"),
+            "specificity_score": row.get("specificity_score"),
+            "datasourceId": row.get("datasourceId"),
+        }
+        for row in rows[:EXPRESSION_ROWS_SHOWN]
+    ]
+    count = expression.get("count")
+    return {"count": count if isinstance(count, int) else len(rows), "rows": shown}
 
 
 def _flags_shown(flags: dict, summary: dict) -> dict:
@@ -202,8 +320,9 @@ def triage_dossier(idea_fields: dict, evidence: dict, documents: list[dict]) -> 
       ``document_count`` (all documents, before the D35 cap) and ``candidates``: the S3
       candidates (extract output shape, quotes already checked) of the listed documents.
     - ``evidence``: ``evidence_summary``, ``data_flags`` and ``evidence_status``; a source
-      whose status is ``failed`` is listed as unavailable, and depMap data the summary
-      already holds is not repeated in the flags (``_flags_shown``, D78).
+      whose status is ``failed`` is listed as unavailable. Open Targets records are cut to
+      what S4 judges with (``_summary_shown``, D79), and depMap data the summary already
+      holds is not repeated in the flags (``_flags_shown``, D78).
     - ``documents``: one dict per listed document with ``kind``, ``document_type`` and
       ``date`` only.
 

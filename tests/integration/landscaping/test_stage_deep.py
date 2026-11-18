@@ -320,7 +320,20 @@ def _deep_requests(state) -> list[dict]:
 
 
 def _dossier(state) -> str:
-    return _deep_requests(state)[0]["messages"][0]["content"]
+    return "".join(
+        block["text"] for block in _deep_requests(state)[0]["messages"][0]["content"]
+    )
+
+
+def _consult_requests(state) -> list[dict]:
+    return [r for s, r in state["calls"] if s == "deep" and "format" not in r["output_config"]]
+
+
+def _consult_persona(request: dict) -> str:
+    """The persona a consult was sent with: its mid-conversation system message, before the
+    domain question (D79)."""
+    [system] = [m for m in request["messages"] if m["role"] == "system"]
+    return system["content"].split("\n\n## Question from Blackbird")[0]
 
 
 # --- tests --------------------------------------------------------------------------------------
@@ -338,8 +351,7 @@ async def test_chemistry_idea_adds_technologic(db_factory, fakes):
     assert chem.status == bio.status == "done"
     assert await _consult_domains(db_factory, chem.id) == set(panel.PANEL_CHEMISTRY)
     assert await _consult_domains(db_factory, bio.id) == set(panel.PANEL_BIOLOGY)
-    consult_systems = [r["system"] for s, r in fakes["calls"]
-                       if s == "deep" and "format" not in r["output_config"]]
+    consult_systems = [_consult_persona(r) for r in _consult_requests(fakes)]
     assert panel.compose_persona("technologic") in consult_systems
     async with db_factory() as db:
         opinion = await db.scalar(select(LandscapeConsult.opinion).where(
@@ -366,8 +378,7 @@ async def test_consults_and_scores_use_the_epochs_inputs(db_factory, fakes):
 
     row = await _deep_row(db_factory, idea_id)
     assert row.status == "done"
-    consult_systems = [r["system"] for s, r in fakes["calls"]
-                       if s == "deep" and "format" not in r["output_config"]]
+    consult_systems = [_consult_persona(r) for r in _consult_requests(fakes)]
     assert sorted(consult_systems) == sorted(
         f"An invented stored persona for {domain}." for domain in panel.PANEL_BIOLOGY
     )
@@ -526,6 +537,50 @@ async def test_literature_loop_stops_after_eight_rounds(db_factory, fakes):
     assert len(requests) == deep.MAX_SEARCH_ROUNDS + 1
     assert "tools" not in requests[-1]
     assert (await _deep_row(db_factory, idea_id)).status == "done"
+
+
+async def test_analysis_rounds_cache_the_conversation(db_factory, fakes):
+    """Each round but the last marks the end of the conversation, and only there, as a cache
+    breakpoint; the last round, sent without tools, marks none (D79)."""
+    epoch_id, idea_id, doc_id = await _idea(db_factory)
+    fakes["answer"] = _answer(f"doc:{doc_id}")
+    fakes["tool_rounds"] = 50
+
+    await deep.run_deep(db_factory, idea_id, epoch_id=epoch_id)
+
+    def marks(request):
+        return [
+            (n, k) for n, message in enumerate(request["messages"])
+            for k, block in enumerate(message["content"]) if "cache_control" in block
+        ]
+
+    *rounds, last = _deep_requests(fakes)
+    for request in rounds:
+        final = len(request["messages"]) - 1
+        assert marks(request) == [(final, len(request["messages"][final]["content"]) - 1)]
+    assert marks(last) == []
+    assert "tools" not in last
+
+
+async def test_consults_share_one_cached_record(db_factory, fakes):
+    """Every consult sends the same record first, marked as a cache breakpoint, and no
+    top-level system prompt; the persona and the question follow as a system message (D79)."""
+    epoch_id, idea_id, doc_id = await _idea(db_factory)
+    fakes["answer"] = _answer(f"doc:{doc_id}")
+
+    await deep.run_deep(db_factory, idea_id, epoch_id=epoch_id)
+
+    consults = _consult_requests(fakes)
+    assert len(consults) == len(panel.PANEL_BIOLOGY)
+    firsts = [request["messages"][0] for request in consults]
+    assert all(first == firsts[0] for first in firsts)
+    assert firsts[0]["role"] == "user"
+    assert firsts[0]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert FULL_TEXT_QUOTE in firsts[0]["content"][0]["text"]
+    for request, domain in zip(consults, panel.PANEL_BIOLOGY, strict=True):
+        assert "system" not in request
+        assert [m["role"] for m in request["messages"]] == ["user", "system"]
+        assert request["messages"][1]["content"].endswith(panel.DOMAIN_QUESTIONS[domain])
 
 
 async def test_full_text_evidence_does_not_bump_version(db_factory, fakes):

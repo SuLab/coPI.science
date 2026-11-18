@@ -19,7 +19,9 @@ def test_panel_domains_by_idea_type():
     assert set(panel.DOMAIN_QUESTIONS) == set(panel.PANEL_CHEMISTRY)
 
 
-def test_consult_message_carries_question_summary_and_dossier():
-    message = panel.consult_message("legal", dossier="DOSSIER-TEXT", summary="SUMMARY-TEXT")
-    assert panel.DOMAIN_QUESTIONS["legal"] in message
-    assert "SUMMARY-TEXT" in message and "DOSSIER-TEXT" in message
+def test_consult_record_and_question():
+    record = panel.consult_record(dossier="DOSSIER-TEXT", summary="SUMMARY-TEXT")
+    assert "SUMMARY-TEXT" in record and "DOSSIER-TEXT" in record
+    assert record.index("SUMMARY-TEXT") < record.index("DOSSIER-TEXT")
+    assert not any(question in record for question in panel.DOMAIN_QUESTIONS.values())
+    assert panel.consult_question("legal").endswith(panel.DOMAIN_QUESTIONS["legal"])
