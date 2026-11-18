@@ -9,14 +9,17 @@ the text and resolved to a stored document becomes an extraction link in the epo
 
 Every derived row is written in the transaction of the result's compare-and-set, and only when
 it changed the row (N12), so a replayed chunk writes nothing twice. Normalization calls outside
-services, so on the batch path it runs before that transaction opens; a fallback re-run
-normalizes inside ``run_fallbacks``' transaction, which owns the row lock.
+services, so on the batch path it runs before that transaction opens, for up to
+``LOOKUP_CONCURRENCY`` results of a chunk at once (D76); the results are then stored one at a
+time, in order. A fallback re-run normalizes inside ``run_fallbacks``' transaction, which owns
+the row lock.
 
 Requests, and the criteria normalization reads, come from the row's epoch's own inputs
 (``epochs.epoch_inputs``), never the files on disk or the current settings (spec §7.11).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
@@ -59,6 +62,9 @@ LINKING_KINDS = ("patent", "jhtv")
 _PUBLICATION_FIELDS = ("doi", "pmid", "title")
 _SUBMIT_READ_LIMIT = 20_000
 _INSERT_CHUNK = 1000
+#: A chunk's results normalized at once (D76). Each outside service's own pacer still bounds
+#: its request rate; running results side by side overlaps their waits.
+LOOKUP_CONCURRENCY = 4
 
 
 @dataclass
@@ -276,13 +282,25 @@ async def _write_derived(
 # --- ingestion -------------------------------------------------------------------------------
 
 
-async def _ingest_one(db_factory, outcome: BatchOutcome) -> None:
+@dataclass
+class _Result:
+    """One outcome's new row values and, for a stored extraction, what it derives."""
+
+    values: dict
+    prepared: _Prepared | None
+    epoch_id: uuid.UUID
+    doc_id: uuid.UUID | None
+
+
+async def _result(db_factory, outcome: BatchOutcome) -> _Result | None:
+    """Read ``outcome``'s row, then quote-check and normalize a succeeded extraction, outside
+    any transaction; None for a replayed or superseded result."""
     async with db_factory() as db:
         row = await db.get(LandscapeExtraction, outcome.row_id)
         # A replayed or superseded result: skip the normalization calls; the compare-and-set
-        # below would change nothing anyway.
+        # in `_store` would change nothing anyway.
         if row is None or row.status != "submitted" or row.batch_item_id != outcome.batch_item_id:
-            return
+            return None
         doc = await db.get(LandscapeDocument, row.document_id)
         attempts, truncated_once, epoch_id = row.attempts, row.truncated_once, row.epoch_id
         criteria = (
@@ -301,15 +319,21 @@ async def _ingest_one(db_factory, outcome: BatchOutcome) -> None:
         values = batches.transition(
             outcome.kind, attempts=attempts, truncated_once=truncated_once, model=outcome.model
         )
+    return _Result(values, prepared, epoch_id, doc.id if doc is not None else None)
+
+
+async def _store(db_factory, outcome: BatchOutcome, result: _Result) -> None:
+    """``result``'s compare-and-set and, when it changed the row, its derived rows, in one
+    transaction (N12)."""
     async with db_factory() as db:
         changed = await batches.apply_result(
             db, LandscapeExtraction, row_id=outcome.row_id, batch_item_id=outcome.batch_item_id,
-            values=values,
+            values=result.values,
         )
-        if changed and prepared is not None:
+        if changed and result.prepared is not None:
             await _write_derived(
-                db, extraction_id=outcome.row_id, epoch_id=epoch_id,
-                doc=await db.get(LandscapeDocument, doc.id), prepared=prepared,
+                db, extraction_id=outcome.row_id, epoch_id=result.epoch_id,
+                doc=await db.get(LandscapeDocument, result.doc_id), prepared=result.prepared,
             )
         await db.commit()
 
@@ -321,9 +345,23 @@ async def ingest_extract_outcomes(db_factory, outcomes: list[BatchOutcome]) -> N
     and the extraction links (D67), all in one transaction and only when the compare-and-set
     changed the row. A reply that is not an extraction is ``failed:invalid``. Every other kind
     takes ``batches.transition``; a refusal leaves the row for ``FALLBACKS``.
+
+    Up to ``LOOKUP_CONCURRENCY`` outcomes are read and normalized at once (D76), then stored
+    one at a time in their order. When one raises, those before it are stored and its error
+    is raised, as when each was handled in turn; those after it are not stored.
     """
-    for outcome in outcomes:
-        await _ingest_one(db_factory, outcome)
+    gate = asyncio.Semaphore(LOOKUP_CONCURRENCY)
+
+    async def gated(outcome: BatchOutcome) -> _Result | None:
+        async with gate:
+            return await _result(db_factory, outcome)
+
+    results = await asyncio.gather(*(gated(o) for o in outcomes), return_exceptions=True)
+    for outcome, result in zip(outcomes, results, strict=True):
+        if isinstance(result, BaseException):
+            raise result
+        if result is not None:
+            await _store(db_factory, outcome, result)
 
 
 async def _on_fallback_success(

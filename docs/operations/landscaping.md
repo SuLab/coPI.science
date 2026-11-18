@@ -232,6 +232,9 @@ figures are at the batch rate. Everything else (stage rows, ingestion, refusal f
 works as in batch mode. A restart in the middle of a local batch sends its unanswered items
 back to `pending`, where their stage batches them again. Answers paid for but not yet
 ingested are lost then, at most one chunk per stage. Switch modes only while no API batch is in flight.
+Fetches run beside the poll, one background task per source, so a fetch never pauses the
+calls; evidence assembly and S3 normalization take four items at a time, each outside
+service at its own pace (D76). A shutdown lets a running fetch finish its slice.
 `src/landscaping/batches.py` documents the protocol.
 
 **The kill switch.** Set `LANDSCAPE_ENABLED=false` in `.env`, then recreate:

@@ -7,6 +7,7 @@ which steps the worker took. Epoch, phase and readiness logic runs for real. Eve
 test shares one connection whose outer transaction rolls back, so ``now()`` is the same for every
 row a test writes. Every name below is invented.
 """
+import asyncio
 import contextlib
 import functools
 import json
@@ -539,7 +540,9 @@ async def test_no_mondo_release_ends_the_pass_after_intake(db_factory, settings,
     calls.results["schedule_due"] = [("openalex", "daily:2026-10-30")]
     await _epoch(db_factory, "active")
     await _set(db_factory, "landscape_phase", "continuous")
-    await worker.run_once(db_factory, worker.WorkerState(), now=NOW)
+    state = worker.WorkerState()
+    await worker.run_once(db_factory, state, now=NOW)
+    await asyncio.gather(*state.fetching.values())
 
     names = calls.names()
     assert [kw["may_run"] is not None for _, kw in calls.args("poll")] == [True]
@@ -569,7 +572,9 @@ async def test_daily_cap_defers_llm_work_only(db_factory, settings, calls):
     calls.results["schedule_due"] = [("openalex", "daily:2026-10-30")]
     await _epoch(db_factory, "active")
     await _set(db_factory, "landscape_phase", "continuous")
-    await worker.run_once(db_factory, worker.WorkerState(), now=NOW)
+    state = worker.WorkerState()
+    await worker.run_once(db_factory, state, now=NOW)
+    await asyncio.gather(*state.fetching.values())
 
     names = set(calls.names())
     assert {"run_slice", "run_cut", "issue_weekly_batch"} <= names
@@ -867,7 +872,9 @@ async def test_phase_pilot_runs_no_backfill(db_factory, settings, calls, monkeyp
     monkeypatch.setattr(intake, "schedule_due", REAL_SCHEDULE_DUE)
     async with db_factory() as db:
         await intake.ensure_sources(db)
-    await worker.run_once(db_factory, worker.WorkerState(), now=NOW)
+    state = worker.WorkerState()
+    await worker.run_once(db_factory, state, now=NOW)
+    await asyncio.gather(*state.fetching.values())
 
     fetched = [(args[1], args[2]) for args, _ in calls.args("run_slice")]
     assert fetched
@@ -1268,3 +1275,105 @@ async def test_the_poll_stops_starting_calls_at_its_budget(db_factory, settings,
     [(_, default), (_, spent)] = calls.args("poll")
     assert default["should_stop"]() is False
     assert spent["should_stop"]() is True
+
+
+# --- D76: fetches beside the loop, ideas assembled side by side ------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetches_run_beside_the_loop(db_factory, settings, calls, monkeypatch):
+    """D76: a fetch holds back neither the pass nor another source; a source whose task is
+    still running starts no second one, and one source's slices run in order."""
+    release, started = asyncio.Event(), asyncio.Event()
+    fetched: list[tuple[str, str]] = []
+
+    async def run_slice(db_factory_, source, slice_key, fetch):
+        fetched.append((source, slice_key))
+        if source == "pubmed":
+            started.set()
+            await release.wait()
+
+    monkeypatch.setattr(intake, "run_slice", run_slice)
+    calls.results["schedule_due"] = [("pubmed", "month:2026-01"), ("pubmed", "month:2026-02")]
+    await _epoch(db_factory, "active")
+    await _set(db_factory, "landscape_phase", "continuous")
+    state = worker.WorkerState()
+    await worker.run_once(db_factory, state, now=NOW)
+    await asyncio.wait_for(started.wait(), timeout=5)
+
+    assert "issue_weekly_batch" in calls.names(), "the pass goes on while the fetch waits"
+    assert fetched == [("pubmed", "month:2026-01")]
+    pubmed_task = state.fetching["pubmed"]
+
+    calls.results["schedule_due"] = [
+        ("pubmed", "month:2026-02"), ("openalex", "daily:2026-10-30"),
+    ]
+    await worker.run_once(db_factory, state, now=NOW + timedelta(minutes=1))
+    await asyncio.wait_for(state.fetching["openalex"], timeout=5)
+
+    assert state.fetching["pubmed"] is pubmed_task
+    assert fetched == [("pubmed", "month:2026-01"), ("openalex", "daily:2026-10-30")]
+
+    release.set()
+    await asyncio.wait_for(pubmed_task, timeout=5)
+    assert fetched[-1] == ("pubmed", "month:2026-02")
+
+
+@pytest.mark.asyncio
+async def test_end_fetches_waits_after_a_shutdown_and_cancels_otherwise(monkeypatch):
+    """D76: a shutdown lets a running fetch end its slice; a lost lock cancels it."""
+    release = asyncio.Event()
+
+    async def slow() -> str:
+        await release.wait()
+        return "ended"
+
+    state = worker.WorkerState()
+    state.fetching["pubmed"] = asyncio.create_task(slow())
+    await worker.end_fetches(state)
+    assert state.fetching["pubmed"].cancelled()
+
+    monkeypatch.setattr(worker, "_shutdown", True)
+    task = asyncio.create_task(slow())
+    state.fetching["pubmed"] = task
+    ending = asyncio.create_task(worker.end_fetches(state))
+    await asyncio.sleep(0.01)
+    assert not ending.done()
+    release.set()
+    await asyncio.wait_for(ending, timeout=5)
+    assert task.result() == "ended"
+
+
+@pytest.mark.asyncio
+async def test_evidence_assembly_takes_ideas_side_by_side(db_factory, settings, monkeypatch):
+    """D76: up to ``ASSEMBLY_CONCURRENCY`` ideas are assembled at once, each once."""
+    epoch_id = await _epoch(db_factory, "active")
+    async with db_factory() as db:
+        rows = [
+            LandscapeIdea(
+                epoch_id=epoch_id, idea_key=_key(f"INVA{n}"), idea_type="biology",
+                targets=[{"hgnc_id": "HGNC:90002", "symbol": f"INVA{n}"}], direction="inhibit",
+                disease={"mondo_id": "MONDO:9999998"}, stage="target_validation",
+                evidence_grade="in_vivo", jhu_group_count=1, version_hash=uuid.uuid4().hex,
+            )
+            for n in range(worker.ASSEMBLY_CONCURRENCY * 2)
+        ]
+        db.add_all(rows)
+        await db.commit()
+        wanted = sorted(row.id for row in rows)
+    in_flight = peak = 0
+    assembled: list[uuid.UUID] = []
+
+    async def assemble(db_factory_, *, epoch_id, idea_id):
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0.01)
+        in_flight -= 1
+        assembled.append(idea_id)
+
+    monkeypatch.setattr(ideas, "assemble_evidence", assemble)
+    await worker._assemble(db_factory, epoch_id)
+
+    assert peak == worker.ASSEMBLY_CONCURRENCY
+    assert sorted(assembled) == wanted

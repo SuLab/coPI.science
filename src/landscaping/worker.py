@@ -22,9 +22,10 @@ batch reconciliation before returning stale ``running`` rows to ``pending``.
   ended S5 tie-break tournament finishes its cut here (it asks nothing); an ended S7 rebuild
   is landed only by the synchronous step, whose insertions ask the model.
 - Only while ``landscape_enabled`` is true and ``app_settings.landscape_paused`` is not, in §12.2
-  order: intake (and the D69 flip to ``continuous``); loading the Mondo release, without which
+  order: intake (and the D69 flip to ``continuous``), whose due fetches run beside the loop in
+  one background task per source (D76); loading the Mondo release, without which
   the pass ends there (the cut, the data flags and S8 read it synchronously);
-  evidence assembly and S2-S4 submissions;
+  evidence assembly, ``ASSEMBLY_CONCURRENCY`` ideas at a time (D76), and S2-S4 submissions;
   synchronous work (S6, S7, similarity judgments, fallback chains) while no simulation run is
   live; the cut, S8, labels and S9, then the weekly batch and reports; epochs; the reject audit;
   probes; the expert sample; the bake-off and the pilot's measurements.
@@ -131,6 +132,9 @@ logger = logging.getLogger(__name__)
 LOOP_SECONDS = 30
 #: Ideas given an evidence-assembly pass per epoch and loop, so one loop stays bounded.
 ASSEMBLY_PER_LOOP = 200
+#: Ideas assembled at once (D76). Each evidence source's own pacer still bounds its request
+#: rate; assembling ideas side by side overlaps their waits.
+ASSEMBLY_CONCURRENCY = 4
 #: Phases in which S5-S9 run (D69).
 _DEEP_PHASES = ("pilot", "continuous")
 _ALL_STAGES = (
@@ -229,6 +233,8 @@ class WorkerState:
     landed: set[uuid.UUID] = field(default_factory=set)
     #: Batch item id -> its outcome's failed ingestions (``ingest_ended``, D71).
     ingest_failures: dict[uuid.UUID, _IngestFailures] = field(default_factory=dict)
+    #: Source -> its latest background fetch task (``_start_fetches``, D76).
+    fetching: dict[str, asyncio.Task] = field(default_factory=dict)
 
     def poll_due(self, now: datetime, seconds: float) -> bool:
         if self.last_poll is not None and (now - self.last_poll).total_seconds() < seconds:
@@ -342,10 +348,10 @@ async def main() -> None:
         raise WorkerStartRefused("another landscaping worker holds the worker lock")
     engine = make_engine("landscape", settings.database_url)
     db_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    state = WorkerState()
     try:
         await start(db_factory)
         logger.info("landscaping worker started")
-        state = WorkerState()
         while not _shutdown:
             await lock.check()
             try:
@@ -355,6 +361,7 @@ async def main() -> None:
             await _pause(LOOP_SECONDS)
     finally:
         logger.info("landscaping worker shutting down")
+        await end_fetches(state)
         await engine.dispose()
         await lock.release()
 
@@ -386,7 +393,7 @@ async def run_once(db_factory, state: WorkerState, *, now: datetime) -> None:
         ))
     if not running:
         return
-    phase = await _step("intake", _intake_step(db_factory, phase, now), default=phase)
+    phase = await _step("intake", _intake_step(db_factory, state, phase, now), default=phase)
     if not await _step("mondo", _mondo_ready(), default=False):
         return
     loop = _Loop(
@@ -665,15 +672,11 @@ async def _after_tournament(db_factory, batch_id: uuid.UUID) -> None:
 # --- step 1: intake and the D69 flip ----------------------------------------------------------
 
 
-async def _intake_step(db_factory, phase: str, now: datetime) -> str:
-    """Due fetches, links, lab unifications and alias resolution; in ``backfill``, the D69
-    flip once the backfill has drained. Returns the phase in force afterwards."""
-    async with db_factory() as db:
-        due = await intake.schedule_due(db, now=now)
-    for source, slice_key in due:
-        if _shutdown:
-            break
-        await _step(f"fetch {source} {slice_key}", _fetch(db_factory, source, slice_key))
+async def _intake_step(db_factory, state: WorkerState, phase: str, now: datetime) -> str:
+    """Starts the due fetches (``_start_fetches``), then links, lab unifications and alias
+    resolution; in ``backfill``, the D69 flip once the backfill has drained. Returns the phase
+    in force afterwards."""
+    await _start_fetches(db_factory, state, now)
     await _step("grant links", _in_session(db_factory, intake.link_grants))
     await _step("dataset links", _in_session(db_factory, intake.link_datasets))
     await _step("lab unifications", _in_session(db_factory, ideas.apply_lab_unifications))
@@ -687,6 +690,49 @@ async def _intake_step(db_factory, phase: str, now: datetime) -> str:
         await _flip_to_continuous(db_factory)
         return "continuous"
     return phase
+
+
+async def _start_fetches(db_factory, state: WorkerState, now: datetime) -> None:
+    """Start each source's due slices, oldest first, in a background task of the source's own,
+    unless its previous task is still running (D76). A slow source, or a failing slice's retry
+    waits (``intake.RETRY_DELAYS``), then holds back neither the loop's calls nor the other
+    sources; one source's slices still run one at a time. A slice a running task has not
+    reached yet is due again at the next loop and waits for that task to end. What a fetch
+    stores is read by the next loop that runs after it."""
+    if _shutdown:
+        return
+    async with db_factory() as db:
+        due = await intake.schedule_due(db, now=now)
+    by_source: dict[str, list[str]] = {}
+    for source, slice_key in due:
+        by_source.setdefault(source, []).append(slice_key)
+    for source, keys in by_source.items():
+        running = state.fetching.get(source)
+        if running is not None and not running.done():
+            continue
+        state.fetching[source] = asyncio.create_task(
+            _fetch_slices(db_factory, source, keys), name=f"landscape fetch {source}",
+        )
+
+
+async def _fetch_slices(db_factory, source: str, keys: list[str]) -> None:
+    """Fetch ``keys`` of ``source`` in order; a shutdown starts no next slice."""
+    for slice_key in keys:
+        if _shutdown:
+            return
+        await _step(f"fetch {source} {slice_key}", _fetch(db_factory, source, slice_key))
+
+
+async def end_fetches(state: WorkerState) -> None:
+    """At exit, before the engine closes: after a shutdown signal, each running fetch task
+    ends its current slice (it starts no next one); after any other exit (a lost worker
+    lock), the tasks are cancelled and an interrupted slice stays ``running`` until
+    ``intake.RUNNING_STALE_AFTER``."""
+    tasks = [task for task in state.fetching.values() if not task.done()]
+    if not _shutdown:
+        for task in tasks:
+            task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _fetch(db_factory, source: str, slice_key: str) -> None:
@@ -778,6 +824,9 @@ async def _submission_step(db_factory, state: WorkerState, loop: _Loop, work: li
 
 
 async def _assemble(db_factory, epoch_id: uuid.UUID) -> None:
+    """One assembly pass for up to ``ASSEMBLY_PER_LOOP`` ideas without assembled evidence,
+    oldest first, ``ASSEMBLY_CONCURRENCY`` at a time (D76); each idea commits on its own. A
+    shutdown starts no further idea."""
     async with db_factory() as db:
         idea_ids = (
             await db.scalars(
@@ -790,13 +839,18 @@ async def _assemble(db_factory, epoch_id: uuid.UUID) -> None:
                 .limit(ASSEMBLY_PER_LOOP)
             )
         ).all()
-    for idea_id in idea_ids:
-        if _shutdown:
-            return
-        await _step(
-            f"assemble {idea_id}",
-            ideas.assemble_evidence(db_factory, epoch_id=epoch_id, idea_id=idea_id),
-        )
+    gate = asyncio.Semaphore(ASSEMBLY_CONCURRENCY)
+
+    async def assemble(idea_id: uuid.UUID) -> None:
+        async with gate:
+            if _shutdown:
+                return
+            await _step(
+                f"assemble {idea_id}",
+                ideas.assemble_evidence(db_factory, epoch_id=epoch_id, idea_id=idea_id),
+            )
+
+    await asyncio.gather(*(assemble(idea_id) for idea_id in idea_ids))
 
 
 async def _submit_due(

@@ -257,6 +257,7 @@ The owner may override any of these. Each names the section that carries it.
 | D73 | S3 asks for each gene, protein or RNA target's HGNC-approved symbol (`hgnc_symbol`) and the disease's standard name (`standard_name`) beside the names as written; normalization tries them first and builds a provisional key from them. An approved symbol wins over another gene's alias, and Mondo labels fold quote marks. | Measured 2026-11-17 (`docs/audits/2026-11-17-extraction-agreement-rca/`): with free text only, 25% of names reached an id and only 7 of 984 pilot ideas spanned more than one document. With the two fields, ids reach 81-89% of genes and diseases, and Sonnet 5.5's exact-key agreement with Opus 5 triples (0.06-0.07 to 0.21-0.25). | 7.4 |
 | D74 | S3 agreement matches the targets and diseases each side names, by any shared id or folded name, and passes at 90% of the reference model's agreement with itself, measured by asking it the sample again; the regression gate asks it again on the stored items. | The exact (targets, direction, disease) key measured sampling noise: Opus 5 scored 0.31-0.36 against its own earlier answers, so no model could reach the absolute 0.90, and every epoch failed the gate. | 10.1, 10.4 |
 | D75 | In sync batch mode, the poll runs each stage's local batches in a lane of its own, side by side, each at `landscape_sync_concurrency` calls; ingestion stays one chunk at a time. A poll starts no new call after 15 minutes and returns, and a chunk already ingested is not replayed at the next. | One batch at a time, the backfill's 21,000-item screening batch would have held Opus extraction back about 15 hours, and the poll held the loop's submissions as long (2026-11-17). | 12.2 |
+| D76 | Due source fetches run beside the loop, one background task per source, each source's slices one at a time; a source whose task still runs starts no second. Evidence assembly takes four ideas at a time, and S3 ingestion normalizes four results of a chunk at once, then stores them one at a time in order. Each outside service keeps its own pacer. | The loop made no model call for 10-13 of every 25-28 minutes while it fetched (one failing JHTV slice waits six minutes between its tries), assembled evidence and normalized names one at a time; ingestion also held every stage's lane while it normalized, so extraction ran at about 260 documents an hour (2026-11-18). | 12.2 |
 
 ## 4. Constraints
 
@@ -1790,6 +1791,8 @@ existing `jobs` table and `job_type_enum` are untouched.
 
 **Each loop**, while `landscape_enabled` is true and the database pause flag is off:
 1. Run due source fetches. Each source has its own `next_due_at` in `landscape_sources`.
+   The fetches run beside the loop, in one background task per source, so a slow source
+   or a retry wait never holds back the calls (D76).
 2. Submit batches for each batched stage. A stage submits when it has at least
    `landscape_batch_min_items` pending items, or when its oldest pending item has waited
    longer than `landscape_batch_max_wait_minutes`.

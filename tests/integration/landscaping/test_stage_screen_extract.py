@@ -10,6 +10,7 @@ stores a snapshot of the judging inputs, which the runners read (spec §7.11).
 # below from resolving to it.
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import uuid
@@ -455,7 +456,9 @@ async def test_extraction_link_only_when_verbatim_and_resolved(db_factory, fake)
     })
 
     assert await extract.submit_extract_batch(db_factory, epoch_id) == 2
-    await extract.ingest_extract_outcomes(db_factory, await _poll(db_factory))
+    await extract.ingest_extract_outcomes(
+        _one_session_at_a_time(db_factory), await _poll(db_factory)
+    )
 
     async with db_factory() as db:
         links = (await db.scalars(select(LandscapeExtractionLink))).all()
@@ -488,3 +491,92 @@ async def test_registered_fence_tags_only(monkeypatch):
         screen.user_message(doc)
     assert len(tags) == len(kinds)
     assert set(tags) <= REGISTERED_TAGS
+
+
+def _one_session_at_a_time(db_factory):
+    """``db_factory`` with one session open at a time: every session of a test shares one
+    connection, which takes one statement at a time, while results are normalized side by
+    side."""
+    lock = asyncio.Lock()
+
+    @contextlib.asynccontextmanager
+    async def factory():
+        async with lock, db_factory() as session:
+            yield session
+
+    return factory
+
+
+async def _three_extractions(db_factory, fake) -> tuple[uuid.UUID, list, dict]:
+    """Three screened documents extracted in one batch: (epoch, outcomes, row id -> doc id)."""
+    epoch_id = await _epoch(db_factory)
+    for n in range(3):
+        doc_id = await _doc(
+            db_factory, title=f"Invented fibrosis study {n}",
+            summary=f"{QUOTE}, in invented model {n}.",
+        )
+        await _screened(db_factory, epoch_id, doc_id)
+    fake.reply = lambda params: _succeeded({"ideas": [_idea(QUOTE)], "linked_publications": []})
+    assert await extract.submit_extract_batch(db_factory, epoch_id) == 3
+    outcomes = await _poll(db_factory)
+    async with db_factory() as db:
+        docs = dict((await db.execute(
+            select(LandscapeExtraction.id, LandscapeExtraction.document_id)
+            .where(LandscapeExtraction.epoch_id == epoch_id)
+        )).all())
+    return epoch_id, outcomes, docs
+
+
+async def test_extract_normalizes_side_by_side_and_stores_in_order(db_factory, fake, monkeypatch):
+    """D76: a chunk's results are normalized at once (each waits until a second has started),
+    then stored one at a time in their order."""
+    epoch_id, outcomes, docs = await _three_extractions(db_factory, fake)
+    second = asyncio.Event()
+    in_flight = 0
+    real_prepare = extract._prepare
+
+    async def prepare(parsed, doc, criteria):
+        nonlocal in_flight
+        in_flight += 1
+        if in_flight >= 2:
+            second.set()
+        await asyncio.wait_for(second.wait(), timeout=5)
+        return await real_prepare(parsed, doc, criteria)
+
+    stored: list[uuid.UUID] = []
+    real_merge = extract.merge_candidate
+
+    async def recording_merge(db, **kwargs):
+        stored.append(kwargs["document"].id)
+        return await real_merge(db, **kwargs)
+
+    monkeypatch.setattr(extract, "_prepare", prepare)
+    monkeypatch.setattr(extract, "merge_candidate", recording_merge)
+    await extract.ingest_extract_outcomes(_one_session_at_a_time(db_factory), outcomes)
+
+    assert stored == [docs[outcome.row_id] for outcome in outcomes]
+    for outcome in outcomes:
+        assert (await _extraction(db_factory, epoch_id, docs[outcome.row_id])).status == "done"
+
+
+async def test_extract_failure_raises_after_the_results_before_it(db_factory, fake, monkeypatch):
+    """D76: when one result's normalization raises, those before it are stored and the error
+    is raised (the worker then routes the chunk one result at a time, D71)."""
+    epoch_id, outcomes, docs = await _three_extractions(db_factory, fake)
+    failing = docs[outcomes[1].row_id]
+    real_prepare = extract._prepare
+
+    async def prepare(parsed, doc, criteria):
+        if doc.id == failing:
+            raise RuntimeError("an invented lookup failure")
+        return await real_prepare(parsed, doc, criteria)
+
+    monkeypatch.setattr(extract, "_prepare", prepare)
+    with pytest.raises(RuntimeError, match="invented lookup failure"):
+        await extract.ingest_extract_outcomes(_one_session_at_a_time(db_factory), outcomes)
+
+    statuses = [
+        (await _extraction(db_factory, epoch_id, docs[outcome.row_id])).status
+        for outcome in outcomes
+    ]
+    assert statuses == ["done", "submitted", "submitted"]
