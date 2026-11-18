@@ -246,7 +246,9 @@ starts no new call. A rate-limit, overload or connection error leaves the rest f
 poll (`LANDSCAPE_BATCH_POLL_SECONDS`, default 300). Each call is ledgered as soon as it
 answers, at the full synchronous rate, about twice the batch rate. The bake-off report's cost
 figures are at the batch rate. Everything else (stage rows, ingestion, refusal fallbacks)
-works as in batch mode. A restart in the middle of a local batch sends its unanswered items
+works as in batch mode. An item whose row has left it since submission (a re-screened
+document's S3 row, reset and batched again) is not sent: it is answered `canceled`, with no
+ledger row (D78). A restart in the middle of a local batch sends its unanswered items
 back to `pending`, where their stage batches them again. Answers paid for but not yet
 ingested are lost then, at most one chunk per stage. Switch modes only while no API batch is in flight.
 Fetches run beside the poll, one background task per source, so a fetch never pauses the

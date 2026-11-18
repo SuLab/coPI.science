@@ -850,6 +850,41 @@ async def test_sync_mode_runs_items_in_poll_at_the_full_rate(db_factory, fake, s
     assert len(sync_mode) == 4
 
 
+async def test_sync_mode_sends_nothing_for_a_row_that_left_the_batch(
+    db_factory, fake, sync_mode,
+):
+    """A row reset and batched again since submission is answered ``canceled`` with no call
+    and no ledger row (D78): the compare-and-set would discard its answer."""
+    ids = await _screens(db_factory, 3)
+    first = await _submit_stops(db_factory, ids, ["end_turn"] * 3)
+    async with db_factory() as db:
+        await db.execute(
+            update(LandscapeScreen).where(LandscapeScreen.id == ids[1]).values(status="pending")
+        )
+        await db.commit()
+    second = await _submit_stops(db_factory, [ids[1]], ["end_turn"])
+
+    chunks = await _drain_local(db_factory)
+
+    by_batch = {got: outcomes for got, outcomes, _ in chunks}
+    assert [o.kind for o in by_batch[first]] == ["succeeded", "canceled", "succeeded"]
+    assert [o.kind for o in by_batch[second]] == ["succeeded"]
+    assert len(sync_mode) == 3
+    async with db_factory() as db:
+        ledgered = await db.scalar(
+            select(func.count()).select_from(LandscapeLlmCall)
+            .where(LandscapeLlmCall.batch_id == first)
+        )
+        kinds = (await db.scalars(
+            select(LandscapeBatchItem.result_kind).where(LandscapeBatchItem.batch_id == first)
+            .order_by(LandscapeBatchItem.item_seq)
+        )).all()
+    assert ledgered == 2
+    assert kinds == ["succeeded", "canceled", "succeeded"]
+    assert not await _apply_generic(db_factory, by_batch[first][1])
+    assert (await _rows(db_factory, ids))[ids[1]].status == "submitted"
+
+
 async def test_sync_mode_calls_nothing_unless_allowed(db_factory, fake, sync_mode):
     ids = await _screens(db_factory, 2)
     batch_id = await _submit_stops(db_factory, ids, ["end_turn", "end_turn"])

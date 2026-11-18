@@ -60,6 +60,10 @@ _IDENTITY_KEYS = frozenset({
     "institution", "institutions", "journal", "venue", "pi", "pi_name", "investigators",
 })
 
+#: What the dossier's data flags show for a target's ``depMapEssentiality`` that the database
+#: evidence above already holds (D78).
+DEPMAP_SHOWN_ABOVE = "as in opentargets_target above"
+
 # The model-output fields stored on the triage row as given.
 _STORED_FIELDS = (
     "gating", "gating_rationales", "dimension_rationales", "target_rubric", "evidence_grade",
@@ -120,9 +124,34 @@ def _evidence_section(evidence: dict) -> list[str]:
             + ", ".join(unavailable)
         )
     lines += ["", "## Data flags (never exclude an idea)"]
-    flags = evidence.get("data_flags") or {}
+    flags = _flags_shown(evidence.get("data_flags") or {}, summary or {})
     lines += [f"- {key}: {_json(flags[key])}" for key in sorted(flags)] or ["- none computed"]
     return lines
+
+
+def _flags_shown(flags: dict, summary: dict) -> dict:
+    """``flags`` as the dossier shows them (D78): under ``target_essential``, a target's
+    ``depMapEssentiality`` is replaced by ``DEPMAP_SHOWN_ABOVE`` when the summary's
+    ``opentargets_target`` entry for that target holds the same value, so the database
+    evidence above is its one copy (sent twice, it was about 37% of a dossier, 2026-11-18).
+    Any other value is shown as stored."""
+    essential = flags.get("target_essential")
+    ot = summary.get("opentargets_target")
+    if not isinstance(essential, dict) or not isinstance(ot, dict):
+        return flags
+    evidence = essential.get("evidence")
+    if not isinstance(evidence, dict):
+        return flags
+    shown = {}
+    for target, entry in evidence.items():
+        record = ot.get(target)
+        repeated = (
+            isinstance(entry, dict) and isinstance(record, dict)
+            and entry.get("depMapEssentiality") is not None
+            and entry.get("depMapEssentiality") == record.get("depMapEssentiality")
+        )
+        shown[target] = {**entry, "depMapEssentiality": DEPMAP_SHOWN_ABOVE} if repeated else entry
+    return {**flags, "target_essential": {**essential, "evidence": shown}}
 
 
 def _documents_section(documents: list[dict]) -> list[str]:
@@ -173,7 +202,8 @@ def triage_dossier(idea_fields: dict, evidence: dict, documents: list[dict]) -> 
       ``document_count`` (all documents, before the D35 cap) and ``candidates``: the S3
       candidates (extract output shape, quotes already checked) of the listed documents.
     - ``evidence``: ``evidence_summary``, ``data_flags`` and ``evidence_status``; a source
-      whose status is ``failed`` is listed as unavailable.
+      whose status is ``failed`` is listed as unavailable, and depMap data the summary
+      already holds is not repeated in the flags (``_flags_shown``, D78).
     - ``documents``: one dict per listed document with ``kind``, ``document_type`` and
       ``date`` only.
 

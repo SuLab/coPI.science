@@ -188,6 +188,33 @@ async def test_s4_input_carries_data_flags(db_factory, submitted):
     assert "association" in message
 
 
+def test_dossier_shows_depmap_once():
+    """A flag's depMap data that the database evidence already holds is named, not repeated;
+    a value that differs is shown in full (D78)."""
+    def depmap(tissue: str) -> list:
+        return [{"tissueName": tissue, "screens": [{"geneEffect": -1.2}]}]
+
+    evidence = {
+        "evidence_summary": {"opentargets_target": {
+            "ENSG-INV1": {"isEssential": True, "depMapEssentiality": depmap("tissue-alpha")},
+            "ENSG-INV2": {"isEssential": False, "depMapEssentiality": depmap("tissue-beta")},
+        }},
+        "data_flags": {"target_essential": {"raised": True, "evidence": {
+            "ENSG-INV1": {"isEssential": True, "depMapEssentiality": depmap("tissue-alpha")},
+            "ENSG-INV2": {"isEssential": False, "depMapEssentiality": depmap("tissue-gamma")},
+        }}},
+    }
+
+    message = triage.triage_dossier({"idea_type": "biology"}, evidence, [])
+
+    assert message.count("tissue-alpha") == 1
+    assert message.count("tissue-beta") == 1
+    assert message.count("tissue-gamma") == 1
+    assert message.count(triage.DEPMAP_SHOWN_ABOVE) == 1
+    flag_line = next(line for line in message.splitlines() if line.startswith("- target_essential"))
+    assert '"isEssential": true' in flag_line and '"raised": true' in flag_line
+
+
 async def test_failed_evidence_does_not_block_triage(db_factory, submitted):
     failed = {
         "open_targets": {"status": "failed", "attempts": 3},

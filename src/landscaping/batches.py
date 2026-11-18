@@ -27,7 +27,8 @@ unanswered item as its own Messages call, a chunk at a time, on the batch's mode
 refusal still goes to ``run_fallbacks``), each stage's batches in a lane of their own beside
 the other stages' (D75). Each answer is ledgered at the synchronous rate with
 the batch id and ``item_seq`` (insert-ignore), and its outcome goes through the same ingestion.
-Answers stay in memory until ``mark_ingested``, so a chunk whose ingestion failed is replayed,
+An item whose stage row has left it since submission (reset and batched again, or settled) is
+answered ``canceled`` without a call (D78). Answers stay in memory until ``mark_ingested``, so a chunk whose ingestion failed is replayed,
 not paid for again. A restart loses the requests: the batch's rows still ``submitted`` go back
 to ``pending`` for their stage to batch again. No API batch exists in this mode, so
 reconciliation lists nothing and releases every unconfirmed row to ``pending``. Switch modes
@@ -729,7 +730,9 @@ async def _run_local(
                 )
                 for item in answered
             ], is_last
-            if not is_last and not await _any_ingested(db_factory, batch, answered):
+            # Items answered `canceled` without a call (D78) say nothing about ingestion.
+            sent = [item for item in answered if answers[item.item_seq][0] != "canceled"]
+            if not is_last and sent and not await _any_ingested(db_factory, batch, sent):
                 return
         if not complete:
             return
@@ -747,6 +750,24 @@ async def _still_submitted(db_factory, batch: LandscapeBatch, items: list) -> in
         ) or 0
 
 
+async def _moved_on(db_factory, batch: LandscapeBatch, items: list) -> set[uuid.UUID]:
+    """The ids of ``items`` whose stage row is no longer ``submitted`` under that item."""
+    table = Base.metadata.tables[batch.row_table]
+    async with db_factory() as db:
+        held = set(
+            (
+                await db.scalars(
+                    select(table.c.batch_item_id).where(
+                        table.c.batch_item_id
+                        == _uuid_array("item_ids", [item.id for item in items]),
+                        table.c.status == "submitted",
+                    )
+                )
+            ).all()
+        )
+    return {item.id for item in items} - held
+
+
 async def _any_ingested(db_factory, batch: LandscapeBatch, items: list) -> bool:
     """Whether any of ``items``' stage rows has left ``submitted`` (been ingested)."""
     return await _still_submitted(db_factory, batch, items) < len(items)
@@ -761,7 +782,29 @@ async def _call_local(
     ledger row (synchronous rate, insert-ignore on ``(batch_id, item_seq)``) and its item's
     ``result_kind`` commit, one call at a time. A call that raises is ``errored``, except a
     transient failure (``_TRANSIENT``): that item stays unanswered, writes nothing, and no
-    further call starts. No call starts once ``should_stop()`` is true."""
+    further call starts. No call starts once ``should_stop()`` is true.
+
+    An item whose stage row has left it since the batch was built (reset and batched again,
+    or settled) is answered ``canceled`` without a call, and nothing is ledgered (D78): the
+    compare-and-set would discard its answer. On 2026-11-18 such calls were 13% of S3 spend.
+    """
+    moved = await _moved_on(db_factory, batch, todo)
+    if moved:
+        for item in todo:
+            if item.id in moved:
+                answers[item.item_seq] = ("canceled", None)
+        async with db_factory() as db:
+            await db.execute(
+                update(LandscapeBatchItem)
+                .where(LandscapeBatchItem.id == _uuid_array("moved_ids", sorted(moved)))
+                .values(result_kind="canceled")
+            )
+            await db.commit()
+        logger.info(
+            "batch %s: %d item(s) not sent, their rows having left the batch",
+            batch.seq, len(moved),
+        )
+        todo = [item for item in todo if item.id not in moved]
     client = llm.get_anthropic_client()
     gate = asyncio.Semaphore(max(1, get_settings().landscape_sync_concurrency))
     halted = False
