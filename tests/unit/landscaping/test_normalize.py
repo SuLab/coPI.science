@@ -277,6 +277,38 @@ async def test_agent_lookup_rejected_by_chembl_still_raises(monkeypatch):
         await normalize.normalize_agent({"as_written": "invented", "kind": "other"})
 
 
+async def test_lookup_memo_asks_each_query_once_and_keeps_no_failure(lookups, monkeypatch):
+    """D82: inside ``lookup_memo`` a repeated HGNC or ChEMBL query is asked once; a lookup
+    that fails keeps nothing, so the next asks again; outside it every call asks."""
+    asked: list[str] = []
+    answers = iter([httpx.ConnectTimeout("invented timeout"),
+                    [{"molecule_chembl_id": "CHEMBL900001"}]])
+
+    async def chembl_molecule(name):
+        asked.append(name)
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(normalize, "chembl_molecule", chembl_molecule)
+    criteria = load_criteria()
+    target = {"as_written": "KINX", "kind": "gene", "species": "human"}
+    agent = {"as_written": "inventinib", "kind": "small_molecule"}
+    with normalize.lookup_memo():
+        for _ in range(2):
+            [matched] = await normalize.normalize_targets([target], pubtator=[], criteria=criteria)
+            assert matched["hgnc_id"] == "HGNC:9001"
+        assert "chembl_id" not in await normalize.normalize_agent(agent)
+        for _ in range(2):
+            assert (await normalize.normalize_agent(agent))["chembl_id"] == "CHEMBL900001"
+    assert lookups["hgnc"] == ["KINX"]
+    assert asked == ["inventinib", "inventinib"]
+
+    await normalize.normalize_targets([target], pubtator=[], criteria=criteria)
+    assert lookups["hgnc"] == ["KINX", "KINX"]
+
+
 async def test_pubtator_client_output_is_the_shape_normalize_reads(lookups):
     """``_annotation`` turns a BioC mention into the flat mention normalization matches on."""
     from src.landscaping.evidence import pubtator

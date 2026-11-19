@@ -32,6 +32,7 @@ from src.landscaping import (
     intake,
     ledger,
     liveness,
+    normalize,
     reports,
     rescue,
     review_batches,
@@ -115,7 +116,8 @@ STUBS = (
     (intake, "link_datasets", 0),
     (intake, "ingest_positive_controls", 0),
     (ideas, "apply_lab_unifications", 0),
-    (ideas, "resolve_aliases", 0),
+    (ideas, "recheck_reads", []),
+    (ideas, "apply_recheck", False),
     (ideas, "assemble_evidence", None),
     (screen_stage, "submit_screen_batch", 0),
     (extract_stage, "submit_extract_batch", 0),
@@ -1388,6 +1390,70 @@ async def test_end_fetches_waits_after_a_shutdown_and_cancels_otherwise(monkeypa
     release.set()
     await asyncio.wait_for(ending, timeout=5)
     assert task.result() == "ended"
+
+
+@pytest.mark.asyncio
+async def test_alias_check_runs_beside_the_loop(db_factory, settings, calls, monkeypatch):
+    """D82: the daily re-check's lookups hold back neither the pass nor the next one, under
+    one lookup memo; no second check starts while one runs; the loop stores the answers once
+    the check has made them, each on its own, and an idea whose lookups raise is left out,
+    still due (2026-11-19: the check held the loop, and every model call, for 58 minutes)."""
+    active = await _epoch(db_factory, "active")
+    await _set(db_factory, "landscape_phase", "continuous")
+    first, failing, second = (uuid.uuid4() for _ in range(3))
+    reads = [(first, {"n": 1}), (failing, {"n": 2}), (second, {"n": 3})]
+    asked: list[uuid.UUID] = []
+
+    async def recheck_reads(db, *, epoch_id, today):
+        asked.append(epoch_id)
+        return list(reads) if epoch_id == active else []
+
+    release, started = asyncio.Event(), asyncio.Event()
+    memo_held: list[bool] = []
+
+    async def renormalized(read, criteria):
+        memo_held.append(normalize._MEMO.get() is not None)
+        if read["n"] == 1:
+            started.set()
+            await release.wait()
+        if read["n"] == 2:
+            raise httpx.ConnectError("invented outage")
+        return {"n": read["n"]}
+
+    monkeypatch.setattr(ideas, "recheck_reads", recheck_reads)
+    monkeypatch.setattr(ideas, "renormalized", renormalized)
+    state = worker.WorkerState()
+    await worker.run_once(db_factory, state, now=NOW)
+    await asyncio.wait_for(started.wait(), timeout=5)
+    assert "issue_weekly_batch" in calls.names(), "the pass goes on while the lookups wait"
+    check, asked_once = state.aliasing, len(asked)
+    assert active in asked
+
+    await worker.run_once(db_factory, state, now=NOW + timedelta(minutes=1))
+    assert state.aliasing is check and len(asked) == asked_once
+    assert not calls.args("apply_recheck")
+
+    release.set()
+    await asyncio.wait_for(check, timeout=5)
+    reads.clear()
+    await worker.run_once(db_factory, state, now=NOW + timedelta(minutes=2))
+    stored = [args[1] for args, _ in calls.args("apply_recheck")]
+    assert [(r.idea_id, r.read, r.fields, r.day) for r in stored] == [
+        (first, {"n": 1}, {"n": 1}, "2026-10-30"), (second, {"n": 3}, {"n": 3}, "2026-10-30"),
+    ]
+    assert memo_held == [True, True, True]
+    assert state.rechecks == [] and len(asked) > asked_once, "a new check reads what is due"
+    assert state.aliasing is check, "nothing due: no new task"
+
+
+@pytest.mark.asyncio
+async def test_end_alias_check_cancels_the_running_check():
+    """D82: the check writes nothing, so exit cancels it; its ideas stay due."""
+    state = worker.WorkerState()
+    await worker.end_alias_check(state)
+    state.aliasing = asyncio.create_task(asyncio.Event().wait())
+    await worker.end_alias_check(state)
+    assert state.aliasing.cancelled()
 
 
 @pytest.mark.asyncio

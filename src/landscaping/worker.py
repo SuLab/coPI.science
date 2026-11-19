@@ -23,7 +23,8 @@ batch reconciliation before returning stale ``running`` rows to ``pending``.
   is landed only by the synchronous step, whose insertions ask the model.
 - Only while ``landscape_enabled`` is true and ``app_settings.landscape_paused`` is not, in §12.2
   order: intake (and the D69 flip to ``continuous``), whose due fetches run beside the loop in
-  one background task per source (D76); loading the Mondo release, without which
+  one background task per source (D76), as do the daily re-check's lookups of provisional
+  ideas, whose answers the loop stores (D82); loading the Mondo release, without which
   the pass ends there (the cut, the data flags and S8 read it synchronously);
   evidence assembly, ``ASSEMBLY_CONCURRENCY`` ideas at a time (D76), and S2-S4 submissions;
   synchronous work (S6, S7, similarity judgments, fallback chains) while no simulation run is
@@ -80,6 +81,7 @@ from src.landscaping import (
     intake,
     ledger,
     liveness,
+    normalize,
     reports,
     rescue,
     review_batches,
@@ -242,6 +244,10 @@ class WorkerState:
     ingest_failures: dict[uuid.UUID, _IngestFailures] = field(default_factory=dict)
     #: Source -> its latest background fetch task (``_start_fetches``, D76).
     fetching: dict[str, asyncio.Task] = field(default_factory=dict)
+    #: The latest background re-check of provisional ideas (``_alias_step``, D82) ...
+    aliasing: asyncio.Task | None = None
+    #: ... and the re-checks it has finished that the loop has not stored yet.
+    rechecks: list[ideas.Recheck] = field(default_factory=list)
 
     def poll_due(self, now: datetime, seconds: float) -> bool:
         if self.last_poll is not None and (now - self.last_poll).total_seconds() < seconds:
@@ -377,6 +383,7 @@ async def main() -> None:
     finally:
         logger.info("landscaping worker shutting down")
         await end_fetches(state)
+        await end_alias_check(state)
         await engine.dispose()
         await lock.release()
 
@@ -699,18 +706,13 @@ async def _after_tournament(db_factory, batch_id: uuid.UUID) -> None:
 
 async def _intake_step(db_factory, state: WorkerState, phase: str, now: datetime) -> str:
     """Starts the due fetches (``_start_fetches``), then links, lab unifications and alias
-    resolution; in ``backfill``, the D69 flip once the backfill has drained. Returns the phase
-    in force afterwards."""
+    resolution (``_alias_step``); in ``backfill``, the D69 flip once the backfill has drained.
+    Returns the phase in force afterwards."""
     await _start_fetches(db_factory, state, now)
     await _step("grant links", _in_session(db_factory, intake.link_grants))
     await _step("dataset links", _in_session(db_factory, intake.link_datasets))
     await _step("lab unifications", _in_session(db_factory, ideas.apply_lab_unifications))
-    async with db_factory() as db:
-        live = (
-            await db.scalars(select(LandscapeEpoch.id).where(LandscapeEpoch.status != "retired"))
-        ).all()
-    for epoch_id in live:
-        await _step(f"aliases {epoch_id}", _resolve_aliases(db_factory, epoch_id))
+    await _step("aliases", _alias_step(db_factory, state, now))
     if phase == "backfill" and await _backfill_drained(db_factory, now):
         await _flip_to_continuous(db_factory)
         return "continuous"
@@ -770,10 +772,79 @@ async def _in_session(db_factory, work: Callable[[AsyncSession], Awaitable[Any]]
         await db.commit()
 
 
-async def _resolve_aliases(db_factory, epoch_id: uuid.UUID) -> None:
+async def _alias_step(db_factory, state: WorkerState, now: datetime) -> None:
+    """D82: store the re-checks the background task has finished, each committed on its own
+    (``ideas.apply_recheck``); once that task has ended, read the provisional ideas of each
+    non-retired epoch not yet checked today (``ideas.recheck_reads``) and start a new task
+    for them. The task only makes the lookups (``_recheck``), so a slow or failing source
+    never holds the loop, and every database write stays in the loop. A restart loses only
+    the lookups not stored yet: those ideas are still due."""
+    ended = state.aliasing is None or state.aliasing.done()
+    ready, state.rechecks = state.rechecks, []
+    for recheck in ready:
+        if _shutdown:
+            return
+        await _step(f"alias {recheck.idea_id}", _apply_recheck(db_factory, recheck))
+    if not ended or _shutdown:
+        return
+    today = now.date().isoformat()
     async with db_factory() as db:
-        await ideas.resolve_aliases(db, epoch_id=epoch_id)
+        live = (
+            await db.scalars(select(LandscapeEpoch.id).where(LandscapeEpoch.status != "retired"))
+        ).all()
+    work = [
+        due for epoch_id in live
+        if (due := await _step(f"aliases {epoch_id}", _recheck_due(db_factory, epoch_id, today)))
+    ]
+    if work:
+        state.aliasing = asyncio.create_task(
+            _step("alias check", _recheck(state, work, today)), name="landscape alias check",
+        )
+
+
+async def _recheck_due(db_factory, epoch_id: uuid.UUID, today: str) -> tuple | None:
+    """``(criteria, reads)`` of the epoch's ideas due a re-check; None when none is due.
+    ``LookupError`` for an epoch without a snapshot."""
+    async with db_factory() as db:
+        reads = await ideas.recheck_reads(db, epoch_id=epoch_id, today=today)
+        if not reads:
+            return None
+        return (await epochs.epoch_inputs(db, epoch_id)).criteria, reads
+
+
+async def _recheck(state: WorkerState, work: list[tuple], today: str) -> None:
+    """The background task of ``_alias_step``: normalize each due idea again, one at a time
+    so the sources' pacers keep room for the loop's own lookups, under one
+    ``normalize.lookup_memo``, and queue each answer on ``state.rechecks``. An idea whose
+    lookups raise is logged and left due; a shutdown starts no further idea."""
+    with normalize.lookup_memo():
+        for criteria, reads in work:
+            for idea_id, read in reads:
+                if _shutdown:
+                    return
+                try:
+                    fields = await ideas.renormalized(read, criteria)
+                except Exception as exc:  # noqa: BLE001 - one idea's lookups must not end the run
+                    logger.warning(
+                        "re-checking idea %s failed (%s); it stays due", idea_id, job_error_text(exc),
+                    )
+                    continue
+                state.rechecks.append(ideas.Recheck(idea_id, read, fields, today))
+
+
+async def _apply_recheck(db_factory, recheck: ideas.Recheck) -> None:
+    async with db_factory() as db:
+        await ideas.apply_recheck(db, recheck)
         await db.commit()
+
+
+async def end_alias_check(state: WorkerState) -> None:
+    """At exit: cancel the running re-check. It writes nothing, and the ideas whose answers
+    were not stored stay due."""
+    task = state.aliasing
+    if task is not None and not task.done():
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 async def _backfill_drained(db_factory, now: datetime) -> bool:

@@ -13,14 +13,22 @@ identity (D73). Each is tried first, and names the provisional key when nothing 
 
 A ChEMBL molecule lookup that fails on ChEMBL's side (a 429 or 5xx after one retry, or a
 network failure) leaves the agent unmatched (D81), so an extraction is not held behind it;
-``ideas.resolve_aliases`` normalizes the provisional idea again on a later day.
+the daily re-check (``ideas.renormalized``, D82) normalizes the provisional idea again on a
+later day.
+
+Inside `lookup_memo`, each HGNC, ChEMBL molecule and Open Targets target lookup is made once
+per query and its answer reused (D82); outside it every call asks the source.
 
 PubTator3 annotations are read in the flat shape ``evidence.pubtator.pubtator_annotations``
 returns: ``type``, ``text``, ``identifier`` and ``name`` keys on each mention.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
+from collections.abc import Awaitable, Callable, Iterator
+from contextvars import ContextVar
+from typing import Any
 
 import httpx
 
@@ -50,6 +58,33 @@ _SPECIES_NAMES = {
     "rat": frozenset({"10116", "rattus norvegicus", "rat"}),
 }
 _HUMAN_SPECIES = frozenset({"human", "unstated", ""})
+#: The answers `lookup_memo` keeps, by (source, query); None outside one.
+_MEMO: ContextVar[dict[tuple[str, str], Any] | None] = ContextVar(
+    "landscape_lookup_memo", default=None
+)
+
+
+@contextlib.contextmanager
+def lookup_memo() -> Iterator[None]:
+    """Within the block, in this context only (a task started inside it gets a copy of the
+    same memo), each lookup `_looked_up` makes is made once per query and its answer reused;
+    a lookup that raises keeps nothing, so a later one asks again. The worker's daily
+    re-check holds one around its run (D82), where the same name recurs across ideas."""
+    token = _MEMO.set({})
+    try:
+        yield
+    finally:
+        _MEMO.reset(token)
+
+
+async def _looked_up(source: str, query: str, lookup: Callable[[str], Awaitable[Any]]) -> Any:
+    memo = _MEMO.get()
+    if memo is None:
+        return await lookup(query)
+    key = (source, query)
+    if key not in memo:
+        memo[key] = await lookup(query)
+    return memo[key]
 
 
 def provisional_key(kind: str, as_written: str) -> str:
@@ -84,7 +119,10 @@ async def _single_gene(symbol: str) -> dict | None:
     case-insensitively), else the one gene it is an alias or previous symbol of; None when
     there is none or more than one. An approved symbol wins over another gene's alias of the
     same spelling (``XBP1``, ``SPP1``)."""
-    records = [r for r in await hgnc_lookup(symbol) if isinstance(r, dict) and r.get("hgnc_id")]
+    records = [
+        r for r in await _looked_up("hgnc", symbol, hgnc_lookup)
+        if isinstance(r, dict) and r.get("hgnc_id")
+    ]
     wanted = symbol.casefold()
     approved = [r for r in records if str(r.get("symbol") or "").casefold() == wanted]
     if len({r["hgnc_id"] for r in approved}) == 1:
@@ -112,7 +150,7 @@ async def _human_ortholog(symbol: str, species: str) -> dict | None:
     record = await _single_gene(symbol)
     if record is None or not record.get("ensembl_gene_id"):
         return None
-    target = await ot_target(record["ensembl_gene_id"])
+    target = await _looked_up("opentargets", record["ensembl_gene_id"], ot_target)
     homologues = target.get("homologues") or []
     if any(isinstance(h, dict) and _is_ortholog(h, symbol, species) for h in homologues):
         return record
@@ -278,7 +316,7 @@ async def normalize_agent(agent: dict) -> dict:
     if not name:
         return result
     try:
-        molecules = await chembl_molecule(name)
+        molecules = await _looked_up("chembl", name, chembl_molecule)
     except (httpx.HTTPStatusError, httpx.TransportError) as exc:
         if isinstance(exc, httpx.HTTPStatusError) and (
             exc.response.status_code not in TRANSIENT_STATUSES

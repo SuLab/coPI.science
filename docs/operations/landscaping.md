@@ -214,6 +214,14 @@ lookup is the exception (D81): retried once, a 429, 5xx or network failure leave
 unmatched instead of failing the result (log: `ChEMBL lookup of agent … failed; left
 unmatched`), and the alias step looks it up again on a later day.
 
+**The alias re-check** (D82). Once a UTC day, every provisional idea is normalized again
+(HGNC, ChEMBL, Open Targets) in case a facet now resolves. The lookups run in a background
+task beside the loop, one idea at a time, so the first loops after 00:00 UTC make their model
+calls as usual; with about 2,500 provisional ideas the check takes about an hour. The loop
+stores each answer as it comes, so a restart is safe: what is stored stays, and the rest is
+asked again. An idea whose lookups fail is logged (`re-checking idea … failed (…); it stays
+due`) and tried again by the next check.
+
 **Epoch overrides.** A candidate that fails its regression check is held. An admin can let
 it go ahead from the pipeline page, with a reason; the override is recorded with the admin
 and the reason. An active or retired epoch cannot be overridden.

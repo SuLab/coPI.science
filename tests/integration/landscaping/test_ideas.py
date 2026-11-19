@@ -7,7 +7,7 @@ evidence cache and normalization are faked. Every name and identifier is invente
 import contextlib
 import itertools
 import uuid
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -20,14 +20,17 @@ from src.landscaping.evidence import cache, chembl, comention, opentargets, orph
 from src.landscaping.ideas import (
     DOSSIER_CAP,
     EVIDENCE_SOURCES,
+    Recheck,
     apply_lab_unifications,
+    apply_recheck,
     assemble_evidence,
     dossier_documents,
     group_candidates,
     group_counts,
     idea_key,
     merge_candidate,
-    resolve_aliases,
+    recheck_reads,
+    renormalized,
     version_hash,
 )
 from src.landscaping.stages import cut as cut_stage
@@ -85,6 +88,20 @@ async def _epoch(db: AsyncSession, status: str = "active") -> LandscapeEpoch:
     db.add(epoch)
     await db.flush()
     return epoch
+
+
+async def _recheck_epoch(db: AsyncSession, epoch_id: uuid.UUID) -> int:
+    """The worker's daily re-check (D82) for one epoch, run serially in ``db``'s transaction:
+    `recheck_reads`, `renormalized` with the epoch's stored criteria, `apply_recheck`.
+    Returns how many ideas moved."""
+    criteria = (await epochs.epoch_inputs(db, epoch_id)).criteria
+    today = datetime.now(UTC).date().isoformat()
+    moved = 0
+    for idea_id, read in await recheck_reads(db, epoch_id=epoch_id, today=today):
+        fields = await renormalized(read, criteria)
+        moved += await apply_recheck(db, Recheck(idea_id, read, fields, today))
+    await db.flush()
+    return moved
 
 
 async def _doc(
@@ -333,7 +350,7 @@ async def test_alias_merge_keeps_reviews_visible(db_session, monkeypatch):
     monkeypatch.setattr(normalize, "normalize_targets", targets)
     monkeypatch.setattr(normalize, "normalize_disease", disease)
 
-    assert await resolve_aliases(db_session, epoch_id=epoch.id) == 1
+    assert await _recheck_epoch(db_session, epoch.id) == 1
     # Normalization uses the epoch's stored criteria, not the file on disk.
     stored = (await epochs.epoch_inputs(db_session, epoch.id)).criteria
     assert seen_criteria and all(c is stored for c in seen_criteria)
@@ -374,7 +391,7 @@ async def test_alias_merge_keeps_reviews_visible(db_session, monkeypatch):
     )).all()
     assert [idea for _, idea in reachable] == [normalized]
     # Resolving again moves nothing.
-    assert await resolve_aliases(db_session, epoch_id=epoch.id) == 0
+    assert await _recheck_epoch(db_session, epoch.id) == 0
 
 
 async def test_lab_unification_rekeys_chemistry_idea_via_alias(db_session):
@@ -457,7 +474,7 @@ async def test_merge_drops_pending_cut_whose_tie_class_held_the_merged_idea(
         epoch_id, pending_id = epoch.id, pending.id
 
     async with db_factory() as db:
-        assert await resolve_aliases(db, epoch_id=epoch_id) == 1
+        assert await _recheck_epoch(db, epoch_id) == 1
         await db.commit()
     async with db_factory() as db:
         assert await db.get(LandscapeCut, pending_id) is None
@@ -482,7 +499,7 @@ async def test_merge_repoints_complete_cut_folds_to_the_survivor(db_session, mon
     ))
     await db_session.flush()
 
-    assert await resolve_aliases(db_session, epoch_id=epoch.id) == 1
+    assert await _recheck_epoch(db_session, epoch.id) == 1
 
     cut = (await db_session.execute(
         select(LandscapeCut).where(LandscapeCut.epoch_id == epoch.id)
@@ -490,6 +507,63 @@ async def test_merge_repoints_complete_cut_folds_to_the_survivor(db_session, mon
     )).scalar_one()
     assert cut.ordered_idea_ids == [str(survivor), keeper]
     assert cut.folds["folded"] == {str(survivor): [folded_a], keeper: [folded_b]}
+
+
+async def test_recheck_is_stored_only_while_the_idea_has_the_facets_it_read(
+    db_session, monkeypatch,
+):
+    """D82: the worker makes a re-check's lookups beside its loop, so the idea may change
+    before the answer is stored; an answer read from other facets is dropped, and the idea
+    stays due."""
+    _resolve_kinx(monkeypatch)
+    epoch = await _epoch(db_session)
+    survivor, merged, _, _ = await _survivor_and_merged(db_session, epoch)
+    day = "2026-11-19"
+    [(idea_id, read)] = await recheck_reads(db_session, epoch_id=epoch.id, today=day)
+    assert idea_id == merged
+    criteria = (await epochs.epoch_inputs(db_session, epoch.id)).criteria
+    fields = await renormalized(read, criteria)
+
+    stale = {**read, "disease": {"as_written": "another invented ail"}}
+    assert await apply_recheck(db_session, Recheck(idea_id, stale, fields, day)) is False
+    assert ((await _idea(db_session, merged)).normalization or {}).get("checked_on") != day
+    assert [i for i, _ in await recheck_reads(db_session, epoch_id=epoch.id, today=day)] == [
+        merged
+    ]
+
+    assert await apply_recheck(db_session, Recheck(idea_id, read, fields, day)) is True
+    assert await _idea(db_session, merged) is None
+    assert await recheck_reads(db_session, epoch_id=epoch.id, today=day) == []
+    assert (await _idea(db_session, survivor)) is not None
+
+
+async def test_recheck_with_an_unchanged_key_stamps_the_day(db_session, monkeypatch):
+    """A re-check that resolves nothing stores only the day it was made, so the idea is due
+    again the next day and not before."""
+    async def unchanged_targets(items, *, pubtator, criteria):
+        return [{**t, "provisional_key": "prov:target:kinx-like"} for t in items]
+
+    async def unchanged_disease(item, *, pubtator):
+        return item
+
+    monkeypatch.setattr(normalize, "normalize_targets", unchanged_targets)
+    monkeypatch.setattr(normalize, "normalize_disease", unchanged_disease)
+    epoch = await _epoch(db_session)
+    _, merged, _, _ = await _survivor_and_merged(db_session, epoch)
+    key = (await _idea(db_session, merged)).idea_key
+    [(idea_id, read)] = await recheck_reads(db_session, epoch_id=epoch.id, today="2026-11-19")
+    fields = await renormalized(read, (await epochs.epoch_inputs(db_session, epoch.id)).criteria)
+
+    recheck = Recheck(idea_id, read, fields, "2026-11-19")
+    assert await apply_recheck(db_session, recheck) is False
+    idea = await _idea(db_session, merged)
+    assert (idea.idea_key, idea.normalization["checked_on"]) == (key, "2026-11-19")
+    assert await recheck_reads(db_session, epoch_id=epoch.id, today="2026-11-19") == []
+    assert [i for i, _ in await recheck_reads(
+        db_session, epoch_id=epoch.id, today="2026-11-20"
+    )] == [merged]
+    # Stored once: the same answer again changes nothing.
+    assert await apply_recheck(db_session, recheck) is False
 
 
 # --- versions, tombstones, dossiers -------------------------------------------------------------

@@ -25,6 +25,9 @@ lab is unified under another lab), the idea is either re-keyed in place or, when
 the new key already exists, merged into it. Either way an alias row records the old key, and a
 merge re-points every row that references the merged idea, so foreign keys stay valid and
 opportunities, whose versions list member ``idea_key`` strings, resolve through the alias.
+A provisional idea is normalized again at most once a UTC day: `recheck_reads` lists the due
+ideas, `renormalized` makes the lookups without touching the database, and `apply_recheck`
+stores each answer, so the worker can run the lookups beside its loop (D82).
 
 Nothing here commits except `assemble_evidence`, which owns its sessions; callers own the
 transaction of everything else.
@@ -43,7 +46,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import get_settings
-from src.landscaping import epochs, normalize
+from src.landscaping import normalize
 from src.landscaping.evidence import cache, chembl, comention, opentargets, orphadata, trials
 from src.landscaping.flags import combine_flags, data_flags
 from src.models.landscape import (
@@ -638,9 +641,44 @@ def _strip(item: dict, *names: str) -> dict:
     return {k: v for k, v in item.items() if k not in ("provisional_key", *names)}
 
 
-async def _renormalized(idea: LandscapeIdea, criteria) -> dict:
-    """The idea's facets with every unmatched one normalized again (no PubTator input)."""
-    targets = [dict(t) for t in idea.targets or []]
+@dataclass(frozen=True)
+class Recheck:
+    """One provisional idea normalized again (D36, D82): ``read`` holds the facets the
+    lookups were made from (`recheck_reads`), ``fields`` what `renormalized` made of them, and
+    ``day`` the ISO UTC day of the lookups. `apply_recheck` stores it."""
+
+    idea_id: uuid.UUID
+    read: dict
+    fields: dict
+    day: str
+
+
+def _read(idea_type, targets, disease, agent) -> dict:
+    return {"idea_type": idea_type, "targets": targets, "disease": disease, "agent": agent}
+
+
+async def recheck_reads(
+    db: AsyncSession, *, epoch_id: uuid.UUID, today: str,
+) -> list[tuple[uuid.UUID, dict]]:
+    """``(idea id, facets read)`` for each provisional idea of the epoch not yet checked on
+    ``today`` (``normalization["checked_on"]``), oldest first: an idea is normalized again at
+    most once a UTC day, since normalization calls external lookups."""
+    rows = (await db.execute(
+        select(LandscapeIdea.id, LandscapeIdea.idea_type, LandscapeIdea.targets,
+               LandscapeIdea.disease, LandscapeIdea.agent, LandscapeIdea.normalization)
+        .where(LandscapeIdea.epoch_id == epoch_id, LandscapeIdea.provisional.is_(True))
+        .order_by(LandscapeIdea.created_at, LandscapeIdea.id)
+    )).all()
+    return [
+        (row.id, _read(row.idea_type, row.targets, row.disease, row.agent))
+        for row in rows if (row.normalization or {}).get("checked_on") != today
+    ]
+
+
+async def renormalized(read: dict, criteria) -> dict:
+    """The read facets (`recheck_reads`) with every unmatched one normalized again (no
+    PubTator input), under ``criteria``, the epoch's own. Touches no database."""
+    targets = [dict(t) for t in read["targets"] or []]
     todo = [i for i, t in enumerate(targets) if not t.get("hgnc_id")]
     if todo:
         fresh = await normalize.normalize_targets(
@@ -649,11 +687,11 @@ async def _renormalized(idea: LandscapeIdea, criteria) -> dict:
         if len(fresh) == len(todo):
             for i, target in zip(todo, fresh, strict=True):
                 targets[i] = target
-    disease = idea.disease
+    disease = read["disease"]
     if isinstance(disease, dict) and not disease.get("mondo_id"):
         disease = await normalize.normalize_disease(_strip(disease), pubtator=[])
-    agent = idea.agent
-    if idea.idea_type == "chemistry" and isinstance(agent, dict) and not agent.get("chembl_id"):
+    agent = read["agent"]
+    if read["idea_type"] == "chemistry" and isinstance(agent, dict) and not agent.get("chembl_id"):
         fresh_agent = await normalize.normalize_agent(_strip(agent, "lab_key"))
         agent = fresh_agent if fresh_agent.get("chembl_id") else {
             **fresh_agent, "lab_key": agent.get("lab_key")
@@ -661,39 +699,31 @@ async def _renormalized(idea: LandscapeIdea, criteria) -> dict:
     return {"targets": targets or None, "disease": disease, "agent": agent}
 
 
-async def resolve_aliases(db: AsyncSession, *, epoch_id: uuid.UUID) -> int:
-    """Normalize every provisional idea of the epoch again and move the ones whose key
-    changed: into the idea already holding the new key, through an alias row that keeps
-    every foreign key valid, else re-keyed in place with an alias row (D36).
-
-    Each idea is retried at most once a UTC day (``normalization["checked_on"]``), since
-    normalization calls external lookups. Normalization uses the epoch's own criteria
-    (``epochs.epoch_inputs``), so raises ``LookupError`` for an epoch without a snapshot.
-    Returns how many ideas moved. Flushes only."""
-    criteria = (await epochs.epoch_inputs(db, epoch_id)).criteria
-    today = datetime.now(UTC).date().isoformat()
-    ids = (await db.execute(
-        select(LandscapeIdea.id)
-        .where(LandscapeIdea.epoch_id == epoch_id, LandscapeIdea.provisional.is_(True))
-        .order_by(LandscapeIdea.created_at, LandscapeIdea.id)
-    )).scalars().all()
-    moved = 0
-    for idea_id in ids:
-        idea = await db.get(LandscapeIdea, idea_id)
-        if idea is None or (idea.normalization or {}).get("checked_on") == today:
-            continue
-        fields = await _renormalized(idea, criteria)
-        facets = _facets(idea, **fields)
-        fields["provisional"] = _is_provisional(facets)
-        fields["normalization"] = {**_normalization(facets), "checked_on": today}
-        new_key = idea_key(facets, senior_lab=(fields["agent"] or {}).get("lab_key"))
-        if new_key == idea.idea_key:
-            idea.normalization = fields["normalization"]
-            continue
-        await _move(db, idea, new_key, fields)
-        moved += 1
-    await db.flush()
-    return moved
+async def apply_recheck(db: AsyncSession, recheck: Recheck) -> bool:
+    """Store one re-check: the idea is stamped checked on ``recheck.day`` and, when its key
+    changed, moved into the idea already holding the new key, through an alias row that keeps
+    every foreign key valid, else re-keyed in place with an alias row (D36). Nothing is
+    stored for an idea that is gone, no longer provisional or already checked that day, or
+    whose facets changed since they were read: a later re-check reads it again. Returns
+    whether the idea moved. Flushes only."""
+    idea = await db.get(LandscapeIdea, recheck.idea_id)
+    if (
+        idea is None or not idea.provisional
+        or (idea.normalization or {}).get("checked_on") == recheck.day
+        or _read(idea.idea_type, idea.targets, idea.disease, idea.agent) != recheck.read
+    ):
+        return False
+    fields = dict(recheck.fields)
+    facets = _facets(idea, **fields)
+    fields["provisional"] = _is_provisional(facets)
+    fields["normalization"] = {**_normalization(facets), "checked_on": recheck.day}
+    new_key = idea_key(facets, senior_lab=(fields["agent"] or {}).get("lab_key"))
+    if new_key == idea.idea_key:
+        idea.normalization = fields["normalization"]
+        await db.flush()
+        return False
+    await _move(db, idea, new_key, fields)
+    return True
 
 
 async def apply_lab_unifications(db: AsyncSession) -> int:
