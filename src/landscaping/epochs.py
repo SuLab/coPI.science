@@ -117,6 +117,8 @@ _MODEL_SETTINGS = tuple(k for k in STAGE_INPUTS if k.startswith("landscape_"))
 
 # Stage-row statuses that mean work is still owed; every other status is terminal.
 _IN_FLIGHT = ("pending", "submitting", "submitted", "running")
+# The in-flight statuses past ``pending``: the row's request is being or has been sent.
+_SENT = ("submitting", "submitted", "running")
 _UNACTIVATED = ("candidate", "held")
 # Columns a copied row takes fresh from the server defaults.
 _FRESH_COLUMNS = frozenset({"created_at", "updated_at"})
@@ -759,6 +761,13 @@ async def funnel_work_pending(
     version with no S4 row). S4 rows count only at the idea's current version: a stale-version
     row is never sent.
 
+    A ``pending`` S2 or S3 row counts only while something would send it (D83): its stage's
+    submitter (S2: the document is S1-eligible and not merged; S3: it is not merged and S2
+    screened it in) or the fallback chain (``fallback_from`` set). Intake returns both rows to
+    ``pending`` when a document's summary changes (``intake._rerun_judgments``); when the same
+    write excludes the document at S1, or S2 then screens it out, the row waits, unsent, until
+    the document qualifies again.
+
     With ``cutoff``, only the items the epoch had then count: documents created before it, and
     ideas with evidence from such a document (§7.11 step 4).
     """
@@ -781,12 +790,23 @@ async def funnel_work_pending(
     triaged = select(T.id).where(
         T.idea_id == Idea.id, T.epoch_id == epoch_id, T.idea_version == Idea.version_hash
     ).exists()
+    screened_in = or_(and_(S.status == "done", S.decision.in_(("yes", "unsure"))),
+                      S.status == "rescued")
+    s2_sendable = select(D.id).where(
+        D.id == S.document_id, D.s1_status == "eligible", D.merged_into.is_(None)
+    ).exists()
+    s3_sendable = and_(
+        select(D.id).where(D.id == E.document_id, D.merged_into.is_(None)).exists(),
+        select(S.id).where(
+            S.document_id == E.document_id, S.epoch_id == epoch_id, screened_in
+        ).exists(),
+    )
     checks = (
         select(S.id).where(
-            S.epoch_id == epoch_id, S.status.in_(_IN_FLIGHT), *old_doc(S.document_id),
+            S.epoch_id == epoch_id, _owed(S, s2_sendable), *old_doc(S.document_id),
         ).exists(),
         select(E.id).where(
-            E.epoch_id == epoch_id, E.basis == "summary", E.status.in_(_IN_FLIGHT),
+            E.epoch_id == epoch_id, E.basis == "summary", _owed(E, s3_sendable),
             *old_doc(E.document_id),
         ).exists(),
         select(T.id).join(Idea, Idea.id == T.idea_id).where(
@@ -797,10 +817,8 @@ async def funnel_work_pending(
             D.s1_status == "eligible", D.merged_into.is_(None), ~screened, *created_before,
         ).exists(),
         select(S.id).join(D, D.id == S.document_id).where(
-            S.epoch_id == epoch_id,
-            or_(and_(S.status == "done", S.decision.in_(("yes", "unsure"))),
-                S.status == "rescued"),
-            D.merged_into.is_(None), ~extracted, *created_before,
+            S.epoch_id == epoch_id, screened_in, D.merged_into.is_(None), ~extracted,
+            *created_before,
         ).exists(),
         select(Idea.id).where(
             Idea.epoch_id == epoch_id, Idea.evidence_assembled_at.is_(None),
@@ -815,6 +833,15 @@ async def funnel_work_pending(
         if await db.scalar(select(check)):
             return True
     return False
+
+
+def _owed(row, sendable: ColumnElement[bool]) -> ColumnElement[bool]:
+    """A document-stage row still owed (D83): sent and not yet settled, or ``pending`` and
+    ``sendable`` by its stage's submitter or held by the fallback chain."""
+    return or_(
+        row.status.in_(_SENT),
+        and_(row.status == "pending", or_(row.fallback_from.is_not(None), sendable)),
+    )
 
 
 async def mark_drained(db: AsyncSession, *, epoch_id: uuid.UUID) -> bool:

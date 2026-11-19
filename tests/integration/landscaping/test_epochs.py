@@ -344,6 +344,58 @@ async def test_mark_drained_ignores_items_after_rejudge_start(db_session):
     assert new_screen.status == "pending"
 
 
+async def test_funnel_work_pending_skips_rows_no_stage_would_send(db_session):
+    """D83: intake returns S2 and S3 to ``pending`` on a new summary; a row whose document S1
+    then excludes, S2 screens out or a merge retires is never sent and owes nothing, until
+    the document qualifies again."""
+    epoch = await _epoch(db_session, "candidate")
+    excluded = await _document(db_session)
+    excluded.s1_status = "excluded:type_review_evidence_only"
+    screened_out = await _document(db_session)
+    kept = await _document(db_session)
+    merged = await _document(db_session)
+    merged.merged_into, merged.s1_status = kept.id, "excluded:merged"
+    dormant_s2 = LandscapeScreen(document_id=excluded.id, epoch_id=epoch.id, status="pending")
+    screen_out = LandscapeScreen(
+        document_id=screened_out.id, epoch_id=epoch.id, status="excluded:screen", decision="no"
+    )
+    dormant_s3 = LandscapeExtraction(
+        document_id=screened_out.id, epoch_id=epoch.id, basis="summary", status="pending"
+    )
+    db_session.add_all([
+        dormant_s2, screen_out, dormant_s3,
+        LandscapeScreen(document_id=kept.id, epoch_id=epoch.id, status="done", decision="yes"),
+        LandscapeExtraction(document_id=kept.id, epoch_id=epoch.id, basis="summary", status="done"),
+        LandscapeScreen(document_id=merged.id, epoch_id=epoch.id, status="done", decision="yes"),
+        LandscapeExtraction(
+            document_id=merged.id, epoch_id=epoch.id, basis="summary", status="pending"
+        ),
+    ])
+    await db_session.flush()
+
+    async def owed() -> bool:
+        await db_session.flush()
+        return await epochs.funnel_work_pending(db_session, epoch.id)
+
+    assert await owed() is False
+
+    # The fallback chain sends a row whatever its document's S1 status.
+    dormant_s2.fallback_from = "invented-model"
+    assert await owed() is True
+    dormant_s2.fallback_from = None
+    # A row already sent is owed until its result settles it.
+    dormant_s3.status = "submitted"
+    assert await owed() is True
+    dormant_s3.status = "pending"
+    assert await owed() is False
+    # Qualifying again makes the waiting row owed: S2 screens the document in, or S1 admits it.
+    screen_out.status, screen_out.decision = "done", "unsure"
+    assert await owed() is True
+    screen_out.status, screen_out.decision = "excluded:screen", "no"
+    excluded.s1_status = "eligible"
+    assert await owed() is True
+
+
 async def test_mark_drained_waits_for_screened_in_document_without_extraction(db_session):
     start = datetime(2026, 10, 1, tzinfo=UTC)
     candidate = await _epoch(db_session, "candidate", rejudge_started_at=start)

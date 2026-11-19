@@ -214,6 +214,15 @@ lookup is the exception (D81): retried once, a 429, 5xx or network failure leave
 unmatched instead of failing the result (log: `ChEMBL lookup of agent … failed; left
 unmatched`), and the alias step looks it up again on a later day.
 
+**When the backfill drains** (D69, D83). The worker moves itself to `continuous` once every
+enabled source's backfill slices have ended and the candidate owes no S2-S4 work. A
+`pending` S2 or S3 row that no stage would send is not owed: intake returns both rows to
+`pending` when a document's summary changes, and the new record can then exclude the
+document at S1 (PubMed's publication types often mark a review, comment or letter), S2 can
+screen it out, or a merge can retire it. Such a row stays as it is and is sent if the
+document qualifies again. If the phase stays `backfill` with no model calls and nothing in
+flight, check what `epochs.funnel_work_pending` still counts.
+
 **The alias re-check** (D82). Once a UTC day, every provisional idea is normalized again
 (HGNC, ChEMBL, Open Targets) in case a facet now resolves. The lookups run in a background
 task beside the loop, one idea at a time, so the first loops after 00:00 UTC make their model
