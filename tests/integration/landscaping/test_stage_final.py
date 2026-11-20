@@ -368,6 +368,20 @@ async def test_weighted_score_from_the_epochs_rubric(db_factory, monkeypatch):
     assert row.served_by_model == MODEL
 
 
+async def test_s9_stamps_markdown_prose_format(db_factory):
+    epoch_id = await _epoch(db_factory, "active")
+    idea = await _idea(db_factory, epoch_id)
+    opportunity_id = await _opportunity(db_factory, epoch_id, [idea.idea_key])
+    row_id = await _assessment(
+        db_factory, opportunity_id=opportunity_id, opportunity_version=1, epoch_id=epoch_id,
+    )
+
+    row = await _ingest(db_factory, row_id, _verdict())
+
+    assert row.status == "done"
+    assert row.prose_format == "markdown"
+
+
 async def test_invalid_gating_retried_then_failed(db_factory):
     epoch_id = await _epoch(db_factory, "active")
     idea = await _idea(db_factory, epoch_id)

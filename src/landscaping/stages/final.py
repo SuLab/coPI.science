@@ -601,7 +601,9 @@ def _verdict_values(parsed: Any, rubric: Rubric) -> dict:
     missing. The contract's plain fields go through ``sidecar_column_kwargs`` (bounded ones
     clipped); the weighted score and band from ``rubric`` (``scoring.epoch_weighted_score``,
     ``scoring.epoch_band``), never the model's;
-    ``raw_verdict`` keeps the reply as given.
+    ``raw_verdict`` keeps the reply as given; ``prose_format`` is always ``"markdown"``: S9's
+    prose fields are Markdown. The batch and fallback paths both take
+    these values through ``_reply_values``.
     """
     if not isinstance(parsed, dict):
         raise ValueError("the reply is not a JSON object")
@@ -622,6 +624,7 @@ def _verdict_values(parsed: Any, rubric: Rubric) -> dict:
         weighted_score=score,
         band=epoch_band(rubric, score),
         raw_verdict=parsed,
+        prose_format="markdown",
         rubric_version=rubric.version,
         rubric_content_hash=rubric.content_hash,
     )
