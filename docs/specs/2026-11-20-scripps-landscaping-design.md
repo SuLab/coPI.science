@@ -51,8 +51,8 @@ Made by the designer (each can be overruled):
 - **C5. The tech-transfer listing source stays off**, as it starts (`intake._DISABLED_AT_START`).
   Scripps has a comparable feed (§12), but Scripps Research's terms forbid crawling and
   scraping without written consent. The feed also holds only 38 items, none newer than June
-  2026, and names no inventors. Turning it on needs the owner's go-ahead (§13) and two code
-  changes:
+  2026, and names no inventors. The owner chose on 2026-11-20 to leave it off for this test and
+  not to ask the office for permission now. Turning it on later needs two code changes:
   - point `jhtv.RSS_URL` at `https://scrippsotd.technologypublisher.com/rss.aspx`;
   - give `jhtv._make_client` an explicit, non-httpx `User-Agent`.
 - **C6. NCBI paced at 1 request a second** locally (`LANDSCAPE_NCBI_MAX_RPS=1`), because the key
@@ -516,9 +516,6 @@ These figures were read on 2026-11-20 with read-only queries:
 
 ## 13. Open questions
 
-**The tech-transfer feed.** Should someone ask Scripps Research's Office of Technology
-Development for written permission to read its RSS feed? Until then the source stays off (C5).
-The feed would add at most 38 listings. At Hopkins's 45% S2 keep rate for listings, that is
-about 17 kept, a few dollars of S3 and S4.
-
-The cut fraction is settled at 0.20 (§2).
+None. The owner settled the last two on 2026-11-20: the cut fraction is 0.20 (§2), and the
+tech-transfer feed stays off without a permission request (C5). The feed would add at most 38
+listings, about 17 kept at Hopkins's 45% S2 keep rate for listings: a few dollars of S3 and S4.
