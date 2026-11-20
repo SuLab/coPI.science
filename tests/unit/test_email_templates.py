@@ -182,3 +182,93 @@ async def test_new_proposal_email_uses_shared_footer(monkeypatch):
     assert "Manage email preferences" in html
     assert ">Unsubscribe</a>" in html
     assert "/settings/unsubscribe/" in html
+
+
+def test_render_summary_html_renders_markdown_and_shortcodes():
+    """Proposal summaries are Slack markdown; the email must not show raw ``**``/``:memo:``."""
+    from src.services.email import render_summary_html
+
+    md = (
+        ":memo: **Summary — Convergence Nodes**\n\n"
+        "**Scientific question:** Where do paths converge?\n\n"
+        "- **Petrascheck lab:** worms\n- **Su lab:** graphs\n\n"
+        "1. Week 1\n2. Week 2\n"
+    )
+    out = render_summary_html(md)
+    assert ":memo:" not in out and "**" not in out
+    assert "\U0001f4dd <strong>Summary — Convergence Nodes</strong>" in out
+    assert "<li><strong>Su lab:</strong> graphs</li>" in out
+    assert "<ol>" in out
+
+
+def test_render_summary_html_escapes_untrusted_markup():
+    from src.services.email import render_summary_html
+
+    out = render_summary_html(
+        '<script>alert(1)</script> <img src=x onerror=y> '
+        "[x](javascript:alert(1)) ![p](https://evil.example/pixel.png) :unknown_code:"
+    )
+    assert "<script>" not in out and "<img" not in out
+    assert 'href="javascript' not in out
+    assert ":unknown_code:" in out
+
+
+@pytest.mark.asyncio
+async def test_proposal_emails_render_summary_markdown(monkeypatch):
+    """Both the review reminder and the new-proposal email render the summary."""
+    import src.services.email_notifications as en
+
+    captured = {}
+
+    def _fake_send(to, subject, text_body, html_body, reply_to=None, unsubscribe_url=None):
+        captured["html"], captured["text"] = html_body, text_body
+        return True
+
+    monkeypatch.setattr(en, "_send_html_email", _fake_send)
+
+    class _FakeDB:
+        def add(self, _obj):
+            pass
+
+        async def flush(self):
+            pass
+
+        async def execute(self, *a, **k):
+            class _Result:
+                def scalar_one_or_none(self):
+                    return None
+            return _Result()
+
+    user = types.SimpleNamespace(id=uuid.uuid4(), email="pi@example.com")
+    agent = types.SimpleNamespace(id=uuid.uuid4(), agent_id="su", bot_name="SuBot")
+    td = types.SimpleNamespace(
+        id=uuid.uuid4(), agent_a="su", agent_b="lotz",
+        summary_text=":memo: **Summary — X**\n\n- **Su lab:** graphs",
+        channel="drug-repurposing",
+    )
+
+    await en._send_new_proposal_email(user, td, agent, "LotzBot", _FakeDB())
+    for key in ("html", "text"):
+        assert ":memo:" not in captured[key]
+    assert "<strong>Su lab:</strong>" in captured["html"]
+    assert "**" not in captured["html"]
+    assert "pre-wrap" not in captured["html"]
+
+    # The review reminder sends through boto3 SES directly (raw MIME).
+    import email as email_lib
+    import sys
+
+    sent = {}
+
+    class _FakeSES:
+        def send_raw_email(self, **kw):
+            sent["raw"] = kw["RawMessage"]["Data"]
+
+    monkeypatch.setitem(
+        sys.modules, "boto3", types.SimpleNamespace(client=lambda *a, **k: _FakeSES())
+    )
+    assert await en.send_proposal_notification(user, td, agent, "LotzBot", 1, _FakeDB())
+    msg = email_lib.message_from_string(sent["raw"])
+    html = _html_part(msg)
+    assert "<strong>Su lab:</strong>" in html
+    assert ":memo:" not in html and "**" not in html

@@ -2,9 +2,58 @@
 
 import html
 import logging
+import re
 from pathlib import Path
 
+from markdown_it import MarkdownIt
+
 logger = logging.getLogger(__name__)
+
+# Slack shortcodes the agents write into proposal summaries. Slack renders
+# them; email clients show the literal text, so map them to the characters.
+# Unknown shortcodes are left as-is rather than guessed.
+_SLACK_SHORTCODES = {
+    "memo": "\U0001f4dd",
+    "white_check_mark": "✅",
+    "heavy_check_mark": "✔️",
+    "wave": "\U0001f44b",
+    "moneybag": "\U0001f4b0",
+    "bulb": "\U0001f4a1",
+    "dart": "\U0001f3af",
+    "microscope": "\U0001f52c",
+    "test_tube": "\U0001f9ea",
+    "dna": "\U0001f9ec",
+    "warning": "⚠️",
+    "x": "❌",
+    "tada": "\U0001f389",
+    "rocket": "\U0001f680",
+    "star": "⭐",
+}
+_SHORTCODE_RE = re.compile(r":([a-z0-9_+\-]+):")
+
+# CommonMark with raw HTML disabled: any `<tag>` in the LLM-written text is
+# escaped, not passed through. markdown-it also refuses javascript:/vbscript:/
+# data: link targets by default. Images are disabled so a summary cannot make
+# the recipient's mail client fetch a remote URL.
+_MD = MarkdownIt("commonmark", {"html": False}).enable("table").disable("image")
+
+
+def replace_slack_shortcodes(text: str) -> str:
+    """Replace known Slack ``:shortcode:`` emoji with the Unicode character."""
+    return _SHORTCODE_RE.sub(
+        lambda m: _SLACK_SHORTCODES.get(m.group(1), m.group(0)), text
+    )
+
+
+def render_summary_html(text: object) -> str:
+    """Render an untrusted, LLM-written markdown summary as email-safe HTML.
+
+    Proposal summaries are written as Slack-flavored markdown (``**bold**``,
+    bullet lists, ``:memo:``). Escaping them and showing the source verbatim
+    leaves the markup visible to the PI; this renders it instead. Raw HTML in
+    the input is escaped (see ``_MD``), so the output is safe to interpolate.
+    """
+    return _MD.render(replace_slack_shortcodes("" if text is None else str(text)))
 
 
 def esc(value: object) -> str:
