@@ -155,6 +155,9 @@ $74 for 6 months.
 - **Second reference pass.** The code asks the bake-off's S3 reference a second time on its
   60-document sample (`bakeoff._extract_round`). Hopkins's ledger shows no such calls, so it is a
   contingency: 60 × $0.0586 = $3.52.
+- **Tech-transfer listings are off** (design C5), so they cost nothing. Scripps's feed holds 38
+  listings. If they were turned on, about 17 would be kept, at Hopkins's 44.6% rate for
+  listings. That adds about $0.75 of S3 and $1.30 of S4, plus whatever reaches the cut.
 - **Probes** are drawn only for a blind batch, which is every fourth batch
   (`review_batches.draw_probes`). A test that issues one or two batches draws none.
 - **Batches.** If the new key's account accepts Message Batches, S3, S4, the S8 names, S9 and the

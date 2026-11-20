@@ -49,6 +49,12 @@ Made by the designer (each can be overruled):
   grant with no campus in its address, are kept. La Jolla is the main campus.
 - **C4. A $100 daily spending cap** (`LANDSCAPE_DAILY_USD_CAP=100`); the code's default is none.
 - **C5. The tech-transfer listing source stays off**, as it starts (`intake._DISABLED_AT_START`).
+  Scripps has a comparable feed (§12), but Scripps Research's terms forbid crawling and
+  scraping without written consent. The feed also holds only 38 items, none newer than June
+  2026, and names no inventors. Turning it on needs the owner's go-ahead (§13) and two code
+  changes:
+  - point `jhtv.RSS_URL` at `https://scrippsotd.technologypublisher.com/rss.aspx`;
+  - give `jhtv._make_client` an explicit, non-httpx `User-Agent`.
 - **C6. NCBI paced at 1 request a second** locally (`LANDSCAPE_NCBI_MAX_RPS=1`), because the key
   is shared with production.
 - **C7. The remote colleague gets the `reviewer` role**; the owner is `admin`.
@@ -476,8 +482,26 @@ These figures were read on 2026-11-20 with read-only queries:
   none.
 - **NSF,** awardees matching "Scripps" since 2023, first 25: 22 "University of California-San
   Diego Scripps Inst of Oceanography" and 3 "The Scripps Research Institute" (La Jolla).
-- **Tech-transfer feed:** not checkable. technologypublisher.com answers 403 to automated
-  requests, Johns Hopkins's feed included.
+- **Tech-transfer feed: one exists.**
+  - Scripps Research's Office of Technology Development links its "available technologies" from
+    `scripps.edu/science/technology-development/` to `https://scrippsotd.technologypublisher.com/`.
+    It is the same Inteum platform as Johns Hopkins's.
+  - The RSS 2.0 feed is `https://scrippsotd.technologypublisher.com/rss.aspx`. It holds **38
+    items**, published 2026-05-21 to 2026-06-30, and nothing since.
+  - Every item carries `title`, `caseId` (`BD-nnnn`), `link`, `description` (cut at about 600
+    characters), `pubDate`, `guid` and `author`. The author is always the office's own address,
+    so the feed gives no inventor names, and there are no `category` elements.
+  - The listing, sitemap and search index name neither Jupiter nor Calibr. Scripps Florida
+    discoveries are licensed through UF Innovate instead.
+  - **The 403 comes from the user agent.** httpx's default agent (`python-httpx/…`) gets 403
+    from this feed and from Johns Hopkins's. A generic agent gets 200. `jhtv.py` sets no agent,
+    and production's `jhtv` source is disabled after 20 fetches that failed with 403.
+  - **Terms.** Scripps Research's terms of service (`scripps.edu/terms-of-use`) apply to its
+    website "and any information services that contain or link to these Terms of Service". They
+    forbid using the Site "to spam, phish, pharm, pretext, spider, crawl, or scrape, or to train
+    artificial intelligence algorithms". They allow content to be copied only for "personal,
+    non-commercial home viewing use" without written consent. The Inteum host has no
+    `robots.txt` and links no terms, so whether these terms cover the feed is unverified.
 - **The one-year window, 2025-11-20 to 2026-11-20:**
   - **OpenAlex:** 808 Scripps Research articles, preprints and reviews; 60 of them carry a
     Jupiter address. The Hopkins lineage roots had 60,368 in their own three-year window.
@@ -492,4 +516,9 @@ These figures were read on 2026-11-20 with read-only queries:
 
 ## 13. Open questions
 
-None for the owner. The cut fraction is set to 0.20 (§2).
+**The tech-transfer feed.** Should someone ask Scripps Research's Office of Technology
+Development for written permission to read its RSS feed? Until then the source stays off (C5).
+The feed would add at most 38 listings. At Hopkins's 45% S2 keep rate for listings, that is
+about 17 kept, a few dollars of S3 and S4.
+
+The cut fraction is settled at 0.20 (§2).
