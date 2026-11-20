@@ -11,7 +11,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from src.config import get_settings
-from src.services.email import clean_subject, email_shell_open, email_shell_close, esc
+from src.services.email import (
+    clean_subject,
+    email_shell_close,
+    email_shell_open,
+    esc,
+    render_summary_html,
+    replace_slack_shortcodes,
+)
 from src.models import (
     AgentDelegate,
     AgentRegistry,
@@ -500,7 +507,8 @@ async def send_proposal_notification(
     bot_html = esc(agent.bot_name)
     other_bot_html = esc(other_bot_name)
     channel_html = esc(channel)
-    summary_html = esc(summary)
+    # Rendered from markdown with raw HTML escaped (render_summary_html).
+    summary_html = render_summary_html(summary)
 
     subject = f"{clean_subject(agent.bot_name)} has a new collaboration proposal to review"
 
@@ -550,7 +558,7 @@ async def send_proposal_notification(
 
     text_body = (
         f"{agent.bot_name} and {other_bot_name} developed a collaboration proposal in #{channel}:\n\n"
-        f"---\n{summary}\n---\n\n"
+        f"---\n{replace_slack_shortcodes(summary)}\n---\n\n"
         f"{review_options_text}"
         f"{backlog_text}\n"
         f"---\n"
@@ -585,7 +593,7 @@ async def send_proposal_notification(
             {bot_html} and {other_bot_html} in #{channel_html}
         </p>
         <div style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
-            <p style="color: #374151; line-height: 1.6; margin: 0; font-size: 14px; white-space: pre-wrap;">{summary_html}</p>
+            <div style="color: #374151; line-height: 1.6; font-size: 14px;">{summary_html}</div>
         </div>
 
         {review_options_html}
@@ -1304,7 +1312,8 @@ async def _send_new_proposal_email(
     bot_html = esc(agent.bot_name)
     other_bot_html = esc(other_bot_name)
     channel_html = esc(channel)
-    summary_html = esc(summary)
+    # Rendered from markdown with raw HTML escaped (render_summary_html).
+    summary_html = render_summary_html(summary)
 
     subject = f"{clean_subject(agent.bot_name)} proposed a collaboration with {clean_subject(other_bot_name)}"
 
@@ -1328,7 +1337,7 @@ async def _send_new_proposal_email(
 
     text_body = (
         f"{agent.bot_name} just proposed a collaboration with {other_bot_name} in #{channel}:\n\n"
-        f"---\n{summary}\n---\n\n"
+        f"---\n{replace_slack_shortcodes(summary)}\n---\n\n"
         f"{review_line}\n\n"
         f"---\n"
         f"Unsubscribe: {unsubscribe_url}\n"
@@ -1340,7 +1349,7 @@ async def _send_new_proposal_email(
         <h2 style="margin: 0 0 4px; font-size: 18px; color: #111827;">\U0001f9ea {bot_html} × {other_bot_html}</h2>
         <p style="color: #6b7280; font-size: 13px; margin: 0 0 20px;">#{channel_html}</p>
         <div style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
-            <p style="color: #374151; line-height: 1.6; margin: 0; font-size: 14px; white-space: pre-wrap;">{summary_html}</p>
+            <div style="color: #374151; line-height: 1.6; font-size: 14px;">{summary_html}</div>
         </div>
         {review_html}
         <div style="text-align:center;margin:24px 0;">
