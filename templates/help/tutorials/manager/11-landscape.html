@@ -1,5 +1,6 @@
 {% extends "help/_layout.html" %}
 {% from "help/_callouts.html" import careful, note %}
+{% from "help/_figure.html" import figure %}
 {% block help_body %}
 <p class="text-sm text-gray-600">Manager tutorial</p>
 <h1>{{ step.title }}</h1>
@@ -22,11 +23,20 @@ walks through the batch and the decision.</p>
 <em>you</em> have decided. Until you decide on an opportunity you see nobody else's decisions or
 reviews of it, as a reviewer does, and while you have undecided cards in a blind batch both lists
 leave that batch's cards out.</p>
+<p>Both lists open with tiles counting the whole list by recommendation, whatever the tab and
+lab. <strong>Sort</strong> keeps <strong>Pipeline order</strong> or sorts by
+<strong>Score</strong> or <strong>Recommendation</strong>; <strong>Lab</strong> shows the
+opportunities with one lab among their labs. Press <strong>Apply</strong> to use them.</p>
 
 <h3 id="pipeline">The pipeline page</h3>
+{{ figure(request, "landscape-pipeline", "The Landscape pipeline page: the phase, the sets of judging criteria and the sources.") }}
 <p>It shows the phase and whether the pipeline is paused, the sets of judging criteria and their
 checks, each source's intake, the running counts and spend, the latest cut, the reports, and the
-items each stage filtered out.</p>
+items each stage filtered out. The latest cut reads as a sentence: how many ideas were ranked,
+how many kept, and how many opportunities they make. A set of criteria an admin let go ahead
+after it was held reads <strong>Held, then overridden</strong>, with the reasons folded under
+<strong>Reasons</strong>, and <strong>Completeness (last slice)</strong> describes each source's
+most recent intake slice only.</p>
 <ul>
     <li><strong>Pause</strong> and <strong>Resume</strong> stop and restart new work.</li>
     <li><strong>Rescue</strong> returns a filtered-out item to the pipeline, with your

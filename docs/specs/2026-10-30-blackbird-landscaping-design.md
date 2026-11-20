@@ -265,6 +265,17 @@ The owner may override any of these. Each names the section that carries it.
 | D81 | A ChEMBL molecule-name request is retried once, and a lookup ChEMBL fails to answer (a 429 or 5xx after the retry, or a network failure) leaves the agent unmatched instead of raising. A 4xx still raises. The idea is provisional, so the daily re-check (D82) normalizes it again on a later day and re-keys it through an alias once ChEMBL answers. | Such failures had been treated as an outage: the S3 outcome waited up to two hours, and a sync-mode chunk that cannot ingest holds its batch, so extraction fell from about 450 an hour to about 50 while ChEMBL failed about a third of name lookups (2026-11-18). | 7.4 |
 | D82 | The daily re-check of provisional ideas makes its lookups beside the loop, in one background task, one idea at a time, under a memo that asks each HGNC, ChEMBL or Open Targets query once per run; a check still running starts no second. The loop stores each answer, committed on its own, unless the idea has changed since it was read; an idea whose lookups raise stays due. A restart loses only the answers not yet stored. | The check ran inside the loop, in one transaction. At 00:00 UTC on 2026-11-19 it normalized 2,492 provisional ideas again, about 2,200 ChEMBL requests among them, and held the loop, so every model call, for 58 minutes; a restart would have thrown all of it away. During the day the checks of new provisional ideas held the loop too, about 12 seconds for each ChEMBL lookup that failed. The memo saves little at present (1,065 distinct agent names among 1,097 unmatched agents). | 7.4, 12.2 |
 | D83 | A `pending` S2 or S3 row counts as work owed to the drain (D69, §7.11 step 4) only while something would send it: S2's submitter (an S1-eligible document that is not merged), S3's (a document that is not merged and that S2 screened in), or the fallback chain. A row past `pending` counts until it settles. A row no stage would send stays as it is and is sent if its document qualifies again. | Intake returns a document's S2 and S3 rows to `pending` whenever its summary changes. From 02:19 UTC on 2026-11-18 the PubMed backfill replaced OpenAlex abstracts with PubMed's; for some of those documents PubMed's publication types (review, comment, letter, editorial) then excluded them at S1, S2 screened others out, and one was merged, leaving 174 S2 rows and 206 S3 rows that no stage would send. The drain counted them, so the backfill's S2-S4 work ended at about 07:07 UTC on 2026-11-19 but the phase stayed `backfill`, no cut was taken, and the same check would also have kept the candidate from activating. | 7.11, 12.3 |
+| D84 | A card follows the Assessments card. The headline is the link; each structured line is printed once, then the labs and the issue date. BlackbirdBot's recommendation is a coloured chip, a pass under the rubric's display word. Two columns, stacking on a phone: the whole "In one minute" pitch with a "detail →" button; then the cost line (the bold first line of the recommended next experiment, its `**` removed) and the key points with their risks. Score, band and the score rationale sit one click down under "Why this score", with the note that the band is computed from the dimension scores. The footer carries the red-flag and confirmed deal-breaker counts, the assignees and, once the viewer has decided, who has decided (L40). The quick decision stays open, its reason tags folded. | The short card showed the band where BlackbirdBot's own call differed, and gave no cost to decide on (audit findings 1 and 6 in `docs/audits/2026-11-19-landscape-ui/README.md`). Reviewers already read the Assessments and Projects cards; the cost line follows the Projects card's "Time and budget". The owner chose this card over the short one after seeing both, accepting that a batch of 10 is about 8-10 screens; measured on production data after the build, the 10-card batch is about 17,000 px, some 19 screens at 1280×900 (2026-11-19, `docs/specs/2026-11-19-landscape-ui-remediation-design.md`, "The card"). | 13.1 |
+| D85 | On a blind card the viewer has not decided, the recommendation chip, the flag counts and "Why this score" (so the score, band and score rationale) are hidden. The cost line, the pitch and the key points stay. The hiding is the card's only: the detail page and the chat record keep showing the recommendation and hide what §10.6 lists. | A cost is not a verdict (owner, 2026-11-19). The chip and the counts would show the card's standing before the viewer judges it; the detail page and chat are unchanged from today (`docs/specs/2026-11-19-landscape-ui-remediation-design.md`, "The card"). | 13.1, 10.6 |
+| D86 | No card shows a rank number. Cards keep the pipeline's order (D30), and a blind batch its shuffle (D62). | Neither the Assessments nor the Projects card is numbered, and a rank printed beside a score it does not follow went unexplained (audit finding 7; `docs/specs/2026-11-19-landscape-ui-remediation-design.md`, "The card"). | 13.1 |
+| D87 | Current and All assessed get a Sort ("Pipeline order", the default; "Score"; "Recommendation") and a Lab filter, with an Apply button. An opportunity matches the Lab filter when any of its labs is the one chosen. Sorting and the count tiles use only the values the viewer's card shows: a hidden value sorts last and counts only in "Total". The list header carries the band legend, count tiles by recommendation over the whole list, and a sentence saying how many ideas the cut kept and into how many opportunities they group. The batch view gets the legend and its own tiles. | Both sibling lists have a sort and a lab filter, and the list gave no orientation (audit finding 18). A Landscape opportunity can have several labs. A sort or count over hidden values would reveal them (`docs/specs/2026-11-19-landscape-ui-remediation-design.md`, "Lists"). | 13.1 |
+| D88 | The pitch, the ask and the rationale render as Markdown. A Landscape assessment row with NULL `prose_format` counts as Markdown, and S9 stamps `markdown` on new rows. No stored row is rewritten. | Every Landscape assessment was written under the same Markdown instruction from 2026-10-30, and the pages printed its symbols literally (audit finding 4). Interview assessments render it (`docs/specs/2026-11-19-landscape-ui-remediation-design.md`, "Markdown"). | 13.2 |
+| D89 | The Approve, Disapprove and Clear buttons are removed from the detail page. The status route and `landscape_review_events` stay, the route with a reachability allowlist entry, and a mark recorded earlier still shows read-only. | Assessments removed the same buttons on 2026-09-21 (`docs/specs/2026-09-21-assessment-queue-and-headline-contract-design.md` D2/D3); here they were unexplained beside the decision and the review (audit finding 14). Reverses revision 3 of the remediation plan (`docs/specs/2026-11-19-landscape-ui-remediation-design.md`, "Approve / Disapprove"). | 13.2, 13.3 |
+| D90 | Each History row opens a read-only view of that earlier assessment (`?assessment=<id>`, accepted only for a row the History list shows; any other id is a 404). It shows the assessment's own sections under the note "This is an earlier assessment of this opportunity, shown as history.", with no forms, no chat, no deal-breakers and no member ideas, under the same hiding rules. | Assessments keep their old verdicts viewable, and §13.2 promised older versions "linked as history" (`docs/specs/2026-11-19-landscape-ui-remediation-design.md`, "History"). | 13.2 |
+| D91 | When the active epoch went into use by an admin override after a failed check, the Verdict says so in one line, "These criteria went into use by an admin override after a failed check.", with no name or reason. | Assessments warn openly when a score is weaker than it looks; the Verdict did not mention the override (audit finding 23). Names and reasons stay on the staff pipeline page (D94) (`docs/specs/2026-11-19-landscape-ui-remediation-design.md`, "Criteria override"). | 13.2 |
+| D92 | Claims show their sources on the page, not in a tooltip. A `doc:` reference becomes its document's title; DOI, PubMed and clinical-trial ids become links; patents and database records show as labels; a verified quote resolves to its document. A claim's badge is "sourced" (green) only when one of its items is a document, database record or verified quote; "analysis" (grey) for a specialist's or the pipeline's own note, with no label on an expert's open item (D63); otherwise "estimate". Each member idea shows its verified quotes, by section. | Claims could not be checked against their sources, and the promised quotes were missing (audit findings 2 and 3). Projects link only DOI, PubMed and trial ids, leave patents unlinked and show unmatched items in neutral grey (`docs/specs/2026-11-19-landscape-ui-remediation-design.md`, "Sources"). | 13.2 |
+| D93 | The Landscape help page, glossary and tutorials are rewritten to match the rebuilt pages, and the glossary gains order and rank, deal-breaker flags, the three badges, evidence grade, structured line and the licence values. The Landscape help screenshots are captured from the seeded demo instance on the workstation as the last step before deploy. | The help promised things the pages did not do and left terms unexplained (audit findings 16 and 19). Every other help page is captured the same way (`docs/specs/2026-11-19-landscape-ui-remediation-design.md`, "Help"). | 13.6 |
+| D94 | The pipeline page prints the latest cut as a sentence ("Latest cut: N ideas ranked, K kept, M opportunities", with its time). An epoch let through after a hold reads "Held, then overridden", with the hold and override reasons folded under "Reasons" for staff. Each reject-audit row carries its item's title. The completeness column is "Completeness (last slice)", and a received count above the expected count prints as complete. Intake is unchanged. | The page was operator output: a raw JSON cut, override text with an environment variable, reject-audit rows with only a kind and an id beside an irreversible Rescue, and "917 of 916" completeness (audit finding 20). No precedent exists here (`docs/specs/2026-11-19-landscape-ui-remediation-design.md`, "Pipeline page"). | 13.4 |
 
 ## 4. Constraints
 
@@ -2025,17 +2036,33 @@ All pages are GET-only on the workspace router; no POST goes there
 - **Expert sample** (D63). A marked expert's view also lists their open sample items for the
   quarter, with S9's and S6's calls hidden until they submit.
 
-**A card** (L41; readable in under a minute) shows:
-- the BlackbirdBot headline;
-- one structured line per member idea (D29);
-- the first two sentences of the elevator pitch;
-- the labs behind it, named by person;
-- band and score, hidden on every card of a blind batch until the viewer decides (L53), and on
-  an expert's own sample items until they submit (D63);
-- the quick decision (§13.3).
+**A card** (L41) follows the Assessments card (D84). It shows:
+- the BlackbirdBot headline, as the link to the detail page;
+- one structured line per member idea (D29), each printed once, then the labs behind it, named
+  by person, and the issue date;
+- BlackbirdBot's recommendation as a coloured chip, a pass under the rubric's display word;
+- two columns, stacking on a phone: the whole elevator pitch under "In one minute", with a
+  "detail →" button; then the cost line (the bold first line of the recommended next
+  experiment) and the key points, each with its risk;
+- "Why this score", closed: the score, the band, BlackbirdBot's score rationale and the note
+  that the band is computed from the dimension scores;
+- a footer with the red-flag count, the confirmed deal-breaker count, the assignees and, once
+  the viewer has decided, who has decided (L40);
+- the quick decision (§13.3), open, its reason tags folded.
+
+On a blind card the viewer has not decided, the chip, the counts and "Why this score" are
+hidden; the cost line, the pitch and the key points stay (L53, D85). On an expert's own open
+sample item, the recommendation and the counts are hidden until they submit (D63).
 
 Cards are ordered by their best member's S7 rank (D30), except in blind batches, which are
-shuffled.
+shuffled. No card shows a rank number (D86).
+
+**The lists** (D87). Current and All assessed carry the band legend, count tiles by
+recommendation over the whole list, and a sentence saying how many ideas the latest cut kept
+and into how many opportunities they group. A Sort ("Pipeline order", the default; "Score";
+"Recommendation") and a Lab filter (any of the opportunity's labs), with Apply, act on the
+values the viewer's card shows only: a hidden value sorts last and counts only in "Total".
+The batch view carries the legend and its own tiles.
 
 **Route order** (D46). `/workspace/landscape/pipeline` is registered before the UUID-typed
 `/workspace/landscape/{opportunity_id}`, and a test pins that the pipeline path never reaches
@@ -2061,37 +2088,59 @@ list, detail and review-form templates, and share only `_head.html`, the timelin
 the chat drawer. The assessment templates are not refactored, so the Assessments page is
 untouched.
 
+**Layout.** The page copies the assessment detail page: the title "Opportunity detail", the
+headline as the brief's title, a sticky "On this page" jump nav with Expand all / Collapse
+all, and the assessment's section order and open and collapsed defaults. The pitch, the ask
+and the rationale render as Markdown; a NULL `prose_format` counts as Markdown (D88).
+
 **Opportunity sections, in assessment order.**
-- **Brief:** headline, structured lines, elevator pitch, and the six key-point groups. Each
-  bullet carries its sourced or estimate badge (`claim_support`, L30).
+- **Brief:** headline, structured lines, elevator pitch with "Why this score" beside it, and
+  the six key-point groups, each risk marked. Each bullet carries a support badge (L30, D92):
+  "sourced" (green) only for a document, database record or verified quote, its sources
+  listed under it and linked where they have a DOI, PubMed or clinical-trial id; "analysis"
+  (grey) for a specialist's or the pipeline's own note, unlabelled on an expert's open item;
+  otherwise "estimate". A `doc:` reference in any prose becomes its document's title.
 - **Evidence summary.** `derive_strengths_and_risks` gets the S6 consults in the dict shape it
-  expects.
-- **The ask:** the recommended next experiment.
-- **Verdict:** score and band, with the rubric's "provisional, advisory" note and the epoch.
+  expects, with the assessment page's explanations; a consult row about one idea links to
+  that idea.
+- **The ask:** the recommended next experiment, its bold first line shown and the rest behind
+  "Show the full plan", with the budget specialist's view beside it.
+- **Verdict:** BlackbirdBot's recommendation and the score and band as separate labelled
+  values, with the rubric's "provisional, advisory" note and the epoch's criteria and prompt
+  versions. When the active epoch went into use by an admin override after a failed check,
+  one line says so (D91).
 - **Gating; red flags; rationale; dimension scores** (`build_dimension_rows` and
-  `resolve_revision`, reused).
-- **Deal-breaker flags** (L24): each raised flag, with its evidence, and whether S6 confirmed
-  or cleared it.
+  `resolve_revision`, reused). When flags were confirmed but S9 recorded no red flag, the red
+  flags say why.
+- **Deal-breaker flags** (L24): each flag raised or reviewed, with its evidence in words;
+  confirmed and cleared flags look different, and the flags checked and not raised are named
+  on one line. The raw evidence JSON is admin only.
 - **Human review** (§13.3) and the **chat drawer** (§13.5).
 - **Raw verdict JSON**, admin only.
 
-**Member idea sections**, one per idea in the opportunity, collapsed after the first:
+**Member idea sections**, one per idea in the opportunity, numbered "Idea N", collapsed after
+the first:
 - the structured line;
-- type, stage, evidence grade and group counts;
+- type, stage, evidence grade (in words) and group counts;
 - **Target biology** (§7.7 step 4);
 - **Disease profile** (§7.7 step 3), with a support badge on every field;
-- the panel opinions;
-- the full-text and summary evidence: verified quotes by section, with the evidence grade;
-- **Sources:** every document, with its role basis (§5.2), license and `text_basis`;
-- **Labs:** the qualifying labs, with OpenAlex and ORCID links. There is no PI page, because
-  these researchers are not on the roster.
+- the panel opinions, a long one clamped behind "Show full message";
+- "Verified quotes": the full-text and summary quotes, by section (D92);
+- **Sources:** every document, with its kind, a DOI or PubMed link, its role basis (§5.2),
+  license and `text_basis`;
+- **Labs:** the qualifying labs, with ORCID links and OpenAlex links where an OpenAlex author
+  id is known. There is no PI page, because these researchers are not on the roster.
 
 **Which assessment** (X1). The page shows the opportunity's current assessment *in the active
-epoch*. Older versions and retired epochs are linked as history, never shown as current.
-Decisions and reviews carry across versions, marked "changed since your decision" (L60).
+epoch*. Older versions and retired epochs are listed under History, never shown as current.
+Each History row opens a read-only view of that assessment (D90): its own sections, under a
+note saying it is an earlier assessment, with no forms, no chat, no deal-breakers and no
+member ideas. Decisions and reviews carry across versions, marked "changed since your
+decision" (L60).
 
 **Blind batches** (L53, X5, F2). For a card of a blind batch, the detail page hides everything
-§10.6 lists, the score and dimension rationales included, until the viewer has decided.
+§10.6 lists, the score and dimension rationales included, until the viewer has decided. It
+keeps showing the recommendation; only the card hides that (D85).
 
 **Help with this page** links to the new help page (§13.6).
 
@@ -2119,7 +2168,8 @@ It is one `landscape_decisions` row per (opportunity, reviewer), which the revie
 - `edited`; the reviewer foreign key SET NULL, with `reviewer_name`; `recorded_by_user_id`.
 
 Alongside it:
-- `landscape_review_events`: approved, disapproved, cleared; append-only.
+- `landscape_review_events`: approved, disapproved, cleared; append-only. The page has no
+  buttons that write them (D89); a mark recorded earlier shows read-only.
 - `landscape_review_assignments`: unique per (opportunity, assignee).
 
 **Independent votes** (L40, L50, L51). Until a viewer has made their own quick decision on an
@@ -2141,7 +2191,8 @@ structured form for a later version. Nothing in v1 tunes from them. There is no
 - submit and edit decision;
 - submit and edit full review;
 - delete (admin);
-- status (approve / disapprove / clear);
+- status (approve / disapprove / clear), kept with no button on the page and a
+  reachability allowlist entry (D89);
 - assign and unassign (staff; impersonation refused);
 - expert judgment (a marked expert, on their own sample items, D63).
 
@@ -2153,13 +2204,18 @@ gains the new paths. As today, there are no notifications.
 
 `/workspace/landscape/pipeline` is staff only. It shows:
 - the phase (pilot, backfill or continuous) and the pause state;
-- the epochs: active, candidate or held, with regression results (§7.11, §10.4);
-- per-source completeness and last fetch;
-- the §10.3 metrics;
-- the latest cut: N, K and time;
+- the epochs: active, candidate or held, with regression results (§7.11, §10.4); an epoch let
+  through after a hold reads "Held, then overridden", its hold and override reasons folded
+  under "Reasons" (D94);
+- per-source last fetch, and completeness under "Completeness (last slice)": the latest
+  slice's, with a received count above the expected count printed as complete;
+- the §10.3 metrics, each JSON block behind a disclosure titled in words;
+- the latest cut, as a sentence: N ideas ranked, K kept, the opportunities they form, and the
+  time;
 - the bake-off, positive-control and drift reports;
 - incomplete slices;
-- the reject audit's disagreements, and the filtered-items browser with reasons (§10.5).
+- the reject audit's disagreements, each with its item's title, and the filtered-items
+  browser with reasons (§10.5).
 
 **Controls** post to a new router, `src/routers/landscape.py` at `/landscape`. It gets its own
 POST-allowlist test, and the Origin guard covers it automatically.
@@ -2234,7 +2290,8 @@ Per `docs/operations/help-content.md`:
 - A new help page `landscape` (list, detail, reviewing, pipeline) in `src/web/help_pages.py`,
   with literal template names, under `templates/help/pages/`.
 - Glossary terms: cut, opportunity, batch, blind batch, disease profile, role basis, text
-  basis.
+  basis; since D93 also order, deal-breaker flag, the sourced / analysis / estimate badges,
+  evidence grade, structured line and the licence values.
 - Troubleshooting entries for the new refusals.
 - A reviewer tutorial step and a manager tutorial step.
 - Screenshots captured from a seeded throwaway instance on a workstation, as the last step

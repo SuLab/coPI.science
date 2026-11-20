@@ -258,6 +258,18 @@ collisions; and the latest cut. The bake-off, pilot, probe, positive-control and
 reports are stored on the same page. The ledger, `landscape_llm_calls`, is the only cost
 record for landscaping: `llm_call_logs` does not see it.
 
+**The Landscape pages** (spec D84-D94). The pipeline page is staff only. It prints the latest
+cut as a sentence ("Latest cut: N ideas ranked, K kept, M opportunities", with its time). An
+epoch an admin let through after a hold reads "Held, then overridden", with the hold and
+override reasons folded under "Reasons". "Completeness (last slice)" is the completeness of
+each source's most recent intake slice, not of the whole source; a slice that received more
+than it expected prints as complete, and intake itself counts as before. Each reject-audit row
+carries its item's title. On an opportunity's page, each History row opens that earlier
+assessment read-only (`/workspace/landscape/<id>?assessment=<assessment id>`): its own
+sections only, with no forms, no chat, no deal-breakers and no member ideas. Only an id the
+History list shows is accepted; any other is a 404. The Verdict of the current assessment
+says, in one line with no name or reason, when the active epoch went into use by an override.
+
 **Synchronous work and the simulation.** The worker makes its synchronous calls (S6, S7,
 similarity judgments, fallback chains) only while no simulation run is live, so a live run
 delays them. Do not stop or start a run for it.

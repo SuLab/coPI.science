@@ -7,23 +7,23 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#activity": "f7057fae84268c3a7090a9e06a5110673674b53914c1d1efeb9e960116c51da2",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/activity.html": "1ed12241f6977d813032f4617979bf8b735cba87b83e74019e79f20220357368",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "assessment-card": {
     "audience": "all",
     "alt": "One assessment card: the recommendation, the headline, the summary and the quick-scoring form.",
     "width": 1216,
-    "height": 985,
+    "height": 987,
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#assessment-card": "454ec3db48fcce1a4313aff1241c1ad575c1d7ea6fc018d3de112932dfced014",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
       "templates/_run_bar.html": "be261635450bbb1a6c7db5260fbe0ece436a6c7dce041c7cc162cdec0ff83551",
       "templates/assessments/_body.html": "93db957560a6742298ed3a8b91a5299747666065719ec5ea4ce6adffef7f0040",
@@ -31,9 +31,9 @@
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessments.html": "b060d6f72af036498bf6be0d68abaa8f5ac683768a8271d635046c5e04063a9a",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "assessments-list": {
     "audience": "all",
@@ -43,7 +43,7 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#assessments-list": "bd414228854ce8ebf84523fcad891fa00604fa650b54c129241a5f6853dc165e",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
       "templates/_run_bar.html": "be261635450bbb1a6c7db5260fbe0ece436a6c7dce041c7cc162cdec0ff83551",
       "templates/assessments/_body.html": "93db957560a6742298ed3a8b91a5299747666065719ec5ea4ce6adffef7f0040",
@@ -51,9 +51,9 @@
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessments.html": "b060d6f72af036498bf6be0d68abaa8f5ac683768a8271d635046c5e04063a9a",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "assign-to": {
     "audience": "staff",
@@ -63,27 +63,27 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#assign-to": "049d17cea0a41ed1bdc718a5230465545384f24b46fc94213ac7de3a3cc76eb5",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
-      "templates/assessments/_chat_drawer.html": "ba33b4b38d567e38bdc6861b26b08504749832ec81b207ba6cb150fcd419ee2b",
+      "templates/assessments/_chat_drawer.html": "eaeeec2a1587b71fedb018f6e0a5ef4e584398601c0439ab110f15fcbb39ef35",
       "templates/assessments/_detail_body.html": "a8ae8cf3fdeef08fe7968a2e14a672800fc89e9ff693994d17623fb8156dafae",
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "e97bb92b4395e665329549ca2081732737f3402e"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "card-rubric-gating": {
     "audience": "all",
     "alt": "An assessment card's rubric scores and gating criteria, opened.",
     "width": 1174,
-    "height": 353,
+    "height": 321,
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#card-rubric-gating": "5609d1170380ac17d6ced60e7e8bd0aa91fb362ad776487a77993179c3850816",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
       "templates/_run_bar.html": "be261635450bbb1a6c7db5260fbe0ece436a6c7dce041c7cc162cdec0ff83551",
       "templates/assessments/_body.html": "93db957560a6742298ed3a8b91a5299747666065719ec5ea4ce6adffef7f0040",
@@ -91,9 +91,9 @@
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessments.html": "b060d6f72af036498bf6be0d68abaa8f5ac683768a8271d635046c5e04063a9a",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "chat-drawer": {
     "audience": "all",
@@ -103,57 +103,57 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#chat-drawer": "bff926b223b15710a3645add20bfbaf1860937aac6e7e81c41cc60543311a071",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
-      "templates/assessments/_chat_drawer.html": "ba33b4b38d567e38bdc6861b26b08504749832ec81b207ba6cb150fcd419ee2b",
+      "templates/assessments/_chat_drawer.html": "eaeeec2a1587b71fedb018f6e0a5ef4e584398601c0439ab110f15fcbb39ef35",
       "templates/assessments/_detail_body.html": "a8ae8cf3fdeef08fe7968a2e14a672800fc89e9ff693994d17623fb8156dafae",
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "e97bb92b4395e665329549ca2081732737f3402e"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "detail-brief": {
     "audience": "all",
     "alt": "The brief at the top of an assessment's detail page: headline, pitch and key points.",
     "width": 1024,
-    "height": 803,
+    "height": 776,
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#detail-brief": "d56981af99b7d835163cfb8fb44afcde3f51513b5e5ed3d63b0a81f2c56283d8",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
-      "templates/assessments/_chat_drawer.html": "ba33b4b38d567e38bdc6861b26b08504749832ec81b207ba6cb150fcd419ee2b",
+      "templates/assessments/_chat_drawer.html": "eaeeec2a1587b71fedb018f6e0a5ef4e584398601c0439ab110f15fcbb39ef35",
       "templates/assessments/_detail_body.html": "a8ae8cf3fdeef08fe7968a2e14a672800fc89e9ff693994d17623fb8156dafae",
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "e97bb92b4395e665329549ca2081732737f3402e"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "detail-evidence": {
     "audience": "all",
     "alt": "The Evidence summary on an assessment's detail page: strengths, risks and what was not established.",
     "width": 1024,
-    "height": 1540,
+    "height": 1566,
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#detail-evidence": "3148a5cbcab10f9f70d96a3249d897d394356bb41f5e1595fccd98cbf6e17b40",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
-      "templates/assessments/_chat_drawer.html": "ba33b4b38d567e38bdc6861b26b08504749832ec81b207ba6cb150fcd419ee2b",
+      "templates/assessments/_chat_drawer.html": "eaeeec2a1587b71fedb018f6e0a5ef4e584398601c0439ab110f15fcbb39ef35",
       "templates/assessments/_detail_body.html": "a8ae8cf3fdeef08fe7968a2e14a672800fc89e9ff693994d17623fb8156dafae",
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "e97bb92b4395e665329549ca2081732737f3402e"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "detail-panel-gating": {
     "audience": "all",
@@ -163,17 +163,17 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#detail-panel-gating": "744dc330f47c5d07128f93440eafa9c0ce4605e1626259071be86a46ca491d1e",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
-      "templates/assessments/_chat_drawer.html": "ba33b4b38d567e38bdc6861b26b08504749832ec81b207ba6cb150fcd419ee2b",
+      "templates/assessments/_chat_drawer.html": "eaeeec2a1587b71fedb018f6e0a5ef4e584398601c0439ab110f15fcbb39ef35",
       "templates/assessments/_detail_body.html": "a8ae8cf3fdeef08fe7968a2e14a672800fc89e9ff693994d17623fb8156dafae",
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "e97bb92b4395e665329549ca2081732737f3402e"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "detail-timeline": {
     "audience": "all",
@@ -183,17 +183,17 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#detail-timeline": "d4961954f27aa38df693328efc786bd1b472c635dbc95fb0d8ff138a85dd188b",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
-      "templates/assessments/_chat_drawer.html": "ba33b4b38d567e38bdc6861b26b08504749832ec81b207ba6cb150fcd419ee2b",
+      "templates/assessments/_chat_drawer.html": "eaeeec2a1587b71fedb018f6e0a5ef4e584398601c0439ab110f15fcbb39ef35",
       "templates/assessments/_detail_body.html": "a8ae8cf3fdeef08fe7968a2e14a672800fc89e9ff693994d17623fb8156dafae",
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "e97bb92b4395e665329549ca2081732737f3402e"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "discussions": {
     "audience": "staff",
@@ -203,16 +203,16 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#discussions": "6b51b1ff750e293d00d0642d8504fd1b91a45d4abdda4d76bec8ea81aa623b3d",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
       "templates/_run_bar.html": "be261635450bbb1a6c7db5260fbe0ece436a6c7dce041c7cc162cdec0ff83551",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/discussions/_threads.html": "aeffa8783a49374b6fde8144f41057bc6227c685f9b71232f7a832faf794ed89",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/discussions.html": "591872faa2c007dc4607d1260aa64e3f1a585cb3d78d39f470ed50911c23d51e",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "intro-prompt": {
     "audience": "all",
@@ -222,11 +222,121 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#intro-prompt": "b26a9397f5a04c13beb2381cafe452b5ef19aca09b8d5f353618741db28cb4c3",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
+  },
+  "landscape-card": {
+    "audience": "all",
+    "alt": "A Landscape card: the headline, the recommendation, In one minute, the cost line and key points, Why this score, the footer and the quick decision.",
+    "width": 1216,
+    "height": 858,
+    "sources": {
+      "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
+      "shots.py#landscape-card": "612cab5e5d4fc97300daa0fe1d712d8ef7bef1cdb01155837660fa08eaacf9ce",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
+      "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
+      "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
+      "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
+      "templates/landscape/_card.html": "f90543fed68f0f2db1f95ce4868ad9ea1a395fa8a5c7b12f5684eb13106c693e",
+      "templates/landscape/_decision_form.html": "783e5da66ce6d9572385c8bf63c272735774db030ef0e1591127f8597e1c99b7",
+      "templates/workspace/landscape.html": "4e32b64e76e9ba5de3e7e91ea713191304b82ee6db5073a4778bf07af988fb63",
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
+    },
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
+  },
+  "landscape-detail-brief": {
+    "audience": "all",
+    "alt": "The brief on an opportunity's page: the headline, In one minute, Why this score and the key points with their sourced or estimate badges.",
+    "width": 1024,
+    "height": 720,
+    "sources": {
+      "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
+      "shots.py#landscape-detail-brief": "99b0bc8e4d76d56df173d3a727c6c6415f5d081f98a988b4241c7dd2fd90686c",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
+      "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
+      "templates/assessments/_chat_drawer.html": "eaeeec2a1587b71fedb018f6e0a5ef4e584398601c0439ab110f15fcbb39ef35",
+      "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
+      "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
+      "templates/landscape/_decision_form.html": "783e5da66ce6d9572385c8bf63c272735774db030ef0e1591127f8597e1c99b7",
+      "templates/landscape/_expert_form.html": "421e1661889daff0178b16fe8142d40b26cf8a710cbcb7975c066fdc16379eae",
+      "templates/landscape/_member_idea.html": "03487661c4fdf574c011a7ef2c5b0753331fcc29488471183040e99cf1e5772b",
+      "templates/landscape/_review_form.html": "9ef58cb063028639e8a60d85f356391df4f0ce9700084021a0c8cf0d9020a5f4",
+      "templates/landscape/_signals.html": "6e624aba5d0069afbc7f7be293ad9a23ab667f6693e6f4d02e0afaca6f52d77e",
+      "templates/workspace/landscape_detail.html": "714d03c94ece33039614ade6afc9b3dd0c93dceafa09312987bdf8c3aadc24b5",
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
+    },
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
+  },
+  "landscape-detail-dealbreakers": {
+    "audience": "all",
+    "alt": "The Deal-breaker flags on an opportunity's page: a raised flag the deep analysis confirmed, with its evidence, and the flags checked and not raised.",
+    "width": 1024,
+    "height": 163,
+    "sources": {
+      "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
+      "shots.py#landscape-detail-dealbreakers": "ca82a83c8ad838a9747fdf48be9cfaa10c8ff1b74603617bebee6114d856cfba",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
+      "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
+      "templates/assessments/_chat_drawer.html": "eaeeec2a1587b71fedb018f6e0a5ef4e584398601c0439ab110f15fcbb39ef35",
+      "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
+      "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
+      "templates/landscape/_decision_form.html": "783e5da66ce6d9572385c8bf63c272735774db030ef0e1591127f8597e1c99b7",
+      "templates/landscape/_expert_form.html": "421e1661889daff0178b16fe8142d40b26cf8a710cbcb7975c066fdc16379eae",
+      "templates/landscape/_member_idea.html": "03487661c4fdf574c011a7ef2c5b0753331fcc29488471183040e99cf1e5772b",
+      "templates/landscape/_review_form.html": "9ef58cb063028639e8a60d85f356391df4f0ce9700084021a0c8cf0d9020a5f4",
+      "templates/landscape/_signals.html": "6e624aba5d0069afbc7f7be293ad9a23ab667f6693e6f4d02e0afaca6f52d77e",
+      "templates/workspace/landscape_detail.html": "714d03c94ece33039614ade6afc9b3dd0c93dceafa09312987bdf8c3aadc24b5",
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
+    },
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
+  },
+  "landscape-detail-verdict": {
+    "audience": "all",
+    "alt": "The Verdict on an opportunity's page: BlackbirdBot's recommendation beside the score and band, with the band lines.",
+    "width": 1024,
+    "height": 247,
+    "sources": {
+      "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
+      "shots.py#landscape-detail-verdict": "b917eed891dee5e13b452a4486f6b5e4c2bd2a8e8051cb063d4532686e1c7421",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
+      "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
+      "templates/assessments/_chat_drawer.html": "eaeeec2a1587b71fedb018f6e0a5ef4e584398601c0439ab110f15fcbb39ef35",
+      "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
+      "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
+      "templates/landscape/_decision_form.html": "783e5da66ce6d9572385c8bf63c272735774db030ef0e1591127f8597e1c99b7",
+      "templates/landscape/_expert_form.html": "421e1661889daff0178b16fe8142d40b26cf8a710cbcb7975c066fdc16379eae",
+      "templates/landscape/_member_idea.html": "03487661c4fdf574c011a7ef2c5b0753331fcc29488471183040e99cf1e5772b",
+      "templates/landscape/_review_form.html": "9ef58cb063028639e8a60d85f356391df4f0ce9700084021a0c8cf0d9020a5f4",
+      "templates/landscape/_signals.html": "6e624aba5d0069afbc7f7be293ad9a23ab667f6693e6f4d02e0afaca6f52d77e",
+      "templates/workspace/landscape_detail.html": "714d03c94ece33039614ade6afc9b3dd0c93dceafa09312987bdf8c3aadc24b5",
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
+    },
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
+  },
+  "landscape-pipeline": {
+    "audience": "staff",
+    "alt": "The Landscape pipeline page: the phase, the sets of judging criteria and the sources.",
+    "width": 1280,
+    "height": 900,
+    "sources": {
+      "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
+      "shots.py#landscape-pipeline": "8b761acff2c6b9e066407061594f75487d2dc3f51cc42a0124ad368935e14310",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
+      "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
+      "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
+      "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
+      "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
+      "templates/workspace/landscape_pipeline.html": "92ad1d20c5039d17721e84730312540b80966ebf9016a89975a19ec46a377a70",
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
+    },
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "pi-account-edit": {
     "audience": "staff",
@@ -236,7 +346,7 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#pi-account-edit": "5b646f607aa0c453c95b1a0a18cf1cbf54618d4616103038e66692d83a1b8da6",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/_profile_errors.html": "3506eeb1dcaf84b298d2ff570cf54c69d028c2e8f0228196bbcdd2ad36c62815",
       "templates/_tag_field.html": "f0d5004245726bf1554ee395d101fc6ce19af445cc8ac87c67e6fb146cdf3062",
       "templates/admin/_microsoft_link.html": "d42d402b4c28b55e0a135f0467bdd48c225dcdc215e5da7281a10e402bf87cee",
@@ -247,19 +357,19 @@
       "templates/pis/_profile_review.html": "b00296edcf1a6dc05f01e76ea51f613c5ec483d7c9e947cda3cabfc70c33462a",
       "templates/pis/_revision_history.html": "7f21279bcd9d19086382f840758abc0915a60678aa5e85c6d19fa34d64941cb7",
       "templates/workspace/pi_detail.html": "cb6cbf51c0b3a2d42a72eb8e57878c85d1566b1ffcac29538aa6baf01f0343cc",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "pi-companies": {
     "audience": "staff",
     "alt": "The Companies card: a confirmed company, a suggestion to confirm or reject, and the form to add one.",
     "width": 896,
-    "height": 922,
+    "height": 923,
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#pi-companies": "be6abe58a0f6e570693a74382ba71d912096f52ab9bc7bd3c5f5b3d43f7af7cf",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/_profile_errors.html": "3506eeb1dcaf84b298d2ff570cf54c69d028c2e8f0228196bbcdd2ad36c62815",
       "templates/_tag_field.html": "f0d5004245726bf1554ee395d101fc6ce19af445cc8ac87c67e6fb146cdf3062",
       "templates/admin/_microsoft_link.html": "d42d402b4c28b55e0a135f0467bdd48c225dcdc215e5da7281a10e402bf87cee",
@@ -270,9 +380,9 @@
       "templates/pis/_profile_review.html": "b00296edcf1a6dc05f01e76ea51f613c5ec483d7c9e947cda3cabfc70c33462a",
       "templates/pis/_revision_history.html": "7f21279bcd9d19086382f840758abc0915a60678aa5e85c6d19fa34d64941cb7",
       "templates/workspace/pi_detail.html": "cb6cbf51c0b3a2d42a72eb8e57878c85d1566b1ffcac29538aa6baf01f0343cc",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "pi-detail-reviewer": {
     "audience": "all",
@@ -282,7 +392,7 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#pi-detail-reviewer": "66ce5d1f964c84be63b151692b298476ddcff4bda65f78a5fb4c6d4f20677e9c",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/_profile_errors.html": "3506eeb1dcaf84b298d2ff570cf54c69d028c2e8f0228196bbcdd2ad36c62815",
       "templates/_tag_field.html": "f0d5004245726bf1554ee395d101fc6ce19af445cc8ac87c67e6fb146cdf3062",
       "templates/admin/_microsoft_link.html": "d42d402b4c28b55e0a135f0467bdd48c225dcdc215e5da7281a10e402bf87cee",
@@ -293,9 +403,9 @@
       "templates/pis/_profile_review.html": "b00296edcf1a6dc05f01e76ea51f613c5ec483d7c9e947cda3cabfc70c33462a",
       "templates/pis/_revision_history.html": "7f21279bcd9d19086382f840758abc0915a60678aa5e85c6d19fa34d64941cb7",
       "templates/workspace/pi_detail.html": "cb6cbf51c0b3a2d42a72eb8e57878c85d1566b1ffcac29538aa6baf01f0343cc",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "pi-grants": {
     "audience": "staff",
@@ -305,7 +415,7 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#pi-grants": "b1971ed2a88851f4bc4e33f1140900d365afb8ea93c21ff9300ba99836c9c0bc",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/_profile_errors.html": "3506eeb1dcaf84b298d2ff570cf54c69d028c2e8f0228196bbcdd2ad36c62815",
       "templates/_tag_field.html": "f0d5004245726bf1554ee395d101fc6ce19af445cc8ac87c67e6fb146cdf3062",
       "templates/admin/_microsoft_link.html": "d42d402b4c28b55e0a135f0467bdd48c225dcdc215e5da7281a10e402bf87cee",
@@ -316,9 +426,9 @@
       "templates/pis/_profile_review.html": "b00296edcf1a6dc05f01e76ea51f613c5ec483d7c9e947cda3cabfc70c33462a",
       "templates/pis/_revision_history.html": "7f21279bcd9d19086382f840758abc0915a60678aa5e85c6d19fa34d64941cb7",
       "templates/workspace/pi_detail.html": "cb6cbf51c0b3a2d42a72eb8e57878c85d1566b1ffcac29538aa6baf01f0343cc",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "pi-header-pending": {
     "audience": "staff",
@@ -328,7 +438,7 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#pi-header-pending": "f9353033bdb6d6417f81056a0c122e8af372bcec7c3c7b2d6bb7536a52d37478",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/_profile_errors.html": "3506eeb1dcaf84b298d2ff570cf54c69d028c2e8f0228196bbcdd2ad36c62815",
       "templates/_tag_field.html": "f0d5004245726bf1554ee395d101fc6ce19af445cc8ac87c67e6fb146cdf3062",
       "templates/admin/_microsoft_link.html": "d42d402b4c28b55e0a135f0467bdd48c225dcdc215e5da7281a10e402bf87cee",
@@ -339,9 +449,9 @@
       "templates/pis/_profile_review.html": "b00296edcf1a6dc05f01e76ea51f613c5ec483d7c9e947cda3cabfc70c33462a",
       "templates/pis/_revision_history.html": "7f21279bcd9d19086382f840758abc0915a60678aa5e85c6d19fa34d64941cb7",
       "templates/workspace/pi_detail.html": "cb6cbf51c0b3a2d42a72eb8e57878c85d1566b1ffcac29538aa6baf01f0343cc",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "pi-industry": {
     "audience": "staff",
@@ -351,7 +461,7 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#pi-industry": "c38fc38d3713dedfceab1283878f69542c929d8dfa6eee2a36a06bac3afd3f1b",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/_profile_errors.html": "3506eeb1dcaf84b298d2ff570cf54c69d028c2e8f0228196bbcdd2ad36c62815",
       "templates/_tag_field.html": "f0d5004245726bf1554ee395d101fc6ce19af445cc8ac87c67e6fb146cdf3062",
       "templates/admin/_microsoft_link.html": "d42d402b4c28b55e0a135f0467bdd48c225dcdc215e5da7281a10e402bf87cee",
@@ -362,19 +472,19 @@
       "templates/pis/_profile_review.html": "b00296edcf1a6dc05f01e76ea51f613c5ec483d7c9e947cda3cabfc70c33462a",
       "templates/pis/_revision_history.html": "7f21279bcd9d19086382f840758abc0915a60678aa5e85c6d19fa34d64941cb7",
       "templates/workspace/pi_detail.html": "cb6cbf51c0b3a2d42a72eb8e57878c85d1566b1ffcac29538aa6baf01f0343cc",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "pi-paper-review": {
     "audience": "staff",
     "alt": "Corpus and profile review: the latest generation notes, the pending draft, a candidate paper, a withheld paper, an unanchored paper and an excluded one with its reason.",
     "width": 896,
-    "height": 1331,
+    "height": 1315,
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#pi-paper-review": "0adc87950d2b8a5502557c2af3ede7cb9c5303a22fb48b1c9c984cf03a66ed73",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/_profile_errors.html": "3506eeb1dcaf84b298d2ff570cf54c69d028c2e8f0228196bbcdd2ad36c62815",
       "templates/_tag_field.html": "f0d5004245726bf1554ee395d101fc6ce19af445cc8ac87c67e6fb146cdf3062",
       "templates/admin/_microsoft_link.html": "d42d402b4c28b55e0a135f0467bdd48c225dcdc215e5da7281a10e402bf87cee",
@@ -385,9 +495,9 @@
       "templates/pis/_profile_review.html": "b00296edcf1a6dc05f01e76ea51f613c5ec483d7c9e947cda3cabfc70c33462a",
       "templates/pis/_revision_history.html": "7f21279bcd9d19086382f840758abc0915a60678aa5e85c6d19fa34d64941cb7",
       "templates/workspace/pi_detail.html": "cb6cbf51c0b3a2d42a72eb8e57878c85d1566b1ffcac29538aa6baf01f0343cc",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "pis-list-manager": {
     "audience": "staff",
@@ -397,13 +507,13 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#pis-list-manager": "897bc91fffc7eabc282f986166a5f162fe1250b92730fec7be508e97bc7acc79",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/pis.html": "84853662a3a4edae4122e57f01915d1c33893356c013c2d60ab4410f1b527c85",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "pis-list-reviewer": {
     "audience": "all",
@@ -413,13 +523,13 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#pis-list-reviewer": "a83bc8c4159bb90baf5095b47216243708aff1dcbe3632d0e65f25f85c19be04",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/pis.html": "84853662a3a4edae4122e57f01915d1c33893356c013c2d60ab4410f1b527c85",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "prompt-suggestion-detail": {
     "audience": "staff",
@@ -429,14 +539,14 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#prompt-suggestion-detail": "495a84c08885db57c7815c9119fea93649ab6544a96bf2a4b0f7443e4380336c",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/prompt_suggestion_detail.html": "7eed854a2cab648f2321a89b9cb1b9011bcb8158fe56cd8803298e95575ed890",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "prompt-suggestions": {
     "audience": "staff",
@@ -446,33 +556,33 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#prompt-suggestions": "ae0324c9dbd786503eb1613b5905dbee3917a35c8907fc5c664084417eafb656",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/prompt_suggestions.html": "c750299bebdc6b59ab2357a5507abdfd0e7b48486af74989f4eff57102669a67",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "review-form": {
     "audience": "all",
     "alt": "The Human review section: other reviewers' feedback and the form for an overall rating, dimension scores, a comment and the feedback mode.",
     "width": 1024,
-    "height": 1241,
+    "height": 1273,
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#review-form": "827a362f8921dd50737f78418b3eb440e721ad00d1ac0fbd1495b634631d3306",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/_head_assets.html": "7341b3bd9c86925da4355c2d8837ca8b2f12645f61d72e47bd87d465bafae204",
-      "templates/assessments/_chat_drawer.html": "ba33b4b38d567e38bdc6861b26b08504749832ec81b207ba6cb150fcd419ee2b",
+      "templates/assessments/_chat_drawer.html": "eaeeec2a1587b71fedb018f6e0a5ef4e584398601c0439ab110f15fcbb39ef35",
       "templates/assessments/_detail_body.html": "a8ae8cf3fdeef08fe7968a2e14a672800fc89e9ff693994d17623fb8156dafae",
       "templates/assessments/_head.html": "4d97236b10d5f9177bdff08329b83edb60690c43ceb2502eea9e94a3846e1f79",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/assessment_detail.html": "cf34f970b935230792779ef2c7b985fc377b1ac925b8b8607f9159a84ff67bc4",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "e97bb92b4395e665329549ca2081732737f3402e"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "slack-bots": {
     "audience": "staff",
@@ -482,30 +592,30 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#slack-bots": "c8a8ada3d6022173eaad987cc4137a15dd020d47d4103cfbb53f42d6d7c4cf14",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/pis/_bot_action.html": "f4ea7d8f70eea58713af57458875eed07f6f41972f1bcab49b77020023c0817b",
       "templates/workspace/slack_bots.html": "3c87828545c3d2e71fc50db4fd2c574da01575bed223483f155ad9f7631d538f",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "staff-form": {
     "audience": "staff",
     "alt": "The Add a staff account form: ORCID iD, role and an optional name.",
     "width": 1216,
-    "height": 106,
+    "height": 107,
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#staff-form": "a3fdf0d1ba52db2a478cbdca7d8673afc0826b2d20cfb40bf7eeb507273b3688",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/staff.html": "47e8ab4638ba3e2ba6fd5fc279ef51693bb11d577105be36c6be98320124f95b",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "staff-preview": {
     "audience": "staff",
@@ -515,13 +625,13 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#staff-preview": "b85a3e295c872ac9fe9facb9091c4dad49fb99a51c10f33f749af56dcbae94a1",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/staff.html": "47e8ab4638ba3e2ba6fd5fc279ef51693bb11d577105be36c6be98320124f95b",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "staff-table": {
     "audience": "staff",
@@ -531,13 +641,13 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#staff-table": "4bcd4362264cd7c7d1637390a5bae74e292669c68e6c67757198641d664d75b8",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
       "templates/help/_link.html": "2934dcbb7dde1d93fcd1d56a8e0fa87f71261dff207f24fd987ea0a32e82f8dd",
       "templates/workspace/staff.html": "47e8ab4638ba3e2ba6fd5fc279ef51693bb11d577105be36c6be98320124f95b",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   },
   "topbar-help": {
     "audience": "all",
@@ -547,10 +657,10 @@
     "sources": {
       "prompts/rubric/blackbird-rubric.toml": "f0b452e95057d750706aee28f5179ad01768c4b411b3fd931faefd31fff8eb2a",
       "shots.py#topbar-help": "9c2721a7838e7c1ef0e55f0ef837d06cfc6018b1ee52bf9a8d3fb267246a5ef3",
-      "static/css/app.css": "a3c8301bf204911c6a34a45c25a821566bda6bd2fe58c63001e97383af9bb93f",
+      "static/css/app.css": "27b33bd0a8513bf22478f02b49fba9ea62c6e7ed0256d8737802b15c49129adf",
       "templates/base.html": "0db04afc8df906324ffe29f465e9c780d1b29a5208e648de980dea56c3171b6e",
-      "tests/e2e/help_shots/seed.py": "20bbffe22ef5dab82e80dc682287c5693d6d48c79ec33fd2b43877477ac99c4f"
+      "tests/e2e/help_shots/seed.py": "62719496febf096ce7da9fa3befd988ba86878d4c7ba1e2555c926d8e70fdec7"
     },
-    "commit": "76b1d479963a1f25040c8aa1757275c9f26a250f"
+    "commit": "3e4c49afab7844a2cb4b5da3bfe69a6d2f6a90e6"
   }
 }

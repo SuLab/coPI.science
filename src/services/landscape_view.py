@@ -29,6 +29,23 @@ rank, for any viewer: probes are never ranked, so a rank on its in-cut cards alo
 the probes (``_shown_rank``). No card of that batch appears in **Current** or **All assessed**
 until then, for any viewer; a viewer with an undecided card in a blind batch sees none of that
 batch's cards in those lists even afterwards, nor that batch's results on the pipeline page.
+
+**What the pages show** (decisions OD1-OD13 and contracts C2-C14 of
+``docs/plans/2026-11-19-landscape-ui-remediation-plan.md``). Every value below is hidden under
+the rule of the data it comes from, and a hidden value never counts in a tile, a sort order or
+a filter result:
+
+- **Card** (C2, OD1/OD4): the recommendation chip, the counts and "Why this score" are None on an
+  undecided blind card and on an expert's open item; the cost line, the full pitch and the key
+  points always show; ``decided_by`` waits for the viewer's own decision.
+- **Sources** (C3, C4): ``doc:`` references in S9, S6 and panel prose become the document
+  (``landscape_sources.rewrite_doc_refs``) after the hiding and before ``_verdict``; on the
+  detail page each key point's and profile field's support is classified
+  (``landscape_sources.resolve_support``).
+- **Lists** (C14): sorted by shown values only, filtered by any member's lab, with count tiles
+  over the whole list.
+- **History** (C8): ``detail_view(..., history_assessment_id=...)`` renders one listed earlier
+  assessment read-only.
 """
 from __future__ import annotations
 
@@ -86,10 +103,21 @@ from src.models.landscape import (
 from src.models.user import USER_ROLE_ADMIN, USER_ROLE_MANAGER, USER_ROLE_REVIEWER
 from src.services.assessment_detail import (
     _gating_definitions,
+    _review_rubric,
     build_dimension_rows,
+    classify_key_point,
     derive_strengths_and_risks,
     key_point_sections,
 )
+from src.services.landscape_quotes import member_quotes
+from src.services.landscape_sources import (
+    DocInfo,
+    Quote,
+    SupportView,
+    resolve_support,
+    rewrite_doc_refs,
+)
+from src.services.publication_links import doi_url, pubmed_url
 from src.services.rubric_revisions import resolve_revision
 from src.services.verdict_fields import VERDICT_FIELDS
 from src.services.web_permissions import can_review, is_staff
@@ -132,6 +160,30 @@ _UNACTIVATED = ("candidate", "held")
 _HISTORY_EPOCHS = ("active", "retired")
 _REVIEW_ROLES = (USER_ROLE_ADMIN, USER_ROLE_MANAGER, USER_ROLE_REVIEWER)
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+#: S9 prose written in the row's ``prose_format`` (C4): rewritten as Markdown links when it is
+#: Markdown. Every other rewritten field is plain text.
+_S9_PROSE = ("elevator_pitch", "rationale", "recommended_next_experiment", "score_rationale")
+_S9_PLAIN = (
+    "key_points", "strengths", "risks", "competitive_landscape",
+    "evidence_maturity", "red_flags", "gating_rationales", "dimension_rationales",
+)
+#: A source's kind as the page names it (C12; ``LandscapeDocument.kind``).
+_KIND_LABELS = {
+    "work": "paper", "preprint": "preprint", "grant": "grant", "patent": "patent",
+    "jhtv": "technology listing", "dataset": "dataset",
+}
+#: The recommendation sort (C14): advance first, then route-to-incubation, conditional, pass.
+_RECOMMENDATION_ORDER = {"advance": 0, "route-to-incubation": 1, "conditional": 2, "pass": 3}
+#: The count tile each stored recommendation adds to (C14).
+_TILE_KEYS = {
+    "advance": "advance", "conditional": "conditional",
+    "route-to-incubation": "route_to_incubation", "pass": "pass",
+}
+_SORTS = ("pipeline", "score", "recommendation")
+#: A flag review's statuses (``stages.deep``'s ``flag_review``).
+_FLAG_STATUSES = ("confirmed", "cleared")
+#: The "· idea N" suffix ``_consult_dict`` gives a consult's domain on a multi-member page.
+_IDEA_SUFFIX = re.compile(r"· idea (\d+)$")
 
 
 @dataclass(frozen=True)
@@ -168,6 +220,73 @@ def _pitch(text: str | None) -> str | None:
     if not text:
         return None
     return " ".join(_SENTENCE_END.split(text.strip())[:2])
+
+
+def _words(value: str | None) -> str | None:
+    """A stored token as words: underscores become spaces (C12)."""
+    return value.replace("_", " ") if isinstance(value, str) else None
+
+
+def _cost_line(text: Any) -> str | None:
+    """The card's cost line (C2): the first line of "The ask" when it opens in bold, with the
+    ``**`` markers removed; None when the ask is missing or does not open with ``**``."""
+    if not isinstance(text, str) or not text.strip().startswith("**"):
+        return None
+    return text.strip().splitlines()[0].replace("**", "").strip() or None
+
+
+def _lines(structured_lines: Any) -> list[str]:
+    """The structured lines, each once, in stored order (C2)."""
+    lines = structured_lines if isinstance(structured_lines, list) else []
+    return list(dict.fromkeys(s.strip() for s in lines if isinstance(s, str) and s.strip()))
+
+
+def _show_label(label: str | None, lines: Sequence[str]) -> bool:
+    """Whether the label prints beside the structured lines (C2): not when the one line starts
+    with the label, less the "…" a clipped label ends with (D80)."""
+    if not label:
+        return False
+    if len(lines) != 1:
+        return True
+    return not lines[0].startswith(label[:-1] if label.endswith("…") else label)
+
+
+def _rewrite(value: Any, docs: Mapping[str, DocInfo], *, markdown: bool) -> Any:
+    """`value` with ``rewrite_doc_refs`` applied to every string in it, at any depth (C4)."""
+    if isinstance(value, str):
+        return rewrite_doc_refs(value, docs, markdown=markdown)
+    if isinstance(value, list):
+        return [_rewrite(v, docs, markdown=markdown) for v in value]
+    if isinstance(value, dict):
+        return {k: _rewrite(v, docs, markdown=markdown) for k, v in value.items()}
+    return value
+
+
+def _rewrite_assessment(values: dict, docs: Mapping[str, DocInfo]) -> dict:
+    """A copy of S9's values, already hidden, with every C4 field's ``doc:`` references
+    replaced by the document and ``prose_format`` read as ``"markdown"`` when NULL (OD2)."""
+    out = {**values, "prose_format": values.get("prose_format") or "markdown"}
+    markdown = out["prose_format"] == "markdown"
+    for key in _S9_PROSE:
+        if key in out:
+            out[key] = _rewrite(out[key], docs, markdown=markdown)
+    for key in _S9_PLAIN:
+        if key in out:
+            out[key] = _rewrite(out[key], docs, markdown=False)
+    return out
+
+
+def _review_status(entry: Any) -> tuple[str | None, str | None]:
+    """``(status, reason)`` of one ``flags_reviewed`` entry: ``{"status", "reason"}``, or a
+    bare status string on older rows; a status other than confirmed or cleared reads as None."""
+    if isinstance(entry, dict):
+        status, reason = entry.get("status"), entry.get("reason")
+    else:
+        status, reason = entry, None
+    return (
+        status if status in _FLAG_STATUSES else None,
+        reason if isinstance(reason, str) and reason.strip() else None,
+    )
 
 
 async def _setting(db: AsyncSession, key: str) -> str | None:
@@ -370,6 +489,8 @@ class _Epochs:
         return self.active.id if self.active is not None else None
 
     def summary(self) -> dict | None:
+        """The active epoch for a page header; ``overridden`` is whether an admin override put
+        its criteria into use (C10, OD8)."""
         epoch = self.active
         if epoch is None:
             return None
@@ -377,6 +498,7 @@ class _Epochs:
             "id": _sid(epoch.id), "status": epoch.status,
             "prompt_set_version": epoch.prompt_set_version,
             "criteria_version": epoch.criteria_version, "activated_at": epoch.activated_at,
+            "overridden": epoch.override_at is not None,
         }
 
 
@@ -665,27 +787,195 @@ def _member_epoch(
     return display.epoch_id if display is not None else version.epoch_id
 
 
+@dataclass(frozen=True)
+class _CardLoads:
+    """What one page's cards read beyond their assessment (C2), each loaded once per page."""
+
+    docs: Mapping[uuid.UUID, dict[str, DocInfo]]  # by member idea, for the ``doc:`` rewrite
+    deep: Mapping[uuid.UUID, LandscapeDeep]  # by member idea, as ``member_deep`` picks it
+    deciders: Mapping[uuid.UUID, list[str]]  # by opportunity: who decided, oldest first
+    assignees: Mapping[uuid.UUID, list[str]]  # by opportunity: who is assigned
+
+
+async def _card_docs(
+    db: AsyncSession, idea_ids: Iterable[uuid.UUID]
+) -> dict[uuid.UUID, dict[str, DocInfo]]:
+    """Each idea's unmerged documents as ``DocInfo`` keyed by document id, in one query."""
+    idea_ids = list(idea_ids)
+    if not idea_ids:
+        return {}
+    E, X, Doc = LandscapeIdeaEvidence, LandscapeExtraction, LandscapeDocument
+    rows = (await db.execute(
+        select(E.idea_id, Doc.id, Doc.title, Doc.doi, Doc.pmid, Doc.kind)
+        .join(X, X.id == E.extraction_id).join(Doc, Doc.id == X.document_id)
+        .where(E.idea_id.in_(idea_ids), Doc.merged_into.is_(None)).distinct()
+    )).all()
+    out: dict[uuid.UUID, dict[str, DocInfo]] = defaultdict(dict)
+    for idea_id, doc_id, title, doi, pmid, kind in rows:
+        out[idea_id][str(doc_id)] = DocInfo(id=str(doc_id), title=title, doi=doi, pmid=pmid,
+                                            kind=kind)
+    aliases = await _merged_aliases(db, {doc_id for _, doc_id, *_ in rows})
+    for docs in out.values():
+        _add_aliases(docs, aliases)
+    return out
+
+
+async def _merged_aliases(
+    db: AsyncSession, doc_ids: Iterable[uuid.UUID]
+) -> dict[str, str]:
+    """``{merged document id: the document it was merged into}`` for every document merged
+    into one of `doc_ids`, so prose written before the merge still resolves (C4)."""
+    ids = list(doc_ids)
+    if not ids:
+        return {}
+    Doc = LandscapeDocument
+    rows = (await db.execute(
+        select(Doc.id, Doc.merged_into).where(Doc.merged_into.in_(ids))
+    )).all()
+    return {str(old): str(target) for old, target in rows}
+
+
+def _add_aliases(docs: dict[str, DocInfo], aliases: Mapping[str, str]) -> None:
+    """Point each merged document's id at its target's ``DocInfo`` in `docs`."""
+    for old, target in aliases.items():
+        if target in docs and old not in docs:
+            docs[old] = docs[target]
+
+
+async def _card_deep(
+    db: AsyncSession, idea_ids: Iterable[uuid.UUID]
+) -> dict[uuid.UUID, LandscapeDeep]:
+    """Each idea's ``member_deep`` record, read with one ``_passed_deep`` per epoch."""
+    idea_ids = list(idea_ids)
+    if not idea_ids:
+        return {}
+    versions: dict[uuid.UUID, dict[uuid.UUID, str]] = defaultdict(dict)
+    for idea in (await db.scalars(
+        select(LandscapeIdea).where(LandscapeIdea.id.in_(idea_ids))
+    )).all():
+        versions[idea.epoch_id][idea.id] = idea.version_hash or ""
+    out: dict[uuid.UUID, LandscapeDeep] = {}
+    for epoch_id, by_idea in versions.items():
+        out.update(await _passed_deep(db, epoch_id, by_idea))
+    return out
+
+
+async def _card_people(
+    db: AsyncSession, opportunity_ids: Iterable[uuid.UUID]
+) -> tuple[dict[uuid.UUID, list[str]], dict[uuid.UUID, list[str]]]:
+    """Per opportunity, the names of everyone who has decided (oldest first) and of its
+    assignees, one query each. ``_card`` shows the first only to a viewer who has decided."""
+    ids = list(opportunity_ids)
+    deciders: dict[uuid.UUID, list[str]] = defaultdict(list)
+    assignees: dict[uuid.UUID, list[str]] = defaultdict(list)
+    if not ids:
+        return deciders, assignees
+    D, R = LandscapeDecision, LandscapeReviewAssignment
+    for opportunity_id, name in (await db.execute(
+        select(D.opportunity_id, D.reviewer_name).where(D.opportunity_id.in_(ids))
+        .order_by(D.created_at, D.id)
+    )).all():
+        deciders[opportunity_id].append(name)
+    for opportunity_id, name in (await db.execute(
+        select(R.opportunity_id, R.assignee_name).where(R.opportunity_id.in_(ids))
+        .order_by(R.created_at, R.id)
+    )).all():
+        assignees[opportunity_id].append(name)
+    return deciders, assignees
+
+
+def _confirmed_count(rows: Iterable[LandscapeDeep | None], hiding: Hiding) -> int:
+    """How many deal-breaker flags the members' S6 records confirmed, after ``hide_deep``."""
+    count = 0
+    for row in rows:
+        if row is None:
+            continue
+        reviewed = hide_deep({"flags_reviewed": row.flags_reviewed}, hiding).get("flags_reviewed")
+        if isinstance(reviewed, dict):
+            count += sum(_review_status(v)[0] == "confirmed" for v in reviewed.values())
+    return count
+
+
+def _with_kinds(
+    groups: list[dict], support: Callable[[Any], SupportView] | None
+) -> list[dict]:
+    """``_key_points`` groups whose bullets gain ``kind`` ("risk", "companies" or None) and
+    ``body`` (``assessment_detail.classify_key_point``). With `support`, each bullet's support
+    becomes what `support` makes of it (C3, the detail page); without, it is dropped (C2)."""
+    out = []
+    for group in groups:
+        bullets = []
+        for bullet in group["bullets"]:
+            kind, body = classify_key_point(bullet["text"])
+            item = {"text": bullet["text"], "kind": kind, "body": body}
+            if support is not None:
+                item["support"] = support(bullet["support"])
+            bullets.append(item)
+        out.append({**group, "bullets": bullets})
+    return out
+
+
+def _card_fields(
+    opportunity_id: uuid.UUID, values: dict, ask: Any, hiding: Hiding,
+    members: Sequence[uuid.UUID], docs: Mapping[str, DocInfo], loads: _CardLoads, *,
+    decided: bool,
+) -> dict:
+    """The card's C2 fields (OD1/OD4). `values` are S9's after hiding and the C4 rewrite; `ask`
+    is "The ask" before the rewrite, so the cost line is cut from the stored text. The chip and
+    the counts are None on an undecided blind card and on an expert's open item; the cost line,
+    pitch and key points never are."""
+    called = not (hiding.blind or hiding.expert)
+    red_flags = values.get("red_flags")
+    return {
+        "elevator_pitch": values.get("elevator_pitch"),
+        "prose_format": values["prose_format"],
+        "cost_line": rewrite_doc_refs(_cost_line(ask), docs, markdown=False),
+        "key_points": _with_kinds(_key_points(values), None),
+        "score_rationale": values.get("score_rationale"),
+        "recommendation": values.get("recommendation") if called else None,
+        "confidence": values.get("confidence") if called else None,
+        "red_flag_count": (
+            (len(red_flags) if isinstance(red_flags, list) else 0) if called else None
+        ),
+        "confirmed_flags": (
+            _confirmed_count((loads.deep.get(i) for i in members), hiding) if called else None
+        ),
+        "assigned_names": list(loads.assignees.get(opportunity_id, [])),
+        "decided_by": list(loads.deciders.get(opportunity_id, [])) if decided else None,
+    }
+
+
 def _card(
     viewer: _Viewer, opp: LandscapeOpportunity, version: LandscapeOpportunityVersion | None,
     pick: _Pick, *, probe: bool, labs: list[str], rank: int | None,
+    members: Sequence[uuid.UUID], loads: _CardLoads,
 ) -> dict:
     hiding = viewer.hiding(opp.id)
     retired = opp.retired_at is not None
-    values = hide_assessment(_row_values(pick.display), hiding) if pick.display else {}
+    hidden = hide_assessment(_row_values(pick.display), hiding) if pick.display else {}
+    docs = {k: v for i in members for k, v in loads.docs.get(i, {}).items()}
+    values = _rewrite_assessment(hidden, docs)
     decision = viewer.decisions.get(opp.id)
     shown_id = pick.shown.id if pick.shown is not None else None
     no_assessment = pick.shown is None and not retired
+    label = version.label if version is not None else None
+    lines = _lines(values.get("structured_lines"))
     return {
         "opportunity_id": _sid(opp.id),
-        "label": version.label if version is not None else None,
+        "label": label,
         "headline": values.get("headline"),
         "structured_lines": list(values.get("structured_lines") or []),
+        "lines": lines,
+        "show_label": _show_label(label, lines),
         "pitch": _pitch(values.get("elevator_pitch")),
         "labs": labs,
         "score": values.get("weighted_score"),
         "band": values.get("band"),
         "rank": None if hiding.blind or hiding.expert else rank,
-        "recommendation": values.get("recommendation"),
+        **_card_fields(
+            opp.id, values, hidden.get("recommended_next_experiment"), hiding, members, docs,
+            loads, decided=decision is not None,
+        ),
         "assessment_id": _sid(pick.display.id) if pick.display is not None else None,
         "no_assessment": no_assessment,
         "failure": _failure(pick) if no_assessment else None,
@@ -716,7 +1006,17 @@ async def _load_cards(
     ({"status", "error"}|None), ``history_assessment_id`` (str|None), ``retired`` (bool),
     ``probe`` (bool), ``blind_hidden`` and ``expert_hidden`` (bool), ``my_decision`` (decision
     dict|None) and ``changed_since_decision`` (bool). Score, band, rank and recommendation
-    are None where the viewer's hiding hides them."""
+    are None where the viewer's hiding hides them.
+
+    The C2 fields (OD1/OD4): ``lines`` (the structured lines, each once), ``show_label``
+    (bool), ``elevator_pitch`` (str|None, in full), ``prose_format`` (str, NULL read as
+    ``"markdown"``), ``cost_line`` (str|None), ``key_points`` (``[{"label", "group",
+    "bullets": [{"text", "kind", "body"}]}]``, no support), ``score_rationale`` (str|None),
+    ``confidence`` (str|None), ``red_flag_count`` and ``confirmed_flags`` (int|None),
+    ``assigned_names`` (list[str]) and ``decided_by`` (list[str]|None, None until the viewer
+    has decided). ``recommendation``, ``confidence`` and both counts are None on an undecided
+    blind card and on an expert's open item. ``doc:`` references in the prose are rewritten
+    (C4). The documents, S6 records, decisions and assignments are read once for all cards."""
     ids = set(opportunity_ids)
     visible_probes = issued.visible_probes()
     opps = {o.id: o for o in (await db.scalars(
@@ -740,14 +1040,21 @@ async def _load_cards(
         if v else []
         for o, v in chosen.items()
     }
-    labs = await _lab_names(db, {i for ids_ in members.values() for i in ids_})
+    all_members = {i for ids_ in members.values() for i in ids_}
+    labs = await _lab_names(db, all_members)
     s7, s5 = await _ranks(db, ep.active_id)
     unranked = _Unranked.of(issued)
+    deciders, assignees = await _card_people(db, opps)
+    loads = _CardLoads(
+        docs=await _card_docs(db, all_members), deep=await _card_deep(db, all_members),
+        deciders=deciders, assignees=assignees,
+    )
     by_id = {
         o: _card(
             viewer, opp, chosen[o], picks[o], probe=o in visible_probes,
             labs=sorted({name for i in members[o] for name in labs.get(i, [])}),
             rank=_shown_rank(o, chosen[o], members[o], unranked, s7, s5),
+            members=members[o], loads=loads,
         )
         for o, opp in opps.items()
     }
@@ -777,8 +1084,10 @@ async def batch_view(db, user) -> dict:
     week's batch, the viewer's carry-overs and changed cards, and the earlier batches.
 
     Returns ``{"epoch": {"id", "status", "prompt_set_version", "criteria_version",
-    "activated_at"}|None, "banner": str|None, "is_staff": bool, "this_week": batch|None,
-    "carry_overs": [card], "changed": [card], "earlier_batches": [batch]}``. A batch is
+    "activated_at", "overridden"}|None, "banner": str|None, "is_staff": bool, "this_week":
+    batch|None, "carry_overs": [card], "changed": [card], "earlier_batches": [batch],
+    "tiles": tiles}``, ``tiles`` counting this week's cards by shown recommendation
+    (``_tiles``, C14). A batch is
     ``{"batch_id": str, "issued_on": date, "blind": bool, "superseded": bool, "cards":
     [card]}``; every card is a ``_load_cards`` card plus ``batch_id`` (str), ``issued_on``
     (date), ``blind`` (bool) and, on carry-overs and changed cards, ``kind``
@@ -810,15 +1119,47 @@ async def batch_view(db, user) -> dict:
         {**_on_batch(cards.by_id[c["opportunity_id"]], batches[c["batch_id"]]), "kind": c["kind"]}
         for c in extra
     ]
+    this_week = batch_dict(issued.batches[0]) if issued.batches else None
     return {
         "epoch": ep.summary(),
         "banner": _banner(ep),
         "is_staff": viewer.staff,
-        "this_week": batch_dict(issued.batches[0]) if issued.batches else None,
+        "this_week": this_week,
         "carry_overs": [c for c in extra_cards if c["kind"] == "carry_over"],
         "changed": [c for c in extra_cards if c["kind"] == "changed"],
         "earlier_batches": [batch_dict(b) for b in issued.batches[1:]],
+        "tiles": _tiles(this_week["cards"] if this_week else []),
     }
+
+
+def _tiles(cards: Sequence[dict]) -> dict:
+    """``{"total", "advance", "conditional", "route_to_incubation", "pass"}`` over `cards`
+    (C14), from each card's shown recommendation: a hidden one counts only in ``total``."""
+    tiles = {"total": len(cards), **dict.fromkeys(_TILE_KEYS.values(), 0)}
+    for card in cards:
+        key = _TILE_KEYS.get(card.get("recommendation"))
+        if key is not None:
+            tiles[key] += 1
+    return tiles
+
+
+def _sorted_cards(cards: Sequence[dict], sort: str) -> list[dict]:
+    """`cards`, given in pipeline order (D30), by `sort` (C14): ``"score"`` by shown score,
+    highest first; ``"recommendation"`` advance, route-to-incubation, conditional, pass;
+    anything else unchanged. A hidden or missing value sorts last, and ties keep pipeline
+    order, which itself falls back to the opportunity id (``rerank.card_order``)."""
+    if sort == "score":
+        def key(pair: tuple[int, dict]) -> tuple:
+            score = pair[1]["score"]
+            missing = not isinstance(score, int | float)
+            return (missing, 0 if missing else -score, pair[0])
+    elif sort == "recommendation":
+        def key(pair: tuple[int, dict]) -> tuple:
+            rank = _RECOMMENDATION_ORDER.get(pair[1]["recommendation"])
+            return (rank is None, rank or 0, pair[0])
+    else:
+        return list(cards)
+    return [card for _, card in sorted(enumerate(cards), key=key)]
 
 
 def _on_batch(card: dict, batch: LandscapeReviewBatch) -> dict:
@@ -893,27 +1234,37 @@ async def _list_candidates(
 
 async def lists_view(
     db, user, *, view: Literal["current", "all"], tab: Literal["unreviewed", "reviewed", "all"],
-    assignment: str,
+    assignment: str, sort: Literal["pipeline", "score", "recommendation"] = "pipeline",
+    lab: str | None = None,
 ) -> dict:
     """The staff lists, **Current** and **All assessed** (§13.1, L48).
 
     Staff only: anyone else gets ``PermissionError`` (the page answers 403). ``view`` other
     than ``"all"`` reads as ``"current"``; ``tab`` other than ``unreviewed``/``reviewed`` as
-    ``"all"``; ``assignment`` ``"mine"`` keeps the viewer's assigned cards, anything else all.
-    Tabs are per viewer: *unreviewed* is no quick decision by this viewer (D60). No card of a
-    blind batch not yet superseded is listed, for any viewer; a viewer with an undecided card
-    in a blind batch sees none of that batch's cards even after it is superseded; and a probe
-    appears only once its blind batch is superseded (F2).
+    ``"all"``; ``assignment`` ``"mine"`` keeps the viewer's assigned cards, anything else all;
+    ``sort`` other than ``score``/``recommendation`` as ``"pipeline"``; an empty ``lab`` as
+    None. Tabs are per viewer: *unreviewed* is no quick decision by this viewer (D60). No card
+    of a blind batch not yet superseded is listed, for any viewer; a viewer with an undecided
+    card in a blind batch sees none of that batch's cards even after it is superseded; and a
+    probe appears only once its blind batch is superseded (F2).
 
-    Returns ``{"view": str, "tab": str, "assignment": "mine"|"all", "epoch": dict|None,
-    "banner": str|None, "cut": {"n", "k", "completed_at"}|None, "counts": {"unreviewed":
-    int, "reviewed": int, "all": int}, "cards": [card]}``, cards as ``_load_cards`` makes them,
-    in card order (D30)."""
+    Sort and lab (C14, OD12): ``lab`` keeps the cards with that lab among their ``labs`` (any
+    member's lab); ``sort`` orders by the cards' shown values (``_sorted_cards``), so a value
+    the viewer's hiding hides sorts with the missing ones. ``lab_options`` (the distinct lab
+    names) and ``tiles`` (``_tiles``) cover every card listed before the lab filter and the
+    tab; ``counts`` and ``cards`` are after the lab filter.
+
+    Returns ``{"view": str, "tab": str, "assignment": "mine"|"all", "sort": str, "lab":
+    str|None, "lab_options": [str], "tiles": tiles, "epoch": dict|None, "banner": str|None,
+    "cut": {"n", "k", "completed_at", "opportunities"}|None, "counts": {"unreviewed": int,
+    "reviewed": int, "all": int}, "cards": [card]}``, cards as ``_load_cards`` makes them."""
     if not is_staff(user):
         raise PermissionError("the landscape lists are for managers and admins (L48)")
     view = "all" if view == "all" else "current"
     tab = tab if tab in ("unreviewed", "reviewed") else "all"
     assignment = "mine" if assignment == "mine" else "all"
+    sort = sort if sort in _SORTS else "pipeline"
+    lab = lab or None
     viewer = await _viewer(db, user)
     ep = await _epochs(db)
     issued = await _issued(db)
@@ -928,23 +1279,40 @@ async def lists_view(
             select(R.opportunity_id).where(R.assignee_id == user.id)
         )).all())
     cards = await _load_cards(db, viewer, ep, candidates, issued)
-    ordered = [cards.by_id[o] for o in cards.order(cards.by_id)]
+    listed = [cards.by_id[o] for o in cards.order(cards.by_id)]
+    ordered = _sorted_cards([c for c in listed if lab is None or lab in c["labs"]], sort)
     reviewed = [c for c in ordered if c["my_decision"] is not None]
     unreviewed = [c for c in ordered if c["my_decision"] is None]
     return {
-        "view": view, "tab": tab, "assignment": assignment,
+        "view": view, "tab": tab, "assignment": assignment, "sort": sort, "lab": lab,
+        # The active lab stays selectable even when no listed card has it (a bookmark, or
+        # "Assigned to me"), so Apply never clears it silently.
+        "lab_options": sorted({name for c in listed for name in c["labs"]} | ({lab} if lab else set())),
+        "tiles": _tiles(listed),
         "epoch": ep.summary(), "banner": _banner(ep), "cut": await _cut_summary(db, ep),
         "counts": {"unreviewed": len(unreviewed), "reviewed": len(reviewed), "all": len(ordered)},
         "cards": {"unreviewed": unreviewed, "reviewed": reviewed}.get(tab, ordered),
     }
 
 
+async def _cut_opportunities(db: AsyncSession, cut_id: uuid.UUID) -> int:
+    """How many opportunities S8 grouped a cut's ideas into (C7): probes have no cut."""
+    V = LandscapeOpportunityVersion
+    return await db.scalar(
+        select(func.count(func.distinct(V.opportunity_id))).where(V.cut_id == cut_id)
+    ) or 0
+
+
 async def _cut_summary(db: AsyncSession, ep: _Epochs) -> dict | None:
-    """The active epoch's last complete cut: N, K and when it completed."""
+    """The active epoch's last complete cut: N, K, when it completed and how many
+    opportunities its ideas were grouped into (C7)."""
     if ep.active_id is None:
         return None
     cut = await _last_complete_cut(db, ep.active_id)
-    return {"n": cut.n, "k": cut.k, "completed_at": cut.completed_at} if cut else None
+    if cut is None:
+        return None
+    return {"n": cut.n, "k": cut.k, "completed_at": cut.completed_at,
+            "opportunities": await _cut_opportunities(db, cut.id)}
 
 
 async def expert_view(db, user) -> dict:
@@ -974,10 +1342,16 @@ async def expert_view(db, user) -> dict:
 # --- the detail page --------------------------------------------------------------------------
 
 
-def _consult_dict(row: LandscapeConsult, *, admin: bool, label: str | None) -> dict:
-    """A panel opinion in the dict shape ``derive_strengths_and_risks`` reads."""
+def _consult_dict(
+    row: LandscapeConsult, *, admin: bool, label: str | None, docs: Mapping[str, DocInfo],
+) -> dict:
+    """A panel opinion in the dict shape ``derive_strengths_and_risks`` reads, its
+    established points, concerns and questions with ``doc:`` references rewritten (C4)."""
     opinion = row.opinion if isinstance(row.opinion, dict) else {}
-    concerns = [c for c in opinion.get("concerns") or [] if isinstance(c, str)]
+    concerns = [
+        _rewrite(c, docs, markdown=False) for c in opinion.get("concerns") or []
+        if isinstance(c, str)
+    ]
     established = opinion.get("established")
     if not opinion:
         read_state = None
@@ -990,9 +1364,13 @@ def _consult_dict(row: LandscapeConsult, *, admin: bool, label: str | None) -> d
         "concerns": concerns,
         "concern_count": len(concerns),
         "questions_to_ask": [
-            q for q in opinion.get("questions_to_ask") or [] if isinstance(q, str)
+            _rewrite(q, docs, markdown=False) for q in opinion.get("questions_to_ask") or []
+            if isinstance(q, str)
         ],
-        "established": list(established) if isinstance(established, list) else None,
+        "established": (
+            _rewrite(list(established), docs, markdown=False)
+            if isinstance(established, list) else None
+        ),
         "reply_truncated": False,
         "read_state": read_state,
         "raw_opinion": row.raw_text if admin else None,
@@ -1002,7 +1380,9 @@ def _consult_dict(row: LandscapeConsult, *, admin: bool, label: str | None) -> d
 
 
 async def _sources(db: AsyncSession, idea_id: uuid.UUID) -> tuple[list[dict], list[dict]]:
-    """The idea's documents (§13.2 Sources) and the labs behind them, with links."""
+    """The idea's documents (§13.2 Sources) and the labs behind them, with links. A source's
+    ``kind_label`` names its kind for the page and ``url`` is its DOI link, else its PubMed
+    link, else None (C12)."""
     E, X, Doc = LandscapeIdeaEvidence, LandscapeExtraction, LandscapeDocument
     docs = (await db.scalars(
         select(Doc).join(X, X.document_id == Doc.id).join(E, E.extraction_id == X.id)
@@ -1018,8 +1398,10 @@ async def _sources(db: AsyncSession, idea_id: uuid.UUID) -> tuple[list[dict], li
     )).all() if lab_keys else []
     sources = [
         {
-            "document_id": _sid(d.id), "kind": d.kind, "document_type": d.document_type,
+            "document_id": _sid(d.id), "kind": d.kind,
+            "kind_label": _KIND_LABELS.get(d.kind, d.kind), "document_type": d.document_type,
             "title": d.title, "published_on": d.published_on, "doi": d.doi, "pmid": d.pmid,
+            "url": doi_url(d.doi) or pubmed_url(d.pmid),
             "role_basis": d.role_basis, "institution": d.qualifying_institution,
             "license": (texts[d.id].license if d.id in texts else None) or d.license,
             "text_basis": texts[d.id].text_basis if d.id in texts else None,
@@ -1041,22 +1423,153 @@ async def _sources(db: AsyncSession, idea_id: uuid.UUID) -> tuple[list[dict], li
     return sources, lab_rows
 
 
+def _doc_infos(sources: Iterable[Mapping]) -> dict[str, DocInfo]:
+    """``_sources`` rows as the ``DocInfo`` map C3 and C4 resolve against, by document id."""
+    return {
+        s["document_id"]: DocInfo(id=s["document_id"], title=s["title"], doi=s["doi"],
+                                  pmid=s["pmid"], kind=s["kind"])
+        for s in sources
+    }
+
+
+def _resolve_deep(
+    deep: dict, docs: Mapping[str, DocInfo], quotes: Sequence[Quote], *, expert: bool,
+) -> dict:
+    """S6's values (already hidden) with ``doc:`` references rewritten in its summary, gate
+    reasons, biology lines and disease-profile values (C4), and each biology line's and
+    profile field's ``support`` classified (C3)."""
+    def support(refs: Any) -> SupportView:
+        return resolve_support(refs, docs, quotes, expert_hidden=expert)
+
+    out = dict(deep)
+    for key in ("summary", "gating_rationales"):
+        if key in out:
+            out[key] = _rewrite(out[key], docs, markdown=False)
+    if isinstance(out.get("target_biology"), list):
+        out["target_biology"] = [
+            {**e, "line": _rewrite(e.get("line"), docs, markdown=False),
+             "support": support(e.get("support"))} if isinstance(e, dict) else e
+            for e in out["target_biology"]
+        ]
+    if isinstance(out.get("disease_profile"), dict):
+        out["disease_profile"] = {
+            k: {**e, "value": _rewrite(e.get("value"), docs, markdown=False),
+                "support": support(e.get("support"))} if isinstance(e, dict) else e
+            for k, e in out["disease_profile"].items()
+        }
+    return out
+
+
+def _per_target(evidence: Any, marker: Callable[[Any], bool]) -> list:
+    """A data flag's evidence entries: `evidence` itself when `marker` says it is one entry
+    (``flags.data_flags``), else the per-target values (``flags.combine_flags``)."""
+    if marker(evidence):
+        return [evidence]
+    if isinstance(evidence, dict):
+        return [v for v in evidence.values() if marker(v)]
+    return []
+
+
+def _depmap_summary(entries: Sequence[dict]) -> str:
+    """DepMap essentiality in a few words: cell lines, tissues and the lowest gene effect."""
+    tissues = [t for e in entries for t in e.get("depMapEssentiality") or []
+               if isinstance(t, dict)]
+    effects = [
+        s["geneEffect"] for t in tissues for s in t.get("screens") or []
+        if isinstance(s, dict) and isinstance(s.get("geneEffect"), int | float)
+        and not isinstance(s.get("geneEffect"), bool)
+    ]
+    if not effects:
+        return "not reported"
+    return (f"{len(effects)} cell lines in {len(tissues)} tissues, lowest gene effect "
+            f"{min(effects):.2f}")
+
+
+def _flag_evidence_text(name: str, evidence: Any) -> str:
+    """A data flag's evidence as one sentence (C6); "" for a flag with no data evidence."""
+    if name == "target_essential":
+        entries = _per_target(evidence, lambda v: isinstance(v, dict) and "isEssential" in v)
+        essential = any(e.get("isEssential") is True for e in entries)
+        return (f"Open Targets: essential = {str(essential).lower()}; "
+                f"DepMap: {_depmap_summary(entries)}")
+    if name == "safety_liabilities":
+        lists = _per_target(evidence, lambda v: isinstance(v, list))
+        names = dict.fromkeys(
+            str(item.get("event") or item.get("eventId") or "") if isinstance(item, dict)
+            else str(item)
+            for items in lists for item in items
+        )
+        return "; ".join(n for n in names if n) or "none listed"
+    if name == "same_target_in_clinic":
+        entries = _per_target(
+            evidence, lambda v: isinstance(v, dict) and ("candidates" in v or "trials" in v)
+        )
+        candidates = sum(len(e.get("candidates") or []) for e in entries)
+        trials = sum(e.get("trials") for e in entries if isinstance(e.get("trials"), int))
+        return f"{candidates} candidates, {trials} trials"
+    return ""
+
+
+def _deal_breakers(
+    data_flags: Any, reviewed: Any, docs: Mapping[str, DocInfo], *, expert: bool
+) -> dict:
+    """A member's deal-breaker rows (C6): ``flags``, every data flag raised and every flag S6
+    reviewed (triage flags included), each ``{"name", "raised", "status", "reason",
+    "evidence_text"}``; and ``not_raised``, the names of the data flags neither raised nor
+    reviewed. `reviewed` is S6's ``flags_reviewed`` after ``hide_deep``; under the expert
+    rule ``status`` and ``reason`` are None. Names are the stored keys as words; a reason's
+    ``doc:`` references are rewritten against `docs` (C4)."""
+    data_flags = data_flags if isinstance(data_flags, dict) else {}
+    reviewed = reviewed if isinstance(reviewed, dict) else {}
+    flags: list[dict] = []
+    not_raised: list[str] = []
+    for name in dict.fromkeys([*data_flags, *reviewed]):
+        entry = data_flags.get(name) if isinstance(data_flags.get(name), dict) else {}
+        raised = entry.get("raised") is True
+        if not raised and name not in reviewed:
+            not_raised.append(_words(str(name)))
+            continue
+        status, reason = (None, None) if expert else _review_status(reviewed.get(name))
+        reason = rewrite_doc_refs(reason, docs, markdown=False)
+        flags.append({
+            "name": _words(str(name)), "raised": raised, "status": status, "reason": reason,
+            "evidence_text": _flag_evidence_text(name, entry.get("evidence")),
+        })
+    return {"flags": flags, "not_raised": not_raised}
+
+
+@dataclass
+class _LoadedMember:
+    """One member idea as ``detail_view`` reads it: its page section, its panel opinions and
+    the documents and quotes its support and ``doc:`` references resolve against."""
+
+    section: dict
+    consults: list[dict]
+    docs: dict[str, DocInfo]
+    quotes: list[Quote]
+
+
 async def _member(
-    db: AsyncSession, idea: LandscapeIdea, hiding: Hiding, *, admin: bool, label: str | None,
-) -> tuple[dict, list[dict]]:
-    """One member idea's section (§13.2), its S6 record as ``member_deep`` picks it, and its
-    panel opinions for the evidence summary."""
+    db: AsyncSession, idea: LandscapeIdea, hiding: Hiding, *, admin: bool, n: int,
+    label: str | None,
+) -> _LoadedMember:
+    """One member idea's section (§13.2; C6, C12), its S6 record as ``member_deep`` picks it,
+    and its panel opinions for the evidence summary. Its verified quotes (C5) show under the
+    expert rule too: they are verbatim source text, not a call. The raw database evidence and
+    flag evidence are an admin's only (``database_evidence_raw``, ``flag_evidence_raw``)."""
     deep = await member_deep(db, idea)
+    sources, labs = await _sources(db, idea.id)
+    docs = _doc_infos(sources)
+    _add_aliases(docs, await _merged_aliases(db, [uuid.UUID(d) for d in docs]))
     consults: list[dict] = []
     if deep is not None and not hiding.expert:
         consults = [
-            _consult_dict(row, admin=admin, label=label)
+            _consult_dict(row, admin=admin, label=label, docs=docs)
             for row in (await db.scalars(
                 select(LandscapeConsult).where(LandscapeConsult.deep_id == deep.id)
                 .order_by(LandscapeConsult.created_at, LandscapeConsult.domain)
             )).all()
         ]
-    sources, labs = await _sources(db, idea.id)
     deep_values = hide_deep(_row_values(deep), hiding) if deep is not None else None
     if deep_values is not None:
         # A probe's S6 row has no cut, so ``cut_id`` would flag it before its batch is
@@ -1064,27 +1577,40 @@ async def _member(
         deep_values.pop("cut_id", None)
         if not admin:
             deep_values.pop("search_transcript", None)
+    quotes = await member_quotes(db, idea.id, deep_values, docs)
     section = {
         "idea_id": _sid(idea.id), "idea_key": idea.idea_key, "idea_type": idea.idea_type,
-        "structured_line": structured_line(idea), "direction": idea.direction,
+        "n": n, "structured_line": structured_line(idea), "direction": idea.direction,
         "targets": idea.targets, "agent": idea.agent, "disease": idea.disease,
         "modality_variants": idea.modality_variants, "stage": idea.stage,
-        "evidence_grade": idea.evidence_grade, "jhu_group_count": idea.jhu_group_count,
+        "stage_label": _words(idea.stage), "evidence_grade": idea.evidence_grade,
+        "evidence_grade_label": _words(idea.evidence_grade),
+        "jhu_group_count": idea.jhu_group_count,
         "outside_group_count": idea.outside_group_count,
-        "evidence_summary": idea.evidence_summary, "data_flags": idea.data_flags,
-        "deep": deep_values, "consults": consults, "sources": sources, "labs": labs,
+        "deep": (
+            _resolve_deep(deep_values, docs, quotes, expert=hiding.expert)
+            if deep_values is not None else None
+        ),
+        "consults": consults, "sources": sources, "labs": labs, "quotes": quotes,
+        **_deal_breakers(
+            idea.data_flags, (deep_values or {}).get("flags_reviewed"), docs,
+            expert=hiding.expert,
+        ),
     }
-    return section, consults
+    if admin:
+        section["database_evidence_raw"] = idea.evidence_summary
+        section["flag_evidence_raw"] = idea.data_flags
+    return _LoadedMember(section, consults, docs, quotes)
 
 
 async def _members(
     db: AsyncSession, version: LandscapeOpportunityVersion | None, epoch_id: uuid.UUID | None,
     hiding: Hiding, *, admin: bool,
-) -> tuple[list[dict], list[dict]]:
-    """The version's member sections and panel opinions, its keys resolved in `epoch_id`
-    (``_member_epoch``)."""
+) -> list[_LoadedMember]:
+    """The version's member ideas, numbered 1.. in key order (``n``, the "idea N" of the
+    panel labels), their keys resolved in `epoch_id` (``_member_epoch``)."""
     if version is None or epoch_id is None:
-        return [], []
+        return []
     keys = list(version.member_idea_keys or [])
     idea_ids = await _idea_ids(db, {(epoch_id, k) for k in keys})
     ordered = list(dict.fromkeys(idea_ids[(epoch_id, k)] for k in keys
@@ -1092,14 +1618,11 @@ async def _members(
     ideas = {i.id: i for i in (await db.scalars(
         select(LandscapeIdea).where(LandscapeIdea.id.in_(ordered))
     )).all()} if ordered else {}
-    sections: list[dict] = []
-    consults: list[dict] = []
-    for n, idea_id in enumerate(ordered, start=1):
-        label = f"idea {n}" if len(ordered) > 1 else None
-        section, opinions = await _member(db, ideas[idea_id], hiding, admin=admin, label=label)
-        sections.append(section)
-        consults.extend(opinions)
-    return sections, consults
+    return [
+        await _member(db, ideas[idea_id], hiding, admin=admin, n=n,
+                      label=f"idea {n}" if len(ordered) > 1 else None)
+        for n, idea_id in enumerate(ordered, start=1)
+    ]
 
 
 def _key_points(values: Mapping) -> list[dict]:
@@ -1129,11 +1652,36 @@ def _key_points(values: Mapping) -> list[dict]:
     return out
 
 
+def _idea_n(label: Any) -> int | None:
+    """The N of a consult label's "· idea N" suffix (``_consult_dict``), else None."""
+    match = _IDEA_SUFFIX.search(label) if isinstance(label, str) else None
+    return int(match.group(1)) if match else None
+
+
+def _with_idea_n(signals: dict | None) -> dict | None:
+    """The evidence summary with ``idea_n`` on each consult item, so a row links to its
+    member idea (C12)."""
+    if signals is None:
+        return None
+    out = dict(signals)
+    for bucket, items in signals.items():
+        if isinstance(items, list):
+            out[bucket] = [
+                {**item, "idea_n": _idea_n(item.get("label"))}
+                if isinstance(item, dict) and item.get("source") == "consult" else item
+                for item in items
+            ]
+    return out
+
+
 def _verdict(values: dict | None, hiding: Hiding, consults: list[dict]) -> dict:
-    """Dimension rows, gate definitions and the evidence summary, from what is not hidden."""
+    """Dimension rows, gate definitions and the evidence summary, from what is not hidden,
+    and ``verdict_revision`` (C10): the band thresholds and pass label of the revision that
+    scored the row, None when that revision is unknown."""
     if values is None:
         return {"dimensions": [], "revision_provenance": None, "scale_max": None,
-                "gating_definitions": {}, "verdict_signals": None, "key_points": []}
+                "gating_definitions": {}, "verdict_signals": None, "key_points": [],
+                "verdict_revision": None}
     revision, provenance = resolve_revision(
         values.get("rubric_version"), values.get("rubric_content_hash")
     )
@@ -1151,8 +1699,12 @@ def _verdict(values: dict | None, hiding: Hiding, consults: list[dict]) -> dict:
         "revision_provenance": provenance,
         "scale_max": revision.scale_max if revision is not None else None,
         "gating_definitions": _gating_definitions(revision, provenance),
-        "verdict_signals": signals,
+        "verdict_signals": _with_idea_n(signals),
         "key_points": _key_points(values),
+        "verdict_revision": {
+            "advance_min": revision.advance_min, "conditional_min": revision.conditional_min,
+            "pass_label": revision.pass_label,
+        } if revision is not None else None,
     }
 
 
@@ -1215,41 +1767,102 @@ def _history(rows: Sequence[LandscapeAssessment], ep: _Epochs, display_id) -> li
     ]
 
 
-async def detail_view(db, user, opportunity_id: uuid.UUID) -> dict | None:
+def _history_row(
+    rows: Sequence[LandscapeAssessment], history: Sequence[dict], wanted: uuid.UUID,
+) -> LandscapeAssessment:
+    """The earlier assessment the read-only history view shows (C8, OD5): only a ``done`` row
+    the page's ``history`` list holds. Anything else, a candidate epoch's row, the row shown
+    now or another opportunity's, raises ``LookupError`` (the route answers 404)."""
+    listed = {h["assessment_id"] for h in history if h["status"] == "done"}
+    if str(wanted) not in listed:
+        raise LookupError(f"assessment {wanted} is not in this opportunity's history")
+    return next(a for a in rows if a.id == wanted)
+
+
+def _detail_verdict(
+    values: dict | None, hiding: Hiding, consults: list[dict], loaded: Sequence[_LoadedMember],
+    members: Sequence[dict],
+) -> dict:
+    """``detail_view``'s verdict keys: ``_verdict``'s, each key point gaining ``kind`` and
+    ``body`` and its support classified against every member's documents and quotes (C3);
+    ``review_rubric`` (C13), the live rubric with S9's score per dimension as ``bot_score``
+    (None where ``scores`` is hidden); and ``confirmed_not_red_flagged`` (C6): whether a
+    member's S6 confirmed a deal-breaker while S9 recorded no red flag, None under the expert
+    rule or with no assessment."""
+    docs = {k: v for m in loaded for k, v in m.docs.items()}
+    quotes = [q for m in loaded for q in m.quotes]
+
+    def support(refs: Any) -> SupportView:
+        return resolve_support(refs, docs, quotes, expert_hidden=hiding.expert)
+
+    verdict = _verdict(values, hiding, consults)
+    verdict["key_points"] = _with_kinds(verdict["key_points"], support)
+    scores = (values or {}).get("scores")
+    confirmed = None
+    if values is not None and not hiding.expert:
+        confirmed = (
+            any(f["status"] == "confirmed" for m in members for f in m["flags"])
+            and not values.get("red_flags")
+        )
+    return {
+        **verdict,
+        "review_rubric": _review_rubric(scores if isinstance(scores, dict) else {}),
+        "confirmed_not_red_flagged": confirmed,
+    }
+
+
+async def detail_view(
+    db, user, opportunity_id: uuid.UUID, *, history_assessment_id: uuid.UUID | None = None,
+) -> dict | None:
     """The detail page (§13.2): the opportunity's current assessment IN THE ACTIVE EPOCH,
     its member idea sections and its history; None (the route answers 404) unless
     ``can_view``.
 
-    Returns ``{"opportunity_id": str, "label": str|None, "theme": str|None, "retired": bool,
-    "is_history": bool, "probe": bool, "blind": bool, "hiding": {"blind": bool, "expert":
-    bool}, "epoch": dict|None, "banner": str|None, "assessment": dict|None, "no_assessment":
+    Returns ``{"opportunity_id": str, "label": str|None, "lines": [str], "show_label": bool,
+    "theme": str|None, "retired": bool, "is_history": bool, "history_view": bool, "probe":
+    bool, "blind": bool, "hiding": {"blind": bool, "expert": bool}, "epoch": dict|None,
+    "banner": str|None, "assessment": dict|None, "prose_format": str, "no_assessment":
     bool, "failure": {"status", "error"}|None, "history_assessment_id": str|None, "history":
     [{"assessment_id", "epoch_id", "epoch_status", "opportunity_version", "status",
     "headline", "created_at"}], "members": [member], "dimensions": [row],
     "revision_provenance": str|None, "scale_max": float|None, "gating_definitions": {key:
-    {"title", "description"}}, "verdict_signals": dict|None, "key_points": [{"label",
-    "group", "bullets": [{"text", "support"}]}], "my_decision": dict|None,
-    "changed_since_decision": bool, "votes_unlocked": bool, "decisions": [dict], "reviews":
-    [dict], "status_events": [dict], "review_status": dict|None, "assignments": [dict],
-    "review_capable_users": [{"id", "name", "user_role"}] (staff only, else []),
+    {"title", "description"}}, "verdict_signals": dict|None, "verdict_revision":
+    {"advance_min", "conditional_min", "pass_label"}|None, "key_points": [{"label", "group",
+    "bullets": [{"text", "kind", "body", "support": SupportView}]}], "review_rubric":
+    {"version", "scale_min", "scale_max", "dimensions": [{"key", "title", "weight",
+    "anchors", "bot_score"}]}, "confirmed_not_red_flagged": bool|None, "my_decision":
+    dict|None, "changed_since_decision": bool, "votes_unlocked": bool, "decisions": [dict],
+    "reviews": [dict], "status_events": [dict], "review_status": dict|None, "assignments":
+    [dict], "review_capable_users": [{"id", "name", "user_role"}] (staff only, else []),
     "expert_item": {"judgment_id", "quarter", "drawn_at"}|None, "is_staff": bool,
     "is_admin": bool}``.
 
     ``assessment`` holds the shown ``LandscapeAssessment`` columns, ids as strings, ``rank``
     set to the card's rank (``_shown_rank``), without what the viewer's hiding hides, without
     ``raw_verdict`` unless the viewer is an admin, and without the staff-only verdict fields
-    for a reviewer; ``verdict_signals`` is None under the expert hiding. Members are resolved in
+    for a reviewer; ``prose_format`` NULL reads as ``"markdown"`` (OD2), and ``doc:``
+    references in its prose are rewritten (C4). It keeps ``recommendation`` on an undecided
+    blind card: the blind card's chip hiding is the card's only (OD1). ``verdict_signals`` is
+    None under the expert hiding; its consult items carry ``idea_n``. Members are resolved in
     the shown assessment's epoch (``_member_epoch``). A member is the idea's facets
-    (``idea_id``, ``idea_key``, ``idea_type``, ``structured_line``, ``direction``,
-    ``targets``, ``agent``, ``disease``, ``modality_variants``, ``stage``,
-    ``evidence_grade``, ``jhu_group_count``, ``outside_group_count``, ``evidence_summary``,
-    ``data_flags``), ``deep`` (its ``member_deep`` record's columns after ``hide_deep``, or
-    None), ``consults`` (panel opinions; [] on an expert's open item), ``sources`` and
-    ``labs``.
+    (``idea_id``, ``idea_key``, ``idea_type``, ``n``, ``structured_line``, ``direction``,
+    ``targets``, ``agent``, ``disease``, ``modality_variants``, ``stage``, ``stage_label``,
+    ``evidence_grade``, ``evidence_grade_label``, ``jhu_group_count``,
+    ``outside_group_count``), ``deep`` (its ``member_deep`` record's columns after
+    ``hide_deep``, its prose rewritten and its support classified, or None), ``consults``
+    (panel opinions; [] on an expert's open item), ``sources``, ``labs``, ``quotes`` (C5),
+    ``flags`` and ``not_raised`` (``_deal_breakers``, C6) and, for an admin only,
+    ``database_evidence_raw`` and ``flag_evidence_raw``.
     A blind-batch card hides what ``batch_view`` hides until the viewer decides; an expert's
     own sample item hides S9's and S6's calls until they submit (D63). A retired
     opportunity reads as history: its last assessment, ``retired`` and ``is_history`` set
-    (D62)."""
+    (D62).
+
+    With ``history_assessment_id`` (C8, OD5) the page is the read-only view of that earlier
+    assessment, which must be a ``done`` row of ``history`` (``_history_row``; anything else
+    raises ``LookupError``): ``history_view`` is True, ``assessment`` is that row under the
+    same hidings with ``rank`` None, ``members`` is [] and the evidence summary has no panel
+    opinions; its members' sources and quotes still resolve its support and references."""
     if not await can_view(db, user, opportunity_id):
         return None
     viewer = await _viewer(db, user, opportunity_id)
@@ -1260,44 +1873,56 @@ async def detail_view(db, user, opportunity_id: uuid.UUID) -> dict | None:
     rows = (await _assessments(db, [opportunity_id])).get(opportunity_id, [])
     retired = opp.retired_at is not None
     pick = _pick(rows, ep, retired)
+    history = _history(rows, ep, pick.display.id if pick.display else None)
+    history_view = history_assessment_id is not None
+    shown_row = (
+        _history_row(rows, history, history_assessment_id) if history_view else pick.display
+    )
     version = _card_version(opp, (await _versions(db, [opportunity_id])).get(opportunity_id, {}),
-                            pick.display)
-    epoch_id = _member_epoch(version, pick.display) if version is not None else None
-    members, consults = await _members(db, version, epoch_id, hiding, admin=viewer.admin)
+                            shown_row)
+    epoch_id = _member_epoch(version, shown_row) if version is not None else None
+    loaded = await _members(db, version, epoch_id, hiding, admin=viewer.admin)
     values = None
-    if pick.display is not None:
-        raw = _row_values(pick.display)
+    if shown_row is not None:
+        raw = _row_values(shown_row)
         # ``LandscapeAssessment.rank`` is never written: the page's rank is ``_shown_rank``.
-        raw["rank"] = _shown_rank(
-            opportunity_id, version, [uuid.UUID(m["idea_id"]) for m in members],
+        raw["rank"] = None if history_view else _shown_rank(
+            opportunity_id, version, [uuid.UUID(m.section["idea_id"]) for m in loaded],
             _Unranked.of(issued), *await _ranks(db, ep.active_id),
         )
-        values = hide_assessment(raw, hiding)
+        values = _rewrite_assessment(
+            hide_assessment(raw, hiding), {k: v for m in loaded for k, v in m.docs.items()}
+        )
         if not viewer.admin:
             values.pop("raw_verdict", None)
+    members = [] if history_view else [m.section for m in loaded]
+    consults = [] if history_view else [c for m in loaded for c in m.consults]
     decision = viewer.decisions.get(opportunity_id)
     judgment = viewer.expert.get(opportunity_id)
     shown_id = pick.shown.id if pick.shown is not None else None
-    no_assessment = pick.shown is None and not retired
+    no_assessment = pick.shown is None and not retired and not history_view
     batches = issued.batch_of()
     on_blind = any(batches[i.batch_id].blind for i in issued.items
                    if i.opportunity_id == opportunity_id)
+    label = version.label if version else None
+    lines = _lines((values or {}).get("structured_lines"))
     view = {
         "opportunity_id": _sid(opportunity_id),
-        "label": version.label if version else None,
+        "label": label, "lines": lines, "show_label": _show_label(label, lines),
         "theme": version.theme if version else None,
-        "retired": retired, "is_history": retired,
+        "retired": retired, "is_history": retired, "history_view": history_view,
         "probe": opportunity_id in issued.visible_probes(),
         "blind": on_blind,
         "hiding": {"blind": hiding.blind, "expert": hiding.expert},
         "epoch": ep.summary(), "banner": _banner(ep),
         "assessment": values,
+        "prose_format": values["prose_format"] if values is not None else "markdown",
         "no_assessment": no_assessment,
         "failure": _failure(pick) if no_assessment else None,
         "history_assessment_id": _sid(pick.history.id) if pick.history else None,
-        "history": _history(rows, ep, pick.display.id if pick.display else None),
+        "history": history,
         "members": members,
-        **_verdict(values, hiding, consults),
+        **_detail_verdict(values, hiding, consults, loaded, members),
         "my_decision": _decision_dict(decision, user) if decision else None,
         "changed_since_decision": not retired and changed_since_decision(decision, shown_id),
         **await _votes(db, user, opportunity_id),
@@ -1329,7 +1954,9 @@ def _report_dict(row: LandscapeReport | None) -> dict | None:
 
 
 async def _epoch_rows(db: AsyncSession) -> list[dict]:
-    """Every epoch, newest first, with its hold, override and regression run (§7.11, §10.4)."""
+    """Every epoch, newest first, with its hold, override and regression run (§7.11, §10.4).
+    ``was_held`` is whether it was held and then overridden: an override keeps the hold's
+    reason (``epochs.override``), so both are set (C11, OD13)."""
     E, R = LandscapeEpoch, LandscapeRegressionRun
     epochs_ = (await db.scalars(select(E).order_by(E.created_at.desc(), E.id))).all()
     run_ids = [e.regression_run_id for e in epochs_ if e.regression_run_id]
@@ -1345,6 +1972,7 @@ async def _epoch_rows(db: AsyncSession) -> list[dict]:
             "changed_stages": list(e.changed_stages or []), "hold_reason": e.hold_reason,
             "override_actor_id": _sid(e.override_actor_id), "override_reason": e.override_reason,
             "override_at": e.override_at, "drained_at": e.drained_at,
+            "was_held": e.hold_reason is not None and e.override_at is not None,
             "activated_at": e.activated_at, "retired_at": e.retired_at,
             "regression_run": {
                 "id": _sid(run.id), "status": run.status, "set_version": run.set_version,
@@ -1513,9 +2141,35 @@ async def _filtered_items(db: AsyncSession, epoch: LandscapeEpoch | None) -> dic
     }
 
 
+async def _audit_labels(db: AsyncSession, targets: Sequence[tuple[str, Any]]) -> list[str | None]:
+    """What each reject-audit row is about, as the filtered lists name it (C11): a screened
+    document's title, a triaged idea's structured line; None when the row is gone. One query
+    per kind for the whole page."""
+    doc_ids = {t.document_id for kind, t in targets if t is not None and kind == "screen"}
+    idea_ids = {t.idea_id for kind, t in targets if t is not None and kind != "screen"}
+    titles = dict((await db.execute(
+        select(LandscapeDocument.id, LandscapeDocument.title)
+        .where(LandscapeDocument.id.in_(doc_ids))
+    )).all()) if doc_ids else {}
+    ideas = {i.id: i for i in (await db.scalars(
+        select(LandscapeIdea).where(LandscapeIdea.id.in_(idea_ids))
+    )).all()} if idea_ids else {}
+    labels: list[str | None] = []
+    for kind, target in targets:
+        if target is None:
+            labels.append(None)
+        elif kind == "screen":
+            labels.append(titles.get(target.document_id))
+        else:
+            idea = ideas.get(target.idea_id)
+            labels.append(structured_line(idea) if idea is not None else None)
+    return labels
+
+
 async def _audit_disagreements(db: AsyncSession, epoch: LandscapeEpoch | None) -> list[dict]:
-    """The reject audit's disagreements in the judging epoch, newest first (§10.5, §13.4). A
-    row still excluded carries the rescue form's fields; ``rescue`` is None otherwise."""
+    """The reject audit's disagreements in the judging epoch, newest first (§10.5, §13.4),
+    each with its item's ``label`` (``_audit_labels``). A row still excluded carries the rescue
+    form's fields; ``rescue`` is None otherwise."""
     if epoch is None:
         return []
     A = LandscapeRejectAudit
@@ -1524,18 +2178,36 @@ async def _audit_disagreements(db: AsyncSession, epoch: LandscapeEpoch | None) -
         .order_by(A.updated_at.desc(), A.id).limit(_PIPELINE_ROWS)
     )).all()
     kinds = {"screen": (LandscapeScreen, "screen"), "triage": (LandscapeTriage, "triage")}
-    out = []
+    targets = []
     for row in rows:
-        model, stage = kinds.get(row.item_kind, (None, None))
-        target = await db.get(model, row.item_id) if model is not None else None
+        model, _ = kinds.get(row.item_kind, (None, None))
+        targets.append(await db.get(model, row.item_id) if model is not None else None)
+    labels = await _audit_labels(db, [(r.item_kind, t) for r, t in zip(rows, targets, strict=True)])
+    out = []
+    for row, target, label in zip(rows, targets, labels, strict=True):
+        _, stage = kinds.get(row.item_kind, (None, None))
         rescuable = target is not None and str(target.status).startswith("excluded:")
         out.append({
             "item_kind": row.item_kind, "item_id": _sid(row.item_id),
+            "label": label,
             "original_decision": row.original_decision, "audit_decision": row.audit_decision,
             "reason": row.reason, "at": row.updated_at,
             "rescue": _rescue_fields(row.item_kind, target, stage) if rescuable else None,
         })
     return out
+
+
+def _iso_datetime(value: object) -> datetime | None:
+    """A metrics timestamp (stored as ISO text in the JSON report) as a datetime for ``| ts``;
+    None when it is missing or unreadable."""
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 async def pipeline_view(db, user) -> dict:
@@ -1544,11 +2216,14 @@ async def pipeline_view(db, user) -> dict:
     Returns ``{"phase": "pilot"|"backfill"|"continuous" (unset reads ``pilot``), "paused":
     bool, "epochs": [{"id", "status", "created_at", "prompt_set_version",
     "criteria_version", "changed_stages", "hold_reason", "override_actor_id",
-    "override_reason", "override_at", "drained_at", "activated_at", "retired_at",
+    "override_reason", "override_at", "drained_at", "was_held", "activated_at", "retired_at",
     "regression_run": {"id", "status", "set_version", "started_at", "finished_at",
     "results"}|None}], "metrics": reports.pipeline_metrics (its ``blind_results`` without a
     blind batch in which the viewer has an undecided card, its ``expert_agreement``
-    disagreements without the viewer's open expert items), "drift": reports.drift_report,
+    disagreements without the viewer's open expert items), "latest_cut_opportunities":
+    int|None (how many opportunities the metrics' ``latest_cut`` was grouped into, C7; None
+    before a cut), "latest_cut_completed_at": datetime|None (that cut's ``completed_at``, which
+    the report stores as text), "drift": reports.drift_report,
     "positive_control_trace": reports.positive_control_trace, "reports": {"pilot", "bakeoff",
     "probes": {"id", "created_at", "payload"}|None}, "picks_applied": bool,
     "positive_controls": [str] (the stored DOIs and PMIDs), "experts": [{"id", "name",
@@ -1559,8 +2234,9 @@ async def pipeline_view(db, user) -> dict:
     "next_due_at", "last_fetch": fetch|None}], "incomplete_slices": [fetch], "filtered":
     {"screen"|"triage"|"deep_gate": {"count", "items": [{"item_kind", "item_id", "stage",
     "expected_status", "label", "reason", "at"}]}} (empty without an epoch),
-    "audit_disagreements": [{"item_kind", "item_id", "original_decision", "audit_decision",
-    "reason", "at", "rescue": {"item_kind", "item_id", "stage", "expected_status"}|None}],
+    "audit_disagreements": [{"item_kind", "item_id", "label", "original_decision",
+    "audit_decision", "reason", "at", "rescue": {"item_kind", "item_id", "stage",
+    "expected_status"}|None}],
     "is_admin": bool}``, where a fetch is ``{"source", "slice_key", "status", "started_at",
     "finished_at", "expected_count", "received_count", "error"}``. The filtered lists, the
     audit disagreements and the incomplete slices hold the newest ``_PIPELINE_ROWS`` each; a
@@ -1582,11 +2258,18 @@ async def pipeline_view(db, user) -> dict:
     review_users = (await db.scalars(
         select(User).where(User.user_role.in_(_REVIEW_ROLES)).order_by(User.name)
     )).all()
+    metrics = await reports.pipeline_metrics(db)
+    latest_cut = metrics.get("latest_cut")
     return {
         "phase": await _setting(db, "landscape_phase") or "pilot",
         "paused": (await _setting(db, "landscape_paused") or "").lower() in _TRUE_WORDS,
         "epochs": await _epoch_rows(db),
-        "metrics": _visible_metrics(await reports.pipeline_metrics(db), issued, viewer),
+        "metrics": _visible_metrics(metrics, issued, viewer),
+        "latest_cut_opportunities": (
+            await _cut_opportunities(db, uuid.UUID(latest_cut["cut_id"]))
+            if latest_cut else None
+        ),
+        "latest_cut_completed_at": _iso_datetime((latest_cut or {}).get("completed_at")),
         "drift": await reports.drift_report(db),
         "positive_control_trace": await reports.positive_control_trace(db),
         "reports": {

@@ -6,9 +6,12 @@
 {# The staff pipeline page (spec §13.4), from landscape_view.pipeline_view. Every control
    posts to /landscape/... (src/routers/landscape.py), which refuses impersonation, so the
    controls are not rendered while impersonating. Each control form carries a
-   `data-confirm` sentence saying what it does (static/js/confirm.js). The metrics and
-   reports are JSON whose keys come from data, shown as stored. Probe flags appear only for
-   superseded blind batches (F2); the read model decides that. #}
+   `data-confirm` sentence saying what it does (static/js/confirm.js). The latest cut reads
+   as a sentence; the other metrics and the reports are JSON whose keys come from data,
+   shown as stored, each folded under its key in words. An epoch that was held and then
+   overridden reads "Held, then overridden", with both reasons folded away; one still held
+   keeps its amber "Held" line. Probe flags appear only for superseded blind batches (F2);
+   the read model decides that. #}
 {% set can_act = not impersonation_banner %}
 {% set admin = permissions.admin and can_act %}
 {% macro json_block(value) %}<pre class="mt-1 text-sm bg-gray-50 p-3 rounded-lg overflow-x-auto max-h-96 overflow-y-auto whitespace-pre-wrap">{{ value | tojson(indent=2) }}</pre>{% endmacro %}
@@ -64,8 +67,18 @@
         <li class="rounded-lg border border-gray-200 px-4 py-2">
             <p><span class="font-semibold">{{ e.status }}</span> · criteria {{ e.criteria_version or '—' }} · prompts {{ e.prompt_set_version or '—' }} · created {{ e.created_at | ts }}{% if e.activated_at %} · activated {{ e.activated_at | ts }}{% endif %}{% if e.retired_at %} · retired {{ e.retired_at | ts }}{% endif %}</p>
             {% if e.changed_stages %}<p class="text-gray-700">Changed stages: {{ e.changed_stages | join(', ') }}</p>{% endif %}
+            {% if e.was_held %}
+            <p class="text-gray-700">Held, then overridden{% if e.override_at %} {{ e.override_at | ts }}{% endif %}</p>
+            {% if e.hold_reason or e.override_reason %}
+            <details><summary class="cursor-pointer text-sm text-gray-600">Reasons</summary>
+                {% if e.hold_reason %}<p class="mt-1 text-gray-700">Held: {{ e.hold_reason }}</p>{% endif %}
+                {% if e.override_reason %}<p class="mt-1 text-gray-700">Overridden: {{ e.override_reason }}</p>{% endif %}
+            </details>
+            {% endif %}
+            {% else %}
             {% if e.hold_reason %}<p class="text-amber-800">Held: {{ e.hold_reason }}</p>{% endif %}
             {% if e.override_reason %}<p class="text-gray-700">Overridden {{ e.override_at | ts }}: {{ e.override_reason }}</p>{% endif %}
+            {% endif %}
             {% if e.regression_run %}
             <p class="text-gray-700">Regression run: {{ e.regression_run.status }} (set {{ e.regression_run.set_version or '—' }}){% if e.regression_run.finished_at %}, finished {{ e.regression_run.finished_at | ts }}{% endif %}</p>
             {% if e.regression_run.results %}<details><summary class="cursor-pointer text-sm text-gray-600">Results</summary>{{ json_block(e.regression_run.results) }}</details>{% endif %}
@@ -88,16 +101,17 @@
     {% if sources %}
     <div class="overflow-x-auto">
     <table class="min-w-full text-sm text-gray-800">
-        <thead><tr class="text-left text-gray-700"><th class="pr-4 py-1">Source</th><th class="pr-4 py-1">Enabled</th><th class="pr-4 py-1">Completeness</th><th class="pr-4 py-1">Last success</th><th class="pr-4 py-1">Next due</th><th class="pr-4 py-1">Last fetch</th></tr></thead>
+        <thead><tr class="text-left text-gray-700"><th class="pr-4 py-1">Source</th><th class="pr-4 py-1">Enabled</th><th class="pr-4 py-1">Completeness (last slice)</th><th class="pr-4 py-1">Last success</th><th class="pr-4 py-1">Next due</th><th class="pr-4 py-1">Last fetch</th></tr></thead>
         <tbody>
             {% for s in sources %}
             <tr class="border-t border-gray-100">
                 <td class="pr-4 py-1">{{ s.source }}</td>
                 <td class="pr-4 py-1">{{ 'yes' if s.enabled else 'no' }}</td>
-                <td class="pr-4 py-1">{{ ('%.0f%%' | format(s.completeness * 100)) if s.completeness is not none else '—' }}</td>
+                <td class="pr-4 py-1">{{ ('%.0f%%' | format([s.completeness, 1] | min * 100)) if s.completeness is not none else '—' }}</td>
                 <td class="pr-4 py-1">{{ s.last_success_at | ts if s.last_success_at else '—' }}</td>
                 <td class="pr-4 py-1">{{ s.next_due_at | ts if s.next_due_at else '—' }}</td>
-                <td class="pr-4 py-1">{% if s.last_fetch %}{{ s.last_fetch.status }} · {{ s.last_fetch.slice_key }} · {{ s.last_fetch.received_count if s.last_fetch.received_count is not none else '—' }} of {{ s.last_fetch.expected_count if s.last_fetch.expected_count is not none else '—' }}{% else %}—{% endif %}</td>
+                {% set lf = s.last_fetch %}
+                <td class="pr-4 py-1">{% if lf %}{{ lf.status }} · {{ lf.slice_key }} · {% if lf.received_count is not none and lf.expected_count is not none and lf.received_count > lf.expected_count %}complete ({{ lf.received_count }}){% else %}{{ lf.received_count if lf.received_count is not none else '—' }} of {{ lf.expected_count if lf.expected_count is not none else '—' }}{% endif %}{% else %}—{% endif %}</td>
             </tr>
             {% endfor %}
         </tbody>
@@ -115,7 +129,7 @@
 <section class="landscape-metrics bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
     <h2 class="text-base font-semibold text-gray-900 mb-2">Metrics</h2>
     {% set m = metrics or {} %}
-    {% if m.latest_cut %}<p class="text-sm text-gray-800">Latest cut: {{ m.latest_cut | tojson }}</p>{% else %}<p class="text-sm text-gray-600">No cut yet.</p>{% endif %}
+    {% if m.latest_cut %}{% set cut = m.latest_cut %}<p class="text-sm text-gray-800">Latest cut: {{ cut.n }} idea{{ '' if cut.n == 1 else 's' }} ranked, {{ cut.k }} kept{% if latest_cut_opportunities is not none %}, {{ latest_cut_opportunities }} opportunit{{ 'y' if latest_cut_opportunities == 1 else 'ies' }}{% endif %}{% if latest_cut_completed_at %}, {{ latest_cut_completed_at | ts }}{% endif %}.</p>{% else %}<p class="text-sm text-gray-600">No cut yet.</p>{% endif %}
     {% for key, value in m.items() %}
     {% if key not in ('latest_cut', 'epoch_id') %}
     <details class="mt-2"><summary class="cursor-pointer text-sm font-medium text-gray-800">{{ key | replace('_', ' ') }}</summary>{{ json_block(value) }}</details>
@@ -160,7 +174,7 @@
     <ul class="space-y-2 text-sm text-gray-800">
         {% for d in audit_disagreements %}
         <li class="rounded-lg border border-gray-200 px-4 py-2">
-            <p>{{ d.item_kind }} {{ d.item_id }} · stage said {{ d.original_decision }}, audit said {{ d.audit_decision }} · {{ d.at | ts }}</p>
+            <p><span class="font-medium">{{ d.label or d.item_kind }}</span> <span class="text-xs text-gray-600">{{ d.item_id }}</span> · stage said {{ d.original_decision }}, audit said {{ d.audit_decision }} · {{ d.at | ts }}</p>
             {% if d.reason %}<p class="text-gray-700">{{ d.reason }}</p>{% endif %}
             {% if d.rescue and can_act %}{{ rescue_form(d.rescue, 'rescue-audit-' ~ loop.index) }}{% endif %}
         </li>

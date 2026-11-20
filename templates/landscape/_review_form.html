@@ -1,33 +1,76 @@
-{# The optional full review (spec §13.3): an overall score, optional dimension scores on the
-   live rubric (`review_dimensions`, `review_scale_min`, `review_scale_max`, the set
-   /reviews validates against) and a comment of up to 10,000 characters. Included with
-   `opportunity_id`, `assessment_id` (always posted, D50), `review` (the viewer's own review
-   dict or none) and `form_id`. A first review posts to /reviews/landscape/<id>/review, an
-   edit to /reviews/landscape-reviews/<id>/edit; an edit re-posts every dimension, so
-   clearing one clears it. #}
+{# The optional full review (spec §13.3), copied from the assessment review form
+   (templates/assessments/_detail_body.html, `dimension_score_rows`) rather than shared
+   with it (D26): an overall rating, optional dimension scores and a comment of up to
+   10,000 characters. Included with `opportunity_id`, `assessment_id` (always posted, D50),
+   `review` (the viewer's own review dict or none), `form_id` and the page's top-level
+   `review_rubric` (contract C13: {version, scale_min, scale_max, dimensions [{key, title,
+   weight, anchors, bot_score}]}, the live rubric /reviews validates against). `bot_score`
+   is None where the viewer's hiding withholds S9's scores, so the row then reads "did not
+   score this".
+   The form carries `surface` and the page's `list_state` ({view, tab, assignment, sort,
+   lab}) as hidden fields, as the decision form does, so the redirect keeps the detail
+   page's back link (contract C9). A first review posts to /reviews/landscape/<id>/review,
+   an edit to /reviews/landscape-reviews/<id>/edit; an edit re-posts every dimension, so
+   clearing one clears it. A blank dimension is a real answer ("I cannot judge this one"). #}
 {% set own_scores = (review.dimension_scores if review and review.dimension_scores else {}) %}
+{% set rubric = review_rubric if review_rubric is defined and review_rubric else {} %}
+{% set form_state = list_state if list_state is defined and list_state else {} %}
 {% if review %}
 <form method="post" action="/reviews/landscape-reviews/{{ review.id }}/edit" class="landscape-review-form space-y-2">
 {% else %}
 <form method="post" action="/reviews/landscape/{{ opportunity_id }}/review" class="landscape-review-form space-y-2">
 {% endif %}
     <input type="hidden" name="assessment_id" value="{{ assessment_id or '' }}">
-    <label for="{{ form_id }}score" class="block text-sm font-medium text-gray-700">Rating (1 = weak … 5 = strong)</label>
+    <input type="hidden" name="surface" value="detail">
+    {% for key in ('view', 'tab', 'assignment', 'sort', 'lab') %}{% if form_state.get(key) %}<input type="hidden" name="{{ key }}" value="{{ form_state.get(key) }}">{% endif %}{% endfor %}
+    <p class="review-rubric-instructions text-base leading-relaxed text-gray-600 max-w-[68ch]">
+        Scores here rate the opportunity's own merit, not how well BlackbirdBot performed.
+        Review it against Blackbird's rubric{% if rubric.version %}
+        (<span class="font-mono">{{ rubric.version }}</span>){% endif %}: read the full rationale
+        before scoring, since the brief at the top of this page is BlackbirdBot's own summary
+        of it, not an independent account.{% if rubric.dimensions %} Score each rubric dimension
+        from {{ rubric.scale_min }} (weak) to {{ rubric.scale_max }} (strongly meets Blackbird's
+        bar), and leave a dimension blank if you cannot judge it.{% endif %} The overall rating
+        is required; the dimension scores are not. Use the comment to explain the rating and to
+        flag anything the assessment got wrong.
+    </p>
+    <label for="{{ form_id }}score" class="block text-sm font-medium text-gray-700">Overall rating (1 = weak … 5 = strong)</label>
     <select id="{{ form_id }}score" name="score" required class="text-sm border border-gray-300 rounded-md shadow-sm">
         {% if not review %}<option value="" disabled selected>—</option>{% endif %}
         {% for n in range(1, 6) %}<option value="{{ n }}" {% if review and review.score == n %}selected{% endif %}>{{ n }}</option>{% endfor %}
     </select>
-    {% if review_dimensions %}
+    {% if rubric.dimensions %}
     <fieldset class="mt-2">
         <legend class="text-sm font-medium text-gray-700">Dimension scores (optional)</legend>
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1">
-            {% for dim in review_dimensions %}
-            <div class="flex items-center justify-between gap-2">
-                <label for="{{ form_id }}dim-{{ dim.key }}" class="text-sm text-gray-700">{{ dim.title }}</label>
-                <select id="{{ form_id }}dim-{{ dim.key }}" name="dim_{{ dim.key }}" class="text-sm border border-gray-300 rounded-md shadow-sm">
-                    <option value="">—</option>
-                    {% for n in range(review_scale_min, review_scale_max + 1) %}<option value="{{ n }}" {% if own_scores.get(dim.key) == n %}selected{% endif %}>{{ n }}</option>{% endfor %}
+        <div class="review-dimension-scores space-y-2">
+            {% for d in rubric.dimensions %}
+            {% set sid = form_id ~ 'dim-' ~ d.key %}
+            <div class="review-dimension-row review-dim-{{ d.key }} flex items-start gap-2">
+                <select id="{{ sid }}" name="dim_{{ d.key }}" class="border rounded px-1 py-0.5 text-sm shrink-0">
+                    <option value="">&mdash;</option>
+                    {% for n in range(rubric.scale_min, rubric.scale_max + 1) %}
+                    <option value="{{ n }}" {% if own_scores.get(d.key) == n %}selected{% endif %}>{{ n }}</option>
+                    {% endfor %}
                 </select>
+                <div class="min-w-0">
+                    <label for="{{ sid }}" class="text-sm font-medium text-gray-700">
+                        {{ d.title }}
+                        {% if d.weight is not none %}<span class="font-normal text-gray-600">&middot; {{ "%g"|format(d.weight) }}% weight</span>{% endif %}
+                        {# The bot's own number, muted and attributed so it reads as its
+                           claim, never as a pre-filled default: the select stays empty. #}
+                        {% if d.bot_score is not none %}
+                        <span class="review-bot-score font-normal text-gray-600">&middot; BlackbirdBot scored {{ "%g"|format(d.bot_score) }}</span>
+                        {% else %}
+                        <span class="review-bot-score font-normal text-gray-600">&middot; BlackbirdBot did not score this</span>
+                        {% endif %}
+                    </label>
+                    {% if d.anchors %}
+                    <details class="mt-0.5">
+                        <summary class="cursor-pointer text-sm text-indigo-600">What the scale means here</summary>
+                        <p class="mt-1 text-base leading-relaxed text-gray-600 max-w-[68ch]">{{ d.anchors }}</p>
+                    </details>
+                    {% endif %}
+                </div>
             </div>
             {% endfor %}
         </div>

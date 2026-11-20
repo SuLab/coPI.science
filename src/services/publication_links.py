@@ -4,8 +4,9 @@
 A DOI link is built only for a DOI-shaped value (``identifiers.normalize_doi``). It is
 percent-encoded with main EXP-4's safe set, and any ``%xx`` escape already present is kept,
 so encoding is idempotent and a stored escaped DOI is never encoded twice. A PubMed link is
-built only for an all-ASCII-digit PMID. A row with neither gets no link (F22). Pure:
-imports only the stdlib and ``identifiers``.
+built only for an all-ASCII-digit PMID. A row with neither gets no link (F22). The
+ClinicalTrials.gov study link (``TRIAL_URL``, ``NCT_RE``) lives here too. Pure: imports only
+the stdlib and ``identifiers``.
 """
 from __future__ import annotations
 
@@ -20,6 +21,10 @@ DOI_URL_SAFE = "-._~!$'()*+;=:@/"
 _ESCAPE_RE = re.compile(r"(%[0-9A-Fa-f]{2})")
 _DOI_RESOLVER = "https://doi.org/"
 _PUBMED_URL = "https://pubmed.ncbi.nlm.nih.gov/{}/"
+#: A ClinicalTrials.gov study page; ``format`` it with an ``NCT_RE`` id.
+TRIAL_URL = "https://clinicaltrials.gov/study/{}"
+#: A ClinicalTrials.gov registry id (``NCT`` and eight digits); ``fullmatch`` before linking.
+NCT_RE = re.compile(r"NCT\d{8}")
 
 
 def encode_doi(doi: str) -> str:

@@ -4,8 +4,15 @@
    the live rubric's gates (`expert_gates`) and dimensions (`review_dimensions`), the
    criteria file's deal-breakers (`expert_deal_breakers`) and the S9 recommendation
    vocabulary (`expert_recommendations`). A blank choice is not posted as a call.
-   Submitting lifts the hiding of S9's and S6's calls on this opportunity. #}
+   Submitting lifts the hiding of S9's and S6's calls on this opportunity. The "pass"
+   recommendation prints as the rubric's display word (`banding.pass_label`, contract C1);
+   its posted value stays "pass". The form carries `surface` and the page's `list_state`
+   as hidden fields, as the decision form does, so the redirect keeps the detail page's
+   back link (contract C9). #}
+{% set form_state = list_state if list_state is defined and list_state else {} %}
 <form method="post" action="/reviews/landscape/{{ opportunity_id }}/expert-judgment" class="landscape-expert-form space-y-3" data-confirm="Submit your expert judgment? Once submitted it cannot be changed, and the pipeline's own calls on this opportunity appear.">
+    <input type="hidden" name="surface" value="detail">
+    {% for key in ('view', 'tab', 'assignment', 'sort', 'lab') %}{% if form_state.get(key) %}<input type="hidden" name="{{ key }}" value="{{ form_state.get(key) }}">{% endif %}{% endfor %}
     {% if expert_gates %}
     <fieldset>
         <legend class="text-sm font-medium text-gray-700">Gates</legend>
@@ -58,7 +65,7 @@
     <label for="expert-recommendation" class="block text-sm font-medium text-gray-700">Recommendation</label>
     <select id="expert-recommendation" name="recommendation" class="text-sm border border-gray-300 rounded-md shadow-sm">
         <option value="">—</option>
-        {% for value in expert_recommendations %}<option value="{{ value }}">{{ value }}</option>{% endfor %}
+        {% for value in expert_recommendations %}<option value="{{ value }}">{{ banding.pass_label if value == 'pass' and banding and banding.pass_label else value }}</option>{% endfor %}
     </select>
     <label for="expert-comment" class="block text-sm font-medium text-gray-700">Comment</label>
     <textarea id="expert-comment" name="comment" rows="4" maxlength="10000" class="w-full text-sm border border-gray-300 rounded-md shadow-sm"></textarea>

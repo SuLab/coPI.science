@@ -2,9 +2,20 @@
    (`reason_tag_choices`, L49) and a short reason. Included with `opportunity_id`,
    `assessment_id` (the assessment the page shows; always posted, so the decision records
    what it was made on, D50), `decision` (the viewer's own decision dict or none) and
-   `form_id` (a unique id prefix). A first decision posts to
-   /reviews/landscape/<id>/decision, an edit to /reviews/landscape-decisions/<id>/edit;
-   both redirect to the opportunity's page (src/routers/reviews.py). #}
+   `form_id` (a unique id prefix), plus the return state of contract C9 in
+   docs/plans/2026-11-19-landscape-ui-remediation-plan.md:
+   - `surface`: "detail" (the default) or "landscape-list" (a list card). Only this
+     parameter picks the behaviour: a detail page's top-level `list_state` never makes its
+     form a list form.
+   - `list_state`: {view, tab, assignment, sort, lab}; each set value travels as a hidden
+     field so the redirect can rebuild the list or the detail page's back link.
+   - `next_id` and `scope` (list cards only): the following card in the same section ("" on
+     the last) and the card's place on the page, for the `#o-<scope>-<id>` anchor.
+   A first decision posts to /reviews/landscape/<id>/decision, an edit to
+   /reviews/landscape-decisions/<id>/edit (src/routers/reviews.py). On list cards the reason
+   tags fold under "Reason tags (optional)"; on the detail page they stay open. #}
+{% set form_surface = surface if surface is defined and surface else 'detail' %}
+{% set form_state = list_state if list_state is defined and list_state else {} %}
 <details class="landscape-decision mt-3 border-t border-gray-100 pt-3"{% if not decision %} open{% endif %}>
     <summary class="cursor-pointer text-sm font-medium text-indigo-700">{% if decision %}Your decision: {{ 'Pursue' if decision.decision == 'pursue' else 'Pass' }} — change it{% else %}Quick decision{% endif %}</summary>
     {% if decision %}
@@ -13,6 +24,12 @@
     <form method="post" action="/reviews/landscape/{{ opportunity_id }}/decision" class="mt-2 space-y-2">
     {% endif %}
         <input type="hidden" name="assessment_id" value="{{ assessment_id or '' }}">
+        <input type="hidden" name="surface" value="{{ form_surface }}">
+        {% for key in ('view', 'tab', 'assignment', 'sort', 'lab') %}{% if form_state.get(key) %}<input type="hidden" name="{{ key }}" value="{{ form_state.get(key) }}">{% endif %}{% endfor %}
+        {% if form_surface == 'landscape-list' %}
+        <input type="hidden" name="next_id" value="{{ next_id if next_id is defined and next_id else '' }}">
+        <input type="hidden" name="scope" value="{{ scope if scope is defined and scope else '' }}">
+        {% endif %}
         <fieldset>
             <legend class="text-sm font-medium text-gray-700">Decision</legend>
             <div class="flex items-center gap-4 text-sm text-gray-700">
@@ -21,14 +38,22 @@
             </div>
         </fieldset>
         {% if reason_tag_choices %}
+        {% set tag_fieldset %}
         <fieldset>
-            <legend class="text-sm font-medium text-gray-700">Reason tags</legend>
+            <legend class="text-sm font-medium text-gray-700">Reason tags (what drove your decision)</legend>
             <div class="flex flex-wrap gap-x-4 gap-y-1 text-sm text-gray-700">
                 {% for tag in reason_tag_choices %}
                 <span><input type="checkbox" id="{{ form_id }}tag-{{ loop.index }}" name="reason_tags" value="{{ tag }}" {% if decision and tag in (decision.reason_tags or []) %}checked{% endif %}> <label for="{{ form_id }}tag-{{ loop.index }}">{{ tag }}</label></span>
                 {% endfor %}
             </div>
         </fieldset>
+        {% endset %}
+        {% if form_surface == 'landscape-list' %}
+        <details class="landscape-reason-tags">
+            <summary class="cursor-pointer text-sm font-medium text-gray-700">Reason tags (optional)</summary>
+            <div class="mt-2">{{ tag_fieldset }}</div>
+        </details>
+        {% else %}{{ tag_fieldset }}{% endif %}
         {% endif %}
         <label for="{{ form_id }}reason" class="block text-sm font-medium text-gray-700">Reason (optional, up to 1,000 characters)</label>
         <textarea id="{{ form_id }}reason" name="reason" maxlength="1000" rows="2" class="w-full border rounded px-2 py-1 text-sm">{{ decision.reason if decision and decision.reason else '' }}</textarea>

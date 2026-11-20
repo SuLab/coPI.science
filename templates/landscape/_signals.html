@@ -1,0 +1,85 @@
+{# Macros for the opportunity page and its member ideas, imported (without context) by
+   templates/workspace/landscape_detail.html and templates/landscape/_member_idea.html.
+   Copied from templates/assessments/_detail_body.html rather than shared with it (D26).
+
+   `support_badge(support)` renders one claim's C3 SupportView
+   (src/services/landscape_sources.py: {kind, items [{label, url}]}) as a visible badge
+   with its sources listed beside it, never in a hover title: green "sourced" only for a
+   real document, record or verified quote; grey "analysis" or "estimate" otherwise. A
+   missing or malformed value counts as an estimate. Item urls come from the data (DOI,
+   PubMed or trial links only); every other item is a label.
+
+   `signal_groups(items, kind)` renders one Evidence summary section's derived rows
+   (`derive_strengths_and_risks` output) grouped by source. A consult row carrying
+   `idea_n` links to that member idea (`#idea-<n>`). #}
+{% macro support_badge(support) %}
+{% set sv = support if support is mapping else {} %}
+{% set kind = sv.kind if sv.kind in ('sourced', 'analysis', 'estimate') else 'estimate' %}
+{% set items = sv['items'] if sv['items'] is iterable and sv['items'] is not string and sv['items'] is not mapping else [] %}
+<span class="landscape-support landscape-support-{{ kind }} block text-sm text-gray-600">
+    {% if kind == 'sourced' %}<span class="px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-green-100 text-green-700">sourced</span>{% else %}<span class="px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-gray-100 text-gray-700">{{ kind }}</span>{% endif %}
+    {% if kind != 'estimate' %}{% for item in items %}{% if item.label and not (kind == 'analysis' and item.label == 'analysis') %}{% if item.url %}<a class="text-indigo-700 underline-offset-2 hover:underline" href="{{ item.url }}" rel="noopener noreferrer" target="_blank">{{ item.label }}</a>{% else %}{{ item.label }}{% endif %}{{ ' · ' if not loop.last }}{% endif %}{% endfor %}{% endif %}
+</span>
+{% endmacro %}
+
+{# One derived row. `kind` is strengths|risks|mid_scale|unestablished; both maps below
+   name every kind, because a miss yields Undefined and `glyph[1]` then raises. Only
+   consults and long red flags are collapsible: a consult's quoted text sits behind
+   "show", with a two-line preview. A red flag shows its detail alone, since its group
+   label already says "Red flags". #}
+{% macro signal_row(item, kind) %}
+{% set glyph = {'strengths': ('&#10003;', 'text-green-700', 'Strength'), 'risks': ('&#10007;', 'text-red-700', 'Risk'), 'mid_scale': ('&ndash;', 'text-slate-700', 'Mid-scale'), 'unestablished': ('?', 'text-slate-700', 'Not established')}[kind] %}
+{% set collapsible = item.body and item.source in ('consult', 'red_flag') %}
+<li class="signal-entry signal-{{ {'strengths': 'strength', 'risks': 'risk', 'mid_scale': 'midscale', 'unestablished': 'unestablished'}[kind] }} signal-source-{{ item.source }} py-1.5 border-t border-gray-100 first:border-t-0">
+    {% if collapsible %}
+    <details class="signal-collapsible group">
+        <summary class="cursor-pointer list-none [&::-webkit-details-marker]:hidden flex flex-wrap items-baseline gap-x-2 gap-y-0.5 min-w-0">
+            <span class="{{ glyph[1] }} shrink-0" role="img" title="{{ glyph[2] }}" aria-label="{{ glyph[2] }}">{{ glyph[0] | safe }}</span>
+            <span>{% if item.source != 'red_flag' %}<span class="font-semibold">{{ item.label }}</span> &mdash; {% endif %}{{ plain_citations(item.detail) }}</span>
+            {% if item.note %}<span class="signal-note whitespace-nowrap rounded-full border border-gray-300 px-2 text-sm text-gray-700">{{ item.note }}</span>{% endif %}
+            <span class="ml-auto text-sm text-gray-600 select-none"><span class="group-open:hidden">show</span><span class="hidden group-open:inline">hide</span></span>
+            {% if item.preview %}<span class="signal-preview basis-full ml-6 line-clamp-2 text-sm text-gray-600 group-open:hidden">{{ plain_citations(item.preview) }}</span>{% endif %}
+            {% if item.rationale %}<span class="signal-rationale basis-full ml-6 text-sm text-gray-600">Hub's reason: {{ plain_citations(item.rationale) }}</span>{% endif %}
+        </summary>
+        <div class="mt-1 ml-6">
+            {% if item.source == 'consult' %}
+            <div class="text-sm italic text-gray-600">{% if kind == 'strengths' %}what the {{ item.label }} specialist established{% else %}the {{ item.label }} specialist's concerns{% endif %}</div>
+            {% endif %}
+            <ul class="signal-body mt-1 space-y-1 text-base leading-relaxed text-gray-700 list-disc list-outside pl-5">
+                {% for line in item.body %}<li>{{ plain_citations(line) }}</li>{% endfor %}
+            </ul>
+            {% if item.idea_n %}<div class="text-sm text-gray-600 mt-1">The full opinion is under <a class="text-indigo-700 underline-offset-2 hover:underline" href="#idea-{{ item.idea_n }}" data-open-details="idea-{{ item.idea_n }}">Idea {{ item.idea_n }}</a>.</div>{% endif %}
+        </div>
+    </details>
+    {% else %}
+    <div class="flex items-baseline gap-x-2 min-w-0">
+        <span class="{{ glyph[1] }} shrink-0" role="img" title="{{ glyph[2] }}" aria-label="{{ glyph[2] }}">{{ glyph[0] | safe }}</span>
+        <span>{% if item.source != 'red_flag' %}<span class="font-semibold">{{ item.label }}</span> &mdash; {% endif %}{{ plain_citations(item.detail) }}{% if item.source == 'dimension' and item.body %} <span class="text-sm text-gray-600">&middot; {{ item.body | join(' ') }}</span>{% endif %}{% if item.idea_n %} <a class="text-sm text-indigo-700 underline-offset-2 hover:underline" href="#idea-{{ item.idea_n }}" data-open-details="idea-{{ item.idea_n }}">Idea {{ item.idea_n }}</a>{% endif %}</span>
+        {% if item.note %}<span class="signal-note shrink-0 whitespace-nowrap rounded-full border border-gray-300 px-2 text-sm text-gray-700">{{ item.note }}</span>{% endif %}
+    </div>
+    {% if item.rationale %}<span class="signal-rationale block ml-6 text-sm text-gray-600">Hub's reason: {{ plain_citations(item.rationale) }}</span>
+    {% elif item.source == 'gating' and item.body %}<span class="signal-rationale signal-gate-definition block ml-6 text-sm text-gray-600">Rubric definition: {{ item.body | join(' ') }}</span>{% endif %}
+    {% endif %}
+</li>
+{% endmacro %}
+
+{# A section's derived rows, one labelled group per evidence source, in
+   `derive_strengths_and_risks`' append order. A row whose `source` is not listed renders
+   under "Other" rather than vanishing. #}
+{% macro signal_groups(items, kind) %}
+{% set sources = [('dimension', 'Dimension scores'), ('gating', 'Gating criteria'), ('red_flag', 'Red flags'), ('consult', 'Panel opinions')] %}
+{% set other = items | rejectattr('source', 'in', sources | map('first') | list) | list %}
+<div class="signal-groups mt-1 space-y-2">
+    {% for source, title in sources + [('other', 'Other')] %}
+    {% set group = other if source == 'other' else items | selectattr('source', 'equalto', source) | list %}
+    {% if group %}
+    <div class="signal-group signal-group-{{ source }}">
+        <div class="signal-group-label text-sm font-medium text-gray-700">{{ title }}</div>
+        <ul class="signal-derived mt-0.5 text-base leading-relaxed text-gray-700">
+            {% for item in group %}{{ signal_row(item, kind) }}{% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+    {% endfor %}
+</div>
+{% endmacro %}

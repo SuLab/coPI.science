@@ -1,36 +1,133 @@
-{# One Landscape card (spec §13.1, L41): included with `card` (a landscape_view card dict) and
-   `scope` (a string unique to the card's place on the page, so its form ids never repeat
-   when the same card shows twice, e.g. as a carry-over and in its earlier batch).
-   The read model has already removed what this viewer may not see: a blind card arrives
-   without score, band and rank until the viewer decides (L53), an expert's own open sample
-   item without S9's calls until they submit (D63). Nothing here re-derives a hiding; it
-   only says why a value is missing. Model-written text renders autoescaped. #}
-{% set band_class = {'advance': 'bg-green-100 text-green-700', 'conditional': 'bg-amber-100 text-amber-700', 'pass': 'bg-gray-100 text-gray-700'} %}
-<div class="landscape-card bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+{# One Landscape card, copied from the Assessments card (templates/assessments/_body.html; design
+   docs/specs/2026-11-19-landscape-ui-remediation-design.md, "The card"; contract C2 of
+   docs/plans/2026-11-19-landscape-ui-remediation-plan.md). Included with `card` (a
+   landscape_view card dict), `scope` (a string unique to the card's place on the page, so
+   its anchor and form ids never repeat when the same card shows twice, e.g. as a carry-over
+   and in its earlier batch), `next_id` (the following card's opportunity id in the same
+   section, "" on the last) and `list_state` ({view, tab, assignment, sort, lab}, carried on
+   the detail links and the decision form). `banding` comes from the page.
+   The read model has already removed what this viewer may not see: an undecided blind card
+   arrives without recommendation, confidence, score, band, score rationale and flag counts
+   (the cost line, pitch and key points stay), an expert's own open sample item without
+   S9's calls until they submit (D63), and `decided_by` is None until the viewer has decided
+   (independent votes). Nothing here re-derives a hiding; it only says why a value is
+   missing. `rank` is never rendered (OD3). Model-written text renders autoescaped. #}
+{% set ls = list_state if list_state is defined and list_state else {} %}
+{% set ls_query = ls.items() | selectattr('1') | list %}
+{% set detail_href = page_url(request, 'workspace_landscape_detail', query=ls_query, opportunity_id=card.opportunity_id) %}
+<div id="o-{{ scope }}-{{ card.opportunity_id }}" class="landscape-card scroll-mt-16 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
     <div class="flex items-start justify-between gap-4 flex-wrap">
         <div class="min-w-0">
-            <h3 class="landscape-card-title text-base font-semibold text-gray-900"><a href="{{ page_url(request, 'workspace_landscape_detail', opportunity_id=card.opportunity_id) }}" class="text-indigo-700 hover:underline">{{ card.headline or card.label or 'Untitled opportunity' }}</a></h3>
-            {% if card.label and card.headline %}<p class="text-sm text-gray-600 mt-0.5">{{ card.label }}</p>{% endif %}
+            <h3 class="landscape-card-title text-base font-semibold text-gray-900"><a href="{{ detail_href }}" class="text-indigo-700 hover:underline">{{ card.headline or card.label or 'Untitled opportunity' }}</a>{% if card.confidence %} <span class="text-xs font-normal text-gray-600">[{{ card.confidence.strip("[]") }}]</span>{% endif %}</h3>
+            {% if card.show_label and card.label and card.headline %}<p class="landscape-card-label text-xs text-gray-500 mt-0.5">{{ card.label }}</p>{% endif %}
+            {% if card.lines %}
+            <ul class="landscape-lines mt-1 space-y-0.5 text-sm text-gray-800">{% for line in card.lines %}<li>{{ line }}</li>{% endfor %}</ul>
+            {% endif %}
+            <p class="landscape-labs text-xs text-gray-500 mt-1">{{ 'Lab' if card.labs and card.labs | length == 1 else 'Labs' }}: <span class="font-medium text-gray-700">{{ card.labs | join(', ') if card.labs else '—' }}</span>{% if card.issued_on %} &middot; issued {{ card.issued_on }}{% endif %}</p>
         </div>
         <div class="flex flex-wrap items-center gap-2 shrink-0 text-sm">
             {% if card.changed_since_decision %}<span class="landscape-changed px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-indigo-100 text-indigo-700">changed since your decision</span>{% endif %}
             {% if card.retired %}<span class="landscape-retired px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-gray-100 text-gray-700">retired</span>{% endif %}
             {% if card.probe %}<span class="landscape-probe px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-amber-100 text-amber-700">probe</span>{% endif %}
             {% if card.blind %}<span class="landscape-blind px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-slate-100 text-slate-700">blind batch</span>{% endif %}
-            {% if card.band %}<span class="landscape-band px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap {{ band_class.get(card.band, 'bg-gray-100 text-gray-700') }}">{{ card.band }}</span>{% endif %}
-            {% if card.score is not none %}<span class="landscape-score text-gray-700">score {{ '%.2f' | format(card.score) }}</span>{% endif %}
-            {% if card.rank %}<span class="landscape-rank text-gray-700">rank {{ card.rank }}</span>{% endif %}
+            {# The chip colours are the Assessments card's map (contract C1); "pass" prints as
+               the rubric's display word. #}
+            {% if card.recommendation %}
+            {% set rec_chip = {
+                'advance': 'bg-green-100 text-green-700',
+                'conditional': 'bg-amber-100 text-amber-700',
+                'route-to-incubation': 'bg-teal-100 text-teal-700',
+                'pass': 'bg-gray-100 text-gray-600',
+            } %}
+            <span class="landscape-recommendation px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap {{ rec_chip.get(card.recommendation, 'bg-gray-100 text-gray-600') }}">{{ banding.pass_label if card.recommendation == 'pass' else card.recommendation }}</span>
+            {% endif %}
         </div>
     </div>
-    {% if card.blind_hidden %}<p class="landscape-blind-note mt-1 text-sm text-gray-600">Score and band are hidden until you record your decision, and the rank until the next batch is issued.</p>{% endif %}
+    {% if card.blind_hidden %}<p class="landscape-blind-note mt-1 text-sm text-gray-600">This card is in a blind batch: on this card, the recommendation, score, band and flag counts are hidden until you record your decision.</p>{% endif %}
     {% if card.expert_hidden %}<p class="landscape-expert-note mt-1 text-sm text-gray-600">This is one of your expert opportunities: the pipeline's own calls are hidden until you submit your judgment.</p>{% endif %}
     {% if card.no_assessment %}
     <p class="landscape-no-assessment mt-2 text-sm text-amber-800">No completed assessment under the current criteria{% if card.failure and card.failure.status %} ({{ card.failure.status }}){% endif %}.{% if card.history_assessment_id %} Its page shows the last earlier one as history.{% endif %}</p>
     {% endif %}
-    {% if card.structured_lines %}
-    <ul class="landscape-lines mt-2 space-y-0.5 text-sm text-gray-800">{% for line in card.structured_lines %}<li>{{ line }}</li>{% endfor %}</ul>
+
+    {# Two columns as on the Assessments card: the pitch left, the cost line and key points
+       right. Either side may be empty (a partial S9 row), so the grid drops to one column
+       rather than leaving an empty cell. #}
+    {% set has_points = card.cost_line or card.key_points %}
+    {% set detail_button %}<a class="landscape-open-link inline-flex items-center gap-1 rounded bg-indigo-600 px-2 py-1 text-sm font-medium text-white hover:bg-indigo-700 whitespace-nowrap" href="{{ detail_href }}">detail &rarr;</a>{% endset %}
+    {% if card.elevator_pitch or has_points %}
+    <div class="mt-3 grid grid-cols-1 {% if card.elevator_pitch and has_points %}md:grid-cols-2{% else %}md:grid-cols-1{% endif %} gap-4">
+        {% if card.elevator_pitch %}
+        <div class="landscape-card-pitch rounded-lg border border-slate-200 bg-slate-50 p-3">
+            <div class="text-xs font-semibold uppercase tracking-wide text-gray-500">In one minute</div>
+            <div class="assessment-prose max-w-none mt-1">
+            {% if card.prose_format == 'markdown' %}
+            <div class="landscape-card-pitch-body md-content" data-markdown="{{ md_citations(card.elevator_pitch) | e }}"></div>
+            {% else %}
+            <p class="landscape-card-pitch-body whitespace-pre-line">{{ plain_citations(card.elevator_pitch) }}</p>
+            {% endif %}
+            </div>
+            <div class="landscape-card-open mt-3 flex flex-wrap items-center gap-2">{{ detail_button }}</div>
+        </div>
+        {% endif %}
+        {% if has_points %}
+        <div class="landscape-card-points rounded-lg border border-gray-200 bg-white p-3">
+            <div class="text-xs font-semibold uppercase tracking-wide text-gray-500">Key points</div>
+            {% if card.cost_line %}<p class="landscape-cost-line mt-1 text-sm font-semibold text-gray-900">{{ plain_citations(card.cost_line) }}</p>{% endif %}
+            {% if card.key_points %}
+            <div class="mt-1 space-y-2">
+                {% for group in card.key_points %}
+                {% set plain = group.bullets | selectattr('kind', 'none') | list %}
+                <div>{% if group.label %}<span class="font-semibold text-gray-800">{{ group.label }}</span>{% endif %}
+                    {% if plain | length == 1 %}
+                    <p class="text-sm text-gray-700">{{ plain_citations(plain[0].text, link_doi_references=True) }}</p>
+                    {% elif plain %}
+                    <ul class="list-disc list-inside text-sm text-gray-700">{% for bullet in plain %}<li>{{ plain_citations(bullet.text, link_doi_references=True) }}</li>{% endfor %}</ul>
+                    {% endif %}
+                    {% for bullet in group.bullets if bullet.kind == 'risk' or bullet.kind == 'companies' %}<p class="key-point-extra key-point-{{ bullet.kind }} text-sm text-gray-700"><span class="font-semibold">{{ 'Risk:' if bullet.kind == 'risk' else 'Companies:' }}</span> {{ plain_citations(bullet.body, link_doi_references=True) }}</p>{% endfor %}
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </div>
+        {% endif %}
+    </div>
     {% endif %}
-    {% if card.pitch %}<p class="landscape-pitch mt-2 text-base leading-relaxed text-gray-700 max-w-[68ch]">{{ card.pitch }}</p>{% endif %}
-    <p class="landscape-labs mt-2 text-sm text-gray-600">Labs: {{ card.labs | join(', ') if card.labs else '—' }}{% if card.issued_on %} · issued {{ card.issued_on }}{% endif %}</p>
-    {% with opportunity_id=card.opportunity_id, assessment_id=card.assessment_id, decision=card.my_decision, form_id='dec-' ~ scope ~ '-' ~ card.opportunity_id ~ '-' %}{% include "landscape/_decision_form.html" %}{% endwith %}
+    {% if not card.elevator_pitch %}
+    <div class="landscape-card-open mt-3 flex flex-wrap items-center gap-2">{{ detail_button }}</div>
+    {% endif %}
+
+    {# Score and band one click down, as on the Assessments card; skipped when neither the
+       score nor the rationale is shown (blind, expert, or a partial row). #}
+    {% if card.score_rationale or card.score is not none %}
+    <details class="landscape-card-score-rationale rounded-lg border border-amber-200 bg-amber-50 p-3 mt-3">
+        <summary class="cursor-pointer text-xs font-semibold uppercase tracking-wide text-amber-800">Why this score</summary>
+        {%- if card.score is not none %}
+        <div class="mt-2"><span class="text-xl font-bold {{ band_class(card.band, 700, 600) }}">{{ '%.2f' | format(card.score) }}</span><span class="band-label ml-1.5 text-xs font-medium uppercase tracking-wide align-middle {{ band_class(card.band, 700, 600) }}">{{ band_label(card.band, banding.pass_label) or '—' }}</span></div>
+        {%- else %}
+        <div class="mt-2"><span class="text-xl font-bold text-gray-600">&mdash;</span><span class="band-label ml-1.5 text-xs font-medium uppercase tracking-wide align-middle text-gray-600">{{ band_label(card.band, banding.pass_label) or '—' }}</span></div>
+        {%- endif %}
+        <p class="mt-1 text-xs text-gray-600">The band is computed from the dimension scores, not taken from BlackbirdBot.</p>
+        {%- if card.score_rationale %}
+        <div class="assessment-prose max-w-none mt-2">
+        {% if card.prose_format == 'markdown' %}
+        <div class="landscape-card-score-rationale-body md-content" data-markdown="{{ md_citations(card.score_rationale) | e }}"></div>
+        {% else %}
+        <p class="landscape-card-score-rationale-body whitespace-pre-line">{{ plain_citations(card.score_rationale) }}</p>
+        {% endif %}
+        </div>
+        {%- endif %}
+    </details>
+    {% endif %}
+
+    <div class="landscape-card-footer mt-3 pt-3 border-t border-gray-100 flex items-center gap-x-4 gap-y-1 flex-wrap text-xs">
+        {% if card.red_flag_count is not none %}
+        {% if card.red_flag_count > 0 %}<span class="text-amber-700 font-medium whitespace-nowrap">{{ card.red_flag_count }} red flag{{ '' if card.red_flag_count == 1 else 's' }}</span>{% else %}<span class="text-gray-600">no red flags</span>{% endif %}
+        {% endif %}
+        {% if card.confirmed_flags is not none %}
+        <span class="{{ 'text-amber-700 font-medium' if card.confirmed_flags > 0 else 'text-gray-600' }} whitespace-nowrap">{{ card.confirmed_flags }} confirmed deal-breaker{{ '' if card.confirmed_flags == 1 else 's' }}</span>
+        {% endif %}
+        <span class="text-gray-500">Assigned: {{ card.assigned_names | join(', ') if card.assigned_names else '—' }}</span>
+        {% if card.decided_by is not none %}<span class="text-gray-500">Decided by: {{ card.decided_by | join(', ') if card.decided_by else '—' }}</span>{% endif %}
+    </div>
+    {% with opportunity_id=card.opportunity_id, assessment_id=card.assessment_id, decision=card.my_decision, form_id='dec-' ~ scope ~ '-' ~ card.opportunity_id ~ '-', surface='landscape-list' %}{% include "landscape/_decision_form.html" %}{% endwith %}
 </div>

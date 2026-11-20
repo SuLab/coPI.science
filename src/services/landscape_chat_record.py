@@ -72,6 +72,7 @@ from src.services.assessment_chat_record import (
     url_tokens_in,
 )
 from src.services.blackbird_rubric import Rubric
+from src.services.landscape_quotes import full_text_quotes
 
 DOC_VERDICT = "verdict"
 DOC_EVIDENCE = "evidence"
@@ -645,55 +646,6 @@ async def _documents(db: AsyncSession, idea: LandscapeIdea) -> tuple[list, dict[
     return listed, labs
 
 
-def _quotes_in(raw: object, section: str = "") -> list[tuple[str, str]]:
-    """Every ``(section, quote)`` in a full-text extraction's parsed output, in order: an
-    object with a string ``quote`` is one, with its ``section`` when it names one."""
-    found: list[tuple[str, str]] = []
-    if isinstance(raw, Mapping):
-        here = raw.get("section") if isinstance(raw.get("section"), str) else section
-        quote = raw.get("quote")
-        if isinstance(quote, str) and quote.strip():
-            found.append((here, quote.strip()))
-        for key in sorted(raw):
-            if key != "quote":
-                found.extend(_quotes_in(raw[key], here))
-    elif isinstance(raw, list):
-        for item in raw:
-            found.extend(_quotes_in(item, section))
-    return found
-
-
-async def _quotes(
-    db: AsyncSession, deep: Mapping[str, Any] | None, documents: list
-) -> tuple[tuple[str, str, str], ...]:
-    """The verified quotes of the full-text extractions S6's evidence names; none when that
-    evidence is hidden or absent."""
-    evidence = deep.get("full_text_evidence") if deep is not None else None
-    entries = evidence.get("documents") if isinstance(evidence, Mapping) else None
-    ids = []
-    for entry in entries if isinstance(entries, list) else []:
-        try:
-            ids.append(uuid.UUID(str(entry.get("extraction_id"))))
-        except (AttributeError, ValueError):
-            continue
-    if not ids:
-        return ()
-    titles = {row.id: row.title or "" for row in documents}
-    rows = (
-        await db.execute(
-            select(LandscapeExtraction.document_id, LandscapeExtraction.raw, LandscapeDocument.title)
-            .join(LandscapeDocument, LandscapeDocument.id == LandscapeExtraction.document_id)
-            .where(LandscapeExtraction.id.in_(ids), LandscapeExtraction.status == "done")
-            .order_by(LandscapeExtraction.document_id)
-        )
-    ).all()
-    return tuple(
-        (titles.get(document_id) or title or "", section, quote)
-        for document_id, raw, title in rows
-        for section, quote in _quotes_in(raw)
-    )
-
-
 async def _member(db: AsyncSession, idea: LandscapeIdea, hiding: Any) -> _Member:
     deep_row = await landscape_view.member_deep(db, idea)
     deep = landscape_view.hide_deep(_values(deep_row), hiding) if deep_row is not None else None
@@ -710,7 +662,7 @@ async def _member(db: AsyncSession, idea: LandscapeIdea, hiding: Any) -> _Member
     documents, labs = await _documents(db, idea)
     return _Member(
         idea=idea, deep=deep, consults=consults, documents=tuple(documents), labs=labs,
-        quotes=await _quotes(db, deep, documents),
+        quotes=await full_text_quotes(db, deep, {row.id: row.title or "" for row in documents}),
     )
 
 

@@ -148,6 +148,17 @@ ROUTE_ALLOWLIST: dict[tuple[str, str], str] = {
         "button makes this entry stale and test_route_allowlist_has_no_stale_"
         "entries will say so."
     ),
+    ("POST", "/reviews/landscape/{opportunity_id}/status"): (
+        "Deliberately caller-less, as the assessment status route above: the "
+        "Approve, Disapprove and Clear buttons were removed from the Landscape "
+        "detail page (docs/specs/2026-11-19-landscape-ui-remediation-design.md, "
+        "\"Approve / Disapprove\"; D89 of docs/specs/2026-10-30-blackbird-"
+        "landscaping-design.md). The handler and the landscape_review_events "
+        "table are kept, so a mark recorded earlier still shows read-only and "
+        "the capability can be restored without a migration. Do not go looking "
+        "for a caller: there is none. Re-adding a button makes this entry stale "
+        "and test_route_allowlist_has_no_stale_entries will say so."
+    ),
     ("GET", "/help/shots/{shot_id}.png"): (
         "Help screenshots are linked by <img src> from the figure macro "
         "(templates/help/_figure.html); the gate credits href/action/fetch, not img src."
@@ -1064,9 +1075,12 @@ def test_static_link_resolution_coverage_is_reported():
     # OpenAlex (`{{ lab.orcid_url }}`, `{{ lab.openalex_url }}`) and two same-page
     # `#reviewing` links on the Landscape help page.
     unresolvable = len(values) - len(resolvable)
-    assert unresolvable <= 86, (
+    # 105 since the Landscape remediation (docs/plans/2026-11-19-landscape-ui-remediation-plan.md):
+    # the detail page's bare jump-nav fragments and its source, support and history links
+    # built from data.
+    assert unresolvable <= 105, (
         f"{unresolvable} of {len(values)} href/action values do not resolve to a "
-        "checkable local path (was 86) — the matcher probably regressed, or a new "
+        "checkable local path (was 105) — the matcher probably regressed, or a new "
         "link is built from a variable"
     )
 

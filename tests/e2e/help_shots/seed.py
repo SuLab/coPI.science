@@ -555,6 +555,69 @@ _LANDSCAPE = (
 )
 
 
+async def _seed_landscape_evidence(s, epoch, idea, opportunity, *, now: datetime) -> None:
+    """The first demo opportunity's evidence, so its page shows a sourced key point, verified
+    quotes and a confirmed deal-breaker (plan 2026-11-19, Phase C): an invented paper with a
+    DOI and a quote, the S6 record that reviewed its data flags, and one panel opinion."""
+    from sqlalchemy import select
+
+    from src.models.landscape import (
+        LandscapeAssessment,
+        LandscapeConsult,
+        LandscapeDeep,
+        LandscapeDocument,
+        LandscapeExtraction,
+        LandscapeIdeaEvidence,
+        LandscapeLab,
+    )
+
+    s.add(LandscapeLab(lab_key="demo:whitcombe-lab", display_name="Ada Whitcombe"))
+    doc = LandscapeDocument(
+        id=uuid.uuid4(), kind="work", canonical_external_id="demo:fbk1-paper",
+        doi="10.5555/demo.fbk1", title="FBK1 inhibition slows lung fibrosis in two mouse models",
+        published_on=(now - timedelta(days=200)).date(), role_basis="corresponding",
+        lab_key="demo:whitcombe-lab", s1_status="eligible")
+    s.add(doc)
+    await s.flush()
+    extraction = LandscapeExtraction(
+        id=uuid.uuid4(), document_id=doc.id, epoch_id=epoch.id, basis="summary", status="done",
+        raw={"ideas": [{"key_results": [
+            {"quote": "FBK1 inhibition reduced collagen deposition in both models.",
+             "section": "results"}]}]})
+    s.add(extraction)
+    await s.flush()
+    s.add(LandscapeIdeaEvidence(idea_id=idea.id, extraction_id=extraction.id, candidate_index=0))
+    idea.version_hash = idea.version_hash or "demo-v1"
+    idea.data_flags = {
+        "target_essential": {"raised": False, "evidence": {"isEssential": False}},
+        "safety_liabilities": {"raised": True, "evidence": [{"event": "liver enzyme rise"}]},
+        "same_target_in_clinic": {"raised": False, "evidence": {"candidates": [], "trials": 0}},
+    }
+    deep = LandscapeDeep(
+        id=uuid.uuid4(), idea_id=idea.id, idea_version=idea.version_hash, epoch_id=epoch.id,
+        status="done",
+        flags_reviewed={"safety_liabilities": {
+            "status": "confirmed", "reason": "Liver enzyme rises at high doses in one model."}},
+        target_biology=[{"line": "FBK1 drives fibroblast activation in injured lung.",
+                         "support": [f"doc:{doc.id}"]}],
+        disease_profile={"prevalence": {"value": "About 100,000 people in the US.",
+                                        "support": "estimate"}},
+        summary="The paper reports the effect in two mouse models.")
+    s.add(deep)
+    await s.flush()
+    s.add(LandscapeConsult(
+        deep_id=deep.id, domain="budget",
+        opinion={"verdict_signal": "adequate", "confidence": "moderate",
+                 "concerns": ["Patient tissue access may add two months."],
+                 "established": ["The study fits one grant."], "questions_to_ask": []}))
+    assessment = (await s.scalars(select(LandscapeAssessment).where(
+        LandscapeAssessment.opportunity_id == opportunity.id))).one()
+    support = dict(assessment.claim_support or {})
+    support[next(iter(support))] = [f"doc:{doc.id}"]
+    assessment.claim_support = support
+    await s.flush()
+
+
 async def _seed_landscape(s, *, now: datetime) -> dict:
     """An active epoch with a cut, four assessed opportunities in rank order, last week's
     batch and this week's blind batch (spec 2026-10-30 §13.1, §10.6). Returns ids."""
@@ -591,6 +654,7 @@ async def _seed_landscape(s, *, now: datetime) -> dict:
     await s.flush()
 
     opportunities = []
+    first_idea = None
     for i, (headline, target, disease, modality, values) in enumerate(_LANDSCAPE):
         probe = i == len(_LANDSCAPE) - 1
         idea_fields = dict(
@@ -622,11 +686,17 @@ async def _seed_landscape(s, *, now: datetime) -> dict:
                 gating={key: "met" for key in gates},
                 gating_rationales={key: "Established in the lab's papers." for key in gates},
                 red_flags=[], rationale="A credible target with in vivo support.",
-                recommended_next_experiment="Confirm the effect in patient-derived tissue.",
+                confidence="Moderate", prose_format="markdown",
+                recommended_next_experiment=(
+                    "**$150–250K · 9–12 months — the effect in patient-derived tissue.**\n\n"
+                    "Confirm the effect in patient-derived tissue with a pre-specified readout."),
                 rubric_version=RUBRIC_VERSION, rubric_content_hash=RUBRIC_CONTENT_HASH,
                 **_scored({key: values[n % len(values)] for n, key in enumerate(dims)})),
         ])
         opportunities.append(opportunity)
+        first_idea = first_idea or idea
+
+    await _seed_landscape_evidence(s, epoch, first_idea, opportunities[0], now=now)
 
     week = LandscapeReviewBatch(issued_on=(now - timedelta(days=7)).date(), blind=False)
     blind = LandscapeReviewBatch(issued_on=now.date(), blind=True)

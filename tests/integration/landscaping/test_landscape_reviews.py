@@ -402,3 +402,138 @@ async def test_reviewer_posts_outside_issued_batches_404(client, db_session):
             follow_redirects=False,
         )
         assert r.status_code == 303, path
+
+
+# --- return state (C9 of docs/plans/2026-11-19-landscape-ui-remediation-plan.md) -------------
+
+
+def _list_form(**overrides) -> dict:
+    """A list card's decision form as A3 posts it: the list state, the next card and the
+    card's scope, with the defaults the template fills in."""
+    form = {
+        "decision": "pursue", "surface": "landscape-list", "view": "current",
+        "tab": "unreviewed", "assignment": "all", "sort": "pipeline", "lab": "",
+        "next_id": "", "scope": "list",
+    }
+    form.update(overrides)
+    return form
+
+
+async def _post(client, path, data, headers):
+    return await client.post(path, data=data, headers=headers, follow_redirects=False)
+
+
+async def test_list_decision_returns_to_card(client, db_session):
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    decided, _ = await _opportunity(db_session)
+    following, _ = await _opportunity(db_session)
+    headers = auth_headers(manager.id)
+
+    r = await _post(
+        client, f"/reviews/landscape/{decided}/decision",
+        _list_form(next_id=str(following)), headers,
+    )
+    assert r.status_code == 303
+    # A new decision takes the card off Unreviewed, so the reader lands on the next card.
+    assert r.headers["location"] == (
+        f"/workspace/landscape?view=current&tab=unreviewed#o-list-{following}"
+    )
+
+    # On the Reviewed tab the card stays where it is, so an edit returns to it.
+    (row,) = await _decisions(db_session)
+    r = await _post(
+        client, f"/reviews/landscape-decisions/{row.id}/edit",
+        _list_form(decision="pass", tab="reviewed", next_id=str(following)), headers,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == (
+        f"/workspace/landscape?view=current&tab=reviewed#o-list-{decided}"
+    )
+
+
+async def test_list_decision_scope_carry_goes_to_next(client, db_session):
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    carried, _ = await _opportunity(db_session)
+    following, _ = await _opportunity(db_session)
+    this_week, _ = await _opportunity(db_session)
+    earlier, _ = await _opportunity(db_session)
+    headers = auth_headers(reviewer.id)
+    batch_form = {"view": "", "tab": "", "next_id": str(following)}
+
+    r = await _post(
+        client, f"/reviews/landscape/{carried}/decision",
+        _list_form(scope="carry", **batch_form), headers,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == f"/workspace/landscape#o-carry-{following}"
+
+    # A card of this week's batch stays in place once decided: back to the card itself.
+    r = await _post(
+        client, f"/reviews/landscape/{this_week}/decision",
+        _list_form(scope="week", **batch_form), headers,
+    )
+    assert r.headers["location"] == f"/workspace/landscape#o-week-{this_week}"
+
+    # An earlier batch's card returns to the Earlier batches section.
+    r = await _post(
+        client, f"/reviews/landscape/{earlier}/decision",
+        _list_form(scope="b12", **batch_form), headers,
+    )
+    assert r.headers["location"] == "/workspace/landscape#earlier"
+
+
+async def test_detail_forms_keep_list_state(client, db_session):
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    opp_id, _ = await _opportunity(db_session)
+    headers = auth_headers(manager.id)
+    state = {"view": "current", "tab": "reviewed", "assignment": "mine", "sort": "score",
+             "lab": "Invented Lab"}
+    expected = (
+        f"/workspace/landscape/{opp_id}"
+        "?view=current&tab=reviewed&assignment=mine&sort=score&lab=Invented+Lab"
+    )
+
+    r = await _post(
+        client, f"/reviews/landscape/{opp_id}/review",
+        {"score": "4", "comment": "Invented.", **state}, headers,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == expected
+
+    r = await _post(
+        client, f"/reviews/landscape/{opp_id}/decision",
+        {"decision": "pursue", "surface": "detail", **state}, headers,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == expected
+
+    r = await _post(
+        client, f"/reviews/landscape/{opp_id}/assign",
+        {"assignee_user_id": str(manager.id), **state}, headers,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == expected
+
+
+async def test_invalid_state_dropped(client, db_session):
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    on_list, _ = await _opportunity(db_session)
+    on_detail, _ = await _opportunity(db_session)
+    headers = auth_headers(manager.id)
+    junk = {
+        "view": "everything", "tab": "x\r\nSet-Cookie: a=b", "assignment": "nobody",
+        "sort": "bogus", "lab": "L" * 201, "next_id": "not-a-uuid", "scope": "list#x",
+    }
+
+    r = await _post(
+        client, f"/reviews/landscape/{on_list}/decision", _list_form(**junk), headers
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == "/workspace/landscape"
+
+    r = await _post(
+        client, f"/reviews/landscape/{on_detail}/review",
+        {"score": "4", "comment": "Invented.", **junk}, headers,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == f"/workspace/landscape/{on_detail}"

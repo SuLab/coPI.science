@@ -1,5 +1,6 @@
 """The landscaping read model against Postgres (spec §13.1-§13.4, §7.10, §10.6; L40, L48,
-L50, L51, L53, D50, D56, D60, D62, D63, F2).
+L50, L51, L53, D50, D56, D60, D62, D63, F2; contracts C2-C14 of
+docs/plans/2026-11-19-landscape-ui-remediation-plan.md).
 
 Every row is written directly in one rolled-back session; every name is invented.
 """
@@ -20,13 +21,16 @@ from src.models.landscape import (
     LandscapeDocument,
     LandscapeEpoch,
     LandscapeExpertJudgment,
+    LandscapeExtraction,
     LandscapeFetch,
     LandscapeIdea,
+    LandscapeIdeaEvidence,
     LandscapeOpportunity,
     LandscapeOpportunityVersion,
     LandscapeRanking,
     LandscapeRejectAudit,
     LandscapeReview,
+    LandscapeReviewAssignment,
     LandscapeReviewBatch,
     LandscapeReviewBatchItem,
     LandscapeScreen,
@@ -35,6 +39,7 @@ from src.models.landscape import (
 )
 from src.models.user import USER_ROLE_ADMIN, USER_ROLE_MANAGER, USER_ROLE_REVIEWER
 from src.services import landscape_view as view
+from src.services.rubric_revisions import resolve_revision
 from tests.factories import make_user
 
 pytestmark = pytest.mark.integration
@@ -956,3 +961,437 @@ async def test_member_shows_passed_s6_record(db_session):
     assert "UNPASSED" not in repr(detail)
     detail = await view.detail_view(db_session, manager, rescued.opp.id)
     assert detail["members"][0]["deep"]["status"] == "rescued"
+
+
+# --- cards, lists and the detail page (plan 2026-11-19, C2-C14) ----------------------------
+
+
+ASK = "**$200–300K · 9–12 months** — an invented plan\nThe rest of the invented plan."
+COST_LINE = "$200–300K · 9–12 months — an invented plan"
+#: A key-point group the assessment pages render (``assessment_detail.KEY_POINT_GROUPS``).
+POINTS = {"proposal": ["An invented point."]}
+
+
+async def _deep_row(db, card: _Card) -> LandscapeDeep:
+    return await db.scalar(select(LandscapeDeep).where(LandscapeDeep.idea_id == card.idea.id))
+
+
+async def _evidence(db, epoch, idea, *, lab_key: str | None = None, quote: str | None = None):
+    """One document behind `idea`, of `lab_key`, whose summary extraction quotes `quote`."""
+    doc = LandscapeDocument(
+        kind="work", canonical_external_id=f"doi:10.9999/invented-lv-{uuid.uuid4().hex}",
+        title="An invented paper", summary_text="An invented summary.",
+        published_on=date(2026, 3, 1), document_type="article", s1_status="eligible",
+        lab_key=lab_key,
+    )
+    db.add(doc)
+    await db.flush()
+    results = [{"claim": "An invented claim.", "quote": quote, "section": "results"}]
+    extraction = LandscapeExtraction(
+        document_id=doc.id, epoch_id=epoch.id, basis="summary", status="done",
+        raw={"ideas": [{"key_results": results if quote else []}]},
+    )
+    db.add(extraction)
+    await db.flush()
+    db.add(LandscapeIdeaEvidence(idea_id=idea.id, extraction_id=extraction.id, candidate_index=0))
+    await db.flush()
+
+
+async def _multi(db, epoch, labs: list[str]) -> _Card:
+    """One opportunity whose member ideas each rest on one document of one of `labs`."""
+    n = next(_counter)
+    ideas = [
+        LandscapeIdea(
+            id=uuid.uuid4(), epoch_id=epoch.id, idea_key=f"biology;invented-lv-m{n}-{i}",
+            idea_type="biology", direction="inhibit",
+            targets=[{"hgnc_id": "HGNC:90005", "symbol": "INVLM"}],
+            disease={"mondo_id": "MONDO:9999995", "label": "invented colitis"},
+            version_hash="v1",
+        )
+        for i in range(len(labs))
+    ]
+    opp = LandscapeOpportunity(id=uuid.uuid4(), version_counter=1)
+    db.add_all([*ideas, opp])
+    await db.flush()
+    db.add(LandscapeOpportunityVersion(
+        opportunity_id=opp.id, version=1, epoch_id=epoch.id,
+        member_idea_keys=[i.idea_key for i in ideas], label="Invented grouping", status="done",
+    ))
+    for idea, lab in zip(ideas, labs, strict=True):
+        await _evidence(db, epoch, idea, lab_key=lab)
+    assessment = await _assess(db, epoch, opp.id, **_verdict())
+    return _Card(opp, ideas[0], assessment)
+
+
+async def _this_week(db, user) -> list[dict]:
+    return (await view.batch_view(db, user))["this_week"]["cards"]
+
+
+async def test_card_b_fields(db_session):
+    epoch = await _epoch(db_session)
+    card = await _card(
+        db_session, epoch, recommended_next_experiment=ASK, red_flags=["An invented flag."],
+        confidence="High", structured_lines=["Invented line", "Invented line"],
+        key_points={"proposal": ["An invented point.", "Risk: an invented risk."]},
+    )
+    clipped = await _card(
+        db_session, epoch, label="Inhibit INVLV in invented…",
+        structured_lines=["Inhibit INVLV in invented fibrosis with a long tail"],
+    )
+    (await _deep_row(db_session, card)).flags_reviewed = {
+        "target_essential": {"status": "confirmed", "reason": "Invented."},
+    }
+    await _batch(db_session, WEEK_1, [card, clipped])
+    manager = await make_user(db_session, user_role=USER_ROLE_MANAGER)
+    assignee = await make_user(db_session, user_role=USER_ROLE_REVIEWER, name="Invented Assignee")
+    db_session.add(LandscapeReviewAssignment(
+        opportunity_id=card.opp.id, assignee_id=assignee.id, assignee_name=assignee.name,
+        assigned_by_name=manager.name,
+    ))
+    await db_session.flush()
+
+    cards = {c["opportunity_id"]: c for c in await _this_week(db_session, manager)}
+    shown = cards[str(card.opp.id)]
+    assert shown["cost_line"] == COST_LINE
+    assert shown["elevator_pitch"] == (
+        "First invented sentence. Second invented sentence. Third one."
+    )
+    assert shown["prose_format"] == "markdown"
+    assert (shown["recommendation"], shown["confidence"]) == ("advance", "High")
+    assert (shown["red_flag_count"], shown["confirmed_flags"]) == (1, 1)
+    assert shown["score_rationale"] == "Invented score rationale."
+    assert shown["assigned_names"] == ["Invented Assignee"]
+    assert shown["lines"] == ["Invented line"] and shown["show_label"] is True
+    (group,) = shown["key_points"]
+    assert [(b["kind"], b["body"]) for b in group["bullets"]] == [
+        (None, "An invented point."), ("risk", "an invented risk."),
+    ]
+    assert all("support" not in b for b in group["bullets"])
+    assert cards[str(clipped.opp.id)]["show_label"] is False
+
+
+async def test_card_handles_partial_rows(db_session):
+    epoch = await _epoch(db_session)
+    bare = await _card(
+        db_session, epoch, recommended_next_experiment="An invented plan, not bold.",
+        key_points=None, claim_support=None, elevator_pitch=None, structured_lines=None,
+    )
+    short = await _card(
+        db_session, epoch, key_points={"proposal": ["Point one.", "Point two."]},
+        claim_support={"proposal": ["doc:invented"]},
+    )
+    await _batch(db_session, WEEK_1, [bare, short])
+    manager = await make_user(db_session, user_role=USER_ROLE_MANAGER)
+
+    shown = {c["opportunity_id"]: c for c in await _this_week(db_session, manager)}
+    card = shown[str(bare.opp.id)]
+    assert card["cost_line"] is None and card["key_points"] == []
+    assert card["elevator_pitch"] is None and card["lines"] == []
+    detail = await view.detail_view(db_session, manager, bare.opp.id)
+    assert detail["key_points"] == [] and detail["confirmed_not_red_flagged"] is False
+    detail = await view.detail_view(db_session, manager, short.opp.id)
+    bullets = detail["key_points"][0]["bullets"]
+    # A bullet past the end of its support list counts as an estimate.
+    assert bullets[1]["support"]["kind"] == "estimate"
+
+
+async def test_blind_card_hides_chip_counts_keeps_cost(db_session):
+    epoch = await _epoch(db_session)
+    card = await _card(
+        db_session, epoch, recommended_next_experiment=ASK, red_flags=["An invented flag."],
+        confidence="High", key_points=POINTS,
+    )
+    (await _deep_row(db_session, card)).flags_reviewed = {
+        "target_essential": {"status": "confirmed", "reason": "Invented."},
+    }
+    await _batch(db_session, WEEK_1, [card], blind=True)
+    reviewer = await make_user(db_session, user_role=USER_ROLE_REVIEWER)
+
+    (shown,) = await _this_week(db_session, reviewer)
+    for key in ("recommendation", "confidence", "red_flag_count", "confirmed_flags",
+                "score_rationale"):
+        assert shown[key] is None, key
+    assert shown["cost_line"] == COST_LINE
+    assert shown["elevator_pitch"].startswith("First invented sentence.")
+    assert shown["key_points"][0]["bullets"][0]["body"] == "An invented point."
+    detail = await view.detail_view(db_session, reviewer, card.opp.id)
+    assert detail["assessment"]["recommendation"] == "advance"
+
+    await _decide(db_session, reviewer, card)
+    (shown,) = await _this_week(db_session, reviewer)
+    assert (shown["recommendation"], shown["confidence"]) == ("advance", "High")
+    assert (shown["red_flag_count"], shown["confirmed_flags"]) == (1, 1)
+    detail = await view.detail_view(db_session, reviewer, card.opp.id)
+    assert detail["assessment"]["recommendation"] == "advance"
+
+
+async def test_expert_card_and_rows(db_session):
+    epoch = await _epoch(db_session)
+    card = await _card(
+        db_session, epoch, red_flags=["An invented flag."], confidence="High",
+        key_points=POINTS,
+        claim_support={"proposal": ["talent-specialist: an invented note."]},
+    )
+    card.idea.data_flags = {
+        "target_essential": {
+            "raised": True, "evidence": {"ENSG0": {"isEssential": True,
+                                                   "depMapEssentiality": None}},
+        },
+    }
+    (await _deep_row(db_session, card)).flags_reviewed = {
+        "target_essential": {"status": "confirmed", "reason": "Invented."},
+    }
+    await _evidence(db_session, epoch, card.idea, quote="An invented verbatim quote.")
+    await _batch(db_session, WEEK_1, [card])
+    expert = await make_user(db_session, user_role=USER_ROLE_MANAGER)
+    await _judgment(db_session, expert, card)
+
+    (shown,) = await _this_week(db_session, expert)
+    for key in ("recommendation", "confidence", "red_flag_count", "confirmed_flags",
+                "score_rationale"):
+        assert shown[key] is None, key
+    detail = await view.detail_view(db_session, expert, card.opp.id)
+    (member,) = detail["members"]
+    assert [(f["name"], f["raised"], f["status"], f["reason"]) for f in member["flags"]] == [
+        ("target essential", True, None, None),
+    ]
+    (bullet,) = detail["key_points"][0]["bullets"]
+    assert bullet["support"]["kind"] == "analysis"
+    assert [item["label"] for item in bullet["support"]["items"]] == ["analysis"]
+    assert "An invented verbatim quote." in [q["quote"] for q in member["quotes"]]
+    assert detail["confirmed_not_red_flagged"] is None
+
+
+async def test_decided_by_only_after_own_decision(db_session):
+    epoch = await _epoch(db_session)
+    card = await _card(db_session, epoch)
+    await _batch(db_session, WEEK_1, [card])
+    viewer = await make_user(db_session, user_role=USER_ROLE_REVIEWER, name="Invented Viewer")
+    other = await make_user(db_session, user_role=USER_ROLE_REVIEWER, name="Invented Decider")
+    await _decide(db_session, other, card)
+
+    (shown,) = await _this_week(db_session, viewer)
+    assert shown["decided_by"] is None
+    assert "Invented Decider" not in repr(shown)
+    await _decide(db_session, viewer, card)
+    (shown,) = await _this_week(db_session, viewer)
+    # Both rows share one transaction's created_at, so their order is the id tie-break.
+    assert sorted(shown["decided_by"]) == ["Invented Decider", "Invented Viewer"]
+
+
+async def test_list_sort_uses_shown_values(db_session):
+    epoch = await _epoch(db_session)
+    low = await _card(db_session, epoch, rank=1, weighted_score=2.0, recommendation="pass")
+    high = await _card(db_session, epoch, rank=2, weighted_score=4.0, recommendation="conditional")
+    hidden = await _card(db_session, epoch, rank=3, weighted_score=4.9, recommendation="advance")
+    incubate = await _card(
+        db_session, epoch, rank=4, weighted_score=1.0, recommendation="route-to-incubation",
+    )
+    await _batch(db_session, WEEK_1, [low, high, hidden, incubate])
+    expert = await make_user(db_session, user_role=USER_ROLE_MANAGER)
+    await _judgment(db_session, expert, hidden)
+
+    async def order(sort: str) -> list[str]:
+        got = await view.lists_view(
+            db_session, expert, view="current", tab="all", assignment="all", sort=sort,
+        )
+        return _ids(got["cards"])
+
+    def ids(*cards: _Card) -> list[str]:
+        return [str(c.opp.id) for c in cards]
+
+    assert await order("pipeline") == ids(low, high, hidden, incubate)
+    assert await order("unknown") == ids(low, high, hidden, incubate)
+    # The expert's open item shows no score or recommendation, so it sorts with the Nones.
+    assert await order("score") == ids(high, low, incubate, hidden)
+    assert await order("recommendation") == ids(incubate, high, low, hidden)
+
+
+async def test_tiles_count_shown_values(db_session):
+    epoch = await _epoch(db_session)
+    cards = [
+        await _card(db_session, epoch, recommendation=rec)
+        for rec in ("advance", "conditional", "pass", "route-to-incubation", "advance")
+    ]
+    await _batch(db_session, WEEK_1, cards)
+    manager = await make_user(db_session, user_role=USER_ROLE_MANAGER)
+    await _judgment(db_session, manager, cards[-1])
+
+    for tab in ("reviewed", "all"):
+        lists = await view.lists_view(
+            db_session, manager, view="current", tab=tab, assignment="all",
+        )
+        assert lists["tiles"] == {
+            "total": 5, "advance": 1, "conditional": 1, "route_to_incubation": 1, "pass": 1,
+        }
+
+    blind = [await _card(db_session, epoch, recommendation=rec) for rec in ("advance", "pass")]
+    await _batch(db_session, WEEK_1 + timedelta(weeks=1), blind, blind=True)
+    reviewer = await make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    await _decide(db_session, reviewer, blind[1])
+    page = await view.batch_view(db_session, reviewer)
+    assert page["tiles"] == {
+        "total": 2, "advance": 0, "conditional": 0, "route_to_incubation": 0, "pass": 1,
+    }
+
+
+async def test_lab_filter_matches_any_lab(db_session):
+    epoch = await _epoch(db_session)
+    both = await _multi(db_session, epoch, ["invented-lab-a", "invented-lab-b"])
+    only_b = await _multi(db_session, epoch, ["invented-lab-b"])
+    await _batch(db_session, WEEK_1, [both, only_b])
+    manager = await make_user(db_session, user_role=USER_ROLE_MANAGER)
+
+    async def listed(lab: str | None) -> dict:
+        return await view.lists_view(
+            db_session, manager, view="current", tab="all", assignment="all", lab=lab,
+        )
+
+    got = await listed("invented-lab-a")
+    assert _ids(got["cards"]) == [str(both.opp.id)]
+    assert got["lab_options"] == ["invented-lab-a", "invented-lab-b"]
+    assert got["tiles"]["total"] == 2 and got["counts"]["all"] == 1
+    assert sorted(_ids((await listed("invented-lab-b"))["cards"])) == sorted(
+        [str(both.opp.id), str(only_b.opp.id)]
+    )
+    assert len((await listed(None))["cards"]) == 2
+    detail = await view.detail_view(db_session, manager, both.opp.id)
+    assert [m["n"] for m in detail["members"]] == [1, 2]
+
+
+async def test_flags_rows_raised_reviewed_not_raised(db_session):
+    epoch = await _epoch(db_session)
+    card = await _card(db_session, epoch)
+    card.idea.data_flags = {
+        "target_essential": {
+            "raised": True, "evidence": {"ENSG0": {"isEssential": True,
+                                                   "depMapEssentiality": None}},
+        },
+        "safety_liabilities": {"raised": False, "evidence": {"ENSG0": []}},
+        "same_target_in_clinic": {
+            "raised": False, "evidence": {"ENSG0": {"candidates": [], "trials": 0}},
+        },
+    }
+    (await _deep_row(db_session, card)).flags_reviewed = {
+        "target_essential": {"status": "cleared", "reason": "Invented clearance."},
+        "invented_triage_flag": {"status": "confirmed", "reason": "Invented triage reason."},
+    }
+    await db_session.flush()
+    await _batch(db_session, WEEK_1, [card])
+    manager = await make_user(db_session, user_role=USER_ROLE_MANAGER)
+    admin = await make_user(db_session, user_role=USER_ROLE_ADMIN)
+
+    detail = await view.detail_view(db_session, manager, card.opp.id)
+    (member,) = detail["members"]
+    assert {f["name"]: (f["raised"], f["status"], f["reason"]) for f in member["flags"]} == {
+        "target essential": (True, "cleared", "Invented clearance."),
+        "invented triage flag": (False, "confirmed", "Invented triage reason."),
+    }
+    assert member["not_raised"] == ["safety liabilities", "same target in clinic"]
+    assert member["flags"][0]["evidence_text"] == (
+        "Open Targets: essential = true; DepMap: not reported"
+    )
+    for key in ("flag_evidence_raw", "database_evidence_raw", "evidence_summary", "data_flags"):
+        assert key not in member, key
+    # A confirmed flag with no red flag recorded by S9.
+    assert detail["confirmed_not_red_flagged"] is True
+    staff = (await view.detail_view(db_session, admin, card.opp.id))["members"][0]
+    assert staff["flag_evidence_raw"] == card.idea.data_flags
+
+
+async def test_history_view_accepts_only_listed_rows(db_session):
+    retired = await _epoch(db_session, "retired")
+    active = await _epoch(db_session)
+    card = await _card(db_session, active)
+    old = await _assess(db_session, retired, card.opp.id, **_verdict(headline="An earlier one"))
+    candidate = await _epoch(db_session, "candidate")
+    unlisted = await _assess(
+        db_session, candidate, card.opp.id, **_verdict(headline="A candidate headline"),
+    )
+    await _batch(db_session, WEEK_1, [card])
+    manager = await make_user(db_session, user_role=USER_ROLE_MANAGER)
+
+    detail = await view.detail_view(
+        db_session, manager, card.opp.id, history_assessment_id=old.id,
+    )
+    assert detail["history_view"] is True and detail["members"] == []
+    assert detail["assessment"]["headline"] == "An earlier one"
+    assert detail["assessment"]["rank"] is None
+    assert (await view.detail_view(db_session, manager, card.opp.id))["history_view"] is False
+    for bad in (unlisted.id, card.assessment.id, uuid.uuid4()):
+        with pytest.raises(LookupError):
+            await view.detail_view(db_session, manager, card.opp.id, history_assessment_id=bad)
+
+
+async def test_prose_format_null_is_markdown(db_session):
+    epoch = await _epoch(db_session)
+    unstamped = await _card(db_session, epoch)
+    plain = await _card(db_session, epoch, prose_format="plain")
+    await _batch(db_session, WEEK_1, [unstamped, plain])
+    manager = await make_user(db_session, user_role=USER_ROLE_MANAGER)
+
+    cards = {c["opportunity_id"]: c for c in await _this_week(db_session, manager)}
+    assert cards[str(unstamped.opp.id)]["prose_format"] == "markdown"
+    assert cards[str(plain.opp.id)]["prose_format"] == "plain"
+    detail = await view.detail_view(db_session, manager, unstamped.opp.id)
+    assert detail["assessment"]["prose_format"] == "markdown"
+    assert detail["prose_format"] == "markdown"
+
+
+async def test_verdict_revision_and_overridden(db_session):
+    epoch = await _epoch(db_session)
+    card = await _card(db_session, epoch, scores={"scientific_credibility": 4})
+    await _batch(db_session, WEEK_1, [card])
+    manager = await make_user(db_session, user_role=USER_ROLE_MANAGER)
+
+    detail = await view.detail_view(db_session, manager, card.opp.id)
+    revision, _ = resolve_revision(None, None)
+    assert detail["verdict_revision"] == {
+        "advance_min": revision.advance_min, "conditional_min": revision.conditional_min,
+        "pass_label": revision.pass_label,
+    }
+    assert detail["epoch"]["overridden"] is False
+    bot = {d["key"]: d["bot_score"] for d in detail["review_rubric"]["dimensions"]}
+    assert bot["scientific_credibility"] == 4.0
+
+    epoch.hold_reason = "An invented hold."
+    epoch.override_at = datetime.now(UTC)
+    await db_session.flush()
+    detail = await view.detail_view(db_session, manager, card.opp.id)
+    assert detail["epoch"]["overridden"] is True
+    (row,) = (await view.pipeline_view(db_session, manager))["epochs"]
+    assert row["was_held"] is True
+
+
+async def test_lab_options_keep_the_active_lab(db_session):
+    """A lab that no listed card has stays among the options while it is the filter, so
+    Apply never clears it silently (review L4)."""
+    epoch = await _epoch(db_session)
+    manager = await make_user(db_session, user_role=USER_ROLE_MANAGER)
+    lists = await view.lists_view(
+        db_session, manager, view="all", tab="all", assignment="all", lab="An Invented Lab",
+    )
+    assert "An Invented Lab" in lists["lab_options"]
+    assert epoch is not None
+
+
+async def test_merged_document_references_resolve_to_the_target(db_session):
+    """Prose written before a merge cites the merged document's id; it resolves to the
+    document it was merged into (review L5)."""
+    def _doc(title):
+        return LandscapeDocument(
+            kind="work", canonical_external_id=f"doi:10.9999/invented-merge-{uuid.uuid4().hex}",
+            title=title, summary_text="An invented summary.", published_on=date(2026, 3, 1),
+            document_type="article", s1_status="eligible",
+        )
+    target, old = _doc("An invented merge target"), _doc("An invented merged copy")
+    db_session.add_all([target, old])
+    await db_session.flush()
+    old.merged_into = target.id
+    await db_session.flush()
+    docs = {str(target.id): {"id": str(target.id), "title": target.title, "doi": None,
+                             "pmid": None, "kind": "work"}}
+    aliases = await view._merged_aliases(db_session, [target.id])
+    assert aliases == {str(old.id): str(target.id)}
+    view._add_aliases(docs, aliases)
+    assert docs[str(old.id)]["title"] == "An invented merge target"

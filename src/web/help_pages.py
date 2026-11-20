@@ -145,7 +145,7 @@ _REVIEWER_STEPS = (
                  "help/tutorials/reviewer/08-pi-pages-and-help.html", "workspace_pis",
                  ("pis-list-reviewer", "pi-detail-reviewer")),
     TutorialStep("The Landscape batch", "help/tutorials/reviewer/09-landscape.html",
-                 "workspace_landscape", ()),
+                 "workspace_landscape", ("landscape-card",)),
 )
 
 _MANAGER_STEPS = (
@@ -171,7 +171,7 @@ _MANAGER_STEPS = (
                  "help/tutorials/manager/10-discussions-activity-suggestions.html",
                  "workspace_discussions", ("discussions", "activity", "prompt-suggestions")),
     TutorialStep("Landscape and its pipeline", "help/tutorials/manager/11-landscape.html",
-                 "workspace_landscape_pipeline", ()),
+                 "workspace_landscape_pipeline", ("landscape-pipeline",)),
 )
 
 #: Manager first: staff see both, and the manager tutorial is theirs (spec §4.4).

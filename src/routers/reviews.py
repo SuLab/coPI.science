@@ -16,6 +16,7 @@ need headroom under.
 """
 
 import logging
+import re
 import uuid
 from datetime import UTC, datetime
 from urllib.parse import urlencode
@@ -37,6 +38,7 @@ from src.dependencies import (
 from src.models import AssessmentReview, OpportunityAssessment, PromptChangeSuggestion, User
 from src.models.hub_project import HubProject, HubProjectReview
 from src.models.landscape import LandscapeDecision, LandscapeOpportunity, LandscapeReview
+from src.routers.workspace.landscape import list_state as landscape_list_state
 from src.services import landscape_reviews, landscape_view
 from src.services.assessment_reviews import (
     DuplicateFeedbackError,
@@ -935,7 +937,8 @@ async def project_unassign(
 # Landscaping decisions and reviews (spec §13.3, §10.6). Keyed on the stable opportunity;
 # recorded, never learned from (D21). Every route keyed by an opportunity id answers 404 when
 # the user may not see it (D50), so a reviewer cannot write outside the issued batches and their
-# own expert sample. Each returns to the landscaping detail page.
+# own expert sample. Each returns to the landscaping detail page with the list state the form
+# carried, except a decision posted from a list card, which returns to the list (C9).
 
 #: The quick decision's multi-valued tag field.
 _REASON_TAGS_FIELD = "reason_tags"
@@ -945,8 +948,67 @@ _GATE_FIELD_PREFIX = "gate_"
 _DEAL_BREAKER_FIELD_PREFIX = "deal_breaker_"
 
 
-def _landscape_redirect(opportunity_id: uuid.UUID) -> RedirectResponse:
-    return RedirectResponse(f"/workspace/landscape/{opportunity_id}", status_code=303)
+#: The ``surface`` a list card's decision form posts; anything else is the detail page.
+_LANDSCAPE_LIST_SURFACE = "landscape-list"
+#: A list card's ``scope``, the section its anchor id names: this week, carry-overs, changed
+#: since your decision, the staff list, the expert sample, or earlier batch ``b<n>``.
+_LANDSCAPE_SCOPE = re.compile(r"week|carry|changed|list|expert|b\d{1,9}")
+#: Scopes whose card leaves its section once decided, so the return is always the next card.
+_LANDSCAPE_NEXT_SCOPES = frozenset({"carry", "changed"})
+
+
+def _landscape_form_state(form: FormData) -> dict[str, str]:
+    """The list state the form carried, validated by the list page's own ``list_state``:
+    a junk or default value is dropped, never echoed into the ``Location`` header."""
+    return landscape_list_state(
+        *(_form_str(form, field) for field in ("view", "tab", "assignment", "sort", "lab"))
+    )
+
+
+def _landscape_redirect(
+    opportunity_id: uuid.UUID, list_state: dict[str, str]
+) -> RedirectResponse:
+    """Back to the detail page, re-emitting the validated list state (C9) so its back link
+    returns to the list the reader came from. With no state the URL is the bare page."""
+    query = f"?{urlencode(list_state)}" if list_state else ""
+    return RedirectResponse(f"/workspace/landscape/{opportunity_id}{query}", status_code=303)
+
+
+def _from_landscape_list(form: FormData) -> bool:
+    return _form_str(form, "surface") == _LANDSCAPE_LIST_SURFACE
+
+
+def _moves_off_unreviewed(form: FormData) -> bool:
+    """Whether a new decision takes its card off the staff list's Unreviewed tab: the card is
+    in the list scope and the list shows that tab (its default)."""
+    state = _landscape_form_state(form)
+    return (
+        _form_str(form, "scope") == "list" and "view" in state
+        and state.get("tab", "unreviewed") == "unreviewed"
+    )
+
+
+def _landscape_list_redirect(
+    opportunity_id: uuid.UUID, form: FormData, *, moved: bool
+) -> RedirectResponse:
+    """Back to the list a card's decision came from (C9), at ``#o-<scope>-<id>``: the decided
+    card, or the next card (``next_id``) when the decision ``moved`` it off its tab and always
+    in the carry-over and changed scopes; ``#earlier`` for an earlier batch. An invalid scope
+    names no anchor; a missing next card leaves the anchor off."""
+    state = _landscape_form_state(form)
+    scope = _form_str(form, "scope")
+    raw_next = _form_str(form, "next_id")
+    next_id = _optional_uuid(raw_next) if raw_next else None
+    fragment = ""
+    if scope is not None and _LANDSCAPE_SCOPE.fullmatch(scope):
+        if scope.startswith("b"):
+            fragment = "#earlier"
+        elif moved or scope in _LANDSCAPE_NEXT_SCOPES:
+            fragment = f"#o-{scope}-{next_id}" if next_id is not None else ""
+        else:
+            fragment = f"#o-{scope}-{opportunity_id}"
+    query = f"?{urlencode(state)}" if state else ""
+    return RedirectResponse(f"/workspace/landscape{query}{fragment}", status_code=303)
 
 
 async def _require_viewable(db: AsyncSession, user: User, opportunity_id: uuid.UUID) -> None:
@@ -1034,7 +1096,9 @@ async def landscape_decision_submit(
         )
     except landscape_reviews.DuplicateLandscapeDecisionError:
         flash(request, "You have already decided on this opportunity; edit your decision.", "info")
-        return _landscape_redirect(opportunity_id)
+        if _from_landscape_list(form):
+            return _landscape_list_redirect(opportunity_id, form, moved=False)
+        return _landscape_redirect(opportunity_id, _landscape_form_state(form))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await db.commit()
@@ -1042,8 +1106,13 @@ async def landscape_decision_submit(
         "Landscape decision by %s (%s) on opportunity %s: %s",
         current_user.name, current_user.id, opportunity_id, decision,
     )
+    if _from_landscape_list(form):
+        moved = _moves_off_unreviewed(form)
+        flash(request, "Decision saved; moved to Reviewed." if moved else "Decision saved.",
+              "success")
+        return _landscape_list_redirect(opportunity_id, form, moved=moved)
     flash(request, "Decision saved.", "success")
-    return _landscape_redirect(opportunity_id)
+    return _landscape_redirect(opportunity_id, _landscape_form_state(form))
 
 
 @router.post("/landscape-decisions/{decision_id}/edit")
@@ -1078,7 +1147,10 @@ async def landscape_decision_edit(
         decision_id, current_user.name, current_user.id, decision,
     )
     flash(request, "Decision updated.", "success")
-    return _landscape_redirect(opportunity_id)
+    if _from_landscape_list(form):
+        # An edit never moves a card off Unreviewed: the card was already decided.
+        return _landscape_list_redirect(opportunity_id, form, moved=False)
+    return _landscape_redirect(opportunity_id, _landscape_form_state(form))
 
 
 @router.post("/landscape/{opportunity_id}/review")
@@ -1108,7 +1180,7 @@ async def landscape_review_submit(
         )
     except landscape_reviews.DuplicateLandscapeReviewError:
         flash(request, "You have already reviewed this opportunity; edit your review.", "info")
-        return _landscape_redirect(opportunity_id)
+        return _landscape_redirect(opportunity_id, _landscape_form_state(form))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await db.commit()
@@ -1117,7 +1189,7 @@ async def landscape_review_submit(
         current_user.name, current_user.id, opportunity_id, score, len(dimension_scores),
     )
     flash(request, "Review saved.", "success")
-    return _landscape_redirect(opportunity_id)
+    return _landscape_redirect(opportunity_id, _landscape_form_state(form))
 
 
 @router.post("/landscape-reviews/{review_id}/edit")
@@ -1155,7 +1227,7 @@ async def landscape_review_edit(
         review_id, current_user.name, current_user.id, score, len(dimension_scores),
     )
     flash(request, "Review updated.", "success")
-    return _landscape_redirect(opportunity_id)
+    return _landscape_redirect(opportunity_id, _landscape_form_state(form))
 
 
 @router.post("/landscape-reviews/{review_id}/delete")
@@ -1167,6 +1239,7 @@ async def landscape_review_delete(
 ):
     review = await _load_landscape_review(db, review_id)
     opportunity_id = review.opportunity_id
+    form = await request.form()
     recorder = recorded_by(current_user)
     await db.delete(review)
     await db.commit()
@@ -1175,7 +1248,7 @@ async def landscape_review_delete(
         review_id, current_user.name, current_user.id, getattr(recorder, "id", None),
     )
     flash(request, "Review deleted.", "success")
-    return _landscape_redirect(opportunity_id)
+    return _landscape_redirect(opportunity_id, _landscape_form_state(form))
 
 
 @router.post("/landscape/{opportunity_id}/status")
@@ -1205,12 +1278,13 @@ async def landscape_status(
         "Landscape status %s recorded by %s (%s) on opportunity %s",
         action, current_user.name, current_user.id, opportunity_id,
     )
-    return _landscape_redirect(opportunity_id)
+    return _landscape_redirect(opportunity_id, _landscape_form_state(form))
 
 
 @router.post("/landscape/{opportunity_id}/assign")
 async def landscape_assign(
     opportunity_id: uuid.UUID,
+    request: Request,
     assignee_user_id: str = Form(...),
     db: AsyncSession = _DB,
     current_user: User = _STAFF,
@@ -1226,12 +1300,13 @@ async def landscape_assign(
         "Landscape opportunity %s assigned to %s (%s) by %s (%s)",
         opportunity_id, assignee.name, assignee.id, current_user.name, current_user.id,
     )
-    return _landscape_redirect(opportunity_id)
+    return _landscape_redirect(opportunity_id, _landscape_form_state(await request.form()))
 
 
 @router.post("/landscape/{opportunity_id}/unassign")
 async def landscape_unassign(
     opportunity_id: uuid.UUID,
+    request: Request,
     assignee_user_id: str = Form(...),
     db: AsyncSession = _DB,
     current_user: User = _STAFF,
@@ -1247,7 +1322,7 @@ async def landscape_unassign(
         "Landscape opportunity %s unassigned from user %s by %s (%s)",
         opportunity_id, assignee_id, current_user.name, current_user.id,
     )
-    return _landscape_redirect(opportunity_id)
+    return _landscape_redirect(opportunity_id, _landscape_form_state(await request.form()))
 
 
 @router.post("/landscape/{opportunity_id}/expert-judgment")
@@ -1292,4 +1367,4 @@ async def landscape_expert_judgment(
         current_user.name, current_user.id, opportunity_id,
     )
     flash(request, "Judgment submitted.", "success")
-    return _landscape_redirect(opportunity_id)
+    return _landscape_redirect(opportunity_id, _landscape_form_state(form))

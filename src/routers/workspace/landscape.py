@@ -8,6 +8,11 @@ expert samples, independent votes) itself; nothing here re-derives them.
 
 Every page answers 503 until migration 0077 has run (spec §12.5). The check runs once per
 process: once the schema is there it stays there, so only the True answer is cached.
+
+The list's state (``view``, ``tab``, ``assignment``, ``sort``, ``lab``) travels to the detail
+page and back through the ``/reviews`` redirects (contract C9 of
+``docs/plans/2026-11-19-landscape-ui-remediation-plan.md``); ``list_state`` is the one validator
+both routers use.
 """
 
 import uuid
@@ -22,7 +27,7 @@ from src.landscaping.criteria import load_criteria
 from src.landscaping.schema_check import schema_ready
 from src.models import User
 from src.services import landscape_view
-from src.services.blackbird_rubric import load_rubric
+from src.services.blackbird_rubric import BANDING, load_rubric
 from src.services.landscape_reviews import EXPERT_RECOMMENDATIONS
 from src.services.web_permissions import is_staff
 from src.web.identity import identity_for
@@ -58,6 +63,46 @@ def _chat_enabled(request: Request) -> bool:
     )
 
 
+#: The list state's allowed values (C9, C14); ``workspace_landscape`` reads the same sets.
+LIST_VIEWS = ("current", "all")
+LIST_TABS = ("unreviewed", "reviewed", "all")
+LIST_ASSIGNMENTS = ("all", "mine")
+LIST_SORTS = ("pipeline", "score", "recommendation")
+_LAB_MAX = 200
+
+
+def list_state(
+    view: str | None,
+    tab: str | None,
+    assignment: str | None,
+    sort: str | None,
+    lab: str | None,
+) -> dict[str, str]:
+    """The list state worth carrying, as ``{view, tab, assignment, sort, lab}`` in that order
+    with only the surviving keys.
+
+    A value outside its allowlist is dropped, never echoed: the result reaches ``Location``
+    headers and links, so a junk bookmark degrades to the default list instead of an error.
+    ``lab`` is opaque (any non-blank string up to 200 characters; ``lists_view`` matches it
+    against the cards' labs). The defaults ``assignment=all`` and ``sort=pipeline`` are
+    dropped; ``tab`` is kept even when it is ``unreviewed``, so a return URL names the tab
+    the reader was on.
+    """
+    state: dict[str, str] = {}
+    if view in LIST_VIEWS:
+        state["view"] = view
+    if tab in LIST_TABS:
+        state["tab"] = tab
+    if assignment in LIST_ASSIGNMENTS and assignment != "all":
+        state["assignment"] = assignment
+    if sort in LIST_SORTS and sort != "pipeline":
+        state["sort"] = sort
+    lab = lab.strip() if isinstance(lab, str) else ""
+    if lab and len(lab) <= _LAB_MAX:
+        state["lab"] = lab
+    return state
+
+
 def _reason_tags() -> list[str]:
     """The quick decision's tag choices, from the criteria file (L49)."""
     return list(load_criteria().reason_tags)
@@ -69,17 +114,22 @@ async def workspace_landscape(
     view: str | None = None,
     tab: str | None = None,
     assignment: str | None = None,
+    sort: str | None = None,
+    lab: str | None = None,
     db: AsyncSession = _DB,
     current_user: User = _REVIEW,
 ):
     """This week's batch, carry-overs and earlier batches for everyone; with ``view`` set to
-    ``current`` or ``all``, a staff viewer gets that list instead (L48). A reviewer's ``view``
-    is ignored. A marked expert's open sample items show on either (D63)."""
+    ``current`` or ``all``, a staff viewer gets that list instead (L48), sorted by ``sort``
+    and narrowed to ``lab`` (C14). A reviewer's ``view`` is ignored. A marked expert's open
+    sample items show on either (D63)."""
     await _require_schema(db)
+    state = list_state(view, tab, assignment, sort, lab)
     lists = None
-    if view in ("current", "all") and is_staff(current_user):
+    if view in LIST_VIEWS and is_staff(current_user):
         lists = await landscape_view.lists_view(
             db, current_user, view=view, tab=tab or "unreviewed", assignment=assignment or "all",
+            sort=state.get("sort", "pipeline"), lab=state.get("lab"),
         )
     batch = None if lists is not None else await landscape_view.batch_view(db, current_user)
     expert = await landscape_view.expert_view(db, current_user)
@@ -95,6 +145,8 @@ async def workspace_landscape(
             lists=lists,
             expert=expert,
             reason_tag_choices=_reason_tags(),
+            banding=BANDING,
+            list_state=state,
         ),
     )
 
@@ -147,21 +199,45 @@ def _form_choices() -> dict:
 async def workspace_landscape_detail(
     request: Request,
     opportunity_id: uuid.UUID,
+    assessment: str | None = None,
+    view: str | None = None,
+    tab: str | None = None,
+    assignment: str | None = None,
+    sort: str | None = None,
+    lab: str | None = None,
     db: AsyncSession = _DB,
     current_user: User = _REVIEW,
 ):
-    """The detail page (§13.2); 404 unless ``landscape_view.can_view`` admits the viewer."""
+    """The detail page (§13.2); 404 unless ``landscape_view.can_view`` admits the viewer.
+
+    ``assessment`` opens one of the page's listed History rows read-only (C8): a malformed
+    id, or one that is not a listed row (a candidate epoch's, another opportunity's), is a
+    404. The list state is validated and passed as ``list_state`` for the back link and the
+    forms (C9)."""
     await _require_schema(db)
-    view = await landscape_view.detail_view(db, current_user, opportunity_id)
-    if view is None:
+    history_id = None
+    if assessment is not None:
+        try:
+            history_id = uuid.UUID(assessment)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="Assessment not found") from exc
+    try:
+        detail = await landscape_view.detail_view(
+            db, current_user, opportunity_id, history_assessment_id=history_id
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Assessment not found") from exc
+    if detail is None:
         raise HTTPException(status_code=404, detail="Opportunity not found")
     identity = identity_for(current_user)
     chat_enabled = _chat_enabled(request)
     # The chat answers 404 without a current completed assessment in the active epoch, so a
-    # card with none, or a retired opportunity read as history, gets no drawer.
+    # card with none, a retired opportunity read as history, or an earlier assessment opened
+    # from History gets no drawer.
     chat_available = (
-        chat_enabled and not identity.is_impersonating and view.get("assessment") is not None
-        and not view.get("no_assessment") and not view.get("is_history")
+        chat_enabled and not identity.is_impersonating and detail.get("assessment") is not None
+        and not detail.get("no_assessment") and not detail.get("is_history")
+        and not detail.get("history_view")
     )
     return templates.TemplateResponse(
         request,
@@ -173,7 +249,9 @@ async def workspace_landscape_detail(
             chat_enabled=chat_enabled,
             chat_available=chat_available,
             reason_tag_choices=_reason_tags(),
+            banding=BANDING,
+            list_state=list_state(view, tab, assignment, sort, lab),
             **_form_choices(),
-            **view,
+            **detail,
         ),
     )

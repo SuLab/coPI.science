@@ -110,7 +110,9 @@ For how the parts fit together, read
     and the header of the Assessments page prints where each one starts. The band is
     computed from the score; it can differ from BlackbirdBot's own recommendation. The band
     counts under <strong>Dimension distribution</strong> use the stored name pass for the
-    lowest band, which the rest of the page shows under the rubric's label.</dd>
+    lowest band, which the rest of the page shows under the rubric's label. On a Landscape
+    card the band sits under <strong>Why this score</strong>, beside the score; an
+    opportunity's page shows it under <strong>Score and band</strong>.</dd>
 
     <dt id="term-batch">Batch (Landscape)</dt>
     <dd>The set of Landscape opportunities issued in one week, the same for everyone, each
@@ -123,9 +125,12 @@ For how the parts fit together, read
     it <strong>the hub</strong>.</dd>
 
     <dt id="term-blind-batch">Blind batch</dt>
-    <dd>A Landscape batch whose cards are shuffled, with the score, band and their rationales
-    hidden on each card until you record your quick decision on it, and the ranks hidden until
-    the next batch is issued.</dd>
+    <dd>A Landscape batch whose cards are shuffled rather than in the pipeline's order. Until
+    you record your quick decision on a card, the card hides BlackbirdBot's recommendation, the
+    score, the band and the flag counts, and the opportunity's page and chat hide the score,
+    the band, the dimension scores and their rationales. The cost line, the pitch and the key
+    points stay. A blind card's place in the ranking stays hidden until the next batch is
+    issued.</dd>
 
     {% if permissions.staff %}
     <dt id="term-candidate-papers">Candidate papers</dt>
@@ -169,6 +174,16 @@ For how the parts fit together, read
     Only ideas in the cut are analysed in depth and become opportunities.{% if permissions.staff %}
     The pipeline page shows the latest cut and when it was made.{% endif %}</dd>
 
+    <dt id="term-deal-breaker-flag">Deal-breaker flag</dt>
+    <dd>On a Landscape opportunity, a fact that could rule an idea out, such as a target the
+    body cannot do without, known safety liabilities, or the same target already in the
+    clinic. The pipeline raises a flag from database records, and its deeper analysis then
+    marks it <strong>confirmed</strong> or <strong>cleared</strong>. The card counts the
+    confirmed ones; the opportunity's page lists each flag raised or looked at under
+    <strong>Deal-breaker flags</strong>, and names the ones checked and not raised under
+    <strong>Checked and not raised:</strong>. A confirmed deal-breaker is not always one of
+    BlackbirdBot's red flags.</dd>
+
     <dt id="term-dimension">Dimension</dt>
     <dd>One of the separate qualities the rubric scores an idea on. Each has a title and a
     weight in the weighted score; both are shown under <strong>Rubric scores &amp;
@@ -210,6 +225,11 @@ For how the parts fit together, read
     <strong>Discard draft</strong>. A PI with a draft has the profile status
     <strong>Pending draft</strong>.</dd>
     {% endif %}
+
+    <dt id="term-evidence-grade">Evidence grade</dt>
+    <dd>On a Landscape opportunity's page, for each idea: how strong the idea's evidence is, on
+    a scale from the weakest kind to the strongest that the pipeline's criteria set. The page
+    prints the grade in words beside the idea's type and stage.</dd>
 
     <dt id="term-evidence-summary">Evidence summary</dt>
     <dd>A section near the top of an assessment's page that sorts what the assessment holds
@@ -315,13 +335,32 @@ For how the parts fit together, read
     <dt id="term-lab">Lab</dt>
     <dd>A PI's lab, represented in Slack by its lab agent. On the Assessments pages,
     <strong>Lab</strong> names the lab agent that was interviewed, and the
-    <strong>Lab</strong> filter shows one lab's assessments.</dd>
+    <strong>Lab</strong> filter shows one lab's assessments.{% if permissions.staff %} On the
+    Landscape lists, the <strong>Lab</strong> filter keeps every opportunity with that lab among
+    its labs.{% endif %}</dd>
 
     <dt id="term-learn">Learn</dt>
     <dd>The feedback mode that marks your review as eligible for the prompt-suggestion bot,
     and nothing more. {% if permissions.staff %}Suggestions are generated only when someone
     presses the button on the Prompt Suggestions page.{% else %}A manager decides when
     suggestions are generated.{% endif %}</dd>
+
+    <dt id="term-licence">Licence</dt>
+    <dd>On a Landscape opportunity's page, under <strong>Sources</strong>: the licence a
+    document's full text is published under, which decides whether the pipeline may read it.
+    <ul>
+        <li><strong>CC0</strong>, <strong>CC BY</strong>, <strong>CC BY-SA</strong> and
+        <strong>CC BY-ND</strong> are open licences that allow commercial use: the pipeline
+        reads the full text where it can fetch it.</li>
+        <li>Other Creative Commons licences, such as <strong>CC BY-NC</strong>,
+        <strong>CC BY-NC-SA</strong> and <strong>CC BY-NC-ND</strong>, rule out commercial use:
+        the pipeline reads only the summary.</li>
+        <li><strong>TDM</strong>: the publisher allows text and data mining but no other reuse.
+        The pipeline reads only the summary.</li>
+        <li>A value in another form, such as <strong>cc-by</strong> or
+        <strong>other-oa</strong>, is printed as the document's catalogue record gives it.</li>
+    </ul>
+    The text basis beside it says what was actually read.</dd>
 
     <dt id="term-met-not-met-unconfirmed">Met, not met, unconfirmed</dt>
     <dd>The states of a gate. <strong>Met</strong> (&#9989;): the idea passes it.
@@ -392,6 +431,13 @@ For how the parts fit together, read
     <dd>A researcher's unique identifier from ORCID. You sign in to Blackbird with yours,
     and PIs are added and found by theirs.</dd>
 
+    <dt id="term-order">Order, rank (Landscape)</dt>
+    <dd>The cards of a Landscape batch follow the pipeline's ranking of the ideas, the
+    strongest first. No rank number is shown on a card. A blind batch is shuffled instead.
+    {% if permissions.staff %}The Landscape lists keep the same order under <strong>Pipeline
+    order</strong>, and can be sorted by <strong>Score</strong> or
+    <strong>Recommendation</strong> instead.{% endif %}</dd>
+
     <dt id="term-panel-signals">Panel signals</dt>
     <dd>The signal each specialist consult gives: <strong>blocking</strong> (a defect that
     rules the idea out in that field as it stands), <strong>gap</strong> (short of the bar
@@ -438,6 +484,13 @@ For how the parts fit together, read
     <dt id="term-pi">PI</dt>
     <dd>A principal investigator whose lab takes part in Blackbird. Each PI has a page in the
     Workspace and, once a manager adds them or they request one, a lab agent.</dd>
+
+    {% if permissions.staff %}
+    <dt id="term-probe">Probe</dt>
+    <dd>An opportunity from below the cut that a blind batch carries among its cards, to check
+    that the ranking works. Which cards were probes, and the blind comparison's result, appear
+    on the pipeline page only after the next batch replaces the blind one.</dd>
+    {% endif %}
 
     {% if permissions.staff %}
     <dt id="term-profile-status">Profile status</dt>
@@ -505,7 +558,9 @@ For how the parts fit together, read
     <strong>conditional</strong>, <strong>route-to-incubation</strong>, or a pass on the
     idea. A pass is shown under the rubric's own word for it, as the Assessments page header
     prints it; the summary cards count passes as <strong>Decline</strong>. It is separate
-    from the band, which is computed from the score.</dd>
+    from the band, which is computed from the score. On a Landscape card the recommendation is
+    the coloured chip beside the headline, and the tiles above the cards count it the same way;
+    an opportunity's page shows it as <strong>BlackbirdBot's recommendation</strong>.</dd>
 
     <dt id="term-red-flag">Red flag</dt>
     <dd>A specific fact BlackbirdBot judged serious enough, on its own, to rule the idea out.
@@ -577,6 +632,13 @@ For how the parts fit together, read
     as running, though the simulation is not running it now), <strong>Stopped</strong> or
     <strong>Completed</strong>.</dd>
 
+    <dt id="term-sourced-analysis-estimate">Sourced, analysis, estimate</dt>
+    <dd>The badges on a Landscape opportunity's key points, target biology and disease-profile
+    fields, saying what supports each. <strong>sourced</strong> (green): a document, a database record or a
+    verified quote, listed under the point and linked where it has a DOI, a PubMed id or a
+    clinical-trial id. <strong>analysis</strong> (grey): a specialist's or the pipeline's own
+    note, not a source. <strong>estimate</strong> (grey): BlackbirdBot's own judgement.</dd>
+
     <dt id="term-sources">Sources</dt>
     <dd>Under an answer in the assessment chat or the project chat, the parts of the page the
     answer drew on. <strong>Show in page</strong> jumps to one of them.</dd>
@@ -619,6 +681,13 @@ For how the parts fit together, read
     target or keyword alone does not. <strong>stated by the lab</strong> means the plan names
     it but the profile does not show it. Older wording: "not found in the lab's profile". See
     <a href="{{ page_url(request, 'help_page', slug='projects', fragment='detail') }}">The details page</a>.</dd>
+
+    <dt id="term-structured-line">Structured line</dt>
+    <dd>One line naming a Landscape idea, composed by Blackbird from the idea's record rather
+    than written by the AI: for a biological idea, the direction of its effect on its target,
+    the disease and the kind of medicine (or "modality open"); for a chemical one, the agent
+    and its kind, the target and the disease. A card and an opportunity's page print each
+    idea's line once.</dd>
 
     {% if permissions.staff %}
     <dt id="term-suggested-confirmed-companies">Suggested and confirmed companies</dt>

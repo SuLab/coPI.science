@@ -137,7 +137,9 @@ JSON_FIELDS = frozenset(
     # Landscaping JSON whose keys come from data (src/services/landscape_view.py): reports,
     # metrics, an idea's facets and evidence, and the S6 row (``deep``) after its hiding.
     "metrics drift positive_control_trace payload results deep targets disease "
-    "modality_variants evidence_summary data_flags claim_support member_notes".split()
+    "modality_variants evidence_summary data_flags claim_support member_notes "
+    # An admin's raw view of a member idea's database and flag evidence (plan 2026-11-19, C6).
+    "database_evidence_raw flag_evidence_raw".split()
 )
 SECRET_KEYS = frozenset(
     "password password_hash slack_bot_token token_hash private_profile_seed private_profile_md user_submitted_texts pending_profile system_prompt messages_json".split()
@@ -154,7 +156,7 @@ STAFF_KEYS = frozenset(
 ADMIN_KEYS = frozenset(
     "raw_verdict raw_opinion raw_opinion_truncated unplaced_turns held_counts in_doubt "
     "microsoft_link research_cost_usd refinement_cost_usd calls_url raw_choice raw_final "
-    "search_transcript".split()
+    "search_transcript database_evidence_raw flag_evidence_raw".split()
 )
 REVIEWER_SCHEMAS = {
     "PiGrantIdentity": SCHEMAS["PiGrantIdentity"] - {"candidates"},
@@ -272,6 +274,14 @@ VIEW_FIELDS = frozenset(
         "regression_run set_version results enabled last_success_at completeness next_due_at "
         "last_fetch slice_key expected_count received_count item_kind item_id expected_status "
         "original_decision audit_decision rescue mine "
+        # The Landscape remediation (docs/plans/2026-11-19-landscape-ui-remediation-plan.md,
+        # C2-C14): card, list, detail, member, source and pipeline keys, and the count tiles.
+        "elevator_pitch cost_line score_rationale red_flag_count confirmed_flags decided_by "
+        "show_label overridden opportunities latest_cut_opportunities latest_cut_completed_at "
+        "was_held history_view "
+        "confirmed_not_red_flagged evidence_grade_label quotes document quote basis flags "
+        "not_raised raised evidence_text kind_label idea_n advance conditional "
+        "route_to_incubation pass database_evidence_raw flag_evidence_raw "
     ).split()
 )
 DYNAMIC_MAP_FIELDS = frozenset(

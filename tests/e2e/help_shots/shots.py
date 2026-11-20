@@ -33,6 +33,10 @@ _ASSESSMENTS_BODY = "templates/assessments/_body.html"
 _DETAIL = "templates/workspace/assessment_detail.html"
 _DETAIL_BODY = "templates/assessments/_detail_body.html"
 _PI_DETAIL = "templates/workspace/pi_detail.html"
+_LANDSCAPE = "templates/workspace/landscape.html"
+_LANDSCAPE_CARD = "templates/landscape/_card.html"
+_LANDSCAPE_DETAIL = "templates/workspace/landscape_detail.html"
+_LANDSCAPE_PIPELINE = "templates/workspace/landscape_pipeline.html"
 
 
 async def _no_prepare(page: Page) -> None:
@@ -108,6 +112,18 @@ def _prompt_suggestions(ids: dict) -> str:
 def _prompt_suggestion(ids: dict) -> str:
     return f"/workspace/prompt-suggestions/{ids['prompt_suggestion']}"
 
+
+
+def _landscape(ids: dict) -> str:
+    return "/workspace/landscape"
+
+
+def _landscape_detail(ids: dict) -> str:
+    return f"/workspace/landscape/{ids['landscape_opportunity']}"
+
+
+def _landscape_pipeline(ids: dict) -> str:
+    return "/workspace/landscape/pipeline"
 
 # --------------------------------------------------------------------------- prepares
 
@@ -276,6 +292,27 @@ SHOTS: tuple[Shot, ...] = (
          "One prompt suggestion: the suggested change, its status buttons and the feedback "
          "it was distilled from.",
          ("templates/workspace/prompt_suggestion_detail.html",)),
+    Shot("landscape-card", AUDIENCE_ALL, "reviewer", _landscape,
+         ".landscape-carry-overs .landscape-card",
+         "A Landscape card: the headline, the recommendation, In one minute, the cost line and "
+         "key points, Why this score, the footer and the quick decision.",
+         (_LANDSCAPE, _LANDSCAPE_CARD, "templates/landscape/_decision_form.html")),
+    Shot("landscape-detail-brief", AUDIENCE_ALL, "reviewer", _landscape_detail, "#brief",
+         "The brief on an opportunity's page: the headline, In one minute, Why this score and "
+         "the key points with their sourced or estimate badges.",
+         (_LANDSCAPE_DETAIL, "templates/landscape/_signals.html")),
+    Shot("landscape-detail-verdict", AUDIENCE_ALL, "reviewer", _landscape_detail, "#verdict",
+         "The Verdict on an opportunity's page: BlackbirdBot's recommendation beside the score "
+         "and band, with the band lines.",
+         (_LANDSCAPE_DETAIL,)),
+    Shot("landscape-detail-dealbreakers", AUDIENCE_ALL, "reviewer", _landscape_detail,
+         "#deal-breakers",
+         "The Deal-breaker flags on an opportunity's page: a raised flag the deep analysis "
+         "confirmed, with its evidence, and the flags checked and not raised.",
+         (_LANDSCAPE_DETAIL,)),
+    Shot("landscape-pipeline", AUDIENCE_STAFF, "manager", _landscape_pipeline, None,
+         "The Landscape pipeline page: the phase, the sets of judging criteria and the sources.",
+         (_LANDSCAPE_PIPELINE,)),
 )
 
 SHOTS_BY_ID: dict[str, Shot] = {shot.id: shot for shot in SHOTS}

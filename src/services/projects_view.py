@@ -18,7 +18,6 @@ statistics, so a project reads the same on every surface.
 
 from __future__ import annotations
 
-import re
 import uuid
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
@@ -50,7 +49,7 @@ from src.services.project_plan import (
 )
 from src.services.project_research import ledger_row_cost
 from src.services.project_reviews import project_assignments
-from src.services.publication_links import pubmed_url
+from src.services.publication_links import NCT_RE, TRIAL_URL, pubmed_url
 from src.services.runs import live_run_id, run_bar_entries, runs_ordered
 
 #: ``agent_messages.phase`` of BlackbirdBot's posting and of the lab's reply that roots the
@@ -143,8 +142,6 @@ _SOURCE_GROUPS = (
 )
 _OTHER_SOURCES = ("other", "Other sources")
 
-_NCT_RE = re.compile(r"NCT\d{8}")
-_TRIAL_URL = "https://clinicaltrials.gov/study/{}"
 #: The posting's speaker when none of its chunks was logged.
 _HUB_SPEAKER = "BlackbirdBot"
 
@@ -703,7 +700,7 @@ def _source_url(key: str) -> str | None:
         return pubmed_url(key[len("pmid:") :])
     if key.startswith("nct:"):
         nct = key[len("nct:") :]
-        return _TRIAL_URL.format(nct) if _NCT_RE.fullmatch(nct) else None
+        return TRIAL_URL.format(nct) if NCT_RE.fullmatch(nct) else None
     return None
 
 

@@ -25,7 +25,7 @@ import re
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -49,8 +49,12 @@ from src.models.landscape import (
     LandscapeAssessment,
     LandscapeConsult,
     LandscapeDeep,
+    LandscapeDocument,
     LandscapeEpoch,
+    LandscapeExtraction,
     LandscapeIdea,
+    LandscapeIdeaEvidence,
+    LandscapeLab,
     LandscapeOpportunity,
     LandscapeOpportunityVersion,
     LandscapeReviewBatch,
@@ -489,11 +493,57 @@ async def seed_unreviewed_project(db, *, run, lab_agent_id: str) -> HubProject:
     return project
 
 
+#: The seeded opportunity's first dossier document (``seed_landscape_opportunity``): its
+#: title is what a ``doc:`` reference to it reads as, and the support badges' link text.
+GATE_DOC_TITLE = "Gate fibrosis kinase study"
+#: Its DOI, so its links go to ``https://doi.org/<GATE_DOC_DOI>``.
+GATE_DOC_DOI = "10.5555/gate.0001"
+#: The verified summary-basis quote S3 extracted from that document.
+GATE_QUOTE = "GATEK knockdown reduced fibrosis in gate mice."
+
+
+async def _seed_landscape_document(
+    db, epoch: LandscapeEpoch, idea: LandscapeIdea, *, title: str, lab_name: str,
+    kind: str = "work", doi: str | None = None, raw: dict | None = None,
+) -> LandscapeDocument:
+    """A dossier document behind `idea`: its lab, a done S3 extraction carrying `raw` and the
+    ``landscape_idea_evidence`` row (candidate 0) that links them. Keys are unique per call."""
+    suffix = uuid.uuid4().hex[:12]
+    lab_key = f"name:{lab_name.lower().replace(' ', '-')}|{suffix}"
+    db.add(LandscapeLab(lab_key=lab_key, display_name=lab_name, orcid="0000-0002-1825-0097"))
+    doc = LandscapeDocument(
+        id=uuid.uuid4(), kind=kind, canonical_external_id=f"gate:{suffix}", doi=doi,
+        title=title, published_on=date(2026, 1, 15), role_basis="author", lab_key=lab_key,
+        s1_status="eligible",
+    )
+    db.add(doc)
+    await db.flush()
+    extraction = LandscapeExtraction(
+        id=uuid.uuid4(), document_id=doc.id, epoch_id=epoch.id, basis="summary",
+        status="done", raw=raw or {"ideas": [{}]},
+    )
+    db.add(extraction)
+    await db.flush()
+    db.add(LandscapeIdeaEvidence(idea_id=idea.id, extraction_id=extraction.id, candidate_index=0))
+    await db.flush()
+    return doc
+
+
 async def seed_landscape_opportunity(db) -> uuid.UUID:
     """One landscaping opportunity in a normal batch issued today, so every role that can
-    review opens its page: an active epoch, one member idea with its S6 record (disease
-    profile, target biology, a flag review and one panel opinion), a ``done`` assessment with
-    key points, gates and scores, and the idea's deal-breaker flags. Every name is invented."""
+    review opens its page. Every name is invented.
+
+    An active epoch and two member ideas, each from its own lab's document:
+
+    * idea 1 rests on ``GATE_DOC_TITLE`` (a DOI, and the summary-basis quote ``GATE_QUOTE``).
+      Its S6 record has a disease profile, target biology, a summary citing the document as
+      ``doc:<8 hex>``, a cleared flag review and one panel opinion. Its data flags: one raised
+      and confirmed by S6, one unraised but reviewed, one neither.
+    * idea 2 rests on a grant with no link, and its S6 record has one budget opinion, so the
+      Evidence summary links a row to ``#idea-2``.
+
+    The ``done`` assessment has key points (supported by the document), gates, scores, a
+    Markdown rationale and an ask that opens with a bold cost line."""
     epoch = LandscapeEpoch(id=uuid.uuid4(), status="active", criteria_version="gate-1",
                            prompt_set_version="gate-1")
     db.add(epoch)
@@ -504,33 +554,67 @@ async def seed_landscape_opportunity(db) -> uuid.UUID:
         targets=[{"hgnc_id": "HGNC:90009", "symbol": "GATEK"}],
         disease={"mondo_id": "MONDO:9999990", "label": "gate fibrosis"}, version_hash="v1",
         evidence_summary={"trials": [], "note": "Gate evidence"},
-        data_flags={"target_essential": {"evidence": "Gate essentiality screen"}},
+        data_flags={
+            "target_essential": {"raised": False, "evidence": "Gate essentiality screen"},
+            "safety_liabilities": {"raised": True,
+                                   "evidence": [{"event": "Gate hepatotoxicity"}]},
+            "same_target_in_clinic": {"raised": False,
+                                      "evidence": {"candidates": [], "trials": 0}},
+        },
+    )
+    idea2 = LandscapeIdea(
+        id=uuid.uuid4(), epoch_id=epoch.id, idea_key="biology;gate-binder;gate-nephropathy",
+        idea_type="biology", direction="activate", stage="discovery", evidence_grade="in_vitro",
+        targets=[{"hgnc_id": "HGNC:90010", "symbol": "GATEB"}],
+        disease={"mondo_id": "MONDO:9999991", "label": "gate nephropathy"}, version_hash="v1",
+        data_flags={},
     )
     opp = LandscapeOpportunity(id=uuid.uuid4(), version_counter=1)
-    db.add_all([idea, opp])
+    db.add_all([idea, idea2, opp])
     await db.flush()
+    doc = await _seed_landscape_document(
+        db, epoch, idea, title=GATE_DOC_TITLE, lab_name="Gate Lab One", doi=GATE_DOC_DOI,
+        raw={"ideas": [{"key_results": [{"quote": GATE_QUOTE, "section": "results"}]}]},
+    )
+    await _seed_landscape_document(
+        db, epoch, idea2, title="Gate nephropathy grant", lab_name="Gate Lab Two", kind="grant",
+    )
     db.add(LandscapeOpportunityVersion(
-        opportunity_id=opp.id, version=1, epoch_id=epoch.id, member_idea_keys=[idea.idea_key],
+        opportunity_id=opp.id, version=1, epoch_id=epoch.id,
+        member_idea_keys=[idea.idea_key, idea2.idea_key],
         label="Gate programme", theme="Gate theme", status="done",
     ))
     deep = LandscapeDeep(
         id=uuid.uuid4(), idea_id=idea.id, idea_version="v1", epoch_id=epoch.id, status="done",
         gating={"novelty": "met"}, gating_rationales={"novelty": "Gate S6 reason."},
-        flags_reviewed={"target_essential": {"status": "cleared", "reason": "Gate reason."}},
+        flags_reviewed={
+            "target_essential": {"status": "cleared", "reason": "Gate reason."},
+            "safety_liabilities": {"status": "confirmed", "reason": "Gate liability reason."},
+        },
         provisional_scores={"scientific_merit": 4}, provisional_weighted_score=3.9,
         dimension_rationales={"scientific_merit": "Gate S6 dimension reason."},
         disease_profile={"prevalence": {"value": "Rare", "support": "estimate"},
-                         "standard_of_care": {"value": "None", "support": ["doc:gate"]}},
-        target_biology=[{"line": "GATEK drives fibrosis.", "support": ["doc:gate"]}],
-        summary="Gate S6 summary.",
+                         "standard_of_care": {"value": "None", "support": [f"doc:{doc.id}"]}},
+        target_biology=[{"line": "GATEK drives fibrosis.", "support": [f"doc:{doc.id}"]}],
+        summary=f"Gate S6 summary, after doc:{doc.id.hex[:8]}.",
     )
-    db.add(deep)
+    deep2 = LandscapeDeep(
+        id=uuid.uuid4(), idea_id=idea2.id, idea_version="v1", epoch_id=epoch.id, status="done",
+        summary="Gate second S6 summary.",
+    )
+    db.add_all([deep, deep2])
     await db.flush()
     db.add(LandscapeConsult(
         deep_id=deep.id, domain="scientific", raw_text="Gate raw opinion",
         opinion={"verdict_signal": "adequate", "confidence": "moderate",
                  "concerns": ["Gate concern"], "established": ["Gate finding"],
                  "questions_to_ask": ["Gate question?"]},
+    ))
+    db.add(LandscapeConsult(
+        deep_id=deep2.id, domain="budget", raw_text="Gate budget raw opinion",
+        opinion={"verdict_signal": "gap", "confidence": "low",
+                 "concerns": ["Gate budget concern"], "established": [],
+                 "questions_to_ask": []},
     ))
     db.add(LandscapeAssessment(
         id=uuid.uuid4(), epoch_id=epoch.id, opportunity_id=opp.id, opportunity_version=1,
@@ -540,10 +624,13 @@ async def seed_landscape_opportunity(db) -> uuid.UUID:
         scores={"scientific_merit": 4}, score_rationale="Gate score rationale.",
         dimension_rationales={"scientific_merit": "Gate dimension reason."},
         gating={"novelty": "met"}, gating_rationales={"novelty": "Gate gate reason."},
-        rationale="Gate rationale.", red_flags=["Gate red flag"],
-        recommended_next_experiment="A gate experiment.",
+        rationale="**Gate rationale.** It rests on one screen.\n\nA second gate paragraph.",
+        red_flags=["Gate red flag"],
+        recommended_next_experiment=(
+            "**$1 · 1 month — a gate experiment.**\n\nA gate experiment plan."
+        ),
         key_points={"why_it_matters": ["A gate point."]},
-        claim_support={"why_it_matters": ["doc:gate"]},
+        claim_support={"why_it_matters": [f"doc:{doc.id}"]},
         structured_lines=["Inhibit GATEK · gate fibrosis · small molecule"],
         strengths=["Gate strength"], risks=["Gate risk"],
         raw_verdict={"headline": "A gate headline"},
