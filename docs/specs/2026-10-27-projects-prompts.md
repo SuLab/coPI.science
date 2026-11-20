@@ -1,6 +1,6 @@
 # BlackbirdBot projects — complete prompt set
 
-*Companion documents: [BlackbirdBot (hub) — complete prompt set](2026-08-07-hub-bot-prompts.md) and [PI / lab bot — complete prompt set](2026-08-07-pi-bot-prompts.md), the interview system's prompts.*
+*Companion documents: [BlackbirdBot (hub) — complete prompt set](2026-08-07-hub-bot-prompts.md) and [PI / lab bot — complete prompt set](2026-08-07-pi-bot-prompts.md), the interview system's prompts, and [Landscaping — complete prompt set](2026-11-20-landscaping-prompts.md).*
 
 This document reproduces the prompts that drive **BlackbirdBot projects**. In this system BlackbirdBot, Blackbird's scout, proposes a project to a lab, built on that lab's published work, and refines it with the lab into a plan the lab could carry out. Each project goes through four steps. The sections below are the prompts for them, in order:
 

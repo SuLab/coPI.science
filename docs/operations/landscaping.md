@@ -60,6 +60,9 @@ like the `blackbird-app` rename and the agent's supervisor command. Add this blo
 - `prompts/` is mounted read-only. The worker reads the rubric, the BlackbirdBot extracts,
   the landscaping prompt set and `prompts/landscaping/criteria.toml` once, at start, and
   validates them; an edit there applies at the next restart.
+- The prompts' review document is `docs/specs/2026-11-20-landscaping-prompts.md`, with a Word
+  export beside it: every file in `prompts/landscaping/`, the code strings, and how to change
+  them. After an edit, stamp the set, run `scripts/sync_prompt_set_docs.py` and export again.
 - Before touching the container, check it is this repo's:
   `docker inspect copi-blackbird-landscape-1 --format '{{index .Config.Labels "com.docker.compose.project"}}'`
   must print `copi-blackbird`.

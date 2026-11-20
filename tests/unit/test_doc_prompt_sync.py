@@ -1,9 +1,10 @@
 """Docs-vs-prompts sync + retired-model phrase guard.
 
-The three prompt-set docs reproduce every prompt file verbatim inside
+The four prompt-set docs reproduce every prompt file verbatim inside
 *Source:*-labeled four-backtick blocks; the interview docs' §4 sections reproduce the
-thread_guidance strings, and the projects doc's ````text blocks the projects' code
-strings. This test is the reviewed, permanent form of the
+thread_guidance strings, the projects doc's ````text blocks the projects' code
+strings, and the landscaping doc's ````text blocks its code strings and rendered
+placeholders (its criteria file is a ````toml block). This test is the reviewed, permanent form of the
 branch-1 verify script (see docs/plans/2026-08-12-pr34-pitch-only-
 reconciliation-design.md §12.5).
 """
@@ -14,6 +15,13 @@ import pytest
 
 from src.agent.project_guidance import project_turn
 from src.agent.thread_guidance import phase4_guidance
+from src.landscaping.criteria import load_criteria
+from src.landscaping.panel import DOMAIN_QUESTIONS, PANEL_CHEMISTRY
+from src.landscaping.prompt_set import _criteria_vocab, _deal_breakers, _target_rubric
+from src.landscaping.stages.deep import _FINAL_ROUND_TEXT, _PUBMED_DOWN
+from src.services.blackbird_rubric import load_rubric
+from src.services.landscape_chat_record import DOC_TITLES, LEGENDS
+from src.services.llm import SYNTHESIS_DATA_NOTICE
 from src.services.project_research import FINAL_ANSWER_TEXT, RESEARCH_ANGLES, RESEARCH_DOMAINS
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -21,10 +29,12 @@ DOCS = [
     ROOT / "docs/specs/2026-08-07-pi-bot-prompts.md",
     ROOT / "docs/specs/2026-08-07-hub-bot-prompts.md",
     ROOT / "docs/specs/2026-10-27-projects-prompts.md",
+    ROOT / "docs/specs/2026-11-20-landscaping-prompts.md",
 ]
 PROJECTS_DOC = DOCS[2]
+LANDSCAPING_DOC = DOCS[3]
 _BLOCK_RE = re.compile(
-    r"\*Source: `([^`]+)`[^*]*\*.*?\n````(?:markdown|text)?\n(.*?)\n````",
+    r"\*Source: `([^`]+)`[^*]*\*.*?\n````(?:markdown|text|toml)?\n(.*?)\n````",
     re.DOTALL,
 )
 
@@ -40,8 +50,8 @@ def _doc_blocks():
     [pytest.param(d, s, b, id=f"{d}::{s}") for d, s, b in _doc_blocks()],
 )
 def test_doc_block_matches_disk(doc_name, src, block):
-    if not src.endswith(".md"):
-        pytest.skip("§4 python-sourced blocks are checked separately")
+    if not src.endswith((".md", ".toml")):
+        pytest.skip("python-sourced blocks are checked separately")
     assert (ROOT / src).read_text().rstrip("\n") == block.rstrip("\n"), (
         f"{doc_name} embeds {src} but the block has drifted from disk"
     )
@@ -94,6 +104,39 @@ def test_projects_doc_embeds_every_project_prompt():
     """Every file in prompts/projects/ is reproduced, so the doc is the whole set."""
     embedded = {src for doc, src, _ in _doc_blocks() if doc == PROJECTS_DOC.name}
     on_disk = {f"prompts/projects/{p.name}" for p in (ROOT / "prompts/projects").glob("*.md")}
+    assert on_disk and on_disk <= embedded, sorted(on_disk - embedded)
+
+
+def _landscaping_code_blocks() -> list[str]:
+    """The landscaping doc's ````text blocks in document order (mirrors
+    scripts/sync_prompt_set_docs.py's landscaping_code_blocks)."""
+    criteria = load_criteria(ROOT / "prompts/landscaping/criteria.toml")
+    return [
+        SYNTHESIS_DATA_NOTICE,
+        _criteria_vocab(criteria),
+        _deal_breakers(criteria),
+        _target_rubric(load_rubric()),
+        _FINAL_ROUND_TEXT,
+        _PUBMED_DOWN,
+        *(DOMAIN_QUESTIONS[domain] for domain in PANEL_CHEMISTRY),
+        *(LEGENDS[doc] for doc in DOC_TITLES),
+    ]
+
+
+def test_landscaping_doc_code_blocks_match_the_code():
+    blocks = re.findall(r"````text\n(.*?)\n````", LANDSCAPING_DOC.read_text(), re.DOTALL)
+    assert blocks == _landscaping_code_blocks()
+
+
+def test_landscaping_doc_embeds_every_landscaping_file():
+    """Every file in prompts/landscaping/ but the set.toml record is reproduced, the criteria
+    file included, so the doc is the whole set."""
+    embedded = {src for doc, src, _ in _doc_blocks() if doc == LANDSCAPING_DOC.name}
+    on_disk = {
+        f"prompts/landscaping/{p.name}"
+        for p in (ROOT / "prompts/landscaping").iterdir()
+        if p.is_file() and p.name != "set.toml"
+    }
     assert on_disk and on_disk <= embedded, sorted(on_disk - embedded)
 
 

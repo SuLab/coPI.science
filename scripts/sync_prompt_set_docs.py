@@ -1,4 +1,4 @@
-"""Rewrite the three prompt-set specs from the prompt files and code strings they embed.
+"""Rewrite the four prompt-set specs from the prompt files and code strings they embed.
 
 `docs/specs/2026-08-07-{pi,hub}-bot-prompts.md` reproduce every prompt file
 verbatim inside *Source:*-labelled four-backtick blocks, and their section 4
@@ -11,8 +11,13 @@ regexes, so the two cannot disagree about what a block is.
 `docs/specs/2026-10-27-projects-prompts.md` does the same for BlackbirdBot projects
 (`prompts/projects/`); its ````text blocks are code strings (`project_code_blocks`).
 
-Run after any edit to `prompts/**`, to `_PI_LAB`/`_SCOUT_HUB`, or to the projects'
-`RESEARCH_ANGLES`, `FINAL_ANSWER_TEXT` or `src/agent/project_guidance.py`:
+`docs/specs/2026-11-20-landscaping-prompts.md` does the same for landscaping
+(`prompts/landscaping/`, `criteria.toml` included as a ````toml block); its ````text blocks
+are code strings and rendered placeholders (`landscaping_code_blocks`).
+
+Run after any edit to `prompts/**`, to `_PI_LAB`/`_SCOUT_HUB`, to the projects'
+`RESEARCH_ANGLES`, `FINAL_ANSWER_TEXT` or `src/agent/project_guidance.py`, or to a
+landscaping string `landscaping_code_blocks` reads:
 
     .venv-test/bin/python scripts/sync_prompt_set_docs.py [--check]
 
@@ -20,42 +25,59 @@ Run after any edit to `prompts/**`, to `_PI_LAB`/`_SCOUT_HUB`, or to the project
 """
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+# The rubric and criteria loaders read repo-relative paths, the rubric at import.
+os.chdir(ROOT)
 
 from src.agent.project_guidance import project_turn  # noqa: E402
 from src.agent.thread_guidance import phase4_guidance  # noqa: E402
+from src.landscaping.criteria import load_criteria  # noqa: E402
+from src.landscaping.panel import DOMAIN_QUESTIONS, PANEL_CHEMISTRY  # noqa: E402
+from src.landscaping.prompt_set import (  # noqa: E402
+    _criteria_vocab,
+    _deal_breakers,
+    _target_rubric,
+)
+from src.landscaping.stages.deep import _FINAL_ROUND_TEXT, _PUBMED_DOWN  # noqa: E402
+from src.services.blackbird_rubric import load_rubric  # noqa: E402
+from src.services.landscape_chat_record import DOC_TITLES, LEGENDS  # noqa: E402
+from src.services.llm import SYNTHESIS_DATA_NOTICE  # noqa: E402
 from src.services.project_research import (  # noqa: E402
     FINAL_ANSWER_TEXT,
     RESEARCH_ANGLES,
     RESEARCH_DOMAINS,
 )
 
-ROOT = Path(__file__).resolve().parents[1]
 DOCS = {
     "pi_lab": ROOT / "docs/specs/2026-08-07-pi-bot-prompts.md",
     "scout_hub": ROOT / "docs/specs/2026-08-07-hub-bot-prompts.md",
     "projects": ROOT / "docs/specs/2026-10-27-projects-prompts.md",
+    "landscaping": ROOT / "docs/specs/2026-11-20-landscaping-prompts.md",
 }
+# Embedded files of these kinds are rewritten from disk; other *Source:* labels name code.
+_FILE_SUFFIXES = (".md", ".toml")
 # Mirrors _BLOCK_RE in tests/unit/test_doc_prompt_sync.py, but captures the
 # block body as its own group so it can be replaced in place.
 _BLOCK_RE = re.compile(
-    r"(\*Source: `([^`]+)`[^*]*\*.*?\n````(?:markdown|text)?\n)(.*?)(\n````)",
+    r"(\*Source: `([^`]+)`[^*]*\*.*?\n````(?:markdown|text|toml)?\n)(.*?)(\n````)",
     re.DOTALL,
 )
 _PHASE_COUNTS = {"EXPLORE": 2, "DECIDE": 5, "MUST CONCLUDE": 12}
 
 
 def _sync_embedded_files(text: str) -> tuple[str, list[str]]:
-    """Replace every `.md`-sourced block with that file's current contents."""
+    """Replace every `.md`- or `.toml`-sourced block with that file's current contents."""
     changed: list[str] = []
 
     def repl(m: "re.Match[str]") -> str:
         head, src, body, tail = m.group(1), m.group(2), m.group(3), m.group(4)
-        if not src.endswith(".md"):
+        if not src.endswith(_FILE_SUFFIXES):
             return m.group(0)
         disk = (ROOT / src).read_text(encoding="utf-8").rstrip("\n")
         if disk != body.rstrip("\n"):
@@ -125,10 +147,31 @@ def project_code_blocks() -> list[str]:
     return blocks
 
 
-def _sync_code_blocks(text: str, doc_name: str) -> tuple[str, bool]:
-    """Replace the projects document's ````text blocks, in order, with
-    ``project_code_blocks()``. Judged exactly, as section 4 is."""
-    wanted = project_code_blocks()
+def landscaping_code_blocks() -> list[str]:
+    """The landscaping document's ````text blocks, in document order: what ``{data_notice}``,
+    ``{criteria_vocab}``, ``{deal_breakers}`` and ``{target_rubric}`` become; S6's
+    final-round line and its PubMed-down tool result; the panel's eight questions
+    (``PANEL_CHEMISTRY`` order); the chat record's six legends (``DOC_TITLES`` order).
+    ``tests/unit/test_doc_prompt_sync.py`` mirrors this list."""
+    criteria = load_criteria(ROOT / "prompts/landscaping/criteria.toml")
+    return [
+        SYNTHESIS_DATA_NOTICE,
+        _criteria_vocab(criteria),
+        _deal_breakers(criteria),
+        _target_rubric(load_rubric()),
+        _FINAL_ROUND_TEXT,
+        _PUBMED_DOWN,
+        *(DOMAIN_QUESTIONS[domain] for domain in PANEL_CHEMISTRY),
+        *(LEGENDS[doc] for doc in DOC_TITLES),
+    ]
+
+
+_CODE_BLOCKS = {"projects": project_code_blocks, "landscaping": landscaping_code_blocks}
+
+
+def _sync_code_blocks(text: str, doc_name: str, wanted: list[str]) -> tuple[str, bool]:
+    """Replace the document's ````text blocks, in order, with ``wanted``. Judged exactly,
+    as section 4 is."""
     blocks = re.findall(r"````text\n(.*?)\n````", text, re.DOTALL)
     if len(blocks) != len(wanted):
         raise SystemExit(
@@ -156,8 +199,8 @@ def main() -> int:
         text, changed = _sync_embedded_files(original)
         text, sec4 = _sync_section_4(text, role)
         code = False
-        if role == "projects":
-            text, code = _sync_code_blocks(text, doc.name)
+        if role in _CODE_BLOCKS:
+            text, code = _sync_code_blocks(text, doc.name, _CODE_BLOCKS[role]())
         if changed or sec4 or code:
             drift = True
             for src in changed:
