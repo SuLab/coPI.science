@@ -2,7 +2,8 @@
 
 *Branch `scripps-landscaping`, from `blackbird` at 9ab7a021, pushed to `origin`. Written
 2026-11-20. Every external figure below was read from the live source that day (§12); every code
-reference is to 9ab7a021. One question is still open (§13).*
+reference is to 9ab7a021. Costs are in the companion
+[cost estimate](2026-11-20-scripps-landscaping-cost-estimate.md).*
 
 ## 1. Intent
 
@@ -26,7 +27,11 @@ Made by the owner:
 - **Calibr is excluded for now.** It is the California Institute for Biomedical Research
   (Calibr-Skaggs, OpenAlex `I4210140527`).
 - **Time window: the past year** (`LANDSCAPE_WINDOW_DAYS=365`). Hopkins uses three.
-- **Cost:** a per-stage estimate from the Hopkins run is wanted before the run (§6.7).
+- **Cost:** a per-stage estimate from the Hopkins run was wanted before the run. It is in
+  [`2026-11-20-scripps-landscaping-cost-estimate.md`](2026-11-20-scripps-landscaping-cost-estimate.md),
+  for both a 1-year and a 6-month window.
+- **Opportunities: start with a 20% cut** (`LANDSCAPE_CUT_FRACTION=0.20`). That gives K ≈ 24 and
+  about 20 opportunities for the 1-year window.
 - **Where it runs:** the pipeline runs on the owner's workstation. When it has finished, the
   database is copied to a small cloud server that serves the website to both reviewers. The
   owner sets up that server manually, later (§7 is the checklist).
@@ -301,7 +306,7 @@ file: it pins production's container names and joins the shared edge network.
 | `LANDSCAPE_NCBI_MAX_RPS` | `1` (C6) |
 | `LANDSCAPE_BATCH_MODE` | `api` if the new key's account accepts Message Batches, else `sync` (§10) |
 | `LANDSCAPE_WINDOW_DAYS` | `365` (owner) |
-| `LANDSCAPE_CUT_FRACTION` | open (§13); default `0.01` gives K = 2 for Scripps (§6.7) |
+| `LANDSCAPE_CUT_FRACTION` | `0.20` (owner). The default `0.01` would give K = 2 for Scripps |
 | stage model settings | defaults until the bake-off; then its picks |
 | `LANDSCAPE_CHAT_ENABLED` | `false` locally |
 | ORCID settings | only if local login is used (§6.6) |
@@ -340,75 +345,22 @@ pipeline page needs a login.
 
 ### 6.7 Cost and time
 
-**Method.** Inputs, all read on 2026-11-20:
-- *Unit costs:* production's Hopkins ledger (`landscape_llm_calls`, read-only), at the stage
-  models production runs now: S2 Haiku 5.5, S3 Opus 5, S4 Sonnet 5.5, S6–S9 Opus 5. Production
-  made every call synchronously, so these are full prices.
-- *Funnel rates:* Hopkins's active epoch.
-- *Scripps volumes:* the live sources for 2025-11-20 to 2026-11-20 (§12).
+The per-stage estimate, its inputs and its formulas are in the companion
+[cost estimate](2026-11-20-scripps-landscaping-cost-estimate.md). It is built from production's
+Hopkins ledger and funnel, and from Scripps volumes read from the live sources on 2026-11-20.
+At the 20% cut:
 
-**Hopkins funnel (three years):**
-1. 31,115 eligible documents; 31,992 screened.
-2. 6,801 kept. By kind: papers 18.2%, preprints 18.8%, grants 46.4%, patents 52.7%.
-3. About 7,020 extractions, giving 5,496 ideas; 5,903 triaged.
-4. Cut pool n = 4,851, so K = ceil(1% × n) = 49 (`cut.py:288-290`).
-5. 57 deep analyses, 786 comparisons and 50 assessments, making 40 opportunities.
+| Window | Eligible documents | K | Opportunities | Estimate | With batches |
+|---|---|---|---|---|---|
+| 1 year (the run's setting) | ~557 | 24 | ~20 | ~$199 ($139–$258) | ~$175 |
+| 6 months | ~374 | 18 | ~15 | ~$164 ($114–$213) | ~$146 |
 
-**Scripps volume, one year (estimate):**
+About $54 of either total is fixed: the bake-off's triage round, the regression check and the
+repeatability run. Each idea in the cut adds about $4.13 for S6 through S9. Grants enter by fiscal
+year, so a 6-month window keeps all 172 of them.
 
-| Kind | Basis | Eligible | Kept |
-|---|---|---|---|
-| Papers and preprints | OpenAlex 808, less 60 with a Jupiter address, × Hopkins's eligible share 0.46 | ~343 | ~63 |
-| Grants | NIH core projects, fiscal 2026: 171; NSF about 1 | ~172 | ~80 |
-| Patents | USPTO publications naming Scripps Research as applicant: 46 | ~42 | ~22 |
-| **Total** | | **~557** | **~164** |
-
-That gives about 170 extractions, about 133 ideas and about 143 triage calls. The cut pool is
-then n ≈ 117, so the default 1% cut gives **K = 2**.
-
-**Per stage:**
-
-| Stage | Hopkins unit cost (ledger) | Scripps units | Scripps cost |
-|---|---|---|---|
-| S2 screen (Haiku 5.5) | $0.00018 a document (42,065 calls, $7.74) | ~575 | $0.11 |
-| S3 extract (Opus 5) | $0.041 an extraction (7,668 calls, $317.69) | ~170 | $7 |
-| S4 triage (Sonnet 5.5) | $0.085 an idea (7,164 calls, $609.44) | ~143 | $12 |
-| S5 cut | no model call unless a boundary tie needs the tournament | — | ~$0 |
-| S6 deep: full text, searches, 8-specialist panel (Opus 5) | $3.00 an idea in the cut ($201.02 over 67 analyses, ~14.5 calls each) | K | $3.00 × K |
-| S7 rerank (Opus 5) | $0.013 a comparison, ~16 per idea in the cut ($11.14 over 876) | ~16 × K | $0.20 × K |
-| S8 same-program check and names (Opus 5) | $0.67 for 40 opportunities | ~0.8 × K | $0.01 × K |
-| S9 final assessment (Opus 5) | $0.89 an assessment, 1.25 per opportunity ($54.25 over 61) | ~0.8 × K | $0.91 × K |
-| Bake-off (fixed) | $71.55: S2 $18.36, S3 $18.37, S4 $34.82 | once | ~$72 |
-| Regression check, first epoch (fixed) | $19.95 | once | ~$20 |
-| S4 repeatability, pilot (fixed) | 50 ideas triaged again | once | ~$6 |
-| Reject audit | $0.019 an item, up to 100 per stage a cycle ($15.01 over 791) | a few cycles | ~$5–10 |
-
-S6 through S9 come to about **$4.13 per idea in the cut**. The rest comes to about **$125**,
-four-fifths of it the bake-off and the regression check, which do not shrink with the
-institution.
-
-**Totals by cut size** (`LANDSCAPE_CUT_FRACTION`, §13):
-
-| Cut | K | Opportunities (~0.8 × K) | Estimate | If batches are available |
-|---|---|---|---|---|
-| 1% (default) | 2 | ~2 | ~$133 | ~$123 |
-| 10% | 12 | ~10 | ~$174 | ~$159 |
-| 20% | 24 | ~20 | ~$224 | ~$204 |
-| 40% | 47 | ~38 | ~$319 | ~$288 |
-
-**Uncertainty.** Take each figure as ±30%. The largest unknowns are three:
-- Scripps's share of senior-author papers may differ from Hopkins's 0.46.
-- Ideas group differently at small scale.
-- S6 and S9 costs follow dossier size: S9 reads about 110,000 tokens an assessment.
-
-**Batches.** If the new key's account accepts Message Batches, S3, S4, the S8 names and S9 cost
-half (`llm_pricing.BATCH_MULTIPLIER`). The bake-off, regression check, S6 and S7 are synchronous
-either way.
-
-**Time.** Hopkins's pilot covered 15,600 documents and took about 22 hours from the first fetch to
-the pilot report. Scripps has under a tenth of that, but PubMed and GEO fetch only off-peak
-(§6.3), and the daily cap paces spending. At $100 a day, a $224 run spans at least three days. So
-allow two to four days.
+**Time.** Allow two to four days. At $100 a day, a $199 run spans at least two days, and PubMed
+and GEO fetch only off-peak (§6.3).
 
 The daily cap is soft. It stops new submissions and new synchronous calls only
 (`worker._maybe_submit`, `_sync_step`). A bake-off that has started runs to its end
@@ -538,11 +490,6 @@ These figures were read on 2026-11-20 with read-only queries:
   lists no grants under its name for fiscal 2024–2026, and ROR records no link to Scripps
   Research.
 
-## 13. Open question (owner)
+## 13. Open questions
 
-**How many opportunities should the test produce?** The cut keeps
-K = ceil(`LANDSCAPE_CUT_FRACTION` × n) ideas for S6–S9 (`cut.py:288-290`). At the default 1% and
-Scripps's estimated one-year pool of n ≈ 117, that is 2. Each further idea costs about $4.13
-(§6.7). The first weekly batch shows up to 10 opportunities (`review_batches.BATCH_SIZE`), and
-every opportunity stays browsable. The fraction is read only by the cut and is not part of an
-epoch's components, so it can be set before the run without side effects.
+None for the owner. The cut fraction is set to 0.20 (§2).
