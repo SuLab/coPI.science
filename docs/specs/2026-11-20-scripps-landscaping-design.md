@@ -2,7 +2,7 @@
 
 *Branch `scripps-landscaping`, from `blackbird` at 9ab7a021, pushed to `origin`. Written
 2026-11-20. Every external figure below was read from the live source that day (§12); every code
-reference is to 9ab7a021. Two questions are still open (§13).*
+reference is to 9ab7a021. One question is still open (§13).*
 
 ## 1. Intent
 
@@ -23,6 +23,10 @@ Made by the owner:
 - **Scope: Scripps Research, La Jolla only.** Work from the Jupiter, Florida campus is left out,
   as are UF Scripps, Scripps Health and its hospitals, Scripps Institution of Oceanography and
   Scripps College.
+- **Calibr is excluded for now.** It is the California Institute for Biomedical Research
+  (Calibr-Skaggs, OpenAlex `I4210140527`).
+- **Time window: the past year** (`LANDSCAPE_WINDOW_DAYS=365`). Hopkins uses three.
+- **Cost:** a per-stage estimate from the Hopkins run is wanted before the run (§6.7).
 - **Where it runs:** the pipeline runs on the owner's workstation. When it has finished, the
   database is copied to a small cloud server that serves the website to both reviewers. The
   owner sets up that server manually, later (§7 is the checklist).
@@ -34,7 +38,8 @@ Made by the owner:
 Made by the designer (each can be overruled):
 
 - **C1. Hard-code Scripps on the branch** rather than make the institution configurable (§5).
-- **C2. The pilot fetches the whole three-year window**, not one sampled month per year (§6.3).
+- **C2. The pilot fetches the whole one-year window**, not one sampled month per calendar year
+  (§6.3).
 - **C3. When a record's campus cannot be told, it counts.** Patents, and any paper, dataset or
   grant with no campus in its address, are kept. La Jolla is the main campus.
 - **C4. A $100 daily spending cap** (`LANDSCAPE_DAILY_USD_CAP=100`); the code's default is none.
@@ -57,6 +62,9 @@ Made by the designer (each can be overruled):
 - **C10. Only the landscaping pages are reworded.** The rest of the site still names Hopkins in
   places a reviewer can reach: the PI help pages, other glossary entries, and reviewer tutorial
   08. That text is left as it is. The reviewers are told to read only the landscape pages.
+- **C11. A checkpoint after the bake-off.** The projection is redone from the real document count
+  and the bake-off's real spend. The run continues on its own when the new projection is within
+  25% of §6.7's figure for the chosen cut; otherwise it waits for the owner.
 
 ## 3. Goals, non-goals, anti-goals
 
@@ -116,10 +124,12 @@ column, one worker lock (`advisory_locks.LANDSCAPE_WORKER_LOCK_KEY`), and the ep
 review batches are global.
 
 **Pilot.** (i) *Chosen (C2):* the pilot fetches the whole window. (ii) The stock pilot, one
-random month per calendar year (`intake.pilot_slices`): at about a twenty-fourth of Hopkins's
-volume (§12) it may not reach the bake-off's samples of 600 documents, 60 extractions and 60
-ideas (`bakeoff.py:866`), and an empty regression kind fails and holds the first epoch
-(`regression.py:96-101`). (iii) Skip the bake-off and copy production's models: the pilot funnel
+random month per calendar year (`intake.pilot_slices`), would take two months of a year that
+holds only about 560 eligible documents (§6.7). That is under 100 documents, short of the
+bake-off's samples of 600 documents, 60 extractions and 60 ideas (`bakeoff.py:866`). An empty
+regression kind fails and holds the first epoch (`regression.py:96-101`). The whole window
+roughly fills the samples; with fewer documents, the sampler takes them all
+(`bakeoff.stratified_sample`). (iii) Skip the bake-off and copy production's models: the pilot funnel
 waits for a bake-off report's picks (`worker.picks_applied`), and the first epoch's regression
 waits for the set the bake-off seeds (`worker._begin_rejudge`), so skipping means bypassing two
 gates.
@@ -144,7 +154,8 @@ gates.
 `src/landscaping/institutions.py`. It replaces `is_baltimore_affiliation`. A string passes when it
 names Scripps Research (the phrase "scripps research", which covers "The Scripps Research
 Institute", or the token `TSRI`) **and** names neither Jupiter nor Florida (`Jupiter`, `Florida`,
-`FL 334…`). Bare "Scripps" never passes. Do **not** edit `src/services/jhu_rules.is_hopkins_affiliation`:
+`FL 334…`) **nor** Calibr (`Calibr`, `California Institute for Biomedical Research`). Bare
+"Scripps" never passes. Do **not** edit `src/services/jhu_rules.is_hopkins_affiliation`:
 PI profiles use it too (`corpus.py:169`, `non_pubmed_works.py:198`,
 `industry_sources/openalex_industry.py:92`, the tenure rules in `jhu_rules.py`).
 
@@ -156,7 +167,9 @@ listing a matching id and reads raw strings only when no institution is listed (
 `affiliations` list, which pairs each raw string with its institution ids:
 
 - An authorship counts when **at least one** of its `affiliations` entries lists `I123431417` and
-  that entry's raw string names neither Jupiter nor Florida. An author with both campuses counts.
+  that entry's raw string names neither Jupiter, Florida nor Calibr. An author with both campuses
+  counts, and so does a Calibr author with a separate Scripps Research La Jolla address. An
+  entry tagged only `I4210140527` (Calibr) never counts.
 - An authorship listing `I123431417` with no usable `affiliations` detail counts (C3).
 - An authorship listing no institution at all counts when a raw string passes the matcher, as
   today.
@@ -179,9 +192,14 @@ Make the Jupiter test a small function used by the OpenAlex rule, rather than ch
 **Drift report.** Point the drift listing at Scripps (`reports.py:79-80`, `_hopkins_like`): names
 matching "scripps research" or `TSRI`, lineage root `I123431417`. Set
 `EXCLUDED_OPENALEX_IDS` to the known non-La Jolla or unrelated institutions so they are not
-re-proposed: `I4387156289` (UF Scripps, Jupiter), `I150209017` (Oceanography), `I1311914864`
-(Scripps Health) and its children, `I4210109568`, `I16970960` and `I4210089022`. All are listed
-in §12.
+re-proposed:
+- `I4387156289` (UF Scripps, Jupiter);
+- `I4210140527` (Calibr);
+- `I150209017` (Oceanography);
+- `I1311914864` (Scripps Health) and its children;
+- `I4210109568`, `I16970960` and `I4210089022`.
+
+All are listed in §12.
 
 **Probes script.** `scripts/landscaping_probes.py:140` uses `nih_reporter.JHU_ORG_EXACT`. Point it
 at the Scripps RePORTER name; leave `nih_reporter.JHU_ORG_EXACT` itself alone, since PI profiles
@@ -243,7 +261,8 @@ add the slice of a month that began since. That is expected.
 - New matcher cases:
   - **pass:** La Jolla; "TSRI"; an author with both campuses;
   - **fail:** Jupiter; Florida; "Scripps Health"; "Scripps Clinic"; "Scripps Institution of
-    Oceanography"; "Scripps College"; "Wertheim UF Scripps Institute"; bare "Scripps".
+    Oceanography"; "Scripps College"; "Wertheim UF Scripps Institute"; "Calibr-Skaggs
+    Institute, Scripps Research"; bare "Scripps".
 - New OpenAlex rule cases built from the authorship shape in §12.
 - A grep of `src/landscaping`, `src/services/landscape*`, `templates/landscape`,
   `templates/workspace/landscape.html` and the help pages finds no "Hopkins", "JHU" or
@@ -281,7 +300,8 @@ file: it pins production's container names and joins the shared edge network.
 | `LANDSCAPE_DAILY_USD_CAP` | `100` (C4) |
 | `LANDSCAPE_NCBI_MAX_RPS` | `1` (C6) |
 | `LANDSCAPE_BATCH_MODE` | `api` if the new key's account accepts Message Batches, else `sync` (§10) |
-| `LANDSCAPE_WINDOW_DAYS` | unset (default 1096, three years, as Hopkins) |
+| `LANDSCAPE_WINDOW_DAYS` | `365` (owner) |
+| `LANDSCAPE_CUT_FRACTION` | open (§13); default `0.01` gives K = 2 for Scripps (§6.7) |
 | stage model settings | defaults until the bake-off; then its picks |
 | `LANDSCAPE_CHAT_ENABLED` | `false` locally |
 | ORCID settings | only if local login is used (§6.6) |
@@ -299,8 +319,10 @@ OpenAlex key, paging is refused (`openalex_auth.py:3`).
    `alembic upgrade head` from a one-off app container.
 3. Start the app and the worker. The worker inserts the source rows and its first candidate
    epoch, then fetches the window. PubMed and GEO run off-peak only, so allow a night.
-4. When the bake-off report is stored, copy its `recommended_settings` into `.env.scripps` and
-   recreate the worker. Until then the pilot funnel waits (`worker.picks_applied`).
+4. When the bake-off report is stored, check the pilot's eligible-document count and the
+   bake-off's actual spend against §6.7, and send the owner an updated projection (C11). Then
+   copy its `recommended_settings` into `.env.scripps` and recreate the worker. Until then the
+   pilot funnel waits (`worker.picks_applied`).
 5. The first candidate is checked against the bake-off's S2–S4 regression set. If it fails and is
    held, an admin override lets it proceed (`routers/landscape.py:156`).
 6. When the pilot report is stored, start the backfill (`routers/landscape.py:108`). The worker
@@ -318,12 +340,75 @@ pipeline page needs a login.
 
 ### 6.7 Cost and time
 
-The figures are from production's Hopkins ledger, read-only. About 78,000 documents. $1,321 so
-far. The pilot covered 15,600 documents and took about 22 hours from the first fetch to the pilot
-report, costing $211 with the bake-off included. Scripps has about a twenty-fourth of Hopkins's
-OpenAlex output, so the whole Scripps window should come to a few thousand documents, fewer than
-the Hopkins pilot. Two costs do not shrink with size: the bake-off's fixed samples and S6–S9 on
-the cut. `sync` mode costs twice what `api` mode does (`llm_pricing.BATCH_MULTIPLIER`). No firmer estimate is possible before the bake-off report.
+**Method.** Inputs, all read on 2026-11-20:
+- *Unit costs:* production's Hopkins ledger (`landscape_llm_calls`, read-only), at the stage
+  models production runs now: S2 Haiku 5.5, S3 Opus 5, S4 Sonnet 5.5, S6–S9 Opus 5. Production
+  made every call synchronously, so these are full prices.
+- *Funnel rates:* Hopkins's active epoch.
+- *Scripps volumes:* the live sources for 2025-11-20 to 2026-11-20 (§12).
+
+**Hopkins funnel (three years):**
+1. 31,115 eligible documents; 31,992 screened.
+2. 6,801 kept. By kind: papers 18.2%, preprints 18.8%, grants 46.4%, patents 52.7%.
+3. About 7,020 extractions, giving 5,496 ideas; 5,903 triaged.
+4. Cut pool n = 4,851, so K = ceil(1% × n) = 49 (`cut.py:288-290`).
+5. 57 deep analyses, 786 comparisons and 50 assessments, making 40 opportunities.
+
+**Scripps volume, one year (estimate):**
+
+| Kind | Basis | Eligible | Kept |
+|---|---|---|---|
+| Papers and preprints | OpenAlex 808, less 60 with a Jupiter address, × Hopkins's eligible share 0.46 | ~343 | ~63 |
+| Grants | NIH core projects, fiscal 2026: 171; NSF about 1 | ~172 | ~80 |
+| Patents | USPTO publications naming Scripps Research as applicant: 46 | ~42 | ~22 |
+| **Total** | | **~557** | **~164** |
+
+That gives about 170 extractions, about 133 ideas and about 143 triage calls. The cut pool is
+then n ≈ 117, so the default 1% cut gives **K = 2**.
+
+**Per stage:**
+
+| Stage | Hopkins unit cost (ledger) | Scripps units | Scripps cost |
+|---|---|---|---|
+| S2 screen (Haiku 5.5) | $0.00018 a document (42,065 calls, $7.74) | ~575 | $0.11 |
+| S3 extract (Opus 5) | $0.041 an extraction (7,668 calls, $317.69) | ~170 | $7 |
+| S4 triage (Sonnet 5.5) | $0.085 an idea (7,164 calls, $609.44) | ~143 | $12 |
+| S5 cut | no model call unless a boundary tie needs the tournament | — | ~$0 |
+| S6 deep: full text, searches, 8-specialist panel (Opus 5) | $3.00 an idea in the cut ($201.02 over 67 analyses, ~14.5 calls each) | K | $3.00 × K |
+| S7 rerank (Opus 5) | $0.013 a comparison, ~16 per idea in the cut ($11.14 over 876) | ~16 × K | $0.20 × K |
+| S8 same-program check and names (Opus 5) | $0.67 for 40 opportunities | ~0.8 × K | $0.01 × K |
+| S9 final assessment (Opus 5) | $0.89 an assessment, 1.25 per opportunity ($54.25 over 61) | ~0.8 × K | $0.91 × K |
+| Bake-off (fixed) | $71.55: S2 $18.36, S3 $18.37, S4 $34.82 | once | ~$72 |
+| Regression check, first epoch (fixed) | $19.95 | once | ~$20 |
+| S4 repeatability, pilot (fixed) | 50 ideas triaged again | once | ~$6 |
+| Reject audit | $0.019 an item, up to 100 per stage a cycle ($15.01 over 791) | a few cycles | ~$5–10 |
+
+S6 through S9 come to about **$4.13 per idea in the cut**. The rest comes to about **$125**,
+four-fifths of it the bake-off and the regression check, which do not shrink with the
+institution.
+
+**Totals by cut size** (`LANDSCAPE_CUT_FRACTION`, §13):
+
+| Cut | K | Opportunities (~0.8 × K) | Estimate | If batches are available |
+|---|---|---|---|---|
+| 1% (default) | 2 | ~2 | ~$133 | ~$123 |
+| 10% | 12 | ~10 | ~$174 | ~$159 |
+| 20% | 24 | ~20 | ~$224 | ~$204 |
+| 40% | 47 | ~38 | ~$319 | ~$288 |
+
+**Uncertainty.** Take each figure as ±30%. The largest unknowns are three:
+- Scripps's share of senior-author papers may differ from Hopkins's 0.46.
+- Ideas group differently at small scale.
+- S6 and S9 costs follow dossier size: S9 reads about 110,000 tokens an assessment.
+
+**Batches.** If the new key's account accepts Message Batches, S3, S4, the S8 names and S9 cost
+half (`llm_pricing.BATCH_MULTIPLIER`). The bake-off, regression check, S6 and S7 are synchronous
+either way.
+
+**Time.** Hopkins's pilot covered 15,600 documents and took about 22 hours from the first fetch to
+the pilot report. Scripps has under a tenth of that, but PubMed and GEO fetch only off-peak
+(§6.3), and the daily cap paces spending. At $100 a day, a $224 run spans at least three days. So
+allow two to four days.
 
 The daily cap is soft. It stops new submissions and new synchronous calls only
 (`worker._maybe_submit`, `_sync_step`). A bake-off that has started runs to its end
@@ -382,8 +467,9 @@ can therefore end somewhat over $100.
 | The Jupiter rule leaks Jupiter work, or drops La Jolla work | The dry probe's 40 addresses, read before the run |
 | PubMed's query catches other Scripps organizations | The last-author matcher filters every record; probe counts are compared with OpenAlex |
 | A source stalls the pilot | Keys checked first (§6.5); a dead source is disabled in `landscape_sources`, with the reason noted |
-| Too few documents for the bake-off or the regression set | The whole-window pilot (C2); otherwise the override in §6.6 step 5 |
-| The shared NCBI or OpenAlex quota | 1 NCBI request a second, off-peak; Scripps's OpenAlex volume is a few dozen pages |
+| Too few documents for the bake-off or the regression set | The whole-window pilot (C2), and the sampler takes every document when there are fewer; otherwise the override in §6.6 step 5 |
+| The estimate in §6.7 is off | It is checked against the bake-off report's actual spend before S3 starts (§6.6 step 4) |
+| The shared NCBI or OpenAlex quota | 1 NCBI request a second, off-peak; Scripps's one-year OpenAlex volume is about 800 works, a handful of pages |
 | The workstation fills up (19 GB free) | Images about 0.6 GB; prune build cache before building |
 | Something private reaches the public branch | `.env.scripps`, dumps and run logs stay untracked (`.gitignore`); each diff is checked before it is pushed |
 
@@ -440,21 +526,23 @@ These figures were read on 2026-11-20 with read-only queries:
   Diego Scripps Inst of Oceanography" and 3 "The Scripps Research Institute" (La Jolla).
 - **Tech-transfer feed:** not checkable. technologypublisher.com answers 403 to automated
   requests, Johns Hopkins's feed included.
+- **The one-year window, 2025-11-20 to 2026-11-20:**
+  - **OpenAlex:** 808 Scripps Research articles, preprints and reviews; 60 of them carry a
+    Jupiter address. The Hopkins lineage roots had 60,368 in their own three-year window.
+  - **NIH RePORTER, fiscal 2026,** "SCRIPPS RESEARCH INSTITUTE, THE": 226 project rows, 171 core
+    projects. There are no fiscal 2027 rows yet.
+  - **USPTO ODP, publications in the year:** "Scripps Research" is applicant on 46 and assignee
+    on 33. For "Johns Hopkins" the figures are 237 and 177.
+- **Calibr (excluded, §2):** OpenAlex `I4210140527`, ROR `04r28v857`, La Jolla, outside the
+  `I123431417` lineage. It has 91 works since 2023, 67 of which also carry `I123431417`. NIH
+  lists no grants under its name for fiscal 2024–2026, and ROR records no link to Scripps
+  Research.
 
-## 13. Open questions (owner)
+## 13. Open question (owner)
 
-1. **Calibr.** Does Scripps Research La Jolla include the California Institute for Biomedical
-   Research (Calibr-Skaggs)? Here is what the sources say, as of 2026-11-20:
-   - OpenAlex lists it as its own institution, `I4210140527` (ROR `04r28v857`, La Jolla), outside
-     the `I123431417` lineage.
-   - It has 91 works since 2023. 67 of them also carry `I123431417`; the other 24 would not be
-     fetched without its id.
-   - NIH lists no grants under its name for fiscal 2024–2026, and ROR records no link to Scripps
-     Research.
-
-   If it is included, `I4210140527` joins the OpenAlex rule, the lineage query and the drift
-   report, and "Calibr" joins the address matcher.
-2. **Total budget.** The daily cap is soft (§6.7), and most of the spending falls before the pilot
-   report. Proposed: the run pauses after the bake-off report, which gives the actual cost per
-   document. A projected total goes to the owner, and the run continues only on the owner's OK.
-   The alternative is a fixed ceiling at which the run stops.
+**How many opportunities should the test produce?** The cut keeps
+K = ceil(`LANDSCAPE_CUT_FRACTION` × n) ideas for S6–S9 (`cut.py:288-290`). At the default 1% and
+Scripps's estimated one-year pool of n ≈ 117, that is 2. Each further idea costs about $4.13
+(§6.7). The first weekly batch shows up to 10 opportunities (`review_batches.BATCH_SIZE`), and
+every opportunity stays browsable. The fraction is read only by the cut and is not part of an
+epoch's components, so it can be set before the run without side effects.
