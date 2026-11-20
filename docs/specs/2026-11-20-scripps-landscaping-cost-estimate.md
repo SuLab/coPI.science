@@ -14,9 +14,8 @@ owner's starting choice of 20% (`LANDSCAPE_CUT_FRACTION=0.20`).*
 | Ideas | ~133 | ~102 |
 | Ideas in the cut (K at 20%) | 24 | 18 |
 | Opportunities (~0.82 × K) | ~20 | ~15 |
-| **Estimated cost** | **~$199** (range $139–$258) | **~$164** (range $114–$213) |
-| If the new key can use Message Batches | ~$175 | ~$146 |
-| Contingency: the bake-off's second reference pass (§6) | +$3.52 | +$3.52 |
+| **Estimated cost** | **~$202** (range $142–$263) | **~$167** (range $117–$217) |
+| If the new key can use Message Batches | ~$179 | ~$149 |
 
 Halving the window saves only about $35:
 
@@ -133,12 +132,12 @@ so both take all of that year's projects. Fiscal 2027 has no rows yet.
 | S8 same-program check and names | K × $0.0137 | $0.33 | $0.25 |
 | S9 final assessment | K × $0.907 | $21.78 | $16.33 |
 | Bake-off S2 | min(600, eligible) × $0.0152 | $8.47 | $5.69 |
-| Bake-off S3 | kept × $0.0586 + min(60, kept) × $0.0415 | $12.13 | $9.91 |
+| Bake-off S3 | kept × $0.0586 + min(60, kept) × ($0.0415 + $0.0586) | $15.65 | $13.43 |
 | Bake-off S4 | min(60, ideas) × $0.474 | $28.43 | $28.43 |
 | Regression check, first epoch | screen + 2 × S3 + 2 × S4 items, as Hopkins | $19.36 | $19.32 |
 | S4 repeatability | 50 ideas × 2 calls | $6.40 | $6.40 |
 | Reject audit | ≤ 100 S2 rejects a day × 3 days × $0.019 | $5.69 | $4.69 |
-| **Total** | | **$198.78** | **$163.55** |
+| **Total** | | **$202.30** | **$167.07** |
 
 S6 through S9 come to $4.125 per idea in the cut, so each idea added to the cut, or removed,
 moves the total by about that much. At 20% the cut is about half the total: $99 for 1 year and
@@ -152,9 +151,17 @@ $74 for 6 months.
   - S6 and S9 costs follow dossier size: S9 read about 111,000 input tokens an assessment at
     Hopkins.
   - OpenAlex indexes the newest months late, which affects the 6-month window most.
-- **Second reference pass.** The code asks the bake-off's S3 reference a second time on its
-  60-document sample (`bakeoff._extract_round`). Hopkins's ledger shows no such calls, so it is a
-  contingency: 60 × $0.0586 = $3.52.
+- **Second reference pass.** The bake-off asks its S3 reference a second time on its 60-document
+  sample (`bakeoff._extract_round`, `bakeoff:reference-again`), since 2026-11-17 (`d418478e`),
+  after Hopkins's bake-off. Hopkins's ledger has no such calls, so it is priced at the
+  reference's own rate: 60 × $0.0586 = $3.52, in the bake-off S3 row.
+- **S6 repeats.** S6 is priced at one analysis per idea in the cut. Hopkins ran 67 analyses for
+  K = 49 (1.37 each), because a preview cut (D77) preceded the final one. Scripps has no preview
+  cut, and its pilot already covers the whole window, so the cut after the drain holds the same
+  ideas. If S6 repeated at Hopkins's rate anyway, add about $27 (1 year) or $20 (6 months).
+- **Stage models.** S3 is priced on Opus 5, the model production runs now (set by hand after its
+  RCA). The run must use the bake-off's picks (`worker.picks_applied`); a cheaper S3 pick lowers
+  S3's cost, so its row is an upper bound.
 - **Tech-transfer listings are off** (design C5), so they cost nothing. Scripps's feed holds 38
   listings. If they were turned on, about 17 would be kept, at Hopkins's 44.6% rate for
   listings. That adds about $0.75 of S3 and $1.30 of S4, plus whatever reaches the cut.
@@ -163,11 +170,12 @@ $74 for 6 months.
 - **Batches.** If the new key's account accepts Message Batches, S3, S4, the S8 names, S9 and the
   reject audit cost half (`llm_pricing.BATCH_MULTIPLIER`). That saves about $23 for 1 year and $18
   for 6 months. The bake-off, the regression check, S6 and S7 are synchronous either way.
-- **The cap paces the run.** At $100 a day (C4, soft), a $199 run spans at least two days, and
+- **The cap paces the run.** At $100 a day (C4, soft), a $202 run spans at least two days, and
   PubMed and GEO fetch only off-peak. So allow two to four days.
-- **Re-check (C11).** When the bake-off report is stored, the real eligible count and the
-  bake-off's real spend replace §4's estimates. If the new total is more than 25% over the
-  estimate for the chosen window, the run waits for the owner.
+- **Re-check (C11).** When the bake-off report is stored, the real eligible count E and the
+  bake-off's real spend B replace §4's estimates: for the 1-year window the new total is
+  B + $31.45 + $118.30 × E ÷ 557 (the fixed checks, then S2–S9 scaled by E). If it falls outside
+  25% of the estimate either way ($151.73 to $252.88), the run waits for the owner.
 
 ## 7. Re-running this estimate
 
