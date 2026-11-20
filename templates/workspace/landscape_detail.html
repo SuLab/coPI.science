@@ -31,7 +31,7 @@
 {% set shown_id = a.id if assessment else none %}
 {% set dims = dimensions or [] %}
 {% macro prose(text, md, cls) %}{% if md %}<div class="{{ cls }} md-content" data-markdown="{{ md_citations(text) | e }}"></div>{% else %}<p class="{{ cls }} whitespace-pre-line">{{ plain_citations(text) }}</p>{% endif %}{% endmacro %}
-{% macro state_fields(state) %}{% for key in ('view', 'tab', 'assignment', 'sort', 'lab') %}{% if state.get(key) %}<input type="hidden" name="{{ key }}" value="{{ state.get(key) }}">{% endif %}{% endfor %}{% endmacro %}
+{% macro state_fields(state) %}{% for key in ('view', 'tab', 'assignment', 'sort', 'lab', 'cards') %}{% if state.get(key) %}<input type="hidden" name="{{ key }}" value="{{ state.get(key) }}">{% endif %}{% endfor %}{% endmacro %}
 
 <a href="{{ page_url(request, 'workspace_landscape', query=state) }}" class="text-sm text-indigo-700 hover:underline">← Landscape</a>
 <div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 mt-1 mb-4"><h1 class="text-2xl font-bold text-gray-900">Opportunity detail</h1>{{ help_link(request, effective_user, 'landscape', 'detail') }}</div>

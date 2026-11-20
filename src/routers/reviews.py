@@ -961,7 +961,8 @@ def _landscape_form_state(form: FormData) -> dict[str, str]:
     """The list state the form carried, validated by the list page's own ``list_state``:
     a junk or default value is dropped, never echoed into the ``Location`` header."""
     return landscape_list_state(
-        *(_form_str(form, field) for field in ("view", "tab", "assignment", "sort", "lab"))
+        *(_form_str(form, field)
+          for field in ("view", "tab", "assignment", "sort", "lab", "cards"))
     )
 
 

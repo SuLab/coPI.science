@@ -12,7 +12,7 @@
 {% set form_state = list_state if list_state is defined and list_state else {} %}
 <form method="post" action="/reviews/landscape/{{ opportunity_id }}/expert-judgment" class="landscape-expert-form space-y-3" data-confirm="Submit your expert judgment? Once submitted it cannot be changed, and the pipeline's own calls on this opportunity appear.">
     <input type="hidden" name="surface" value="detail">
-    {% for key in ('view', 'tab', 'assignment', 'sort', 'lab') %}{% if form_state.get(key) %}<input type="hidden" name="{{ key }}" value="{{ form_state.get(key) }}">{% endif %}{% endfor %}
+    {% for key in ('view', 'tab', 'assignment', 'sort', 'lab', 'cards') %}{% if form_state.get(key) %}<input type="hidden" name="{{ key }}" value="{{ form_state.get(key) }}">{% endif %}{% endfor %}
     {% if expert_gates %}
     <fieldset>
         <legend class="text-sm font-medium text-gray-700">Gates</legend>

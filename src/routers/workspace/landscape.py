@@ -9,10 +9,12 @@ expert samples, independent votes) itself; nothing here re-derives them.
 Every page answers 503 until migration 0077 has run (spec §12.5). The check runs once per
 process: once the schema is there it stays there, so only the True answer is cached.
 
-The list's state (``view``, ``tab``, ``assignment``, ``sort``, ``lab``) travels to the detail
-page and back through the ``/reviews`` redirects (contract C9 of
+The list's state (``view``, ``tab``, ``assignment``, ``sort``, ``lab``, ``cards``) travels to
+the detail page and back through the ``/reviews`` redirects (contract C9 of
 ``docs/plans/2026-11-19-landscape-ui-remediation-plan.md``); ``list_state`` is the one validator
-both routers use.
+both routers use. ``cards=compact`` is the comparison page (D95 of
+``docs/specs/2026-10-30-blackbird-landscaping-design.md``): the same lists with the shorter
+card of the remediation design's option A.
 """
 
 import uuid
@@ -68,6 +70,7 @@ LIST_VIEWS = ("current", "all")
 LIST_TABS = ("unreviewed", "reviewed", "all")
 LIST_ASSIGNMENTS = ("all", "mine")
 LIST_SORTS = ("pipeline", "score", "recommendation")
+LIST_CARDS = ("full", "compact")
 _LAB_MAX = 200
 
 
@@ -77,16 +80,17 @@ def list_state(
     assignment: str | None,
     sort: str | None,
     lab: str | None,
+    cards: str | None = None,
 ) -> dict[str, str]:
-    """The list state worth carrying, as ``{view, tab, assignment, sort, lab}`` in that order
-    with only the surviving keys.
+    """The list state worth carrying, as ``{view, tab, assignment, sort, lab, cards}`` in that
+    order with only the surviving keys.
 
     A value outside its allowlist is dropped, never echoed: the result reaches ``Location``
     headers and links, so a junk bookmark degrades to the default list instead of an error.
     ``lab`` is opaque (any non-blank string up to 200 characters; ``lists_view`` matches it
-    against the cards' labs). The defaults ``assignment=all`` and ``sort=pipeline`` are
-    dropped; ``tab`` is kept even when it is ``unreviewed``, so a return URL names the tab
-    the reader was on.
+    against the cards' labs). The defaults ``assignment=all``, ``sort=pipeline`` and
+    ``cards=full`` are dropped; ``tab`` is kept even when it is ``unreviewed``, so a return URL
+    names the tab the reader was on.
     """
     state: dict[str, str] = {}
     if view in LIST_VIEWS:
@@ -100,6 +104,8 @@ def list_state(
     lab = lab.strip() if isinstance(lab, str) else ""
     if lab and len(lab) <= _LAB_MAX:
         state["lab"] = lab
+    if cards in LIST_CARDS and cards != "full":
+        state["cards"] = cards
     return state
 
 
@@ -116,15 +122,17 @@ async def workspace_landscape(
     assignment: str | None = None,
     sort: str | None = None,
     lab: str | None = None,
+    cards: str | None = None,
     db: AsyncSession = _DB,
     current_user: User = _REVIEW,
 ):
     """This week's batch, carry-overs and earlier batches for everyone; with ``view`` set to
     ``current`` or ``all``, a staff viewer gets that list instead (L48), sorted by ``sort``
     and narrowed to ``lab`` (C14). A reviewer's ``view`` is ignored. A marked expert's open
-    sample items show on either (D63)."""
+    sample items show on either (D63). ``cards=compact`` draws the same cards in the compact
+    style, for comparison (D95)."""
     await _require_schema(db)
-    state = list_state(view, tab, assignment, sort, lab)
+    state = list_state(view, tab, assignment, sort, lab, cards)
     lists = None
     if view in LIST_VIEWS and is_staff(current_user):
         lists = await landscape_view.lists_view(
@@ -205,6 +213,7 @@ async def workspace_landscape_detail(
     assignment: str | None = None,
     sort: str | None = None,
     lab: str | None = None,
+    cards: str | None = None,
     db: AsyncSession = _DB,
     current_user: User = _REVIEW,
 ):
@@ -250,7 +259,7 @@ async def workspace_landscape_detail(
             chat_available=chat_available,
             reason_tag_choices=_reason_tags(),
             banding=BANDING,
-            list_state=list_state(view, tab, assignment, sort, lab),
+            list_state=list_state(view, tab, assignment, sort, lab, cards),
             **_form_choices(),
             **detail,
         ),

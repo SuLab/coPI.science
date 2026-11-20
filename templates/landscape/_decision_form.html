@@ -7,31 +7,34 @@
    - `surface`: "detail" (the default) or "landscape-list" (a list card). Only this
      parameter picks the behaviour: a detail page's top-level `list_state` never makes its
      form a list form.
-   - `list_state`: {view, tab, assignment, sort, lab}; each set value travels as a hidden
+   - `list_state`: {view, tab, assignment, sort, lab, cards}; each set value travels as a hidden
      field so the redirect can rebuild the list or the detail page's back link.
    - `next_id` and `scope` (list cards only): the following card in the same section ("" on
      the last) and the card's place on the page, for the `#o-<scope>-<id>` anchor.
    A first decision posts to /reviews/landscape/<id>/decision, an edit to
    /reviews/landscape-decisions/<id>/edit (src/routers/reviews.py). On list cards the reason
-   tags fold under "Reason tags (optional)"; on the detail page they stay open. #}
+   tags fold under "Reason tags (optional)"; on the detail page they stay open.
+   `inline` (the compact card, D95): the same fields on one wrapping row, the "Decision"
+   legend and the reason's label kept for screen readers only and a one-line reason box. #}
 {% set form_surface = surface if surface is defined and surface else 'detail' %}
 {% set form_state = list_state if list_state is defined and list_state else {} %}
+{% set form_inline = inline is defined and inline %}
 <details class="landscape-decision mt-3 border-t border-gray-100 pt-3"{% if not decision %} open{% endif %}>
     <summary class="cursor-pointer text-sm font-medium text-indigo-700">{% if decision %}Your decision: {{ 'Pursue' if decision.decision == 'pursue' else 'Pass' }} — change it{% else %}Quick decision{% endif %}</summary>
     {% if decision %}
-    <form method="post" action="/reviews/landscape-decisions/{{ decision.id }}/edit" class="mt-2 space-y-2">
+    <form method="post" action="/reviews/landscape-decisions/{{ decision.id }}/edit" class="{{ 'mt-2 flex flex-wrap items-center gap-x-4 gap-y-2' if form_inline else 'mt-2 space-y-2' }}">
     {% else %}
-    <form method="post" action="/reviews/landscape/{{ opportunity_id }}/decision" class="mt-2 space-y-2">
+    <form method="post" action="/reviews/landscape/{{ opportunity_id }}/decision" class="{{ 'mt-2 flex flex-wrap items-center gap-x-4 gap-y-2' if form_inline else 'mt-2 space-y-2' }}">
     {% endif %}
         <input type="hidden" name="assessment_id" value="{{ assessment_id or '' }}">
         <input type="hidden" name="surface" value="{{ form_surface }}">
-        {% for key in ('view', 'tab', 'assignment', 'sort', 'lab') %}{% if form_state.get(key) %}<input type="hidden" name="{{ key }}" value="{{ form_state.get(key) }}">{% endif %}{% endfor %}
+        {% for key in ('view', 'tab', 'assignment', 'sort', 'lab', 'cards') %}{% if form_state.get(key) %}<input type="hidden" name="{{ key }}" value="{{ form_state.get(key) }}">{% endif %}{% endfor %}
         {% if form_surface == 'landscape-list' %}
         <input type="hidden" name="next_id" value="{{ next_id if next_id is defined and next_id else '' }}">
         <input type="hidden" name="scope" value="{{ scope if scope is defined and scope else '' }}">
         {% endif %}
         <fieldset>
-            <legend class="text-sm font-medium text-gray-700">Decision</legend>
+            <legend class="{{ 'sr-only' if form_inline else 'text-sm font-medium text-gray-700' }}">Decision</legend>
             <div class="flex items-center gap-4 text-sm text-gray-700">
                 <span><input type="radio" id="{{ form_id }}pursue" name="decision" value="pursue" required {% if decision and decision.decision == 'pursue' %}checked{% endif %}> <label for="{{ form_id }}pursue">Pursue</label></span>
                 <span><input type="radio" id="{{ form_id }}pass" name="decision" value="pass" {% if decision and decision.decision == 'pass' %}checked{% endif %}> <label for="{{ form_id }}pass">Pass</label></span>
@@ -55,8 +58,8 @@
         </details>
         {% else %}{{ tag_fieldset }}{% endif %}
         {% endif %}
-        <label for="{{ form_id }}reason" class="block text-sm font-medium text-gray-700">Reason (optional, up to 1,000 characters)</label>
-        <textarea id="{{ form_id }}reason" name="reason" maxlength="1000" rows="2" class="w-full border rounded px-2 py-1 text-sm">{{ decision.reason if decision and decision.reason else '' }}</textarea>
+        <label for="{{ form_id }}reason" class="{{ 'sr-only' if form_inline else 'block text-sm font-medium text-gray-700' }}">Reason (optional, up to 1,000 characters)</label>
+        <textarea id="{{ form_id }}reason" name="reason" maxlength="1000" rows="{{ 1 if form_inline else 2 }}"{% if form_inline %} placeholder="Reason (optional)"{% endif %} class="{{ 'min-w-0 flex-1 basis-48' if form_inline else 'w-full' }} border rounded px-2 py-1 text-sm">{{ decision.reason if decision and decision.reason else '' }}</textarea>
         <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">{{ 'Save decision' if decision else 'Record decision' }}</button>
     </form>
 </details>

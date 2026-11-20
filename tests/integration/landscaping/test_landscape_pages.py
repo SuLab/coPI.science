@@ -437,6 +437,75 @@ async def test_blind_card_markup(client, db_session):
     assert "landscape-cost-line" in card and "1 month" in text
 
 
+async def test_compact_card_markup(client, db_session):
+    """The comparison page (D95): the compact card prints the pitch's first two sentences, the
+    cost line and, in grey beside the chip, the score and band; no key points, no "Why this
+    score" and no rank. Every link and form keeps ``cards=compact``; the default page keeps the
+    full card."""
+    opportunity_id = await seed_landscape_opportunity(db_session)
+    row = await _assessment(db_session, opportunity_id)
+    row.recommendation = "pass"
+    await db_session.flush()
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+
+    listed = await _get(client, manager, f"{_LIST}?cards=compact")
+    assert listed.status_code == 200
+    html = listed.text
+    assert page_problems(html) == []
+    assert re.search(r'aria-current="page"[^>]*>Compact</a>', html)
+    card = _week_card(html, opportunity_id)
+    text = _plain(card)
+    assert "landscape-card-compact" in card
+    chip = re.search(r'class="landscape-recommendation[^"]*">([^<]*)</span>', card)
+    assert chip is not None and chip.group(1) == BANDING["pass_label"]
+    assert re.search(r'class="landscape-compact-score[^"]*">score \d\.\d\d', card)
+    assert "First gate sentence." in card and "Second gate sentence." in card
+    assert "Third." not in card
+    assert re.search(r'class="landscape-cost-line[^"]*">\$1 · 1 month — a gate experiment\.<', card)
+    assert "Why this score" not in text and "landscape-card-points" not in card
+    assert not re.search(r"\brank\b", text, re.IGNORECASE)
+    assert f"/workspace/landscape/{opportunity_id}?cards=compact" in card
+    form = _section(html, f'id="o-week-{opportunity_id}"', "</form>")
+    assert '<input type="hidden" name="cards" value="compact">' in form
+
+    current = (await _get(client, manager, f"{_LIST}?view=current&cards=compact")).text
+    assert page_problems(current) == []
+    tabs = _section(current, 'class="landscape-tabs', "</nav>")
+    assert tabs.count("cards=compact") == 3
+    views = _section(current, 'class="landscape-views', "</nav>")
+    assert views.count("cards=compact") == 3
+    get_form = _section(current, 'action="/workspace/landscape"', "</form>")
+    assert '<input type="hidden" name="cards" value="compact">' in get_form
+
+    full = (await _get(client, manager, _LIST)).text
+    assert "landscape-card-compact" not in full
+    assert "landscape-card-pitch" in _week_card(full, opportunity_id)
+    assert re.search(r'aria-current="page"[^>]*>Full</a>', full)
+    assert "cards=compact" not in _section(full, 'class="landscape-views', "</nav>")
+
+
+async def test_blind_compact_card_markup(client, db_session):
+    """An undecided blind card in the compact style hides the same values as the full card:
+    no chip, no score or band, no flag counts; the pitch and cost line still show (D95)."""
+    opportunity_id = await seed_landscape_opportunity(db_session)
+    batch = await db_session.scalar(
+        select(LandscapeReviewBatch).join(
+            LandscapeReviewBatchItem, LandscapeReviewBatchItem.batch_id == LandscapeReviewBatch.id
+        ).where(LandscapeReviewBatchItem.opportunity_id == opportunity_id)
+    )
+    batch.blind = True
+    await db_session.flush()
+    reviewer = await factories.make_user(db_session, user_role=USER_ROLE_REVIEWER)
+    html = (await _get(client, reviewer, f"{_LIST}?cards=compact")).text
+    card = _week_card(html, opportunity_id)
+    text = _plain(card)
+    assert "landscape-card-compact" in card
+    assert "landscape-recommendation" not in card and "landscape-compact-score" not in card
+    assert "red flag" not in text and "deal-breaker" not in text
+    assert "landscape-blind-note" in card
+    assert "landscape-cost-line" in card and "First gate sentence." in card
+
+
 async def test_card_page_partial_row_renders(client, db_session):
     """A partial S9 row renders its card and page: no pitch, no ask that opens in bold, key
     points that are not a dict or outnumber their support (Review Focus 1)."""

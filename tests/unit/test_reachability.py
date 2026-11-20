@@ -1077,10 +1077,11 @@ def test_static_link_resolution_coverage_is_reported():
     unresolvable = len(values) - len(resolvable)
     # 105 since the Landscape remediation (docs/plans/2026-11-19-landscape-ui-remediation-plan.md):
     # the detail page's bare jump-nav fragments and its source, support and history links
-    # built from data.
-    assert unresolvable <= 105, (
+    # built from data. 107 since the compact Landscape card (D95): its headline and
+    # "detail →" links are the card's `{{ detail_href }}`, as on the full card.
+    assert unresolvable <= 107, (
         f"{unresolvable} of {len(values)} href/action values do not resolve to a "
-        "checkable local path (was 105) — the matcher probably regressed, or a new "
+        "checkable local path (was 107) — the matcher probably regressed, or a new "
         "link is built from a variable"
     )
 

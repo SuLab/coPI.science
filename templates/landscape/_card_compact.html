@@ -1,0 +1,71 @@
+{# One Landscape card in the compact style, for comparison with the full card (D95 of
+   docs/specs/2026-10-30-blackbird-landscaping-design.md): option A of the remediation
+   design's card choice (docs/specs/2026-11-19-landscape-ui-remediation-design.md, "The
+   card"). The page shows it in place of landscape/_card.html when the list state carries
+   `cards=compact`, with the same parameters: `card`, `scope`, `next_id`, `list_state`, and
+   `banding` from the page. It differs in what it prints: the pitch's first two sentences
+   (`card.pitch`) in body-size type, the cost line in a box, the score and band in grey
+   beside the recommendation, and the quick decision on one row (`inline`), with no key
+   points and no "Why this score".
+   The hiding is the read model's, as on the full card: on an undecided blind card the
+   recommendation, confidence, score, band and flag counts arrive as None. No rank is shown
+   (OD3). Model-written text renders autoescaped. #}
+{% set ls = list_state if list_state is defined and list_state else {} %}
+{% set ls_query = ls.items() | selectattr('1') | list %}
+{% set detail_href = page_url(request, 'workspace_landscape_detail', query=ls_query, opportunity_id=card.opportunity_id) %}
+<div id="o-{{ scope }}-{{ card.opportunity_id }}" class="landscape-card landscape-card-compact scroll-mt-16 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+    <div class="flex items-start justify-between gap-4 flex-wrap">
+        <div class="min-w-0">
+            <h3 class="landscape-card-title text-base font-semibold text-gray-900"><a href="{{ detail_href }}" class="text-indigo-700 hover:underline">{{ card.headline or card.label or 'Untitled opportunity' }}</a></h3>
+            {% if card.show_label and card.label and card.headline %}<p class="landscape-card-label text-xs text-gray-500 mt-0.5">{{ card.label }}</p>{% endif %}
+            {% if card.lines %}<p class="landscape-lines mt-0.5 text-sm text-gray-600">{{ card.lines | join(' · ') }}</p>{% endif %}
+        </div>
+        <div class="shrink-0 text-sm sm:text-right">
+            <div class="flex flex-wrap items-center gap-2 sm:justify-end">
+                {% if card.changed_since_decision %}<span class="landscape-changed px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-indigo-100 text-indigo-700">changed since your decision</span>{% endif %}
+                {% if card.retired %}<span class="landscape-retired px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-gray-100 text-gray-700">retired</span>{% endif %}
+                {% if card.probe %}<span class="landscape-probe px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-amber-100 text-amber-700">probe</span>{% endif %}
+                {% if card.blind %}<span class="landscape-blind px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-slate-100 text-slate-700">blind batch</span>{% endif %}
+                {% if card.recommendation %}
+                {% set rec_chip = {
+                    'advance': 'bg-green-100 text-green-700',
+                    'conditional': 'bg-amber-100 text-amber-700',
+                    'route-to-incubation': 'bg-teal-100 text-teal-700',
+                    'pass': 'bg-gray-100 text-gray-600',
+                } %}
+                <span class="landscape-recommendation px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap {{ rec_chip.get(card.recommendation, 'bg-gray-100 text-gray-600') }}">{{ banding.pass_label if card.recommendation == 'pass' else card.recommendation }}</span>
+                {% endif %}
+                {% if card.confidence %}<span class="landscape-confidence text-xs text-gray-600">{{ card.confidence.strip("[]") }}</span>{% endif %}
+            </div>
+            {% if card.score is not none %}<p class="landscape-compact-score mt-1 text-xs text-gray-600">score {{ '%.2f' | format(card.score) }}{% if card.band %} &middot; {{ band_label(card.band, banding.pass_label) }} band{% endif %}</p>{% endif %}
+        </div>
+    </div>
+    {% if card.blind_hidden %}<p class="landscape-blind-note mt-1 text-sm text-gray-600">This card is in a blind batch: on this card, the recommendation, score, band and flag counts are hidden until you record your decision.</p>{% endif %}
+    {% if card.expert_hidden %}<p class="landscape-expert-note mt-1 text-sm text-gray-600">This is one of your expert opportunities: the pipeline's own calls are hidden until you submit your judgment.</p>{% endif %}
+    {% if card.no_assessment %}
+    <p class="landscape-no-assessment mt-2 text-sm text-amber-800">No completed assessment under the current criteria{% if card.failure and card.failure.status %} ({{ card.failure.status }}){% endif %}.{% if card.history_assessment_id %} Its page shows the last earlier one as history.{% endif %}</p>
+    {% endif %}
+
+    {% if card.pitch %}
+    <div class="landscape-compact-pitch mt-2 max-w-[68ch] text-sm leading-relaxed text-gray-700">
+    {% if card.prose_format == 'markdown' %}
+    <div class="landscape-compact-pitch-body md-content" data-markdown="{{ md_citations(card.pitch) | e }}"></div>
+    {% else %}
+    <p class="landscape-compact-pitch-body">{{ plain_citations(card.pitch) }}</p>
+    {% endif %}
+    </div>
+    {% endif %}
+    {% if card.cost_line %}<p class="landscape-cost-line mt-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-gray-900">{{ plain_citations(card.cost_line) }}</p>{% endif %}
+
+    <p class="landscape-compact-footer mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-600">
+        <span class="landscape-labs">{{ 'Lab' if card.labs and card.labs | length == 1 else 'Labs' }}: <span class="font-medium text-gray-700">{{ card.labs | join(', ') if card.labs else '—' }}</span>{% if card.issued_on %} &middot; issued {{ card.issued_on }}{% endif %}</span>
+        {% if card.red_flag_count is not none %}
+        {% if card.red_flag_count > 0 %}<span class="text-amber-700 font-medium whitespace-nowrap">{{ card.red_flag_count }} red flag{{ '' if card.red_flag_count == 1 else 's' }}</span>{% else %}<span>no red flags</span>{% endif %}
+        {% endif %}
+        {% if card.confirmed_flags is not none %}
+        <span class="{{ 'text-amber-700 font-medium' if card.confirmed_flags > 0 else '' }} whitespace-nowrap">{{ card.confirmed_flags }} confirmed deal-breaker{{ '' if card.confirmed_flags == 1 else 's' }}</span>
+        {% endif %}
+        <a class="landscape-open-link font-medium text-indigo-700 hover:underline whitespace-nowrap" href="{{ detail_href }}">detail &rarr;</a>
+    </p>
+    {% with opportunity_id=card.opportunity_id, assessment_id=card.assessment_id, decision=card.my_decision, form_id='dec-' ~ scope ~ '-' ~ card.opportunity_id ~ '-', surface='landscape-list', inline=True %}{% include "landscape/_decision_form.html" %}{% endwith %}
+</div>

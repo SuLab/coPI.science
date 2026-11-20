@@ -22,7 +22,7 @@
 {% endif %}
     <input type="hidden" name="assessment_id" value="{{ assessment_id or '' }}">
     <input type="hidden" name="surface" value="detail">
-    {% for key in ('view', 'tab', 'assignment', 'sort', 'lab') %}{% if form_state.get(key) %}<input type="hidden" name="{{ key }}" value="{{ form_state.get(key) }}">{% endif %}{% endfor %}
+    {% for key in ('view', 'tab', 'assignment', 'sort', 'lab', 'cards') %}{% if form_state.get(key) %}<input type="hidden" name="{{ key }}" value="{{ form_state.get(key) }}">{% endif %}{% endfor %}
     <p class="review-rubric-instructions text-base leading-relaxed text-gray-600 max-w-[68ch]">
         Scores here rate the opportunity's own merit, not how well BlackbirdBot performed.
         Review it against Blackbird's rubric{% if rubric.version %}

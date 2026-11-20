@@ -215,11 +215,24 @@ def _row_values(row: Any) -> dict:
     }
 
 
+#: A Markdown link, as ``rewrite_doc_refs`` writes one (``[title](<url>)``) or the model does.
+_MD_LINK = re.compile(r"\[[^\]\n]*\]\((?:<[^>\n]*>|[^)\s]*)\)")
+
+
 def _pitch(text: str | None) -> str | None:
-    """The first two sentences of an elevator pitch (§13.1)."""
+    """The first two sentences of an elevator pitch (§13.1), the compact card's pitch (D95).
+    A sentence end inside a Markdown link (a title such as "et al. 2024") never cuts it, so
+    the link survives whole."""
     if not text:
         return None
-    return " ".join(_SENTENCE_END.split(text.strip())[:2])
+    links: list[str] = []
+
+    def _hold(match: re.Match[str]) -> str:
+        links.append(match[0])
+        return f"\x00{len(links) - 1}\x00"
+
+    lead = " ".join(_SENTENCE_END.split(_MD_LINK.sub(_hold, text.strip()))[:2])
+    return re.sub(r"\x00(\d+)\x00", lambda m: links[int(m[1])], lead)
 
 
 def _words(value: str | None) -> str | None:

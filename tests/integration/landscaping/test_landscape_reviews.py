@@ -482,6 +482,38 @@ async def test_list_decision_scope_carry_goes_to_next(client, db_session):
     assert r.headers["location"] == "/workspace/landscape#earlier"
 
 
+async def test_compact_cards_state_returns(client, db_session):
+    """``cards=compact`` (D95) survives every return: to the staff list, to a batch card and
+    to the detail page."""
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    decided, _ = await _opportunity(db_session)
+    following, _ = await _opportunity(db_session)
+    this_week, _ = await _opportunity(db_session)
+    on_detail, _ = await _opportunity(db_session)
+    headers = auth_headers(manager.id)
+
+    r = await _post(
+        client, f"/reviews/landscape/{decided}/decision",
+        _list_form(next_id=str(following), cards="compact"), headers,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == (
+        f"/workspace/landscape?view=current&tab=unreviewed&cards=compact#o-list-{following}"
+    )
+
+    r = await _post(
+        client, f"/reviews/landscape/{this_week}/decision",
+        _list_form(scope="week", view="", tab="", cards="compact"), headers,
+    )
+    assert r.headers["location"] == f"/workspace/landscape?cards=compact#o-week-{this_week}"
+
+    r = await _post(
+        client, f"/reviews/landscape/{on_detail}/decision",
+        {"decision": "pursue", "surface": "detail", "cards": "compact"}, headers,
+    )
+    assert r.headers["location"] == f"/workspace/landscape/{on_detail}?cards=compact"
+
+
 async def test_detail_forms_keep_list_state(client, db_session):
     manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
     opp_id, _ = await _opportunity(db_session)
@@ -523,6 +555,7 @@ async def test_invalid_state_dropped(client, db_session):
     junk = {
         "view": "everything", "tab": "x\r\nSet-Cookie: a=b", "assignment": "nobody",
         "sort": "bogus", "lab": "L" * 201, "next_id": "not-a-uuid", "scope": "list#x",
+        "cards": "full\r\nX: y",
     }
 
     r = await _post(
