@@ -240,7 +240,7 @@ def _idea_facts(idea: LandscapeIdea) -> dict:
         "idea_type": idea.idea_type, "targets": idea.targets, "direction": idea.direction,
         "agent": idea.agent, "disease": idea.disease,
         "modality_variants": idea.modality_variants, "stage": idea.stage,
-        "evidence_grade": idea.evidence_grade, "jhu_group_count": idea.jhu_group_count,
+        "evidence_grade": idea.evidence_grade, "scripps_group_count": idea.jhu_group_count,
         "outside_group_count": idea.outside_group_count,
         "evidence_summary": idea.evidence_summary, "data_flags": idea.data_flags,
     }

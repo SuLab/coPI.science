@@ -99,7 +99,7 @@ LEGENDS = {
     DOC_VERDICT: (
         "The landscaping pipeline's final assessment of one opportunity: a group of one or"
         " more therapeutic ideas drawn from published research, grants, patents and"
-        " technology listings of Johns Hopkins labs. The assessment is an AI model's"
+        " technology listings of Scripps Research labs. The assessment is an AI model's"
         " judgment in Blackbird's verdict format. The weighted score and band are computed"
         " by the application from the dimension scores and are provisional and advisory."
         " The rank is the best member idea's position in the pipeline's ranked list."
@@ -362,7 +362,7 @@ def _member_evidence(doc: _Doc, i: int, n: int, m: _Member) -> None:
         f"type: {idea.idea_type}",
         f"stage: {idea.stage or 'not recorded'}",
         f"evidence grade: {idea.evidence_grade or 'not recorded'}",
-        f"Johns Hopkins labs: {idea.jhu_group_count}",
+        f"Scripps Research labs: {idea.jhu_group_count}",
     ]
     if idea.outside_group_count is not None:
         facts.append(f"outside groups: {idea.outside_group_count}")

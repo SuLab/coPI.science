@@ -116,7 +116,7 @@ def _idea_section(idea: dict, documents: list[dict]) -> list[str]:
         ("Stage", "stage"), ("Evidence grade", "evidence_grade"),
     ):
         lines.append(f"- {label}: {_facet(idea.get(key)) or 'none given'}")
-    lines.append(f"- Independent JHU groups: {idea.get('jhu_group_count') or 0}")
+    lines.append(f"- Independent Scripps Research groups: {idea.get('jhu_group_count') or 0}")
     total = idea.get("document_count") or len(documents)
     lines.append(f"- Documents: {total} in all, {len(documents)} listed")
     return lines

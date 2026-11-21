@@ -35,7 +35,7 @@
     <h1 class="text-2xl font-bold text-gray-900">Landscape</h1>
     {{ help_link(request, effective_user, 'landscape', 'list') }}
 </div>
-<p class="text-sm text-gray-600 mb-2 max-w-[68ch]">Opportunities the pipeline found in Johns Hopkins research, issued in a weekly batch. Read each card and record a quick decision: Pursue or Pass.</p>
+<p class="text-sm text-gray-600 mb-2 max-w-[68ch]">Opportunities the pipeline found in research from Scripps Research, issued in a weekly batch. Read each card and record a quick decision: Pursue or Pass.</p>
 {% if banding %}<p class="landscape-band-legend text-sm text-gray-500 mb-4">The band is computed from the dimension scores, not taken from BlackbirdBot. Bands: &ge;{{ banding.advance_min }} advance, {{ banding.conditional_min }}&ndash;&lt;{{ banding.advance_min }} conditional, &lt;{{ banding.conditional_min }} {{ banding.pass_label }}.</p>{% endif %}
 <nav class="landscape-card-style mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm" aria-label="Card style">
     <span class="text-gray-600">Cards:</span>

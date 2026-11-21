@@ -281,8 +281,8 @@ async def _qualifying_ids(db: AsyncSession, idea_id: uuid.UUID) -> set[uuid.UUID
 
 
 async def _refresh_version(db: AsyncSession, idea: LandscapeIdea) -> None:
-    """Recompute the version and the JHU group count; called only when a qualifying document
-    that was not yet attached has attached (D37), or one attached has been taken away.
+    """Recompute the version and the Scripps Research group count; called only when a qualifying
+    document that was not yet attached has attached (D37), or one attached has been taken away.
 
     With no qualifying document left the version is None, not the hash of nothing: a version
     with no documents would get a paid S4 row with an empty dossier for an idea that can never
@@ -410,7 +410,7 @@ async def _prior_attachment(
 
     A replayed candidate returns its first decision (D27); a candidate re-extracted with other
     facets (the document's summary changed) drops its stale attachment and merges afresh. The
-    idea it leaves gets a fresh version and JHU group count when that took a qualifying
+    idea it leaves gets a fresh version and Scripps Research group count when that took a qualifying
     document away from it, so S4 and S6 see the idea without the document; with none left it
     has no version (``_refresh_version``)."""
     row = (await db.execute(
@@ -454,9 +454,9 @@ async def merge_candidate(
       disease and a known direction, when exactly one exists (L21); a candidate already
       merged keeps that decision (D27).
     - Ideas the same extraction produced of the other type are linked (biology ↔ chemistry).
-    - The version and JHU group count are recomputed only when `document` is a qualifying
-      idea-source document not yet attached (D37), and on the idea a stale attachment of
-      this candidate leaves.
+    - The version and Scripps Research group count are recomputed only when `document` is a
+      qualifying idea-source document not yet attached (D37), and on the idea a stale
+      attachment of this candidate leaves.
 
     `document` is the candidate's ``LandscapeDocument``. Flushes; does not commit."""
     senior = await _canonical_lab(db, document.lab_key)

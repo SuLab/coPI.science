@@ -119,9 +119,9 @@ def tie_key(idea_row, *, criteria) -> tuple:
     ``idea_row`` is a mapping or object with ``triage_score``, ``evidence_count``,
     ``evidence_grade``, ``jhu_group_count``, ``stage``, ``document_count``,
     ``newest_document_date`` and ``idea_id`` (else ``id``). In order: triage score ↓,
-    evidence count ↓, evidence grade ↓ (criteria ladder; unknown ranks lowest), JHU groups ↓
-    (the S3 count only, never S6's outside count), stage earlier first (L56; unknown last),
-    qualifying documents ↓, newest qualifying document date ↓ (none last), idea id ↑.
+    evidence count ↓, evidence grade ↓ (criteria ladder; unknown ranks lowest), Scripps Research
+    groups ↓ (the S3 count only, never S6's outside count), stage earlier first (L56; unknown
+    last), qualifying documents ↓, newest qualifying document date ↓ (none last), idea id ↑.
     """
     grades, stages = _ladders(criteria.evidence_grades, criteria.stages)
     idea_id = _field(idea_row, "idea_id") or _field(idea_row, "id")

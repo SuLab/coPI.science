@@ -576,7 +576,7 @@ def _idea_lines(facts: _Facts) -> list[str]:
         ("Stage", idea.stage), ("Evidence grade", idea.evidence_grade),
     ):
         lines.append(f"- {label}: {_json(value) if value else 'none given'}")
-    lines.append(f"- Independent JHU groups: {idea.jhu_group_count}")
+    lines.append(f"- Independent Scripps Research groups: {idea.jhu_group_count}")
     for other in facts.linked:
         lines.append(
             f"- Linked {other.idea_type} idea: targets {_json(other.targets)}, agent "

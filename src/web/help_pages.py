@@ -82,8 +82,8 @@ HELP_PAGES: tuple[HelpPage, ...] = (
              AUDIENCE_ALL, "help/pages/projects.html",
              ("list", "outcomes", "detail", "reviewing", "assigning", "chat", "what-labs-see")),
     HelpPage("landscape", "Landscape",
-             "The weekly batch of opportunities found in Johns Hopkins research, deciding on "
-             "them, and the pipeline that finds them.",
+             "The weekly batch of opportunities found in research from Scripps Research, deciding "
+             "on them, and the pipeline that finds them.",
              AUDIENCE_ALL, "help/pages/landscape.html",
              ("list", "detail", "reviewing", "pipeline")),
     HelpPage("pis", "PIs",
