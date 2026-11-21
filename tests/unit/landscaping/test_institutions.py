@@ -1,33 +1,76 @@
+import pytest
+
 from src.landscaping.institutions import (
-    BALTIMORE_OPENALEX_IDS,
     EXCLUDED_OPENALEX_IDS,
-    is_baltimore_affiliation,
+    NSF_AWARDEE,
+    REPORTER_ORGS,
+    ROR_IDS,
+    SCRIPPS_OPENALEX_ID,
+    SCRIPPS_OPENALEX_IDS,
+    at_scripps_la_jolla,
+    is_scripps_la_jolla_affiliation,
+    names_excluded_campus,
     qualifies_openalex,
 )
 
+LA_JOLLA = "Department of Chemistry, The Scripps Research Institute, La Jolla, CA 92037, USA"
+JUPITER = "The Scripps Research Institute, Jupiter, United States"
+CALIBR_ID = "I4210140527"
 
-def test_baltimore_ids_match_spec():
-    assert BALTIMORE_OPENALEX_IDS == frozenset({
-        "I145311948", "I2799853436", "I4210150714", "I4210164401", "I2802697821",
-        "I4392738222", "I4391767829", "I4210092215", "I4210151848", "I4391012584",
-        "I4394709191", "I4389425327", "I4405260374", "I4392738135", "I4387152773",
-        "I4388891755", "I4210120405", "I4210129832", "I4210114877", "I4405267562",
-        "I1298154867",
+
+def test_institution_set_matches_spec():
+    assert SCRIPPS_OPENALEX_ID == "I123431417"
+    assert SCRIPPS_OPENALEX_IDS == frozenset({"I123431417"})
+    assert EXCLUDED_OPENALEX_IDS == frozenset({
+        "I4387156289", "I4210140527", "I150209017", "I1311914864", "I4210146328",
+        "I2802091096", "I4210107570", "I4210103888", "I4210142769", "I4210146979",
+        "I4210109568", "I16970960", "I4210089022",
     })
-    assert len(BALTIMORE_OPENALEX_IDS) == 21
-    assert not BALTIMORE_OPENALEX_IDS & EXCLUDED_OPENALEX_IDS
+    assert not SCRIPPS_OPENALEX_IDS & EXCLUDED_OPENALEX_IDS
+    assert REPORTER_ORGS == ("SCRIPPS RESEARCH INSTITUTE, THE",)
+    assert NSF_AWARDEE == "The Scripps Research Institute"
+    assert ROR_IDS == frozenset({"02dxx6824"})
 
 
-def test_matcher():
-    assert is_baltimore_affiliation("Johns Hopkins University School of Medicine")
-    assert is_baltimore_affiliation("Kennedy Krieger Institute")
-    assert is_baltimore_affiliation("Jhpiego")
-    assert not is_baltimore_affiliation("Johns Hopkins University Applied Physics Laboratory, Laurel, MD")
-    assert not is_baltimore_affiliation("Johns Hopkins All Children's Hospital, St. Petersburg")
+@pytest.mark.parametrize("text", [
+    LA_JOLLA,
+    "Scripps Research, 10550 North Torrey Pines Road, La Jolla, California, USA",
+    "Scripps Research Translational Institute, La Jolla, CA, USA",
+])
+def test_matcher_passes(text):
+    assert is_scripps_la_jolla_affiliation(text)
 
 
-def _auth(position="middle", corresponding=False, inst_ids=(), raw=(), name="Avery Quillfeather"):
-    return {
+@pytest.mark.parametrize("text", [
+    JUPITER,
+    "Scripps Research, 130 Scripps Way, Jupiter, FL 33458, USA",
+    "Department of Molecular Medicine, Scripps Research, Florida, USA",
+    "The Scripps Research Institute, FL 33458",
+    "Scripps Health, San Diego, CA, USA",
+    "Scripps Clinic, La Jolla, CA, USA",
+    "Scripps Institution of Oceanography, UC San Diego, La Jolla, CA, USA",
+    "Scripps College, Claremont, CA, USA",
+    "The Herbert Wertheim UF Scripps Institute for Biomedical Innovation & Technology, Jupiter, FL",
+    "Calibr-Skaggs Institute for Innovative Medicines, The Scripps Research Institute, La Jolla, CA",
+    "California Institute for Biomedical Research, La Jolla, CA",
+    "Taiwan Semiconductor Research Institute (TSRI), Hsinchu, Taiwan",
+    "Scripps",
+    "",
+])
+def test_matcher_fails(text):
+    assert not is_scripps_la_jolla_affiliation(text)
+
+
+def test_excluded_campus():
+    assert names_excluded_campus(JUPITER)
+    assert names_excluded_campus("Calibr, La Jolla, CA")
+    assert not names_excluded_campus(LA_JOLLA)
+    assert not names_excluded_campus("")
+
+
+def _auth(position="last", corresponding=False, inst_ids=(), raw=(), affs=None,
+          name="Avery Quillfeather"):
+    auth = {
         "author": {"display_name": name, "orcid": None},
         "raw_author_name": name,
         "author_position": position,
@@ -35,27 +78,87 @@ def _auth(position="middle", corresponding=False, inst_ids=(), raw=(), name="Ave
         "institutions": [{"id": f"https://openalex.org/{i}"} for i in inst_ids],
         "raw_affiliation_strings": list(raw),
     }
+    if affs is not None:
+        auth["affiliations"] = [
+            {"raw_affiliation_string": text, "institution_ids": [f"https://openalex.org/{i}" for i in ids]}
+            for text, ids in affs
+        ]
+    return auth
+
+
+S = SCRIPPS_OPENALEX_ID
+
+
+def test_tagged_la_jolla_counts_and_tagged_jupiter_does_not():
+    assert at_scripps_la_jolla(_auth(inst_ids=[S], affs=[(LA_JOLLA, [S])]))
+    assert not at_scripps_la_jolla(_auth(inst_ids=[S], affs=[(JUPITER, [S])]))
+
+
+def test_both_campuses_count():
+    assert at_scripps_la_jolla(_auth(inst_ids=[S], affs=[(JUPITER, [S]), (LA_JOLLA, [S])]))
+
+
+def test_only_tagged_entries_decide():
+    # The spec reads OpenAlex's own tags: an untagged La Jolla address beside a tagged Jupiter
+    # one does not rescue the authorship.
+    untagged = "Department of Chemistry, La Jolla, CA"
+    assert not at_scripps_la_jolla(_auth(inst_ids=[S], raw=[JUPITER, untagged],
+                                         affs=[(JUPITER, [S]), (untagged, [])]))
+
+
+def test_no_usable_detail_counts():
+    assert at_scripps_la_jolla(_auth(inst_ids=[S]))
+    assert at_scripps_la_jolla(_auth(inst_ids=[S], affs=[]))
+    assert at_scripps_la_jolla(_auth(inst_ids=[S], affs=[("", [S])]))
+    assert at_scripps_la_jolla(_auth(inst_ids=[S], raw=["Department of Chemistry, La Jolla"],
+                                     affs=[("Department of Chemistry, La Jolla", [])]))
+
+
+def test_untagged_jupiter_only_does_not_count():
+    jupiter_school = "Skaggs Graduate School, Jupiter, United States"
+    assert not at_scripps_la_jolla(_auth(inst_ids=[S], raw=[jupiter_school],
+                                         affs=[(jupiter_school, [])]))
+
+
+def test_untagged_scripps_strings_decide():
+    # With no tagged entry, the strings naming Scripps decide: another institution's address
+    # beside a Jupiter one does not rescue the authorship (audit 2026-11-20).
+    other = "Max Planck Institute of Biochemistry, Martinsried, Germany"
+    assert not at_scripps_la_jolla(_auth(inst_ids=[S], raw=[JUPITER, other],
+                                         affs=[(JUPITER, []), (other, [])]))
+    assert at_scripps_la_jolla(_auth(inst_ids=[S], raw=[LA_JOLLA, other],
+                                     affs=[(LA_JOLLA, []), (other, [])]))
+    assert at_scripps_la_jolla(_auth(inst_ids=[S], raw=[JUPITER, LA_JOLLA]))
+
+
+def test_calibr():
+    calibr = "Calibr-Skaggs Institute for Innovative Medicines, La Jolla, CA"
+    assert not at_scripps_la_jolla(_auth(inst_ids=[CALIBR_ID], affs=[(calibr, [CALIBR_ID])]))
+    both_ids = "Calibr-Skaggs Institute for Innovative Medicines, The Scripps Research Institute, La Jolla"
+    assert not at_scripps_la_jolla(_auth(inst_ids=[S, CALIBR_ID], affs=[(both_ids, [S, CALIBR_ID])]))
+    assert at_scripps_la_jolla(_auth(inst_ids=[S, CALIBR_ID],
+                                     affs=[(calibr, [CALIBR_ID]), (LA_JOLLA, [S])]))
+
+
+def test_raw_strings_only_when_no_institution():
+    assert at_scripps_la_jolla(_auth(raw=[LA_JOLLA]))
+    assert at_scripps_la_jolla(_auth(raw=[JUPITER, LA_JOLLA]))
+    assert not at_scripps_la_jolla(_auth(raw=["Scripps Health, San Diego, CA"]))
+    assert not at_scripps_la_jolla(_auth(inst_ids=["I999"], raw=[LA_JOLLA]))
 
 
 def _work(*auths):
-    return {"id": "https://openalex.org/W1", "authorships": [_auth("first", inst_ids=["I999"]), *auths]}
+    return {"id": "https://openalex.org/W1",
+            "authorships": [_auth("first", inst_ids=["I999"]), *auths]}
 
 
 def test_qualifies_openalex():
-    last = _auth("last", inst_ids=["I145311948"])
+    last = _auth("last", inst_ids=[S], affs=[(LA_JOLLA, [S])])
     assert qualifies_openalex(_work(last)) == (True, "last", last)
-
-    corr = _auth("middle", corresponding=True, inst_ids=["I4210164401"])
-    assert qualifies_openalex(_work(corr, _auth("last", inst_ids=["I999"]))) == (True, "corresponding", corr)
-
-    apl_only = _auth("last", inst_ids=["I2802946424"])
-    assert qualifies_openalex(_work(apl_only)) == (False, None, None)
-
-    jhu_text = ["Department of Medicine, Johns Hopkins University School of Medicine, Baltimore, MD"]
-    raw_only = _auth("last", raw=jhu_text)
-    assert qualifies_openalex(_work(raw_only)) == (True, "last", raw_only)
-    raw_with_other_inst = _auth("last", inst_ids=["I999"], raw=jhu_text)
-    assert qualifies_openalex(_work(raw_with_other_inst)) == (False, None, None)
-
-    collective = _auth("last", inst_ids=["I145311948"], name="Invented Cohort Study Consortium")
+    corr_jupiter = _auth("middle", corresponding=True, inst_ids=[S], affs=[(JUPITER, [S])])
+    assert qualifies_openalex(_work(corr_jupiter, last)) == (True, "last", last)
+    middle = _auth("middle", inst_ids=[S], affs=[(LA_JOLLA, [S])])
+    assert qualifies_openalex(_work(middle)) == (False, None, None)
+    collective = _auth("last", inst_ids=[S], affs=[(LA_JOLLA, [S])],
+                       name="Invented Cohort Study Consortium")
     assert qualifies_openalex(_work(collective)) == (False, None, None)

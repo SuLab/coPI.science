@@ -135,8 +135,9 @@ owner's go-ahead.
 
        $DC --profile landscape up -d --force-recreate landscape-worker
 
-   The pilot intake starts: one random month of each window year from every enabled
-   source, plus every positive-control document (D68).
+   The pilot intake starts: every month of the window from every enabled source (the
+   Scripps branch's whole-window pilot, `docs/specs/2026-11-20-scripps-landscaping-design.md`
+   §6.3; PubMed and GEO in NCBI's off-peak hours), plus every positive-control document (D68).
 6. **The bake-off** runs once the pilot documents are in, on samples of them, and stores a
    `bakeoff` report with its model picks. It seeds the regression set. When no Haiku or
    Sonnet candidate passes (D43), the first epoch's S2-S4 regression check fails the same

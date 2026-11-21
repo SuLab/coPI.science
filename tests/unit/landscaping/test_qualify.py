@@ -1,12 +1,19 @@
-"""S1, lab keys and the pilot slice pick (plan Task 3.5; spec §5.2, §5.3, §7.2, D68).
+"""S1, lab keys and the pilot slices (plan Task 3.5; spec §5.2, §5.3, §7.2, D68; Scripps
+spec §6.3).
 
 Every name is invented.
 """
 from dataclasses import replace
-from datetime import date, timedelta
+from datetime import date
 
 from src.config import get_settings
-from src.landscaping.intake import canonical_id, pilot_slices, slice_fetcher, summary_of
+from src.landscaping.intake import (
+    backfill_slices,
+    canonical_id,
+    pilot_slices,
+    slice_fetcher,
+    summary_of,
+)
 from src.landscaping.labs import lab_key, name_key_of
 from src.landscaping.qualify import s1_status
 from src.landscaping.sources import (
@@ -66,28 +73,28 @@ def test_lab_key_every_record_type():
         "authorships": [{
             "author_position": "last", "is_corresponding": False,
             "author": {"id": "https://openalex.org/A5000000001", "display_name": "Cora Lindqvist"},
-            "institutions": [{"id": "https://openalex.org/I145311948"}],
-            "raw_affiliation_strings": ["Johns Hopkins University, Baltimore, MD"],
+            "institutions": [{"id": "https://openalex.org/I123431417"}],
+            "raw_affiliation_strings": ["The Scripps Research Institute, La Jolla, CA"],
         }],
     })
     pubmed_rec = pubmed_works.to_document(
         {"pmid": "39000002", "title": "Invented"},
         {"last_author": {"last": "Marrowby", "fore": "Tamsin", "orcid": None,
-                         "affiliations": ["Johns Hopkins University, Baltimore, MD"]}},
+                         "affiliations": ["The Scripps Research Institute, La Jolla, CA"]}},
     )
     nih_rec = reporter.to_document([{
         "core_project_num": "R01XX000001", "appl_id": 11000001, "project_title": "Invented",
-        "organization": {"org_name": "JOHNS HOPKINS UNIVERSITY"},
+        "organization": {"org_name": "SCRIPPS RESEARCH INSTITUTE, THE"},
         "principal_investigators": [
             {"full_name": "Ada Quill", "profile_id": 9000001, "is_contact_pi": True}],
     }])
-    nsf_rec = nsf.to_document({"id": "2400001", "awardeeName": "Johns Hopkins University",
+    nsf_rec = nsf.to_document({"id": "2400001", "awardeeName": "The Scripps Research Institute",
                                "piFirstName": "Ben", "piLastName": "Ostrow", "title": "Invented"})
     patent_rec = odp_patents.to_document({
         "applicationNumberText": "17000001",
         "applicationMetaData": {
             "inventionTitle": "Invented", "firstInventorName": "Rowan Petrakis",
-            "applicantBag": [{"applicantNameText": "The Johns Hopkins University"}],
+            "applicantBag": [{"applicantNameText": "The Scripps Research Institute"}],
         },
     })
     jhtv_rec = jhtv.to_document({"case_id": "C12345", "title": "Invented",
@@ -127,23 +134,15 @@ def test_summary_of_prefers_pubmed_abstract():
     assert summary_of(replace(rec, summary="  "), None) is None
 
 
-def test_pilot_slices_one_month_per_window_year():
-    window_start = TODAY - timedelta(days=get_settings().landscape_window_days)
+def test_pilot_slices_cover_the_whole_window():
+    window = get_settings().landscape_window_days
     slices = pilot_slices(today=TODAY, seed=7)
-    months = sorted(key for source, key in slices if source == "openalex")
-    years = [int(key[len("month:"):][:4]) for key in months]
-    assert years == list(range(window_start.year, TODAY.year + 1))
-    for key in months:
-        year, month = (int(x) for x in key[len("month:"):].split("-"))
-        assert (year, month) >= (window_start.year, window_start.month)
-        assert (year, month) <= (TODAY.year, TODAY.month)
-    # Every source covers the same months; the pick is reproducible from the seed.
+    expected = [("jhtv", "feed:pilot") if source == "jhtv" else (source, key)
+                for source, key in backfill_slices(TODAY, window)]
+    assert slices == expected
+    assert pilot_slices(today=TODAY, seed=8) == slices
+    months = [key for source, key in slices if source == "openalex"]
     for source in ("pubmed", "nsf", "datacite", "geo"):
-        assert sorted(k for s, k in slices if s == source) == months
-    assert len([k for s, k in slices if s == "odp"]) <= len(years)
-    assert len([k for s, k in slices if s == "reporter"]) <= len(years)
-    assert ("jhtv", "feed:pilot") in slices
-    assert pilot_slices(today=TODAY, seed=7) == slices
-    # Each slice names a fetch its source takes.
+        assert [k for s, k in slices if s == source] == months
     for source, key in slices:
         assert callable(slice_fetcher(source, key))

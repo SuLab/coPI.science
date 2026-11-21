@@ -36,6 +36,7 @@ from sqlalchemy import func, select
 from src.landscaping import intake, llm_client
 from src.landscaping.evidence import opentargets
 from src.landscaping.fulltext import EUROPEPMC_SEARCH_URL
+from src.landscaping.institutions import REPORTER_ORGS
 from src.landscaping.sources import odp_patents
 from src.models.landscape import LandscapeReport, LandscapeSource
 from src.services import nih_reporter
@@ -137,7 +138,7 @@ async def probe_ortholog(client: httpx.AsyncClient) -> dict:
 
 async def probe_reporter_pi(client: httpx.AsyncClient) -> dict:
     body = {
-        "criteria": {"org_names": [nih_reporter.JHU_ORG_EXACT],
+        "criteria": {"org_names": [REPORTER_ORGS[0]],
                      "fiscal_years": [datetime.now(UTC).year - 1]},
         "include_fields": ["ProjectNum", "PrincipalInvestigators"],
         "offset": 0, "limit": 1,

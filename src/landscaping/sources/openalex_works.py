@@ -1,6 +1,6 @@
-"""The OpenAlex works source: Baltimore-lineage articles, preprints and reviews by
-publication date (spec 2026-10-30 §6.1), each mapped to a `DocumentRecord` with its §5.2
-qualification already applied.
+"""The OpenAlex works source: Scripps Research articles, preprints and reviews by
+publication date (spec 2026-10-30 §6.1), each mapped to a `DocumentRecord` with its
+qualification (docs/specs/2026-11-20-scripps-landscaping-design.md §6.1) already applied.
 """
 from __future__ import annotations
 
@@ -11,13 +11,9 @@ from src.landscaping.sources import DocumentRecord, SliceResult
 from src.services import openalex
 from src.services.identifiers import normalize_doi, normalize_orcid, normalize_pmid
 
-#: The §5.1 lineage roots: JHU, JH Medicine, Kennedy Krieger, JH Children's Center, JH Center
-#: for Health Security and Jhpiego. Lineage reaches their child institutions too; the
-#: §5.2 qualification then tests each authorship against the full Baltimore set.
-LINEAGE_FILTER = (
-    "authorships.institutions.lineage:"
-    "I145311948|I2799853436|I1298154867|I4210129832|I4210114877|I4405267562"
-)
+#: Scripps Research, the one lineage root; it has no child institutions. Both campuses
+#: share the id, so the qualification then tests each authorship's addresses.
+LINEAGE_FILTER = "authorships.institutions.lineage:I123431417"
 _TYPE_FILTER = "type:article|preprint|review"
 #: The §6.1 select list.
 SELECT = (
@@ -108,8 +104,9 @@ def to_document(work: dict) -> DocumentRecord:
 
     `role_basis` is ``"corresponding"`` or ``"last"`` when the work qualifies (§5.2,
     `qualifies_openalex`), else None. `authorships` then holds the single qualifying
-    authorship, `senior_names` its author, and `raw_qualifier` its Baltimore-test inputs
-    (bare institution ids and raw affiliation strings); all three are empty when the work
+    authorship, `senior_names` its author, and `raw_qualifier` its Scripps Research test
+    inputs (bare institution ids, raw affiliation strings and the per-address
+    `affiliations`); all three are empty when the work
     does not qualify. `summary` is the reconstructed abstract (`summary_source`
     ``"openalex"`` when there is one)."""
     _, role_basis, authorship = qualifies_openalex(work)
@@ -123,6 +120,7 @@ def to_document(work: dict) -> DocumentRecord:
                             for inst in authorship.get("institutions") or []) if i
             ],
             "raw_affiliations": list(authorship.get("raw_affiliation_strings") or []),
+            "affiliations": list(authorship.get("affiliations") or []),
         }
     return DocumentRecord(
         kind="preprint" if doc_type == "preprint" else "work",
@@ -153,7 +151,7 @@ async def _complete(work: dict) -> dict:
 
 
 async def fetch_slice(date_from: date, date_to: date) -> SliceResult:
-    """Every Baltimore-lineage article, preprint and review published from `date_from` to
+    """Every Scripps Research-lineage article, preprint and review published from `date_from` to
     `date_to` inclusive, each mapped by `to_document` (qualifying or not; S1 decides). Pages
     through `openalex.iter_works` with no cap: `expected` is OpenAlex's reported total and
     `received` the rows listed, for the §12.4 completeness check. RAISES on a fetch failure;

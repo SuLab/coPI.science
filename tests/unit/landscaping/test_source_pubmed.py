@@ -39,7 +39,7 @@ FIXTURE_XML = """<?xml version="1.0" ?>
         <Author ValidYN="Y">
           <LastName>Marrowby</LastName><ForeName>Tamsin</ForeName><Initials>T</Initials>
           <Identifier Source="ORCID">0000-0002-1825-0097</Identifier>
-          <AffiliationInfo><Affiliation>Department of Oncology, Johns Hopkins University School of Medicine, Baltimore, MD, USA.</Affiliation></AffiliationInfo>
+          <AffiliationInfo><Affiliation>Department of Chemistry, The Scripps Research Institute, La Jolla, CA, USA.</Affiliation></AffiliationInfo>
         </Author>
         <Author ValidYN="Y">
           <CollectiveName>Invented Trial Consortium</CollectiveName>
@@ -83,7 +83,7 @@ FIXTURE_XML = """<?xml version="1.0" ?>
       <AuthorList CompleteYN="Y">
         <Author ValidYN="Y">
           <LastName>Hollis</LastName><ForeName>Fenwick</ForeName><Initials>F</Initials>
-          <AffiliationInfo><Affiliation>Johns Hopkins Bloomberg School of Public Health, Baltimore, MD</Affiliation></AffiliationInfo>
+          <AffiliationInfo><Affiliation>Department of Chemistry, The Scripps Research Institute, La Jolla, CA, USA.</Affiliation></AffiliationInfo>
         </Author>
         <Author ValidYN="N">
           <LastName>Ostrander</LastName><ForeName>Pell</ForeName><Initials>P</Initials>
@@ -212,10 +212,10 @@ def test_last_valid_individual_author():
     assert review.doc_type == "review"
 
 
-def test_last_author_outside_baltimore_does_not_qualify():
+def test_last_author_at_jupiter_does_not_qualify():
     record = {"pmid": "1", "title": "t", "authors": []}
     last = {"last": "Quillfeather", "fore": "Avery", "orcid": None,
-            "affiliations": ["Example State University, Springfield"]}
+            "affiliations": ["The Scripps Research Institute, Jupiter, FL 33458, USA"]}
     doc = pubmed_works.to_document(record, {"last_author": last})
     assert doc.role_basis is None
     assert doc.summary is None and doc.summary_source is None
@@ -263,8 +263,7 @@ def test_existing_parser_output_unchanged():
             {
                 "last": "Marrowby", "fore": "Tamsin", "initials": "T", "collective": None,
                 "affiliations": [
-                    "Department of Oncology, Johns Hopkins University School of Medicine, "
-                    "Baltimore, MD, USA"
+                    "Department of Chemistry, The Scripps Research Institute, La Jolla, CA, USA"
                 ],
                 "orcid": "0000-0002-1825-0097", "position": 2, "suffix": None, "valid": True,
                 "equal_contrib": False,

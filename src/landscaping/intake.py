@@ -38,7 +38,6 @@ import contextlib
 import hashlib
 import json
 import logging
-import random
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Iterator
@@ -51,7 +50,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import get_settings
-from src.landscaping.institutions import BALTIMORE_OPENALEX_IDS
+from src.landscaping.institutions import SCRIPPS_OPENALEX_IDS
 from src.landscaping.labs import (
     lab_key,
     person_keys,
@@ -340,10 +339,10 @@ def _apply_summary(doc: LandscapeDocument, rec: DocumentRecord) -> None:
 
 
 def _institution(rec: DocumentRecord) -> str | None:
-    """The Baltimore institution a record qualified through, for counts by institution."""
+    """The Scripps Research institution a record qualified through, for counts by institution."""
     rq = rec.raw_qualifier
     for inst in rq.get("institution_ids") or []:
-        if inst in BALTIMORE_OPENALEX_IDS:
+        if inst in SCRIPPS_OPENALEX_IDS:
             return inst
     for key in ("affiliation", "org_name", "awardee"):
         if rq.get(key):
@@ -361,7 +360,7 @@ def _qualifying_authorships(rec: DocumentRecord) -> list | None:
 
 async def _resolve_lab(db: AsyncSession, rec: DocumentRecord) -> str | None:
     """The canonical lab key of a qualifying record (§5.2), lab rows written; the raw key of
-    a record that does not qualify, with no lab row (labs are Baltimore labs only)."""
+    a record that does not qualify, with no lab row (labs are Scripps Research labs only)."""
     if not rec.role_basis or not rec.senior_names:
         return lab_key(rec)
     person = rec.senior_names[0]
@@ -803,18 +802,17 @@ def _month_slices(year: int, month: int) -> list[tuple[str, str]]:
 
 
 def pilot_slices(*, today: date, seed: int) -> list[tuple[str, str]]:
-    """The pilot intake (D68): one month from each calendar year the window touches, picked
-    with ``random.Random(seed)`` among that year's in-window months, as each source's slice
-    covering it (the ODP quarter and RePORTER fiscal year holding the month), plus the JHTV
-    feed once. Every source is listed; `schedule_due` drops disabled ones."""
-    months = _window_months(today, get_settings().landscape_window_days)
-    rng = random.Random(seed)
-    slices: list[tuple[str, str]] = []
-    for year in sorted({y for y, _ in months}):
-        year, month = rng.choice([(y, m) for y, m in months if y == year])
-        slices += _month_slices(year, month)
-    slices.append(("jhtv", "feed:pilot"))
-    return list(dict.fromkeys(slices))
+    """The pilot intake: the whole window for the Scripps test (Scripps spec 2026-11-20
+    §6.3), the list `backfill_slices` builds with its JHTV feed keyed ``feed:pilot``. The
+    month keys are the backfill's, so the backfill's drain finds them already fetched. That
+    includes the anchor's unfinished month, quarter and fiscal year: records added to them
+    after the pilot fetch arrive only through the continuous cadence's lookbacks (spec §6.3).
+    Every source is listed; `schedule_due` drops disabled ones. `seed` is unused, kept for
+    callers."""
+    return [
+        ("jhtv", "feed:pilot") if pair == ("jhtv", "feed:backfill") else pair
+        for pair in backfill_slices(today, get_settings().landscape_window_days)
+    ]
 
 
 def backfill_slices(today: date, window_days: int) -> list[tuple[str, str]]:
@@ -858,7 +856,7 @@ async def _setting(db: AsyncSession, key: str) -> str | None:
 
 async def _pilot_anchor(db: AsyncSession, now: datetime) -> tuple[date, int]:
     """The pilot's fixed `today` and seed: the creation time of the first source row, so the
-    random months stay the same across restarts and days. Before any row exists, `now`."""
+    pilot's slices stay the same across restarts and days. Before any row exists, `now`."""
     first = (await db.execute(select(func.min(LandscapeSource.created_at)))).scalar_one_or_none()
     anchor = first or now
     return anchor.date(), int(anchor.timestamp() * 1_000_000)
@@ -888,17 +886,20 @@ async def _settled(
     return settled
 
 
-async def schedule_due(db: AsyncSession, *, now: datetime) -> list[tuple[str, str]]:
+async def schedule_due(
+    db: AsyncSession, *, now: datetime, respect_off_peak: bool = True,
+) -> list[tuple[str, str]]:
     """The ``(source, slice_key)`` pairs due at `now`, by ``app_settings.landscape_phase``:
 
     - ``pilot`` (also when unset, the state before an admin starts the backfill):
       `pilot_slices`, anchored by `_pilot_anchor` (D68);
-    - ``backfill``: every monthly slice of the window, oldest first; PubMed and GEO only in
-      NCBI's off-peak hours (K8);
+    - ``backfill``: every monthly slice of the window, oldest first;
     - ``continuous``: the D17 cadence.
 
-    A disabled source is never due, nor is a slice already ended, running, or failed within
-    the hour. The worker passes each pair to `slice_fetcher` and `run_slice`."""
+    In the pilot and backfill, PubMed and GEO are due only in NCBI's off-peak hours (K8),
+    unless `respect_off_peak` is false: the worker's pilot-intake check passes that, since a
+    slice held back for the off-peak hours is still owed. A disabled source is never due, nor
+    is a slice already ended, running, or failed within the hour. The worker passes each pair to `slice_fetcher` and `run_slice`."""
     phase = await _setting(db, "landscape_phase") or "pilot"
     window_days = get_settings().landscape_window_days
     if phase == "pilot":
@@ -906,13 +907,13 @@ async def schedule_due(db: AsyncSession, *, now: datetime) -> list[tuple[str, st
         wanted = pilot_slices(today=anchor_day, seed=seed)
     elif phase == "backfill":
         wanted = backfill_slices(now.date(), window_days)
-        if not _ncbi_off_peak(now):
-            wanted = [(s, k) for s, k in wanted if s not in NCBI_SOURCES]
     elif phase == "continuous":
         wanted = _continuous_slices(now.date(), window_days)
     else:
         logger.warning("landscaping: unknown landscape_phase %r; nothing scheduled", phase)
         return []
+    if phase in ("pilot", "backfill") and respect_off_peak and not _ncbi_off_peak(now):
+        wanted = [(s, k) for s, k in wanted if s not in NCBI_SOURCES]
     enabled = set((await db.execute(
         select(LandscapeSource.source).where(LandscapeSource.enabled.is_(True))
     )).scalars())

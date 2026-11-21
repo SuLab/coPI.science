@@ -32,7 +32,7 @@ def _work(n, authorships=None, **fields):
         "title": f"Work {n}",
         "type": "article",
         "authorships": authorships if authorships is not None else [
-            _auth("first", inst_ids=["I999"]), _auth("last", inst_ids=["I145311948"]),
+            _auth("first", inst_ids=["I999"]), _auth("last", inst_ids=["I123431417"]),
         ],
     }
     work.update(fields)
@@ -97,7 +97,7 @@ async def test_slice_counts_expected_vs_received(monkeypatch):
 
 async def test_refetch_when_100_authorships(monkeypatch):
     listed = [_auth("middle", inst_ids=["I999"], author_id=f"A{i}") for i in range(100)]
-    full = [*listed, _auth("last", inst_ids=["I145311948"], name="Rowan Thistlewood",
+    full = [*listed, _auth("last", inst_ids=["I123431417"], name="Rowan Thistlewood",
                            author_id="A900")]
     singles: list[str] = []
 
@@ -140,7 +140,7 @@ async def test_existing_list_works_unchanged(monkeypatch):
 
 
 def test_to_document_maps_a_qualifying_work():
-    senior = _auth("last", inst_ids=["I145311948"], name="Rowan Thistlewood",
+    senior = _auth("last", inst_ids=["I123431417"], name="Rowan Thistlewood",
                    orcid="https://orcid.org/0000-0002-1825-0097", author_id="A42")
     work = _work(
         9, authorships=[_auth("first", inst_ids=["I999"]), senior],
@@ -166,7 +166,23 @@ def test_to_document_maps_a_qualifying_work():
     assert doc.retracted is True
     assert doc.senior_names == [{"name": "Rowan Thistlewood", "orcid": "0000-0002-1825-0097",
                                  "openalex_author_id": "A42", "nih_pi_profile_id": None}]
-    assert doc.raw_qualifier["institution_ids"] == ["I145311948"]
+    assert doc.raw_qualifier["institution_ids"] == ["I123431417"]
+
+
+def test_to_document_keeps_the_qualifying_affiliations():
+    affiliations = [{"raw_affiliation_string": "The Scripps Research Institute, La Jolla, United States",
+                     "institution_ids": ["https://openalex.org/I123431417"]}]
+    senior = {**_auth("last", inst_ids=["I123431417"]), "affiliations": affiliations}
+    doc = openalex_works.to_document(_work(11, authorships=[senior]))
+    assert doc.role_basis == "last"
+    assert doc.raw_qualifier["affiliations"] == affiliations
+
+
+def test_to_document_drops_a_jupiter_senior_author():
+    senior = {**_auth("last", inst_ids=["I123431417"]), "affiliations": [
+        {"raw_affiliation_string": "The Scripps Research Institute, Jupiter, United States",
+         "institution_ids": ["https://openalex.org/I123431417"]}]}
+    assert openalex_works.to_document(_work(12, authorships=[senior])).role_basis is None
 
 
 def test_to_document_leaves_a_non_qualifying_work_unqualified():

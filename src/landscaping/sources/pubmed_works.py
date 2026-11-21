@@ -1,4 +1,4 @@
-"""The PubMed works source (spec §6.1): Baltimore Hopkins affiliations by ESearch.
+"""The PubMed works source (spec §6.1): Scripps Research La Jolla affiliations by ESearch.
 
 Backfill runs one `[dp]` month per slice and the daily incremental one `[edat]` range. ESearch
 serves at most 9,999 records per query (K8), so a slice at or above that is refused, never
@@ -11,12 +11,12 @@ import calendar
 from datetime import date
 from typing import Any
 
-from src.landscaping.institutions import is_baltimore_affiliation
+from src.landscaping.institutions import is_scripps_la_jolla_affiliation
 from src.landscaping.sources import DocumentRecord, SliceResult
 from src.services import pubmed
 from src.services.identifiers import normalize_doi
 
-AFFILIATION_TERM = '("Johns Hopkins"[ad] OR "Kennedy Krieger"[ad] OR "Jhpiego"[ad])'
+AFFILIATION_TERM = '"Scripps Research"[ad]'
 
 #: ESearch's per-query ceiling (K8): a slice whose count reaches it cannot be paged in full.
 ESEARCH_LIMIT = 9_999
@@ -101,12 +101,14 @@ def _doc_type(publication_types: list[str]) -> str:
 
 def _qualify(last_author: dict | None) -> tuple[str | None, dict[str, Any]]:
     """(role_basis, raw_qualifier) for a PubMed-only work (spec §5.2): it qualifies when the
-    last valid individual author has an affiliation passing the §5.1 matcher. PubMed has no
-    corresponding-author flag, so no other author is considered."""
+    last valid individual author has an affiliation passing
+    `is_scripps_la_jolla_affiliation`. PubMed has no corresponding-author flag, so no other
+    author is considered."""
     if last_author is None:
         return None, {"last_author": None, "affiliation": None}
     matched = next(
-        (aff for aff in last_author.get("affiliations") or [] if is_baltimore_affiliation(aff)),
+        (aff for aff in last_author.get("affiliations") or []
+         if is_scripps_la_jolla_affiliation(aff)),
         None,
     )
     qualifier = {"last_author": last_author, "affiliation": matched}

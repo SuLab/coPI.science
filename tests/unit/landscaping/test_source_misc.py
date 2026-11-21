@@ -90,7 +90,7 @@ async def test_geo_inst_variants_query(monkeypatch):
     assert url.endswith("esearch.fcgi") and params["db"] == "gds"
     for name in geo.INST_VARIANTS:
         assert f'"{name}"[INST]' in params["term"]
-    assert "Kennedy Krieger Institute" in geo.INST_VARIANTS
+    assert "The Scripps Research Institute" in geo.INST_VARIANTS
     assert "gse[ETYP]" in params["term"]
     assert '("2025/01/01"[PDAT] : "2025/03/31"[PDAT])' in params["term"]
     assert calls[1][0].endswith("esummary.fcgi") and calls[1][1]["id"] == "200111"
@@ -110,7 +110,7 @@ async def test_odp_query_shape(monkeypatch):
                 "inventionTitle": "Invented compound",
                 "filingDate": "2024-01-05", "earliestPublicationDate": "2025-05-08",
                 "firstInventorName": "Ada Fictitious",
-                "applicantBag": [{"applicantNameText": "The Johns Hopkins University"}],
+                "applicantBag": [{"applicantNameText": "The Scripps Research Institute"}],
             }}]})
 
     monkeypatch.setattr(odp_patents, "_make_client",
@@ -125,8 +125,7 @@ async def test_odp_query_shape(monkeypatch):
     q = body["q"]
     for field in ("applicationMetaData.applicantBag.applicantNameText",
                   "assignmentBag.assigneeBag.assigneeNameText"):
-        for name in ("Johns Hopkins", "Kennedy Krieger"):
-            assert f'{field}:"{name}"' in q
+        assert f'{field}:"Scripps Research"' in q
     assert "firstInventorName" not in q
     assert body["rangeFilters"] == [{"field": odp_patents.DATE_FIELD,
                                      "valueFrom": "2025-04-01", "valueTo": "2025-06-30"}]
@@ -142,7 +141,7 @@ async def test_odp_query_shape(monkeypatch):
 def _app(*cities):
     return {"applicationNumberText": "18000002", "applicationMetaData": {
         "inventionTitle": "Invented sensor",
-        "applicantBag": [{"applicantNameText": "The Johns Hopkins University"}],
+        "applicantBag": [{"applicantNameText": "The Scripps Research Institute"}],
         "inventorBag": [
             {"inventorNameText": f"Inventor {i}",
              "correspondenceAddressBag": [{"cityName": c}] if c else []}
@@ -151,20 +150,10 @@ def _app(*cities):
     }}
 
 
-def test_apl_inventor_city_exclusion_when_present():
-    all_laurel = odp_patents.to_document(_app("Laurel", "NORTH LAUREL"))
-    assert all_laurel.raw_qualifier["apl"] is True
-    assert all_laurel.raw_qualifier["inventor_cities"] == ["Laurel", "NORTH LAUREL"]
-
-    mixed = odp_patents.to_document(_app("Laurel", "Baltimore"))
-    assert mixed.raw_qualifier["apl"] is False
-
-    no_cities = odp_patents.to_document(_app(None, None))
-    assert no_cities.raw_qualifier["apl"] is False
-    assert no_cities.raw_qualifier["inventor_cities"] == []
-
-    one_unknown = odp_patents.to_document(_app("Laurel", None))
-    assert one_unknown.raw_qualifier["apl"] is False
+def test_no_inventor_city_excludes_a_scripps_patent():
+    for cities in (("Jupiter", "Jupiter"), ("La Jolla", "San Diego"), (None, None)):
+        assert odp_patents.to_document(_app(*cities)).raw_qualifier["apl"] is False
+    assert odp_patents.to_document(_app("Jupiter", None)).raw_qualifier["inventor_cities"] == ["Jupiter"]
 
 
 def test_datasets_never_idea_sources():

@@ -1,5 +1,6 @@
-"""The DataCite datasets source: datasets whose creators are affiliated with a §5.1 ROR id
-or name variant, by creation date (spec 2026-10-30 §6.1).
+"""The DataCite datasets source: datasets whose creators are affiliated with a Scripps
+Research ROR id or name variant (docs/specs/2026-11-20-scripps-landscaping-design.md §6.1),
+by creation date (spec 2026-10-30 §6.1).
 
 Datasets are evidence only (D3): every record is ``kind="dataset"`` with no `role_basis`,
 and intake attaches it to a stored work through the DOIs and PMIDs in its `related_ids`.
@@ -18,13 +19,7 @@ from src.services.identifiers import normalize_doi, normalize_pmid
 DOIS_URL = "https://api.datacite.org/dois"
 PAGE_SIZE = 1000
 #: Affiliation names that carry no ROR id on older records.
-NAME_VARIANTS = (
-    "Johns Hopkins University",
-    "Johns Hopkins Medicine",
-    "Johns Hopkins University School of Medicine",
-    "Johns Hopkins Bloomberg School of Public Health",
-    "Kennedy Krieger Institute",
-)
+NAME_VARIANTS = ("The Scripps Research Institute", "Scripps Research Institute", "Scripps Research")
 
 
 def _make_client() -> httpx.AsyncClient:

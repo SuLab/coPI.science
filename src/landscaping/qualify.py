@@ -67,8 +67,8 @@ def _in_window(rec: DocumentRecord, *, today: date, window_days: int) -> bool:
 def s1_status(rec: DocumentRecord, *, today: date, window_days: int) -> str:
     """``"eligible"`` or ``"excluded:<reason>"`` for one record (spec §7.2).
 
-    Reasons, checked in this order: ``dataset_evidence_only`` (D3), ``apl`` (a patent whose
-    inventors are all in Laurel or North Laurel, §6.1), ``not_qualified`` (no §5.2
+    Reasons, checked in this order: ``dataset_evidence_only`` (D3), ``apl`` (a patent every
+    one of whose inventors is in an excluded city; none for Scripps Research), ``not_qualified`` (no §5.2
     `role_basis`), ``retracted``, ``type_review_evidence_only``, ``type_<doc_type>`` (D4),
     ``language`` (a stated language other than English; an unstated one passes) and
     ``window``."""

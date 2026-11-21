@@ -154,19 +154,22 @@ async def test_counts_by_institution(db_factory):
     assert counts["by_stage"]["s1"] == {"eligible": 3, "excluded:not_qualified": 1}
 
 
-async def test_drift_lists_unknown_hopkins_institutions(db_factory):
+async def test_drift_lists_unknown_scripps_institutions(db_factory):
     authorship = {
         "author": {"display_name": "Invented Author"},
         "institutions": [
-            {"id": "https://openalex.org/I145311948", "display_name": "Johns Hopkins University"},
-            # Excluded by §5.1 (not in Baltimore): already decided, never proposed.
-            {"id": "https://openalex.org/I2802946424",
-             "display_name": "Johns Hopkins University Applied Physics Laboratory"},
+            {"id": "https://openalex.org/I123431417", "display_name": "Scripps Research Institute"},
+            # In the excluded list: already decided, never proposed.
+            {"id": "https://openalex.org/I4387156289",
+             "display_name": "Scripps Research Invented Florida Annex"},
             {"id": "https://openalex.org/I999000001",
-             "display_name": "Johns Hopkins Invented Annex"},
+             "display_name": "Scripps Research Invented Annex"},
             {"id": "https://openalex.org/I999000002", "display_name": "Invented Lineage Center",
-             "lineage": ["https://openalex.org/I999000002", "https://openalex.org/I2799853436"]},
+             "lineage": ["https://openalex.org/I999000002", "https://openalex.org/I123431417"]},
             {"id": "https://openalex.org/I999000003", "display_name": "Invented Other College"},
+            # Names Scripps but not Scripps Research, with no lineage to it: not proposed.
+            {"id": "https://openalex.org/I999000004",
+             "display_name": "Scripps Health Invented Clinic"},
         ],
     }
     async with db_factory() as db:
@@ -176,7 +179,7 @@ async def test_drift_lists_unknown_hopkins_institutions(db_factory):
         report = await reports.drift_report(db)
     listed = {entry["id"]: entry for entry in report["unknown_institutions"]}
     assert set(listed) == {"I999000001", "I999000002"}
-    assert listed["I999000001"]["display_name"] == "Johns Hopkins Invented Annex"
+    assert listed["I999000001"]["display_name"] == "Scripps Research Invented Annex"
     assert listed["I999000001"]["documents"] == 2
     assert report["documents_checked"] == 2
 

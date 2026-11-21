@@ -1,5 +1,6 @@
-"""The GEO datasets source: GEO series (`gse[ETYP]`) submitted under a §5.1 institution
-name variant (`[INST]`), by public-release date (spec 2026-10-30 §6.1).
+"""The GEO datasets source: GEO series (`gse[ETYP]`) submitted under a Scripps Research
+name variant (`[INST]`; docs/specs/2026-11-20-scripps-landscaping-design.md §6.1), by
+public-release date (spec 2026-10-30 §6.1).
 
 Datasets are evidence only (D3): every record is ``kind="dataset"`` with no `role_basis`,
 and intake attaches it to a stored work through the PMIDs in its `related_ids`.
@@ -15,16 +16,8 @@ from src.landscaping.sources import DocumentRecord, SliceResult
 from src.services import pubmed
 from src.services.identifiers import normalize_pmid
 
-#: GEO `[INST]` name variants of the §5.1 set.
-INST_VARIANTS = (
-    "Johns Hopkins University",
-    "Johns Hopkins School of Medicine",
-    "Johns Hopkins University School of Medicine",
-    "Johns Hopkins Medicine",
-    "Johns Hopkins Bloomberg School of Public Health",
-    "Johns Hopkins Hospital",
-    "Kennedy Krieger Institute",
-)
+#: GEO `[INST]` name variants of Scripps Research.
+INST_VARIANTS = ("The Scripps Research Institute", "Scripps Research Institute", "Scripps Research")
 PAGE = 500
 
 

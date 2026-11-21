@@ -1,5 +1,5 @@
-"""Pipeline metrics and reports (spec 2026-10-30 §5.1 "Drift", §10.2, §10.3, §10.6; L32,
-D63, D68).
+"""Pipeline metrics and reports (spec 2026-10-30 §10.2, §10.3, §10.6; L32, D63, D68; the
+drift listing, docs/specs/2026-11-20-scripps-landscaping-design.md §6.1).
 
 Everything here reads the database; only `pilot_report` writes (one ``landscape_reports``
 row). The returned dicts hold only JSON values (ids and times as strings, money as floats),
@@ -21,10 +21,9 @@ from typing import Any
 from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.config import get_settings
 from src.landscaping import intake
 from src.landscaping.eval import bakeoff
-from src.landscaping.institutions import BALTIMORE_OPENALEX_IDS, EXCLUDED_OPENALEX_IDS
+from src.landscaping.institutions import EXCLUDED_OPENALEX_IDS, SCRIPPS_OPENALEX_IDS
 from src.landscaping.labs import COLLISION_PREFIX
 from src.landscaping.llm_client import STAGE_SPECS
 from src.models import AppSetting
@@ -75,9 +74,10 @@ _DOCUMENT_STAGES = (("screen", LandscapeScreen), ("extract", LandscapeExtraction
 _TRUNCATION_STAGES = ("deep", "deep_extract", "final")
 #: Statuses a positive control passes a stage with.
 _PASSED = frozenset({"done", "rescued"})
-#: An OpenAlex institution the drift listing considers Hopkins (§5.1 "Drift").
-_HOPKINS_NAME = re.compile(r"hopkins|kennedy[\s-]+krieger", re.IGNORECASE)
-_LINEAGE_ROOTS = frozenset({"I145311948", "I2799853436"})
+#: An OpenAlex institution the drift listing considers Scripps Research
+#: (docs/specs/2026-11-20-scripps-landscaping-design.md §6.1 "Drift report").
+_INSTITUTION_NAME = re.compile(r"\bscripps\s+research\b", re.IGNORECASE)
+_LINEAGE_ROOTS = frozenset({"I123431417"})
 #: Expert-agreement groups (D63): items in a batch issued before the draw, and items judged by
 #: manager-experts, may have been judged with S9's calls seen, so they are kept apart.
 _EXPERT_GROUPS = ("independent", "issued_before_draw", "manager_experts")
@@ -492,17 +492,17 @@ def _institutions_of(authorships: list | None):
                     yield inst
 
 
-def _hopkins_like(inst: dict) -> bool:
+def _institution_like(inst: dict) -> bool:
     lineage = {_bare(i) for i in inst.get("lineage") or []}
-    return bool(_HOPKINS_NAME.search(str(inst.get("display_name") or ""))) or bool(
+    return bool(_INSTITUTION_NAME.search(str(inst.get("display_name") or ""))) or bool(
         lineage & _LINEAGE_ROOTS
     )
 
 
 async def drift_report(db: AsyncSession) -> dict:
-    """The §5.1 drift listing: OpenAlex institutions on stored qualifying authorships that look
-    Hopkins (the name says Hopkins or Kennedy Krieger, or the lineage reaches JHU or JH
-    Medicine) and are in neither the Baltimore set nor its excluded list. It proposes; a code
+    """The drift listing: OpenAlex institutions on stored qualifying authorships that look
+    Scripps Research (the name says Scripps Research, or the lineage reaches it) and are in
+    neither the Scripps Research set nor its excluded list. It proposes; a code
     change adds (D1). Returns ``{"unknown_institutions": [{"id", "display_name", "documents"}],
     "documents_checked"}``, most frequent first."""
     seen: dict[str, dict] = {}
@@ -516,8 +516,8 @@ async def drift_report(db: AsyncSession) -> dict:
         checked += 1
         for inst in _institutions_of(authorships):
             inst_id = _bare(inst.get("id"))
-            if (not inst_id or inst_id in BALTIMORE_OPENALEX_IDS
-                    or inst_id in EXCLUDED_OPENALEX_IDS or not _hopkins_like(inst)):
+            if (not inst_id or inst_id in SCRIPPS_OPENALEX_IDS
+                    or inst_id in EXCLUDED_OPENALEX_IDS or not _institution_like(inst)):
                 continue
             entry = seen.setdefault(inst_id, {
                 "id": inst_id, "display_name": inst.get("display_name"), "documents": 0,
@@ -708,12 +708,11 @@ async def _truncation(db: AsyncSession) -> dict[str, dict]:
 
 
 async def _cost_throughput(db: AsyncSession) -> dict:
-    """Per ledger stage: calls, dollars and calls per hour over the stage's span, each
-    projected to the full window by the ratio of window months to pilot months (one per
-    window year, D68)."""
-    anchor, _ = await intake._pilot_anchor(db, datetime.now(UTC))
-    months = intake._window_months(anchor, get_settings().landscape_window_days)
-    factor = len(months) / max(1, len({y for y, _ in months}))
+    """Per ledger stage: calls, dollars and calls per hour over the stage's span. The
+    pilot covers the whole window (docs/specs/2026-11-20-scripps-landscaping-design.md
+    §6.3), so nothing is projected: the backfill factor is 1 and each projection equals
+    the pilot's own figure."""
+    factor = 1.0
     C = LandscapeLlmCall
     rows = (await db.execute(
         select(C.stage, func.count(), func.coalesce(func.sum(C.cost_usd), 0),

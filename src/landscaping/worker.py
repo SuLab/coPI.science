@@ -1433,9 +1433,18 @@ async def _bakeoff_trigger(db_factory, loop: _Loop) -> str | None:
 
 async def _pilot_intake_in(db: AsyncSession, now: datetime) -> bool:
     """Every pilot slice has ended: none would be due even once a recently failed slice's retry
-    wait (``intake.FAILED_RETRY_AFTER``) has passed, and no fetch is running."""
-    due = await intake.schedule_due(db, now=now + intake.FAILED_RETRY_AFTER)
-    running = await db.scalar(select(exists().where(LandscapeFetch.status == "running")))
+    wait (``intake.FAILED_RETRY_AFTER``) has passed, and no fetch is running. A slice held back
+    for NCBI's off-peak hours is still owed, so the check ignores that filter (Scripps spec
+    2026-11-20 §6.3). A ``running`` row older than ``intake.RUNNING_STALE_AFTER`` is not a
+    fetch: a worker that died mid-slice leaves one that nothing clears, and its slice is due
+    again (``intake._settled``)."""
+    due = await intake.schedule_due(
+        db, now=now + intake.FAILED_RETRY_AFTER, respect_off_peak=False,
+    )
+    running = await db.scalar(select(exists().where(
+        LandscapeFetch.status == "running",
+        LandscapeFetch.started_at > now - intake.RUNNING_STALE_AFTER,
+    )))
     return not due and not running
 
 

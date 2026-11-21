@@ -1,92 +1,110 @@
-"""The Baltimore Johns Hopkins institution set and the author qualification of an OpenAlex
-work (spec 2026-10-30 §5.1, §5.2; L3, L4, D1, D2).
+"""The Scripps Research La Jolla institution set and the author qualification of an OpenAlex
+work (docs/specs/2026-11-20-scripps-landscaping-design.md §6.1).
 
-Nothing here is added automatically: a new Hopkins institution in OpenAlex reaches this
-set only through a code change, prompted by the weekly drift listing (§5.1 "Drift").
+OpenAlex tags both Scripps Research campuses, La Jolla and Jupiter, with the one id
+`SCRIPPS_OPENALEX_ID`, so an authorship's per-address `affiliations` decide the campus
+(`at_scripps_la_jolla`). Nothing here is added automatically: a new Scripps Research
+institution in OpenAlex reaches these sets only through a code change, prompted by the weekly
+drift listing.
 """
 import re
 
-from src.services.authorship_roles import ROLE_RANK, at_institution, is_individual, role
-from src.services.jhu_rules import is_hopkins_affiliation
+from src.services.authorship_roles import ROLE_RANK, is_individual, role
 
-#: The OpenAlex institutions in Baltimore that are part of, or affiliated with, Johns
-#: Hopkins (§5.1 table, from OpenAlex on 2026-10-30).
-BALTIMORE_OPENALEX_IDS = frozenset({
-    "I145311948",   # Johns Hopkins University
-    "I2799853436",  # Johns Hopkins Medicine
-    "I4210150714",  # Johns Hopkins Hospital
-    "I4210164401",  # Sidney Kimmel Comprehensive Cancer Center
-    "I2802697821",  # Johns Hopkins Bayview Medical Center
-    "I4392738222",  # Center for Innovative Medicine
-    "I4391767829",  # Neurofibromatosis Therapeutic Acceleration Program
-    "I4210092215",  # Berman Institute of Bioethics
-    "I4210151848",  # Center for Communication Programs
-    "I4391012584",  # Hopkins Extreme Materials Institute
-    "I4394709191",  # Johns Hopkins University Press
-    "I4389425327",  # JHU Center for AIDS Research
-    "I4405260374",  # JH Materials Characterization and Processing Facility
-    "I4392738135",  # Packard Center
-    "I4387152773",  # PARADIM
-    "I4388891755",  # Materials Science in Extreme Environments University Research Alliance
-    "I4210120405",  # Maryland Space Grant Consortium
-    "I4210129832",  # Johns Hopkins Children's Center
-    "I4210114877",  # Johns Hopkins Center for Health Security
-    "I4405267562",  # Jhpiego
-    "I1298154867",  # Kennedy Krieger Institute
-})
+#: Scripps Research in OpenAlex, both campuses; it has no child institutions (§6.1).
+SCRIPPS_OPENALEX_ID = "I123431417"
+#: The OpenAlex institutions of the set.
+SCRIPPS_OPENALEX_IDS = frozenset({SCRIPPS_OPENALEX_ID})
 
-#: The Hopkins-lineage OpenAlex institutions §5.1 excludes because they are not in
-#: Baltimore; the drift listing skips them as already decided.
+#: Known non-La Jolla or unrelated "Scripps" institutions (§6.1, §12); the drift listing
+#: skips them as already decided.
 EXCLUDED_OPENALEX_IDS = frozenset({
-    "I2802946424",  # Applied Physics Laboratory (North Laurel, MD)
-    "I4210098865",  # All Children's Hospital (St. Petersburg, FL)
-    "I4390039338",  # SAIS (Washington)
-    "I4210131961",  # SAIS Bologna Center
-    "I4210162165",  # Hopkins-Nanjing Center
-    "I4210148073",  # Sibley Memorial Hospital (Washington, DC)
-    "I2799487757",  # Suburban Hospital (Bethesda, MD)
-    "I2800996824",  # Howard County General Hospital (Columbia, MD)
-    "I1326779652",  # Peninsula Regional Medical Center (Salisbury, MD)
-    "I2800952698",  # Saudi Aramco Medical Services Organization (Dhahran)
-    "I4210152837",  # Dhahran Health Center
-    "I4210121676",  # MUJHU Research Collaboration (Kampala)
+    "I4387156289",  # Herbert Wertheim UF Scripps Institute (Jupiter)
+    "I4210140527",  # Calibr
+    "I150209017",   # Scripps Institution of Oceanography
+    "I1311914864",  # Scripps Health
+    "I4210146328",  # Scripps Clinic
+    "I2802091096",  # Scripps Mercy
+    "I4210107570",  # Scripps Memorial
+    "I4210103888",  # Scripps Green
+    "I4210142769",  # Scripps Whittier Diabetes Institute
+    "I4210146979",  # Scripps MD Anderson
+    "I4210109568",  # Scripps Clinic Medical Group
+    "I16970960",    # Scripps College
+    "I4210089022",  # Scripps Korea Antibody Institute
 })
 
-#: NIH RePORTER organization names of the Baltimore set.
-REPORTER_ORGS = ("JOHNS HOPKINS UNIVERSITY", "HUGO W. MOSER RES INST KENNEDY KRIEGER")
-#: The NSF awardee name of the Baltimore set.
-NSF_AWARDEE = "Johns Hopkins University"
-#: ROR ids for DataCite: JHU, JH Medicine, Kennedy Krieger, Sidney Kimmel.
-ROR_IDS = frozenset({"00za53h95", "037zgn354", "05q6tgt32", "05m5b8x20"})
+#: NIH RePORTER organization names of the set.
+REPORTER_ORGS = ("SCRIPPS RESEARCH INSTITUTE, THE",)
+#: The NSF awardee name of the set.
+NSF_AWARDEE = "The Scripps Research Institute"
+#: ROR ids for DataCite: Scripps Research.
+ROR_IDS = frozenset({"02dxx6824"})
 
-_ALSO_BALTIMORE = re.compile(r"\b(kennedy[\s-]+krieger|jhpiego)\b", re.IGNORECASE)
-# The excluded places of §5.1, as raw affiliation text names them.
-_EXCLUDED_PLACE = re.compile(
-    r"\b(applied physics laboratory|laurel|all children[’']?s|(?:st\.?|saint)\s+petersburg"
-    r"|sais|bologna|nanjing|sibley|suburban|howard county|peninsula regional|aramco|dhahran"
-    r"|kampala)\b",
+# "The Scripps Research Institute" contains the phrase; bare "Scripps" and "TSRI" never pass.
+_SCRIPPS_RESEARCH = re.compile(r"\bscripps\s+research\b", re.IGNORECASE)
+# Any "Scripps" string ("Scripps Research", "Scripps Florida", ...): with no tagged entry, the
+# raw strings that name Scripps decide the campus (`at_scripps_la_jolla`).
+_SCRIPPS_WORD = re.compile(r"\bscripps\b", re.IGNORECASE)
+# The Jupiter campus (Jupiter, Florida, a FL 334xx postcode) and Calibr.
+_EXCLUDED_CAMPUS = re.compile(
+    r"\bjupiter\b|\bflorida\b|\bfl\.?\s*334\d\d\b|\bcalibr\b"
+    r"|\bcalifornia\s+institute\s+for\s+biomedical\s+research\b",
     re.IGNORECASE,
 )
 
-#: The roles that make an authorship senior enough to qualify a work (§5.2).
+#: The roles that make an authorship senior enough to qualify a work.
 _QUALIFYING_ROLES = frozenset({"corresponding", "last"})
 
 
-def is_baltimore_affiliation(text: str) -> bool:
-    """Whether a raw affiliation string is a Baltimore Hopkins one (§5.1): it names Johns
-    Hopkins (``jhu_rules.is_hopkins_affiliation``), Kennedy Krieger or Jhpiego, and names
-    none of the excluded places."""
-    if not text:
+def _bare(url: str | None) -> str:
+    """The last path segment of an OpenAlex URL (the bare ``I…`` id)."""
+    return (url or "").rsplit("/", 1)[-1]
+
+
+def names_excluded_campus(text: str) -> bool:
+    """Whether a raw affiliation string names Jupiter, Florida, a FL 334xx postcode or
+    Calibr (California Institute for Biomedical Research)."""
+    return bool(text) and bool(_EXCLUDED_CAMPUS.search(text))
+
+
+def is_scripps_la_jolla_affiliation(text: str) -> bool:
+    """Whether a raw affiliation string is a Scripps Research La Jolla one: it names Scripps
+    Research and no excluded campus (`names_excluded_campus`). False for empty text."""
+    if not text or not _SCRIPPS_RESEARCH.search(text):
         return False
-    if not (is_hopkins_affiliation(text) or _ALSO_BALTIMORE.search(text)):
+    return not names_excluded_campus(text)
+
+
+def at_scripps_la_jolla(auth: dict) -> bool:
+    """Whether an OpenAlex authorship is at Scripps Research La Jolla.
+
+    When it lists `SCRIPPS_OPENALEX_ID`: the `affiliations` entries tagged with that id
+    decide, and it counts when one of their raw strings names no excluded campus; with no
+    such entry it counts unless its raw affiliation strings that name Scripps (all of them
+    when none does) are non-empty and every one names an excluded campus, so another
+    institution's address cannot rescue a Jupiter one. Listing only other institutions, it
+    does not count. Listing no institution, it counts when a raw affiliation string passes
+    `is_scripps_la_jolla_affiliation`."""
+    inst_ids = {_bare(i.get("id")) for i in auth.get("institutions") or []}
+    if SCRIPPS_OPENALEX_ID in inst_ids:
+        tagged = [a for a in auth.get("affiliations") or []
+                  if SCRIPPS_OPENALEX_ID in {_bare(x) for x in a.get("institution_ids") or []}]
+        if tagged:
+            return any(not names_excluded_campus(a.get("raw_affiliation_string") or "")
+                       for a in tagged)
+        raw = [s for s in auth.get("raw_affiliation_strings") or [] if s]
+        deciding = [s for s in raw if _SCRIPPS_WORD.search(s)] or raw
+        return not deciding or not all(names_excluded_campus(s) for s in deciding)
+    if inst_ids:
         return False
-    return not _EXCLUDED_PLACE.search(text)
+    return any(is_scripps_la_jolla_affiliation(s)
+               for s in auth.get("raw_affiliation_strings") or [])
 
 
 def qualifies_openalex(work: dict) -> tuple[bool, str | None, dict | None]:
-    """Whether an OpenAlex work qualifies (§5.2): some individual authorship is
-    corresponding or last and lists a Baltimore institution id, or, listing no
-    institution, a raw affiliation string passing ``is_baltimore_affiliation``.
+    """Whether an OpenAlex work qualifies: some individual authorship is corresponding or
+    last and passes `at_scripps_la_jolla`.
 
     Returns ``(True, role_basis, authorship)`` for the most senior such authorship
     (``ROLE_RANK``; the earliest listed on a tie), ``role_basis`` being ``"corresponding"``
@@ -97,8 +115,7 @@ def qualifies_openalex(work: dict) -> tuple[bool, str | None, dict | None]:
         r = role(auth)
         if r not in _QUALIFYING_ROLES or not is_individual(auth):
             continue
-        if not at_institution(auth, BALTIMORE_OPENALEX_IDS, is_baltimore_affiliation,
-                              raw_strings="only_when_no_institutions"):
+        if not at_scripps_la_jolla(auth):
             continue
         if best_role is None or ROLE_RANK[r] < ROLE_RANK[best_role]:
             best, best_role = auth, r

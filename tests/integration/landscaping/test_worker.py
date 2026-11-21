@@ -870,10 +870,11 @@ async def test_rebuild_ending_over_the_cap_lands_only_under_it(
 
 
 @pytest.mark.asyncio
-async def test_phase_pilot_runs_no_backfill(db_factory, settings, calls, monkeypatch):
+async def test_phase_pilot_fetches_the_whole_window(db_factory, settings, calls, monkeypatch):
     monkeypatch.setattr(intake, "schedule_due", REAL_SCHEDULE_DUE)
     async with db_factory() as db:
         await intake.ensure_sources(db)
+        anchor_day, _ = await intake._pilot_anchor(db, NOW)
     state = worker.WorkerState()
     await worker.run_once(db_factory, state, now=NOW)
     await asyncio.gather(*state.fetching.values())
@@ -882,13 +883,13 @@ async def test_phase_pilot_runs_no_backfill(db_factory, settings, calls, monkeyp
     assert fetched
     assert all(key.startswith(("month:", "quarter:", "fy:", "feed:")) for _, key in fetched)
     openalex = [key for source, key in fetched if source == "openalex"]
-    years = {key.split(":", 1)[1][:4] for key in openalex}
-    assert len(openalex) == len(years), "the pilot takes one month per window year (D68)"
-    backfill = [
-        key for source, key in intake.backfill_slices(NOW.date(), settings.landscape_window_days)
+    window = [
+        key for source, key in intake.backfill_slices(anchor_day, settings.landscape_window_days)
         if source == "openalex"
     ]
-    assert len(openalex) < len(backfill)
+    assert openalex == window, "the pilot takes the whole window (Scripps spec §6.3)"
+    # NOW, 08:00 Eastern on a Friday, is NCBI peak: no PubMed or GEO slice starts.
+    assert not any(source in intake.NCBI_SOURCES for source, _ in fetched)
     assert ("jhtv", "feed:pilot") not in fetched
     assert await _phase(db_factory) is None
 

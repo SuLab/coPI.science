@@ -1,6 +1,5 @@
 """The USPTO Open Data Portal patents source: applications whose applicant or assignee is
-Johns Hopkins or Kennedy Krieger, by calendar quarter (spec 2026-10-30 §6.1), mapped to
-`DocumentRecord`s.
+Scripps Research, by calendar quarter (spec 2026-10-30 §6.1), mapped to `DocumentRecord`s.
 
 It shares the ODP transport and the process-wide pacer of `src/services/odp.py`. The query
 is `uspto_inventor.inventor_query`'s applicant clause without the inventor clause. ODP's
@@ -23,7 +22,7 @@ from src.services.odp import ODP_PACER, ODP_SEARCH_URL, odp_client, odp_headers
 
 logger = logging.getLogger(__name__)
 
-_NAMES = ("Johns Hopkins", "Kennedy Krieger")
+_NAMES = ("Scripps Research",)
 _NAME_FIELDS = (
     "applicationMetaData.applicantBag.applicantNameText",
     "assignmentBag.assigneeBag.assigneeNameText",
@@ -33,9 +32,10 @@ QUERY = " OR ".join(f'{field}:"{name}"' for field in _NAME_FIELDS for name in _N
 #: The date a quarter slices on: publication, the §5.3 window's date for patents.
 DATE_FIELD = "applicationMetaData.earliestPublicationDate"
 PAGE_LIMIT = 100
-#: Inventor cities that, when they are every inventor's, mark an Applied Physics
-#: Laboratory invention (§6.1 "APL patents").
-APL_CITIES = frozenset({"LAUREL", "NORTH LAUREL"})
+#: Inventor cities that, when they are every inventor's, exclude a patent as ``apl``.
+#: No inventor city excludes a Scripps Research patent (spec C3); the S1 `apl` rule stays
+#: and never fires.
+APL_CITIES: frozenset[str] = frozenset()
 
 
 def _api_key() -> str:
@@ -87,7 +87,7 @@ def _inventors(meta: dict) -> list[dict]:
 
 
 def _is_apl(inventors: list[dict]) -> bool:
-    """Every inventor has a city and every city is Laurel or North Laurel."""
+    """Every inventor has a city and every city is in `APL_CITIES`."""
     return bool(inventors) and all(
         inv["city"] and inv["city"].upper() in APL_CITIES for inv in inventors)
 
@@ -103,12 +103,12 @@ def _assignees(app: dict) -> list[str]:
 def to_document(app: dict) -> DocumentRecord:
     """One ODP application record as a patent record.
 
-    `role_basis` is ``"assignee"`` when an applicant or assignee names Johns Hopkins or
-    Kennedy Krieger, else None. `senior_names` holds the first inventor. `raw_qualifier`
-    carries the applicant and assignee names, the inventors' cities, and `apl`: True only
-    when every inventor has a city and all are Laurel or North Laurel, which S1 excludes
-    as ``excluded:apl`` (§6.1). `extra["missing_fields"]` names the expected fields this
-    record lacked."""
+    `role_basis` is ``"assignee"`` when an applicant or assignee names Scripps Research,
+    else None. `senior_names` holds the first inventor. `raw_qualifier` carries the
+    applicant and assignee names, the inventors' cities, and `apl`: True only when every
+    inventor has a city and all are in `APL_CITIES`, which S1 excludes as ``excluded:apl``;
+    with `APL_CITIES` empty it is always False. `extra["missing_fields"]` names the expected
+    fields this record lacked."""
     meta = app.get("applicationMetaData") or {}
     missing = [f for f in ("inventionTitle", "filingDate", "earliestPublicationDate",
                            "inventorBag", "applicantBag") if not meta.get(f)]

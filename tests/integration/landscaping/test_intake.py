@@ -529,6 +529,49 @@ async def test_backfill_ncbi_slices_only_off_peak(db_session):
         assert any(s == "geo" for s, _ in due)
 
 
+PEAK = datetime(2026, 11, 4, 15, 0, tzinfo=UTC)    # Wednesday, 10:00 Eastern
+NIGHT = datetime(2026, 11, 5, 3, 0, tzinfo=UTC)    # Wednesday, 22:00 Eastern
+
+
+async def test_pilot_ncbi_slices_only_off_peak(db_session):
+    db = db_session
+    await ensure_sources(db)                         # landscape_phase unset: pilot
+    due = await schedule_due(db, now=PEAK)
+    assert any(s == "openalex" for s, _ in due)
+    assert not any(s in ("pubmed", "geo") for s, _ in due)
+    night = await schedule_due(db, now=NIGHT)
+    assert [k for s, k in night if s == "pubmed"] == [k for s, k in night if s == "openalex"]
+    assert any(s == "geo" for s, _ in night)
+    assert any(s == "pubmed" for s, _ in await schedule_due(db, now=PEAK, respect_off_peak=False))
+
+
+async def test_pilot_intake_waits_for_ncbi_slices_at_peak(db_session):
+    from src.landscaping.worker import _pilot_intake_in
+    db = db_session
+    await ensure_sources(db)
+    await _record_fetches(db, await schedule_due(db, now=PEAK), PEAK)
+    assert await _pilot_intake_in(db, PEAK) is False
+    await _record_fetches(db, await schedule_due(db, now=PEAK, respect_off_peak=False), PEAK)
+    assert await _pilot_intake_in(db, PEAK) is True
+
+
+async def test_pilot_intake_ignores_a_stale_running_row(db_session):
+    from src.landscaping.worker import _pilot_intake_in
+    db = db_session
+    await ensure_sources(db)
+    due = await schedule_due(db, now=PEAK, respect_off_peak=False)
+    await _record_fetches(db, due, PEAK)
+    source, key = due[0]
+    db.add(LandscapeFetch(source=source, slice_key=key, status="running",
+                          started_at=PEAK - intake.RUNNING_STALE_AFTER - timedelta(minutes=1)))
+    await db.flush()
+    assert await _pilot_intake_in(db, PEAK) is True
+    db.add(LandscapeFetch(source=source, slice_key=key, status="running",
+                          started_at=PEAK - timedelta(minutes=5)))
+    await db.flush()
+    assert await _pilot_intake_in(db, PEAK) is False
+
+
 async def test_jhtv_starts_disabled(db_session):
     db = db_session
     await ensure_sources(db)
@@ -650,8 +693,8 @@ async def test_positive_controls_ingested_by_id(db_session, monkeypatch):
         "authorships": [{
             "author_position": "last", "is_corresponding": False,
             "author": {"id": "https://openalex.org/A5000000070", "display_name": "Ines Okafor"},
-            "institutions": [{"id": "https://openalex.org/I145311948"}],
-            "raw_affiliation_strings": ["Johns Hopkins University, Baltimore, MD"],
+            "institutions": [{"id": "https://openalex.org/I123431417"}],
+            "raw_affiliation_strings": ["The Scripps Research Institute, La Jolla, CA"],
         }],
     }
 
@@ -669,8 +712,8 @@ async def test_positive_controls_ingested_by_id(db_session, monkeypatch):
     extras = {"39200002": {
         "abstract": "Control two abstract.", "published": RECENT, "language": "en",
         "publication_types": ["Journal Article"],
-        "last_author": {"last": "Okonkwo", "fore": "Pell", "orcid": None,
-                        "affiliations": ["Kennedy Krieger Institute, Baltimore, MD"]},
+        "last_author": {"last": "Okonkwo", "fore": "Pell", "orcid": None, "affiliations": [
+            "Department of Chemistry, The Scripps Research Institute, La Jolla, CA"]},
     }}
     monkeypatch.setattr(openalex, "iter_works", fake_iter_works)
     monkeypatch.setattr(openalex, "fetch_work", fake_fetch_work)
