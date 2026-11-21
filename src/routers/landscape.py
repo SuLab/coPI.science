@@ -105,22 +105,36 @@ async def resume(request: Request, db: AsyncSession = _DB, current_user: User = 
     return _done(request, "Landscaping resumed.")
 
 
-@router.post("/backfill/start")
-async def start_backfill(request: Request, db: AsyncSession = _DB, current_user: User = _ADMIN):
-    """Move from ``pilot`` to ``backfill``: refused (409) in any other phase, or before a
-    ``pilot`` report is stored (spec §13.4)."""
-    refuse_impersonation(current_user, _REFUSAL)
+class BackfillRefused(ValueError):
+    """``begin_backfill``'s refusal; the message is the one the route returns with its 409."""
+
+
+async def begin_backfill(db: AsyncSession) -> None:
+    """Write ``landscape_phase = backfill`` without committing (spec §13.4).
+
+    Raises ``BackfillRefused``, writing nothing, when the phase (unset reads as ``pilot``) is
+    not ``pilot``, or when no ``pilot`` report is stored. Shared by the route and
+    ``scripts/scripps_admin.py start-backfill``."""
     phase = (await _read_setting(db, _PHASE_KEY) or _DEFAULT_PHASE).lower()
     if phase != "pilot":
-        raise HTTPException(
-            status_code=409, detail=f"Backfill starts only from pilot (now {phase})"
-        )
+        raise BackfillRefused(f"Backfill starts only from pilot (now {phase})")
     has_pilot_report = await db.scalar(
         select(exists().where(LandscapeReport.kind == "pilot"))
     )
     if not has_pilot_report:
-        raise HTTPException(status_code=409, detail="Backfill needs a stored pilot report")
+        raise BackfillRefused("Backfill needs a stored pilot report")
     await _write_setting(db, _PHASE_KEY, "backfill")
+
+
+@router.post("/backfill/start")
+async def start_backfill(request: Request, db: AsyncSession = _DB, current_user: User = _ADMIN):
+    """Move from ``pilot`` to ``backfill`` (``begin_backfill``): refused (409) in any other
+    phase, or before a ``pilot`` report is stored (spec §13.4)."""
+    refuse_impersonation(current_user, _REFUSAL)
+    try:
+        await begin_backfill(db)
+    except BackfillRefused as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     await db.commit()
     logger.info("Landscaping backfill started by %s (%s)", current_user.name, current_user.id)
     return _done(request, "Backfill started.")
