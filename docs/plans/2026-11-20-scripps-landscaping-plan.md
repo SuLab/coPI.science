@@ -292,6 +292,17 @@ def test_untagged_jupiter_only_does_not_count():
                                          affs=[(jupiter_school, [])]))
 
 
+def test_untagged_scripps_strings_decide():
+    # With no tagged entry, the strings naming Scripps decide: another institution's address
+    # beside a Jupiter one does not rescue the authorship (audit 2026-11-20).
+    other = "Max Planck Institute of Biochemistry, Martinsried, Germany"
+    assert not at_scripps_la_jolla(_auth(inst_ids=[S], raw=[JUPITER, other],
+                                         affs=[(JUPITER, []), (other, [])]))
+    assert at_scripps_la_jolla(_auth(inst_ids=[S], raw=[LA_JOLLA, other],
+                                     affs=[(LA_JOLLA, []), (other, [])]))
+    assert at_scripps_la_jolla(_auth(inst_ids=[S], raw=[JUPITER, LA_JOLLA]))
+
+
 def test_calibr():
     calibr = "Calibr-Skaggs Institute for Innovative Medicines, La Jolla, CA"
     assert not at_scripps_la_jolla(_auth(inst_ids=[CALIBR_ID], affs=[(calibr, [CALIBR_ID])]))
@@ -780,7 +791,8 @@ Spec §6.5, §6.6, §7, §8. Package C.
     and `bump_session_epoch` when its role changed.
   - `async def start_backfill(db) -> None`: `begin_backfill`, then commit.
   - `async def override_epoch(db, *, epoch_id: uuid.UUID, actor_orcid: str, reason: str) -> None`:
-    actor by ORCID (must exist), reason stripped and non-empty, then `epochs.override`.
+    actor by ORCID (must exist and be an admin, as the route requires), reason stripped and
+    non-empty, then `epochs.override`.
   - `async def disable_source(db, *, source: str, reason: str) -> None`: `intake.ensure_sources`
     first; source in `intake.SOURCES`; reason non-empty; prints `source <name> disabled: <reason>`.
   - `async def batch_probe(client, model: str) -> tuple[str, str]`: creates a one-request batch
@@ -801,8 +813,8 @@ Spec §6.5, §6.6, §7, §8. Package C.
     `rejected_addresses`. An accepted address is the qualifying authorship's `I123431417`-tagged
     raw strings that `names_excluded_campus` does not flag, else its raw strings, joined with
     `" | "`. A
-    rejected address is the first campus-rejected senior authorship's tagged raw strings, for a
-    work that does not qualify. ("Pass" above means `names_excluded_campus` does not flag the
+    rejected address is the first campus-rejected senior authorship's tagged raw strings (its
+    raw strings when none is tagged), for a work that does not qualify. ("Pass" above means `names_excluded_campus` does not flag the
     string.) Emails become `<email>`. Samples use `random.Random(seed).sample`.
   - `async def collect(today: date, window_days: int) -> dict`: pages the OpenAlex window
     (`LINEAGE_FILTER`, `_TYPE_FILTER`, publication dates) through `openalex.iter_works` and
@@ -844,6 +856,13 @@ def test_summarize_counts_and_samples():
     assert out["rejected_addresses"] == [JUPITER]
 
 
+def test_summarize_shows_raw_strings_of_an_untagged_rejection():
+    jupiter_school = "Skaggs Graduate School, Jupiter, FL 33458, USA"
+    out = probe.summarize([_work(1, _auth("last", jupiter_school, tagged=False))])
+    assert (out["qualifying_works"], out["campus_rejected_works"]) == (0, 1)
+    assert out["rejected_addresses"] == [jupiter_school]
+
+
 def test_summarize_redacts_emails():
     text = LA_JOLLA + ". Electronic address: someone@example.org"
     out = probe.summarize([_work(1, _auth("last", text))])
@@ -868,7 +887,7 @@ Tests, each with its assertions:
   bare `User`) with that ORCID and `session_epoch=None` → after `grant(..., role="admin")`, still
   one row, `admin`, `allowed`, `session_epoch == 1`.
 - `test_grant_refuses_a_bad_orcid_or_role`: `pytest.raises(ValueError)` for ORCID
-  `"0000-0002-1825-0098"` (wrong check digit; `…0097` is valid), role `"manager"`, and name `"  "`.
+  `"0000-0002-1825-0098"` (wrong check digit; `…0097` is valid), role `"pi"`, and name `"  "`.
 - `test_start_backfill_refused_without_pilot_report`: phase unset → `BackfillRefused` with
   "Backfill needs a stored pilot report"; `landscape_phase` still unset.
 - `test_start_backfill_refused_outside_pilot`: `landscape_phase = "continuous"` →
@@ -877,7 +896,7 @@ Tests, each with its assertions:
   → `landscape_phase == "backfill"`.
 - `test_override_epoch`: an epoch with `status="held"` and a granted admin → `status ==
   "candidate"`, `override_actor_id == admin.id`, `override_reason == "invented reason"`;
-  unknown actor ORCID and a blank reason each raise `ValueError`.
+  an unknown actor ORCID, a blank reason and a `manager` actor each raise `ValueError`.
 - `test_disable_source`: after `disable_source(db, source="geo", reason="invented")`, the `geo`
   row has `enabled is False`; `source="nope"` raises `ValueError`.
 - `test_batch_probe`: a fake client whose `messages.batches.create` returns an object with
@@ -930,6 +949,10 @@ services:
     ports:
       - "127.0.0.1:8090:8000"
     env_file: .env.scripps
+    environment:
+      # Fail closed whatever .env.scripps says: outside "development" a missing or default
+      # SECRET_KEY stops the start (config.Settings._guard_secret_key).
+      ENVIRONMENT: production
     volumes:
       - ./prompts:/app/prompts:ro
     depends_on:
@@ -950,6 +973,8 @@ services:
     stop_grace_period: 330s
     command: ["python", "-m", "src.landscaping.worker"]
     env_file: .env.scripps
+    environment:
+      ENVIRONMENT: production
     volumes:
       - ./prompts:/app/prompts:ro
     depends_on:
@@ -1114,7 +1139,9 @@ published as it stands: no names, ORCID iDs, addresses or key values.
 - [ ] **Step 5: Owner gate 1 (C9)**
 
 The owner reads the 20 accepted and 20 rejected addresses in
-`/home/a/scripps-run/dry-probe.json`. Nothing goes on until the owner approves. If the owner
+`/home/a/scripps-run/dry-probe.json`, looking in particular for a rejected one whose La Jolla
+address lacks the word "Scripps" beside a Jupiter Scripps address (the untagged rule's one
+known false negative, spec §6.1). Nothing goes on until the owner approves. If the owner
 finds La Jolla work rejected or Jupiter work accepted: fix the rule (Task 1), then Task 5 Steps
 1–4, Task 6 Step 2, `$DC up -d --force-recreate --no-deps scripps-app landscape-worker`, and
 this task's Step 3 again.

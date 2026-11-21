@@ -199,8 +199,12 @@ listing a matching id and reads raw strings only when no institution is listed (
   counts, and so does a Calibr author with a separate Scripps Research La Jolla address. An
   entry tagged only `I4210140527` (Calibr) never counts.
 - An authorship listing `I123431417` none of whose `affiliations` entries carries
-  `I123431417` counts (C3), unless it has raw strings and every one names Jupiter, Florida or
-  Calibr.
+  `I123431417` counts (C3), unless its raw strings that name Scripps (all its raw strings when
+  none does) are non-empty and every one names Jupiter, Florida or Calibr. So a Jupiter
+  Scripps address beside another institution's address does not count (adversarial audit,
+  2026-11-20). The cost: a dual-campus author whose La Jolla address lacks the word "Scripps"
+  and whose only Scripps address is Jupiter does not count either; owner gate 1 looks for that
+  among the dry probe's rejected addresses.
 - An authorship listing no institution at all counts when a raw string passes the matcher, as
   today.
 - The role rule is unchanged: corresponding or last author, an individual
@@ -297,6 +301,16 @@ What follows, all already in the code:
 The pilot is anchored to the first source row's date (`intake._pilot_anchor`), so backfill may
 add the slice of a month that began since. That is expected.
 
+The pilot also ends the anchor's unfinished month, ODP quarter and RePORTER fiscal year, and
+the backfill does not fetch those slices again. Records added to them after the pilot fetch
+arrive only through the continuous cadence: OpenAlex the whole window (the weekly sweep, plus
+the daily 120-day lookback), NSF, DataCite and GEO 35 days, ODP the current quarter, RePORTER
+the current and previous fiscal years monthly, PubMed only the day before each daily fetch. So a
+PubMed-only record entered between the pilot and the start of continuous intake is missed,
+and so are the anchor quarter's later patents if continuous intake starts in a new quarter.
+This test is a snapshot (the server runs the website only, C8), so that is accepted (adversarial
+audit, 2026-11-20).
+
 ### 6.4 Tests and checks
 
 - Update the tests that pin Hopkins values: `tests/unit/landscaping/test_institutions.py`,
@@ -344,7 +358,7 @@ file: it pins production's container names and joins the shared edge network.
 |---|---|
 | `DATABASE_URL` | the compose-internal Postgres, `postgresql+asyncpg://copi:<password>@postgres:5432/copi` |
 | `SECRET_KEY` | a new random value |
-| `ENVIRONMENT` | `production` (`SECRET_KEY` is then validated, `config.py:640-663`) |
+| `ENVIRONMENT` | `production` (`SECRET_KEY` is then validated, `config.py:640-663`); the compose file also pins it on the app and the worker |
 | `BASE_URL` | `http://localhost:8090` (the Origin guard needs it exact) |
 | `ALLOW_HTTP_SESSIONS` | `true` (local HTTP only) |
 | `ANTHROPIC_API_KEY` | the new key |
