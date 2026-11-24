@@ -46,9 +46,12 @@ _SCRIPPS_RESEARCH = re.compile(r"\bscripps\s+research\b", re.IGNORECASE)
 # Any "Scripps" string ("Scripps Research", "Scripps Florida", ...): with no tagged entry, the
 # raw strings that name Scripps decide the campus (`at_scripps_la_jolla`).
 _SCRIPPS_WORD = re.compile(r"\bscripps\b", re.IGNORECASE)
-# The Jupiter campus (Jupiter, Florida, a FL 334xx postcode) and Calibr.
+# The Jupiter campus (Jupiter, Florida, a FL 334xx postcode, the state code "FL" in capitals,
+# the UF Scripps Institute named without its city: "UF Scripps", "Wertheim Scripps") and
+# Calibr. "Wertheim" alone is not enough: UC San Diego's school of public health bears the name.
 _EXCLUDED_CAMPUS = re.compile(
-    r"\bjupiter\b|\bflorida\b|\bfl\.?\s*334\d\d\b|\bcalibr\b"
+    r"\bjupiter\b|\bflorida\b|\bfl\.?\s*334\d\d\b|(?-i:\bFL\b)"
+    r"|\buf[\s-]+scripps\b|\bwertheim\s+scripps\b|\bcalibr\b"
     r"|\bcalifornia\s+institute\s+for\s+biomedical\s+research\b",
     re.IGNORECASE,
 )
@@ -63,8 +66,9 @@ def _bare(url: str | None) -> str:
 
 
 def names_excluded_campus(text: str) -> bool:
-    """Whether a raw affiliation string names Jupiter, Florida, a FL 334xx postcode or
-    Calibr (California Institute for Biomedical Research)."""
+    """Whether a raw affiliation string names Jupiter, Florida, a FL 334xx postcode, the
+    state code "FL", the UF Scripps Institute ("UF Scripps", "Wertheim Scripps") or Calibr
+    (California Institute for Biomedical Research)."""
     return bool(text) and bool(_EXCLUDED_CAMPUS.search(text))
 
 
@@ -83,9 +87,10 @@ def at_scripps_la_jolla(auth: dict) -> bool:
     decide, and it counts when one of their raw strings names no excluded campus; with no
     such entry it counts unless its raw affiliation strings that name Scripps (all of them
     when none does) are non-empty and every one names an excluded campus, so another
-    institution's address cannot rescue a Jupiter one. Listing only other institutions, it
-    does not count. Listing no institution, it counts when a raw affiliation string passes
-    `is_scripps_la_jolla_affiliation`."""
+    institution's address cannot rescue a Jupiter one. Listing other institutions or none,
+    it counts when a raw affiliation string passes `is_scripps_la_jolla_affiliation`: OpenAlex
+    sometimes files a Scripps Research La Jolla address under another institution, such as
+    Scripps Institution of Oceanography (owner gate 1 audit, 2026-11-23)."""
     inst_ids = {_bare(i.get("id")) for i in auth.get("institutions") or []}
     if SCRIPPS_OPENALEX_ID in inst_ids:
         tagged = [a for a in auth.get("affiliations") or []
@@ -96,8 +101,6 @@ def at_scripps_la_jolla(auth: dict) -> bool:
         raw = [s for s in auth.get("raw_affiliation_strings") or [] if s]
         deciding = [s for s in raw if _SCRIPPS_WORD.search(s)] or raw
         return not deciding or not all(names_excluded_campus(s) for s in deciding)
-    if inst_ids:
-        return False
     return any(is_scripps_la_jolla_affiliation(s)
                for s in auth.get("raw_affiliation_strings") or [])
 

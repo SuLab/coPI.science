@@ -16,6 +16,8 @@ from src.landscaping.institutions import (
 LA_JOLLA = "Department of Chemistry, The Scripps Research Institute, La Jolla, CA 92037, USA"
 JUPITER = "The Scripps Research Institute, Jupiter, United States"
 CALIBR_ID = "I4210140527"
+UF_SCRIPPS_ID = "I4387156289"
+OCEANOGRAPHY_ID = "I150209017"
 
 
 def test_institution_set_matches_spec():
@@ -36,6 +38,9 @@ def test_institution_set_matches_spec():
     LA_JOLLA,
     "Scripps Research, 10550 North Torrey Pines Road, La Jolla, California, USA",
     "Scripps Research Translational Institute, La Jolla, CA, USA",
+    # "Fl." for a floor is not the state code; UC San Diego's Wertheim school is not UF Scripps.
+    "The Scripps Research Institute, 2nd Fl., 10550 North Torrey Pines Road, La Jolla, CA",
+    "Scripps Research, La Jolla, CA; Herbert Wertheim School of Public Health, UC San Diego",
 ])
 def test_matcher_passes(text):
     assert is_scripps_la_jolla_affiliation(text)
@@ -53,6 +58,13 @@ def test_matcher_passes(text):
     "The Herbert Wertheim UF Scripps Institute for Biomedical Innovation & Technology, Jupiter, FL",
     "Calibr-Skaggs Institute for Innovative Medicines, The Scripps Research Institute, La Jolla, CA",
     "California Institute for Biomedical Research, La Jolla, CA",
+    # Jupiter named only as the UF Scripps Institute, or by the state code (gate 1 audit).
+    "The Wertheim UF Scripps Research Institute",
+    "UF Scripps Research Institute",
+    "Department of Integrative Structural and Computational Biology, Scripps Research and The "
+    "Herbert Wertheim UF Scripps Institute for Biomedical Innovation & Technology",
+    "Center for Inflammation Science, Herbert Wertheim Scripps Research Institute",
+    "The Skaggs Graduate School at Scripps Research, La Jolla, FL, USA",
     "Taiwan Semiconductor Research Institute (TSRI), Hsinchu, Taiwan",
     "Scripps",
     "",
@@ -64,7 +76,11 @@ def test_matcher_fails(text):
 def test_excluded_campus():
     assert names_excluded_campus(JUPITER)
     assert names_excluded_campus("Calibr, La Jolla, CA")
+    assert names_excluded_campus("UF-Scripps Biomedical Research")
+    assert names_excluded_campus("Department of Molecular Medicine, Scripps Research, FL, USA")
     assert not names_excluded_campus(LA_JOLLA)
+    assert not names_excluded_campus("Scripps Research, Fl. 3, La Jolla")
+    assert not names_excluded_campus("Herbert Wertheim School of Public Health, La Jolla")
     assert not names_excluded_campus("")
 
 
@@ -92,6 +108,9 @@ S = SCRIPPS_OPENALEX_ID
 def test_tagged_la_jolla_counts_and_tagged_jupiter_does_not():
     assert at_scripps_la_jolla(_auth(inst_ids=[S], affs=[(LA_JOLLA, [S])]))
     assert not at_scripps_la_jolla(_auth(inst_ids=[S], affs=[(JUPITER, [S])]))
+    uf = "The Wertheim UF Scripps Research Institute"
+    assert not at_scripps_la_jolla(_auth(inst_ids=[S, UF_SCRIPPS_ID],
+                                         affs=[(uf, [S, UF_SCRIPPS_ID])]))
 
 
 def test_both_campuses_count():
@@ -140,11 +159,20 @@ def test_calibr():
                                      affs=[(calibr, [CALIBR_ID]), (LA_JOLLA, [S])]))
 
 
-def test_raw_strings_only_when_no_institution():
+def test_raw_strings_decide_when_scripps_is_not_listed():
     assert at_scripps_la_jolla(_auth(raw=[LA_JOLLA]))
     assert at_scripps_la_jolla(_auth(raw=[JUPITER, LA_JOLLA]))
     assert not at_scripps_la_jolla(_auth(raw=["Scripps Health, San Diego, CA"]))
-    assert not at_scripps_la_jolla(_auth(inst_ids=["I999"], raw=[LA_JOLLA]))
+    # OpenAlex filed a La Jolla address under another institution (gate 1 audit, 2026-11-23).
+    assert at_scripps_la_jolla(_auth(inst_ids=["I999"], raw=[LA_JOLLA]))
+    mis_tagged = "Dept. of Integrative Structural and Computational Biology, Scripps Research, La Jolla, CA, USA"
+    assert at_scripps_la_jolla(_auth(inst_ids=[OCEANOGRAPHY_ID], raw=[mis_tagged],
+                                     affs=[(mis_tagged, [OCEANOGRAPHY_ID])]))
+    assert not at_scripps_la_jolla(_auth(inst_ids=[OCEANOGRAPHY_ID],
+                                         raw=["Scripps Institution of Oceanography, La Jolla, CA"]))
+    assert not at_scripps_la_jolla(_auth(inst_ids=[UF_SCRIPPS_ID],
+                                         raw=["The Wertheim UF Scripps Research Institute"]))
+    assert not at_scripps_la_jolla(_auth(inst_ids=["I999"], raw=["University of Osaka, Japan"]))
 
 
 def _work(*auths):

@@ -178,8 +178,13 @@ gates.
 **The address matcher.** Add `is_scripps_la_jolla_affiliation(text)` in
 `src/landscaping/institutions.py`. It replaces `is_baltimore_affiliation`. A string passes when it
 names Scripps Research (the phrase "scripps research", which covers "The Scripps Research
-Institute") **and** names neither Jupiter nor Florida (`Jupiter`, `Florida`, `FL 334…`) **nor**
-Calibr (`Calibr`, `California Institute for Biomedical Research`). Bare "Scripps" never passes,
+Institute") **and** names neither Jupiter nor Florida (`Jupiter`, `Florida`, `FL 334…`, the
+state code `FL` in capitals, and the UF Scripps Institute without its city: `UF Scripps`,
+`Wertheim Scripps`) **nor** Calibr (`Calibr`, `California Institute for Biomedical Research`).
+The state code and the UF Scripps names were added at owner gate 1 (2026-11-23): its audit of
+every work in the window found Jupiter addresses written only as "The Wertheim UF Scripps
+Research Institute", "UF Scripps Research Institute" or "… Scripps Research, La Jolla, FL".
+"Wertheim" alone is not a Jupiter name (UC San Diego's school of public health bears it). Bare "Scripps" never passes,
 and neither does `TSRI` alone: each of the 11 PubMed affiliations from 2023 to 2026 that say
 TSRI without "Scripps Research" belongs to another organization (Taiwan Semiconductor Research
 Institute, Taiwan Sugar Research Institute, The Saban Research Institute, Thailand Science
@@ -205,8 +210,11 @@ listing a matching id and reads raw strings only when no institution is listed (
   2026-11-20). The cost: a dual-campus author whose La Jolla address lacks the word "Scripps"
   and whose only Scripps address is Jupiter does not count either; owner gate 1 looks for that
   among the dry probe's rejected addresses.
-- An authorship listing no institution at all counts when a raw string passes the matcher, as
-  today.
+- An authorship listing other institutions but not `I123431417`, or no institution at all,
+  counts when a raw string passes the matcher. Until owner gate 1 (2026-11-23) an authorship
+  listing only other institutions never counted; the gate's audit found OpenAlex filing a
+  "Scripps Research, La Jolla" address under Scripps Institution of Oceanography, and another
+  under the author's Japanese institutes.
 - The role rule is unchanged: corresponding or last author, an individual
   (`institutions._QUALIFYING_ROLES`, `authorship_roles.is_individual`).
 
