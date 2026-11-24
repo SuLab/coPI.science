@@ -16,6 +16,8 @@
    tags fold under "Reason tags (optional)"; on the detail page they stay open.
    `inline` (the compact card, D95): the same fields on one wrapping row, the "Decision"
    legend and the reason's label kept for screen readers only and a one-line reason box. #}
+{# The open viewer (src/web/open_view.py) writes nothing, so it gets no form. #}
+{% if not permissions.read_only %}
 {% set form_surface = surface if surface is defined and surface else 'detail' %}
 {% set form_state = list_state if list_state is defined and list_state else {} %}
 {% set form_inline = inline is defined and inline %}
@@ -63,3 +65,4 @@
         <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">{{ 'Save decision' if decision else 'Record decision' }}</button>
     </form>
 </details>
+{% endif %}

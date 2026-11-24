@@ -35,19 +35,26 @@ class WebCapabilities:
     assign_reviews: bool
     manage_suggestions: bool
     chat: bool
+    # The open viewer (src/web/open_view.py): pages drop every form that writes.
+    read_only: bool = False
 
 
 def capabilities_for(user) -> WebCapabilities:
     impersonating = bool(getattr(user, "_is_impersonated", False))
+    from src.web.open_view import is_open_viewer  # import here: open_view imports src.models
+
+    read_only = is_open_viewer(user)
     staff = is_staff(user)
     review = can_review(user)
+    writes = not impersonating and not read_only
     return WebCapabilities(
         research=review,
         staff=staff,
         admin=user.user_role == USER_ROLE_ADMIN,
         pi_surfaces=user.user_role in (USER_ROLE_PI, USER_ROLE_ADMIN),
-        verify_pi_email=staff and not impersonating,
-        assign_reviews=staff and not impersonating,
-        manage_suggestions=staff and not impersonating,
-        chat=review and not impersonating,
+        verify_pi_email=staff and writes,
+        assign_reviews=staff and writes,
+        manage_suggestions=staff and writes,
+        chat=review and writes,
+        read_only=read_only,
     )

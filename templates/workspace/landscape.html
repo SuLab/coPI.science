@@ -51,7 +51,7 @@
     <a href="{{ page_url(request, 'workspace_landscape', query=[('cards', cards_q)]) }}"{% if selected_view == 'batch' %} aria-current="page" class="border-b-2 border-indigo-600 px-3 py-2 text-sm font-semibold text-indigo-700"{% else %} class="px-3 py-2 text-sm text-gray-600 hover:text-gray-900"{% endif %}>This week's batch</a>
     <a href="{{ page_url(request, 'workspace_landscape', query=[('view', 'current'), ('cards', cards_q)]) }}"{% if selected_view == 'current' %} aria-current="page" class="border-b-2 border-indigo-600 px-3 py-2 text-sm font-semibold text-indigo-700"{% else %} class="px-3 py-2 text-sm text-gray-600 hover:text-gray-900"{% endif %}>Current</a>
     <a href="{{ page_url(request, 'workspace_landscape', query=[('view', 'all'), ('cards', cards_q)]) }}"{% if selected_view == 'all' %} aria-current="page" class="border-b-2 border-indigo-600 px-3 py-2 text-sm font-semibold text-indigo-700"{% else %} class="px-3 py-2 text-sm text-gray-600 hover:text-gray-900"{% endif %}>All assessed</a>
-    <a href="{{ page_url(request, 'workspace_landscape_pipeline') }}" class="ml-auto px-3 py-2 text-sm text-indigo-700 hover:underline">Pipeline</a>
+    {% if not permissions.read_only %}<a href="{{ page_url(request, 'workspace_landscape_pipeline') }}" class="ml-auto px-3 py-2 text-sm text-indigo-700 hover:underline">Pipeline</a>{% endif %}
 </nav>
 {% endif %}
 

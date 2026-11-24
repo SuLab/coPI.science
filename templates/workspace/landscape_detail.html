@@ -467,6 +467,8 @@
 {# Human review. The Approve / Disapprove marks are no longer offered (OD9, following
    docs/specs/2026-09-21-assessment-queue-and-headline-contract-design.md D2/D3); an
    existing mark and its events still show read-only. The history view shows no form. #}
+{# The open viewer (src/web/open_view.py) cannot review, so it gets no review panel. #}
+{% if not permissions.read_only %}
 <div class="landscape-human-review bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
     <h2 class="text-lg font-semibold text-gray-900 mb-3">Human review</h2>
     <section id="review" class="scroll-mt-16 max-md:scroll-mt-28">
@@ -525,7 +527,7 @@
         {% if not decisions and not reviews and not status_events %}<p class="mt-1 text-sm text-gray-600">Nothing to show yet.</p>{% endif %}
         {# Assignments: read by everyone who sees the page; assign and remove are staff-only,
            refused under impersonation (src/routers/reviews.py) and absent on the history view. #}
-        {% set can_assign = permissions.staff and not impersonation_banner and not history_view %}
+        {% set can_assign = permissions.staff and not impersonation_banner and not history_view and not permissions.read_only %}
         <div class="landscape-assignments mt-4 border-t border-gray-100 pt-4">
             <h4 class="text-sm font-semibold text-gray-700">Assigned{% if assignments %} ({{ assignments | length }}){% endif %}</h4>
             {% if assignments %}
@@ -558,6 +560,7 @@
     </section>
     {% endif %}
 </div>
+{% endif %}
 
 {% if not history_view %}
 <div id="ideas" class="landscape-members scroll-mt-16 max-md:scroll-mt-28 mb-6">

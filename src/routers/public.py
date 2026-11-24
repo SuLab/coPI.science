@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.database import get_db
 from src.models import User
 from src.services.validators import is_valid_email
+from src.web.open_view import OPEN_LANDING, open_view_enabled
 from src.web.templating import make_templates
 
 logger = logging.getLogger(__name__)
@@ -19,10 +20,13 @@ templates = make_templates()
 
 @router.get("/")
 async def root(request: Request):
-    """Site root: signed-in users go to their profile, everyone else to login.
+    """Site root: signed-in users go to their profile, everyone else to login, or to the
+    Landscape list while the open view is on (src/web/open_view.py).
     This instance has no marketing landing page."""
     if request.session.get("user_id"):
         return RedirectResponse(url="/profile", status_code=302)
+    if open_view_enabled():
+        return RedirectResponse(url=OPEN_LANDING, status_code=302)
     return RedirectResponse(url="/login", status_code=302)
 
 

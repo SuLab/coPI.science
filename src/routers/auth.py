@@ -35,6 +35,7 @@ from src.services.session_epoch import (
 )
 from src.services.user_email import assign_user_email
 from src.web.flash import flash
+from src.web.open_view import OPEN_LANDING, open_view_enabled
 from src.web.sign_in_session import VIA_ORCID, record_orcid_reauth, record_sign_in
 from src.web.templating import make_templates
 from src.web.urls import page_url
@@ -159,7 +160,10 @@ def _get_oauth_client() -> AsyncOAuth2Client:
 
 @router.get("/login", response_class=HTMLResponse)
 async def login(request: Request):
-    """Show the login landing page."""
+    """Show the login landing page; with the open view on there is no sign-in, so the
+    Landscape list instead (src/web/open_view.py)."""
+    if open_view_enabled():
+        return RedirectResponse(url=OPEN_LANDING, status_code=302)
     if request.session.get("user_id"):
         return RedirectResponse(url="/", status_code=302)
     # Remember where the user was headed so we can resume after ORCID auth.
@@ -183,6 +187,8 @@ async def login_start(request: Request, reauth: str | None = None):
     account: ``prompt=login`` forces the password prompt and the callback checks the ID token's
     ``auth_time`` (spec 2026-10-13 D10), then returns to /settings. Refused while impersonating.
     """
+    if open_view_enabled():
+        raise HTTPException(status_code=404, detail="Not Found")
     signed_in = bool(request.session.get("user_id"))
     if signed_in and (reauth != "1" or request.session.get(IMPERSONATE_KEY)):
         return RedirectResponse(url="/", status_code=302)
@@ -405,7 +411,10 @@ async def auth_callback(
     db: AsyncSession = Depends(get_db),
 ):
     """Handle the ORCID OAuth callback: a sign-in, or the re-sign-in /login/start?reauth=1
-    began, which must prove itself (_orcid_reauth_refusal) before it signs in afresh."""
+    began, which must prove itself (_orcid_reauth_refusal) before it signs in afresh.
+    404 while the open view is on: there is no sign-in then."""
+    if open_view_enabled():
+        raise HTTPException(status_code=404, detail="Not Found")
     reauth = request.session.pop(ORCID_REAUTH_KEY, None)
     is_reauth = isinstance(reauth, dict)
     if error:

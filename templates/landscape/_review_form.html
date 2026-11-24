@@ -12,6 +12,8 @@
    page's back link (contract C9). A first review posts to /reviews/landscape/<id>/review,
    an edit to /reviews/landscape-reviews/<id>/edit; an edit re-posts every dimension, so
    clearing one clears it. A blank dimension is a real answer ("I cannot judge this one"). #}
+{# The open viewer (src/web/open_view.py) writes nothing, so it gets no form. #}
+{% if not permissions.read_only %}
 {% set own_scores = (review.dimension_scores if review and review.dimension_scores else {}) %}
 {% set rubric = review_rubric if review_rubric is defined and review_rubric else {} %}
 {% set form_state = list_state if list_state is defined and list_state else {} %}
@@ -80,3 +82,4 @@
     <textarea id="{{ form_id }}comment" name="comment" rows="4" maxlength="10000" class="w-full text-sm border border-gray-300 rounded-md shadow-sm">{{ review.comment if review and review.comment else '' }}</textarea>
     <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">{{ 'Save review' if review else 'Submit review' }}</button>
 </form>
+{% endif %}

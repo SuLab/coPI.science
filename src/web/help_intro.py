@@ -15,6 +15,7 @@ from src.database import get_db
 from src.dependencies import get_current_user
 from src.models.help import HelpIntroDismissal
 from src.web.help_pages import tutorial_key_for
+from src.web.open_view import is_open_viewer
 
 # Module-level Depends, as src/routers/auth.py does: a call in a default argument is a
 # ruff B008 finding, and src/ is under a ratcheted lint ceiling.
@@ -25,7 +26,8 @@ _DB = Depends(get_db)
 async def load_help_intro(request: Request, user=_USER, db: AsyncSession = _DB) -> None:
     """Set ``request.state.help_intro`` to the role's tutorial key when the prompt is owed:
     a GET by a manager or reviewer, not impersonated, with no answer recorded."""
-    if request.method != "GET" or getattr(user, "_is_impersonated", False):
+    if (request.method != "GET" or getattr(user, "_is_impersonated", False)
+            or is_open_viewer(user)):
         return
     key = tutorial_key_for(user.user_role)
     if key is None:

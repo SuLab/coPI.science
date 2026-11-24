@@ -33,6 +33,7 @@ from src.services.microsoft_identity import (
     may_use_microsoft_sign_in,
 )
 from src.web.flash import flash
+from src.web.open_view import open_view_enabled
 from src.web.sign_in_session import VIA_MICROSOFT, fresh_orcid_sign_in
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,8 @@ _IMPERSONATION_DETAIL = "Microsoft sign-in changes are disabled while impersonat
 
 def _require_config(request: Request) -> MicrosoftSignInConfig:
     config = getattr(request.app.state, "microsoft_sign_in", None)
-    if config is None:
+    # The open view (src/web/open_view.py) has no sign-in of any kind.
+    if config is None or open_view_enabled():
         raise HTTPException(status_code=404, detail="Not Found")
     return config
 

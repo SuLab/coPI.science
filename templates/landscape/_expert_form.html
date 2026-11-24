@@ -9,6 +9,8 @@
    its posted value stays "pass". The form carries `surface` and the page's `list_state`
    as hidden fields, as the decision form does, so the redirect keeps the detail page's
    back link (contract C9). #}
+{# The open viewer (src/web/open_view.py) writes nothing, so it gets no form. #}
+{% if not permissions.read_only %}
 {% set form_state = list_state if list_state is defined and list_state else {} %}
 <form method="post" action="/reviews/landscape/{{ opportunity_id }}/expert-judgment" class="landscape-expert-form space-y-3" data-confirm="Submit your expert judgment? Once submitted it cannot be changed, and the pipeline's own calls on this opportunity appear.">
     <input type="hidden" name="surface" value="detail">
@@ -71,3 +73,4 @@
     <textarea id="expert-comment" name="comment" rows="4" maxlength="10000" class="w-full text-sm border border-gray-300 rounded-md shadow-sm"></textarea>
     <button type="submit" class="text-sm font-medium bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Submit judgment</button>
 </form>
+{% endif %}

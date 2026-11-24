@@ -49,7 +49,8 @@
                     <img src="/static/img/blackbird-laboratories.svg" alt="Blackbird Laboratories" width="46" height="32">
                     <span class="ml-2 text-sm text-gray-500 hidden sm:block">Review Platform</span>
                 </a>
-                {% if current_user %}
+                {# The open viewer (src/web/open_view.py) reaches the Landscape pages alone. #}
+                {% if current_user and not (permissions is defined and permissions.read_only) %}
                 <div class="ml-8 flex flex-wrap gap-x-4 gap-y-1">
                     {% if effective_user.may_use_pi_surfaces %}
                     <a href="/profile" class="text-gray-600 hover:text-indigo-600 px-3 py-2 rounded-md text-sm font-medium
@@ -82,7 +83,9 @@
             </div>
             {% block account %}
             <div class="flex items-center">
-                {% if current_user %}
+                {% if permissions is defined and permissions.read_only %}
+                <span class="text-sm text-gray-600">Read-only view</span>
+                {% elif current_user %}
                 <span class="text-sm text-gray-600 mr-4">{{ current_user.name }}</span>
                 <form action="/logout" method="post" class="inline">
                     <button type="submit" class="text-sm text-gray-500 hover:text-red-600 bg-transparent border-0 p-0 cursor-pointer">Sign out</button>

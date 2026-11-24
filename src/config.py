@@ -468,6 +468,10 @@ class Settings(BaseSettings):
     # Messages call at the full rate (src/landscaping/batches.py), for an organization whose
     # Batches endpoint is unavailable (HIPAA-configured, measured 2026-11-16).
     landscape_batch_mode: Literal["api", "sync"] = "api"
+    # No sign-in at all: ORCID and Microsoft sign-in are off, and the Landscape list and
+    # opportunity pages open read-only to anyone who reaches the site (src/web/open_view.py).
+    # For a closed network only (the Scripps test stack); never production.
+    landscape_open_view: bool = False
     landscape_sync_concurrency: int = 4
     landscape_running_stale_minutes: int = 30
     landscape_reject_audit_size: int = 100

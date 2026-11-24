@@ -289,6 +289,11 @@ def create_app() -> FastAPI:
     # process only: a bad MICROSOFT_* value stops the web app at start (MicrosoftConfigError)
     # but never the worker or the agent, which load the same .env. None = off.
     application.state.microsoft_sign_in = load_microsoft_config(settings)
+    if settings.landscape_open_view:
+        logger.warning(
+            "LANDSCAPE_OPEN_VIEW is on: no sign-in; the Landscape pages are open read-only to "
+            "anyone who reaches this site (src/web/open_view.py)"
+        )
 
     # HEAD on every GET route (M-02). Added FIRST, so it is the innermost
     # middleware and only routing sees the GET: see src/web/head_requests.py.

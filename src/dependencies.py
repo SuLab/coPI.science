@@ -14,6 +14,7 @@ from sqlalchemy.orm import selectinload
 from src.database import get_db
 from src.models import User
 from src.services.session_epoch import current_epoch, epoch_in_session
+from src.web.open_view import open_view_applies, open_viewer
 from src.web.urls import page_url
 
 logger = logging.getLogger(__name__)
@@ -72,9 +73,13 @@ async def get_current_user(
 
     For an admin session holding an impersonation (``IMPERSONATE_KEY``, set by
     POST /admin/impersonate), returns the impersonated user, tagged for the banner.
+    With ``LANDSCAPE_OPEN_VIEW`` on, a GET of a Landscape page with no signed-in session
+    gets the read-only open viewer instead of the 302 (``src/web/open_view.py``).
     """
     user_id_str = request.session.get("user_id")
     if not user_id_str:
+        if open_view_applies(request):
+            return open_viewer()
         raise HTTPException(
             status_code=status.HTTP_302_FOUND,
             headers={"Location": _login_location(request)},

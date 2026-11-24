@@ -468,6 +468,28 @@ can therefore end somewhat over $100.
    the person first logs in by ORCID, the login finds the account by ORCID iD. Onboarding must be
    marked done for an admin, who is otherwise sent to `/onboarding` (`auth.py:336-337`), a page
    that waits for a profile job no worker runs here.
+8. **Open view instead of sign-in (owner, 2026-11-23).** The su08 deployment runs with
+   `LANDSCAPE_OPEN_VIEW=true` and no ORCID client. There is no sign-in of any kind: `/login`,
+   and the site root, send a visitor to the Landscape list. ORCID's `/login/start` and
+   `/auth/callback`, and every Microsoft sign-in route, answer 404.
+
+   Anyone who reaches the site reads, as staff see them, these pages and no others:
+   - the Landscape list, opened at `?view=current&tab=all`;
+   - each opportunity's page.
+
+   The pages are read-only (`src/web/open_view.py`):
+   - no decision, review, expert or assignment form;
+   - no review panel and no pipeline link;
+   - the navigation holds the Landscape page alone.
+
+   Everything else answers as it does to a visitor with no session: every other page and
+   every POST. So nothing is written through the site.
+
+   Consequences:
+   - Nobody can record a review, so weekly batches go unreviewed.
+   - An epoch override still runs through `scripts/scripps_admin.py`, with an account that
+     `grant` created by ORCID iD.
+   - The setting is off by default and must never be set in production.
 
 ## 8. Acceptance
 

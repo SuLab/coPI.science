@@ -35,6 +35,12 @@ WORKSPACE_NAVIGATION = (
 def navigation_for(request, permissions):
     if not permissions.research:
         return ()
+    if permissions.read_only:
+        # The open viewer reaches the Landscape pages only (src/web/open_view.py).
+        return tuple(
+            {"section": item.section, "label": item.label, "url": page_url(request, item.route_name)}
+            for item in WORKSPACE_NAVIGATION if item.section == "landscape"
+        )
     return tuple(
         {"section": item.section, "label": item.label, "url": page_url(request, item.route_name)}
         for item in WORKSPACE_NAVIGATION
