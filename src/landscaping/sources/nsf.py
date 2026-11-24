@@ -98,7 +98,9 @@ async def fetch_nsf(date_from: date, date_to: date) -> SliceResult:
     }
     rows: list[DocumentRecord] = []
     total: int | None = None
-    offset = 1
+    # NSF's offset counts from 0: offset=1 skips the first award (measured 2026-11-23, when a
+    # one-award month came back empty with totalCount 1).
+    offset = 0
     async with _make_client() as client:
         while True:
             page_params = {**params, "offset": offset}
@@ -115,7 +117,7 @@ async def fetch_nsf(date_from: date, date_to: date) -> SliceResult:
             awards = body.get("award") or []
             rows.extend(to_document(a) for a in awards)
             offset += RPP
-            if len(awards) < RPP or (total is not None and offset > total):
+            if len(awards) < RPP or (total is not None and offset >= total):
                 break
     if total is None:
         logger.warning("[landscape.nsf] response carried no metadata.totalCount; "

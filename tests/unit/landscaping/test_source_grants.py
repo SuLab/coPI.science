@@ -101,8 +101,8 @@ async def test_nsf_paging_rpp_25(monkeypatch):
         params = dict(request.url.params)
         seen.append(params)
         offset = int(params["offset"])
-        count = 25 if offset == 1 else 5
-        awards = [_award(offset + k) for k in range(count)]
+        count = 25 if offset == 0 else 5
+        awards = [_award(offset + k + 1) for k in range(count)]
         return httpx.Response(200, json={"response": {
             "metadata": {"totalCount": 30}, "award": awards}})
 
@@ -111,7 +111,7 @@ async def test_nsf_paging_rpp_25(monkeypatch):
     monkeypatch.setattr(nsf, "_PACER", Pacer(0))
     result = await nsf.fetch_nsf(date(2025, 1, 1), date(2025, 6, 30))
 
-    assert [p["offset"] for p in seen] == ["1", "26"]
+    assert [p["offset"] for p in seen] == ["0", "25"]
     assert all(p["rpp"] == "25" for p in seen)
     assert seen[0]["awardeeName"] == f'"{NSF_AWARDEE}"'
     assert (seen[0]["dateStart"], seen[0]["dateEnd"]) == ("01/01/2025", "06/30/2025")
@@ -121,3 +121,18 @@ async def test_nsf_paging_rpp_25(monkeypatch):
     assert first.ids == {"nsf_award": "2400001"}
     assert first.published == date(2025, 3, 15)
     assert first.senior_names[0]["name"] == "Cy Madeup"
+
+
+async def test_nsf_first_page_starts_at_offset_0(monkeypatch):
+    # NSF's offset counts from 0; offset=1 returned an empty page for a one-award month.
+    def handler(request):
+        offset = int(dict(request.url.params)["offset"])
+        awards = [_award(1)][offset:]
+        return httpx.Response(200, json={"response": {
+            "metadata": {"totalCount": 1, "offset": offset}, "award": awards}})
+
+    monkeypatch.setattr(nsf, "_make_client",
+                        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(nsf, "_PACER", Pacer(0))
+    result = await nsf.fetch_nsf(date(2026, 4, 1), date(2026, 4, 30))
+    assert (result.expected, result.received) == (1, 1)
