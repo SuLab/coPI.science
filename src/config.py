@@ -472,6 +472,9 @@ class Settings(BaseSettings):
     # opportunity pages open read-only to anyone who reaches the site (src/web/open_view.py).
     # For a closed network only (the Scripps test stack); never production.
     landscape_open_view: bool = False
+    # S9, the final assessment. Off on the Scripps test stack (owner decision 2026-11-24): no
+    # S9 call is made and the pages rank opportunities by S7 alone (src/landscaping/s9_switch.py).
+    landscape_final_enabled: bool = True
     landscape_sync_concurrency: int = 4
     landscape_running_stale_minutes: int = 30
     landscape_reject_audit_size: int = 100

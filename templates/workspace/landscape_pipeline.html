@@ -161,12 +161,14 @@
     {% else %}<p class="text-sm text-gray-600">None yet.</p>{% endif %}
 </section>
 
+{% if landscape_final_enabled() %}
 <section class="landscape-no-assessment bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
     <h2 class="text-base font-semibold text-gray-900 mb-2">Cards without a completed assessment</h2>
     {% if no_assessment_cards %}
     <ul class="space-y-1 text-sm text-gray-800">{% for c in no_assessment_cards %}<li><a href="{{ page_url(request, 'workspace_landscape_detail', opportunity_id=c.opportunity_id) }}" class="text-indigo-700 hover:underline">{{ c.label or c.headline or 'Untitled opportunity' }}</a>{% if c.failure %} · {{ c.failure.status }}{% if c.failure.error %}: {{ c.failure.error }}{% endif %}{% endif %}</li>{% endfor %}</ul>
     {% else %}<p class="text-sm text-gray-600">None.</p>{% endif %}
 </section>
+{% endif %}
 
 <section class="landscape-audit bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
     <h2 class="text-base font-semibold text-gray-900 mb-2">Reject audit disagreements</h2>

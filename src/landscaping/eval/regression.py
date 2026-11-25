@@ -57,6 +57,7 @@ from src.landscaping.eval.bakeoff import (
     stage_request,
     total_cost,
 )
+from src.landscaping.s9_switch import final_enabled
 from src.landscaping.stages import deep, final, opportunities, screen
 from src.models.landscape import (
     LandscapeAssessment,
@@ -177,10 +178,33 @@ def _verdict_expected(row: LandscapeAssessment) -> dict:
 
 async def _opportunity_items(db_factory, epoch_id: uuid.UUID) -> list[dict]:
     """S9 and S6 items: up to ``FROZEN_OPPORTUNITIES`` of the epoch's current, unretired,
-    non-probe opportunities assessed ``done`` in it, and each member's ``done`` S6 record."""
+    non-probe opportunities assessed ``done`` in it, and each member's ``done`` S6 record.
+    With S9 off (``s9_switch``) there is no S9 item, and the S6 items come from up to
+    ``FROZEN_OPPORTUNITIES`` of the epoch's current, unretired, non-probe opportunity
+    versions, assessed or not."""
     A, V, Opp = LandscapeAssessment, LandscapeOpportunityVersion, LandscapeOpportunity
     items: list[dict] = []
     members: dict[uuid.UUID, LandscapeDeep] = {}
+    if not final_enabled():
+        async with db_factory() as db:
+            keysets = (
+                await db.scalars(
+                    select(V.member_idea_keys)
+                    .join(Opp, Opp.id == V.opportunity_id)
+                    .where(
+                        V.epoch_id == epoch_id, V.is_probe.is_(False),
+                        Opp.retired_at.is_(None), V.version == Opp.version_counter,
+                    )
+                    .order_by(func.random())
+                    .limit(FROZEN_OPPORTUNITIES)
+                )
+            ).all()
+            for keys in keysets:
+                for idea, record in await final._members(db, epoch_id, keys or []) or []:
+                    members.setdefault(idea.id, record)
+            await db.commit()
+        return [await _deep_item(db_factory, epoch_id, idea_id, record)
+                for idea_id, record in members.items()]
     async with db_factory() as db:
         rows = (
             await db.execute(
@@ -210,13 +234,20 @@ async def _opportunity_items(db_factory, epoch_id: uuid.UUID) -> list[dict]:
                 members.setdefault(idea.id, record)
         await db.commit()
     for idea_id, record in members.items():
-        items.append(_item(
-            "deep", "frozen",
-            {"idea_id": str(idea_id), "idea_version": record.idea_version,
-             "user": await _deep_dossier(db_factory, idea_id, epoch_id)},
-            {"gating": record.gating or {}, "scores": record.provisional_scores or {}},
-        ))
+        items.append(await _deep_item(db_factory, epoch_id, idea_id, record))
     return items
+
+
+async def _deep_item(
+    db_factory, epoch_id: uuid.UUID, idea_id: uuid.UUID, record: LandscapeDeep
+) -> dict:
+    """One frozen S6 item: the idea's dossier asked again, its stored record expected."""
+    return _item(
+        "deep", "frozen",
+        {"idea_id": str(idea_id), "idea_version": record.idea_version,
+         "user": await _deep_dossier(db_factory, idea_id, epoch_id)},
+        {"gating": record.gating or {}, "scores": record.provisional_scores or {}},
+    )
 
 
 async def _pair_items(db: AsyncSession, epoch_id: uuid.UUID) -> list[dict]:
@@ -465,8 +496,12 @@ async def refresh_after_activation(db_factory, *, epoch_id: uuid.UUID) -> int:
 
 def kinds_to_check(changed: list[str] | None, *, first_epoch: bool) -> list[str]:
     """The item kinds a candidate is checked on: those reading a stage in ``changed`` (every
-    stage when None), and only S2-S4 for a first epoch (D65)."""
+    stage when None), and only S2-S4 for a first epoch (D65). With ``final_enabled`` off no
+    kind that reads only S9 (``final``, ``expert``) is checked: S9 makes no call there
+    (``s9_switch``)."""
     stages = set(changed) if changed is not None else {s for v in KIND_STAGES.values() for s in v}
+    if not final_enabled():
+        stages.discard("final")
     allowed = FIRST_EPOCH_KINDS if first_epoch else tuple(KIND_STAGES)
     return [kind for kind in allowed if stages & set(KIND_STAGES[kind])]
 

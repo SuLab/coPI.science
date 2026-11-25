@@ -25,16 +25,22 @@
     <input type="hidden" name="assessment_id" value="{{ assessment_id or '' }}">
     <input type="hidden" name="surface" value="detail">
     {% for key in ('view', 'tab', 'assignment', 'sort', 'lab', 'cards') %}{% if form_state.get(key) %}<input type="hidden" name="{{ key }}" value="{{ form_state.get(key) }}">{% endif %}{% endfor %}
+    {# With S9 off (src/landscaping/s9_switch.py) there is no assessment, rationale or bot
+       score to refer to, so the text below says nothing of one. #}
+    {% set s9 = landscape_final_enabled() %}
     <p class="review-rubric-instructions text-base leading-relaxed text-gray-600 max-w-[68ch]">
-        Scores here rate the opportunity's own merit, not how well BlackbirdBot performed.
+        {% if s9 %}Scores here rate the opportunity's own merit, not how well BlackbirdBot performed.
         Review it against Blackbird's rubric{% if rubric.version %}
         (<span class="font-mono">{{ rubric.version }}</span>){% endif %}: read the full rationale
         before scoring, since the brief at the top of this page is BlackbirdBot's own summary
-        of it, not an independent account.{% if rubric.dimensions %} Score each rubric dimension
+        of it, not an independent account.{% else %}Scores here rate the opportunity's own merit.
+        Review it against Blackbird's rubric{% if rubric.version %}
+        (<span class="font-mono">{{ rubric.version }}</span>){% endif %}, reading the ideas' in-depth
+        analyses below.{% endif %}{% if rubric.dimensions %} Score each rubric dimension
         from {{ rubric.scale_min }} (weak) to {{ rubric.scale_max }} (strongly meets Blackbird's
         bar), and leave a dimension blank if you cannot judge it.{% endif %} The overall rating
-        is required; the dimension scores are not. Use the comment to explain the rating and to
-        flag anything the assessment got wrong.
+        is required; the dimension scores are not. Use the comment to explain the rating{% if s9 %} and to
+        flag anything the assessment got wrong{% endif %}.
     </p>
     <label for="{{ form_id }}score" class="block text-sm font-medium text-gray-700">Overall rating (1 = weak … 5 = strong)</label>
     <select id="{{ form_id }}score" name="score" required class="text-sm border border-gray-300 rounded-md shadow-sm">
@@ -62,7 +68,7 @@
                            claim, never as a pre-filled default: the select stays empty. #}
                         {% if d.bot_score is not none %}
                         <span class="review-bot-score font-normal text-gray-600">&middot; BlackbirdBot scored {{ "%g"|format(d.bot_score) }}</span>
-                        {% else %}
+                        {% elif s9 %}
                         <span class="review-bot-score font-normal text-gray-600">&middot; BlackbirdBot did not score this</span>
                         {% endif %}
                     </label>

@@ -282,6 +282,8 @@ VIEW_FIELDS = frozenset(
         "confirmed_not_red_flagged evidence_grade_label quotes document quote basis flags "
         "not_raised raised evidence_text kind_label idea_n advance conditional "
         "route_to_incubation pass database_evidence_raw flag_evidence_raw "
+        # S9 off (src/landscaping/s9_switch.py): each card's members, S6 summary and sources.
+        "member_briefs "
     ).split()
 )
 DYNAMIC_MAP_FIELDS = frozenset(

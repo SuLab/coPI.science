@@ -9,7 +9,10 @@
    points and no "Why this score".
    The hiding is the read model's, as on the full card: on an undecided blind card the
    recommendation, confidence, score, band and flag counts arrive as None. No rank is shown
-   (OD3). Model-written text renders autoescaped. #}
+   (OD3), except with S9 off (`landscape_final_enabled()` false), where the card is its
+   label, its pairwise rank and its members' structured lines. Model-written text renders
+   autoescaped. #}
+{% set s9 = landscape_final_enabled() %}
 {% set ls = list_state if list_state is defined and list_state else {} %}
 {% set ls_query = ls.items() | selectattr('1') | list %}
 {% set detail_href = page_url(request, 'workspace_landscape_detail', query=ls_query, opportunity_id=card.opportunity_id) %}
@@ -26,6 +29,7 @@
                 {% if card.retired %}<span class="landscape-retired px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-gray-100 text-gray-700">retired</span>{% endif %}
                 {% if card.probe %}<span class="landscape-probe px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-amber-100 text-amber-700">probe</span>{% endif %}
                 {% if card.blind %}<span class="landscape-blind px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-slate-100 text-slate-700">blind batch</span>{% endif %}
+                {% if not s9 and card.rank is not none %}<span class="landscape-rank px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-indigo-100 text-indigo-700" title="Pairwise rank: the best of its ideas' positions when the cut's ideas were compared in pairs on their in-depth analyses (1 is the strongest); an idea not yet compared keeps its triage rank">Rank {{ card.rank }}</span>{% endif %}
                 {% if card.recommendation %}
                 {% set rec_chip = {
                     'advance': 'bg-green-100 text-green-700',
@@ -42,7 +46,7 @@
     </div>
     {% if card.blind_hidden %}<p class="landscape-blind-note mt-1 text-sm text-gray-600">This card is in a blind batch: on this card, the recommendation, score, band and flag counts are hidden until you record your decision.</p>{% endif %}
     {% if card.expert_hidden %}<p class="landscape-expert-note mt-1 text-sm text-gray-600">This is one of your expert opportunities: the pipeline's own calls are hidden until you submit your judgment.</p>{% endif %}
-    {% if card.no_assessment %}
+    {% if s9 and card.no_assessment %}
     <p class="landscape-no-assessment mt-2 text-sm text-amber-800">No completed assessment under the current criteria{% if card.failure and card.failure.status %} ({{ card.failure.status }}){% endif %}.{% if card.history_assessment_id %} Its page shows the last earlier one as history.{% endif %}</p>
     {% endif %}
 

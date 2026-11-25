@@ -9,7 +9,12 @@ from sqlalchemy import func, select
 
 from src.config import get_settings
 from src.models import USER_ROLE_MANAGER
-from src.models.landscape import LandscapeDecision
+from src.models.landscape import (
+    LandscapeDecision,
+    LandscapeIdea,
+    LandscapeOpportunityVersion,
+    LandscapeRanking,
+)
 from src.web.open_view import OPEN_LANDING
 from tests import factories
 from tests.integration.test_manager_access import auth_headers
@@ -108,3 +113,47 @@ async def test_off_means_sign_in_as_before(client, db_session):
         response = await _anon(client, path)
         assert response.status_code == 302 and response.headers["location"].startswith("/login")
     assert (await _anon(client, "/login")).status_code == 200
+
+
+async def test_s9_off_pages_rank_by_s7_and_show_s6(client, db_session, open_on, monkeypatch):
+    """The Scripps pages with S9 off (src/landscaping/s9_switch.py): the list and the detail
+    page give the pairwise rank and the members' S6 records and sources, and nothing of the
+    stored S9 assessment, not even a note that one is missing."""
+    monkeypatch.setattr(get_settings(), "landscape_final_enabled", False)
+    opportunity_id = await seed_landscape_opportunity(db_session)
+    keys = await db_session.scalar(
+        select(LandscapeOpportunityVersion.member_idea_keys)
+        .where(LandscapeOpportunityVersion.opportunity_id == opportunity_id)
+    )
+    ideas = (await db_session.scalars(
+        select(LandscapeIdea).where(LandscapeIdea.idea_key.in_(keys)).order_by(LandscapeIdea.idea_key)
+    )).all()
+    for position, idea in enumerate(ideas, start=3):
+        db_session.add(LandscapeRanking(epoch_id=idea.epoch_id, idea_id=idea.id, position=position))
+    await db_session.flush()
+    s9_texts = ("A gate headline", "First gate sentence", "Gate score rationale",
+                "Why this score", "Gate red flag", "Gate rationale", "a gate experiment",
+                "Gate strength", "No completed assessment", "No assessment to show",
+                'id="verdict"', 'id="scores"', 'id="gating"', 'id="evidence"', "landscape-tiles")
+
+    for path in (OPEN_LANDING, _LIST):
+        page = (await _anon(client, path)).text
+        assert "Gate programme" in page and "Rank 3" in page, path
+        assert "Gate second S6 summary." in page and "Gate fibrosis kinase study" in page, path
+        assert "In-depth analysis" in page and "pairwise-ranking order" in page, path
+        assert not [t for t in s9_texts if t in page], path
+
+    page = (await _anon(client, f"{_LIST}/{opportunity_id}")).text
+    assert "Rank 3" in page and "in the pairwise ranking" in page
+    assert "Gate second S6 summary." in page and "Gate liability reason." in page
+    assert not [t for t in s9_texts if t in page]
+    assert not _POST_FORM.search(page)
+
+    # A signed-in manager's review form refers to no assessment or bot score.
+    manager = await factories.make_user(db_session, user_role=USER_ROLE_MANAGER)
+    page = (await client.get(f"{_LIST}/{opportunity_id}", headers=auth_headers(manager.id),
+                             follow_redirects=False)).text
+    assert "landscape-review-form" in page and "Rank 3" in page
+    for text in ("BlackbirdBot did not score this", "BlackbirdBot scored",
+                 "BlackbirdBot's own summary", "the assessment got wrong", *s9_texts):
+        assert text not in page, text

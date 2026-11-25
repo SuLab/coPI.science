@@ -91,6 +91,7 @@ from src.landscaping.criteria import load_criteria
 from src.landscaping.eval import bakeoff, regression, reject_audit
 from src.landscaping.evidence import mondo
 from src.landscaping.prompt_set import load_blackbird_extracts, load_prompt_set
+from src.landscaping.s9_switch import final_enabled
 from src.landscaping.schema_check import schema_ready
 from src.landscaping.stages import cut as cut_stage
 from src.landscaping.stages import deep as deep_stage
@@ -995,14 +996,15 @@ async def _over_cap(db_factory) -> bool:
 
 def _fallback_adapters(deep: bool) -> tuple[FallbackAdapter, ...]:
     """The fallback chains to run: S2-S4 and the reject audit's, and with ``deep`` (``_Loop.deep``)
-    S5-S9's too."""
+    S5-S9's too (S5-S8's with ``final_enabled`` off)."""
     early = (
         *screen_stage.FALLBACKS, *extract_stage.FALLBACKS, *triage_stage.FALLBACKS,
         *reject_audit.FALLBACKS,
     )
     if not deep:
         return early
-    return (*early, *comparator.FALLBACKS, *s8.FALLBACKS, *final_stage.FALLBACKS)
+    late = (*comparator.FALLBACKS, *s8.FALLBACKS)
+    return (*early, *late, *(final_stage.FALLBACKS if final_enabled() else ()))
 
 
 async def _sync_step(db_factory, state: WorkerState, loop: _Loop, work: list) -> None:
@@ -1185,15 +1187,17 @@ async def _s6_passed(db: AsyncSession, epoch_id: uuid.UUID, cut: LandscapeCut) -
 
 async def _cut_step(db_factory, state: WorkerState, loop: _Loop, work: list) -> None:
     """S5 when due (and every loop while a boundary tournament is pending), S8 once S6 has
-    ended for the current cut, then the label and S9 batches. Only in ``pilot`` (picks applied)
-    and ``continuous`` (D69), and in ``backfill`` during a preview (D77)."""
+    ended for the current cut, then the label and S9 batches (no S9 with ``final_enabled``
+    off). Only in ``pilot`` (picks applied) and ``continuous`` (D69), and in ``backfill``
+    during a preview (D77)."""
     if not loop.deep or not loop.funnel:
         return
     for epoch_id in work:
         await _step(f"cut {epoch_id}", _cut_epoch(db_factory, loop, epoch_id))
         await _step(f"S8 {epoch_id}", _group_epoch(db_factory, state, epoch_id))
         await _step("submit label", _maybe_submit(db_factory, state, loop, "label", epoch_id))
-        await _step("submit final", _maybe_submit(db_factory, state, loop, "final", epoch_id))
+        if final_enabled():
+            await _step("submit final", _maybe_submit(db_factory, state, loop, "final", epoch_id))
 
 
 async def _cut_epoch(db_factory, loop: _Loop, epoch_id: uuid.UUID) -> None:

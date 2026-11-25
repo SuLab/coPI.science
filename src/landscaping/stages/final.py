@@ -45,6 +45,7 @@ from src.landscaping.comparator import IN_FLIGHT
 from src.landscaping.epochs import EpochInputs
 from src.landscaping.ideas import dossier_documents
 from src.landscaping.llm_client import CallResult, build_request
+from src.landscaping.s9_switch import final_enabled
 from src.landscaping.schemas import stage_schema
 from src.landscaping.scoring import epoch_band, epoch_weighted_score
 from src.landscaping.stages.cut import _batch_cycle_start
@@ -832,13 +833,16 @@ async def candidate_ready(db: AsyncSession, *, epoch_id: uuid.UUID) -> bool:
     ``candidate`` with ``drained_at`` set; its post-drain cut exists (complete, taken after
     ``drained_at``, no boundary batch pending); S6 has ended for every idea in that cut and S8
     has grouped it, its label batch ended; then ``mark_unassessable_probes`` (which commits);
-    then ``candidate_s9_complete``. The phase rule is ``drained_at``'s: it is set only in
-    phase ``continuous``."""
+    then ``candidate_s9_complete``. With ``final_enabled`` off the last two are skipped: no S9
+    runs and no probe is drawn (``s9_switch``). The phase rule is ``drained_at``'s: it is set
+    only in phase ``continuous``."""
     epoch = await db.get(LandscapeEpoch, epoch_id, populate_existing=True)
     if epoch is None or epoch.status != "candidate" or epoch.drained_at is None:
         return False
     cut = await _post_drain_cut(db, epoch)
     if cut is None or not await _s6_and_s8_done(db, epoch_id, cut):
         return False
+    if not final_enabled():
+        return True
     await mark_unassessable_probes(db, epoch_id=epoch_id)
     return await candidate_s9_complete(db, epoch_id=epoch_id)

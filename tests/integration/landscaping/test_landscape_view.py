@@ -13,6 +13,8 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import func, select
 
+from src.config import get_settings
+from src.landscaping.structured_lines import structured_line
 from src.models.landscape import (
     LandscapeAssessment,
     LandscapeCut,
@@ -38,6 +40,7 @@ from src.models.landscape import (
     LandscapeTriage,
 )
 from src.models.user import USER_ROLE_ADMIN, USER_ROLE_MANAGER, USER_ROLE_REVIEWER
+from src.services import landscape_chat_record, landscape_reviews
 from src.services import landscape_view as view
 from src.services.rubric_revisions import resolve_revision
 from tests.factories import make_user
@@ -1395,3 +1398,66 @@ async def test_merged_document_references_resolve_to_the_target(db_session):
     assert aliases == {str(old.id): str(target.id)}
     view._add_aliases(docs, aliases)
     assert docs[str(old.id)]["title"] == "An invented merge target"
+
+
+# --- S9 off (src/landscaping/s9_switch.py) ----------------------------------------------------
+
+
+S9_TEXTS = (
+    "An invented headline", "First invented sentence", "Invented score rationale",
+    "Invented rationale", "An invented point", "An invented flag", "an invented plan",
+)
+
+
+async def test_s9_off_reads_no_assessment(db_session, monkeypatch):
+    """S9 off: cards, the detail page, the lists, decisions and the chat read no S9 row, even
+    one that is stored. A card is its label, its pairwise rank (the best member's S7
+    position) and its members' structured lines, S6 summaries and sources."""
+    monkeypatch.setattr(get_settings(), "landscape_final_enabled", False)
+    epoch = await _epoch(db_session)
+    first = await _card(db_session, epoch, rank=2, recommended_next_experiment=ASK,
+                        red_flags=["An invented flag."])
+    second = await _card(db_session, epoch, rank=1, status=None)
+    await _evidence(db_session, epoch, first.idea)
+    await _batch(db_session, WEEK_1, [first, second])
+    manager = await make_user(db_session, user_role=USER_ROLE_MANAGER)
+
+    cards = await _this_week(db_session, manager)
+    assert _ids(cards) == [str(second.opp.id), str(first.opp.id)]
+    shown = cards[1]
+    for key in ("headline", "elevator_pitch", "pitch", "cost_line", "score_rationale",
+                "recommendation", "confidence", "score", "band", "assessment_id",
+                "red_flag_count", "failure", "history_assessment_id"):
+        assert shown[key] is None, key
+    assert shown["key_points"] == []
+    assert [c["no_assessment"] for c in cards] == [False, False]
+    assert [c["rank"] for c in cards] == [1, 2]
+    assert shown["label"] == "Invented programme"
+    assert shown["lines"] == [structured_line(first.idea)]
+    (brief,) = shown["member_briefs"]
+    assert (brief["n"], brief["structured_line"], brief["summary"]) == (
+        1, structured_line(first.idea), "Invented S6 summary.",
+    )
+    assert [(src["title"], src["url"]) for src in brief["sources"]] == [("An invented paper", None)]
+    assert not any(text in repr(cards) for text in S9_TEXTS)
+
+    detail = await view.detail_view(db_session, manager, first.opp.id)
+    assert detail["assessment"] is None and detail["no_assessment"] is False
+    assert detail["history"] == [] and detail["rank"] == 2
+    assert detail["lines"] == [structured_line(first.idea)]
+    assert detail["members"][0]["deep"]["summary"] == "Invented S6 summary."
+    assert not any(text in repr(detail) for text in S9_TEXTS)
+    with pytest.raises(LookupError):
+        await view.detail_view(db_session, manager, first.opp.id,
+                               history_assessment_id=first.assessment.id)
+
+    lists = await view.lists_view(db_session, manager, view="all", tab="all",
+                                  assignment="all", sort="score")
+    assert lists["sort"] == "pipeline"
+    assert _ids(lists["cards"]) == [str(second.opp.id), str(first.opp.id)]
+    assert await landscape_reviews.shown_assessment_id(
+        db_session, first.opp.id, first.assessment.id,
+    ) is None
+    assert await landscape_chat_record._current_assessment(
+        db_session, first.opp.id, epoch.id,
+    ) is None

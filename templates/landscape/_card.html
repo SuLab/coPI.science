@@ -11,7 +11,13 @@
    (the cost line, pitch and key points stay), an expert's own open sample item without
    S9's calls until they submit (D63), and `decided_by` is None until the viewer has decided
    (independent votes). Nothing here re-derives a hiding; it only says why a value is
-   missing. `rank` is never rendered (OD3). Model-written text renders autoescaped. #}
+   missing. `rank` is never rendered (OD3), except with S9 off.
+   With S9 off (`landscape_final_enabled()` false, src/landscaping/s9_switch.py) the card has
+   no assessment: its title is the S8 label, a "Rank N" chip gives the pairwise rank, and
+   `member_briefs` lists each member idea with its structured line, its S6 summary and its
+   sources (the first five; the rest on the detail page). Model-written text renders
+   autoescaped. #}
+{% set s9 = landscape_final_enabled() %}
 {% set ls = list_state if list_state is defined and list_state else {} %}
 {% set ls_query = ls.items() | selectattr('1') | list %}
 {% set detail_href = page_url(request, 'workspace_landscape_detail', query=ls_query, opportunity_id=card.opportunity_id) %}
@@ -20,7 +26,7 @@
         <div class="min-w-0">
             <h3 class="landscape-card-title text-base font-semibold text-gray-900"><a href="{{ detail_href }}" class="text-indigo-700 hover:underline">{{ card.headline or card.label or 'Untitled opportunity' }}</a>{% if card.confidence %} <span class="text-xs font-normal text-gray-600">[{{ card.confidence.strip("[]") }}]</span>{% endif %}</h3>
             {% if card.show_label and card.label and card.headline %}<p class="landscape-card-label text-xs text-gray-500 mt-0.5">{{ card.label }}</p>{% endif %}
-            {% if card.lines %}
+            {% if card.lines and not card.member_briefs %}
             <ul class="landscape-lines mt-1 space-y-0.5 text-sm text-gray-800">{% for line in card.lines %}<li>{{ line }}</li>{% endfor %}</ul>
             {% endif %}
             <p class="landscape-labs text-xs text-gray-500 mt-1">{{ 'Lab' if card.labs and card.labs | length == 1 else 'Labs' }}: <span class="font-medium text-gray-700">{{ card.labs | join(', ') if card.labs else '—' }}</span>{% if card.issued_on %} &middot; issued {{ card.issued_on }}{% endif %}</p>
@@ -30,6 +36,7 @@
             {% if card.retired %}<span class="landscape-retired px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-gray-100 text-gray-700">retired</span>{% endif %}
             {% if card.probe %}<span class="landscape-probe px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-amber-100 text-amber-700">probe</span>{% endif %}
             {% if card.blind %}<span class="landscape-blind px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-slate-100 text-slate-700">blind batch</span>{% endif %}
+            {% if not s9 and card.rank is not none %}<span class="landscape-rank px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-indigo-100 text-indigo-700" title="Pairwise rank: the best of its ideas' positions when the cut's ideas were compared in pairs on their in-depth analyses (1 is the strongest); an idea not yet compared keeps its triage rank">Rank {{ card.rank }}</span>{% endif %}
             {# The chip colours are the Assessments card's map (contract C1); "pass" prints as
                the rubric's display word. #}
             {% if card.recommendation %}
@@ -45,7 +52,7 @@
     </div>
     {% if card.blind_hidden %}<p class="landscape-blind-note mt-1 text-sm text-gray-600">This card is in a blind batch: on this card, the recommendation, score, band and flag counts are hidden until you record your decision.</p>{% endif %}
     {% if card.expert_hidden %}<p class="landscape-expert-note mt-1 text-sm text-gray-600">This is one of your expert opportunities: the pipeline's own calls are hidden until you submit your judgment.</p>{% endif %}
-    {% if card.no_assessment %}
+    {% if s9 and card.no_assessment %}
     <p class="landscape-no-assessment mt-2 text-sm text-amber-800">No completed assessment under the current criteria{% if card.failure and card.failure.status %} ({{ card.failure.status }}){% endif %}.{% if card.history_assessment_id %} Its page shows the last earlier one as history.{% endif %}</p>
     {% endif %}
 
@@ -90,6 +97,25 @@
             {% endif %}
         </div>
         {% endif %}
+    </div>
+    {% endif %}
+    {% if card.member_briefs %}
+    <div class="landscape-card-members mt-3 space-y-3">
+        {% for m in card.member_briefs %}
+        <div class="landscape-card-member rounded-lg border border-slate-200 bg-slate-50 p-3">
+            {% if card.member_briefs | length > 1 %}<div class="text-xs font-semibold uppercase tracking-wide text-gray-500">Idea {{ m.n }}</div>{% endif %}
+            {% if m.structured_line %}<p class="landscape-card-member-line text-sm font-medium text-gray-900">{{ m.structured_line }}</p>{% endif %}
+            <div class="mt-2 text-xs font-semibold uppercase tracking-wide text-gray-500">In-depth analysis</div>
+            {% if m.summary %}<p class="landscape-card-member-summary mt-1 max-w-[68ch] whitespace-pre-line text-sm leading-relaxed text-gray-700">{{ plain_citations(m.summary) }}</p>{% else %}<p class="mt-1 text-sm text-gray-600">None recorded.</p>{% endif %}
+            <div class="mt-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Sources ({{ m.sources | length }})</div>
+            {% if m.sources %}
+            <ul class="landscape-card-member-sources mt-1 space-y-0.5 text-sm text-gray-800">
+                {% for src in m.sources[:5] %}<li>{% if src.url %}<a class="text-indigo-700 underline-offset-2 hover:underline" href="{{ src.url }}" rel="noopener noreferrer" target="_blank">{{ src.title or 'Untitled document' }}</a>{% else %}{{ src.title or 'Untitled document' }}{% endif %}</li>{% endfor %}
+            </ul>
+            {% if m.sources | length > 5 %}<p class="mt-0.5 text-xs text-gray-600">{{ m.sources | length - 5 }} more on the detail page.</p>{% endif %}
+            {% else %}<p class="mt-1 text-sm text-gray-600">None recorded.</p>{% endif %}
+        </div>
+        {% endfor %}
     </div>
     {% endif %}
     {% if not card.elevator_pitch %}

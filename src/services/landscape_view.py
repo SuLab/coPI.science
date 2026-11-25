@@ -20,6 +20,13 @@ not "changed since your decision" (D50). With no ``done`` row in the active epoc
 so, and the last ``done`` row of a retired epoch is its history link. A retired opportunity reads
 as history: its last ``done`` assessment of an active or retired epoch, marked retired (D62).
 
+**S9 off** (``s9_switch``, ``LANDSCAPE_FINAL_ENABLED=false``). No S9 row is read: every card and
+page has no assessment and says nothing about one missing. A card is its S8 label, its rank
+(``_shown_rank``: the best member's S7 position) and ``member_briefs``, each member's structured
+line, S6 summary and sources; the detail page carries the same ``rank`` and its member sections.
+The lists sort in card order only, and **All assessed** lists every opportunity of an active or
+retired epoch.
+
 **Independent votes** (L40, L50, L51, D60). ``visible_votes`` decides what anyone sees of other
 people's decisions, reviews and status events; tabs and counts are the viewer's own.
 
@@ -64,6 +71,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.landscaping import reports, review_batches
 from src.landscaping.intake import _parse_controls
 from src.landscaping.review_batches import decision_changed, viewer_cards
+from src.landscaping.s9_switch import final_enabled
 from src.landscaping.stages.opportunities import _passed_deep
 from src.landscaping.stages.rerank import card_order
 from src.landscaping.structured_lines import structured_line
@@ -603,6 +611,9 @@ def _pick(rows: Sequence[LandscapeAssessment], ep: _Epochs, retired: bool) -> _P
 async def _assessments(
     db: AsyncSession, opportunity_ids: Iterable[uuid.UUID]
 ) -> dict[uuid.UUID, list[LandscapeAssessment]]:
+    """Each opportunity's S9 rows, oldest first; none with S9 off (``s9_switch``)."""
+    if not final_enabled():
+        return {}
     A = LandscapeAssessment
     rows = (await db.scalars(
         select(A).where(A.opportunity_id.in_(list(opportunity_ids))).order_by(A.created_at)
@@ -808,6 +819,7 @@ class _CardLoads:
     deep: Mapping[uuid.UUID, LandscapeDeep]  # by member idea, as ``member_deep`` picks it
     deciders: Mapping[uuid.UUID, list[str]]  # by opportunity: who decided, oldest first
     assignees: Mapping[uuid.UUID, list[str]]  # by opportunity: who is assigned
+    lines: Mapping[uuid.UUID, str]  # by member idea, its structured line; read with S9 off only
 
 
 async def _card_docs(
@@ -871,6 +883,51 @@ async def _card_deep(
     for epoch_id, by_idea in versions.items():
         out.update(await _passed_deep(db, epoch_id, by_idea))
     return out
+
+
+async def _card_lines(db: AsyncSession, idea_ids: Iterable[uuid.UUID]) -> dict[uuid.UUID, str]:
+    """Each idea's structured line, in one query."""
+    idea_ids = list(idea_ids)
+    if not idea_ids:
+        return {}
+    return {
+        idea.id: structured_line(idea)
+        for idea in (await db.scalars(
+            select(LandscapeIdea).where(LandscapeIdea.id.in_(idea_ids))
+        )).all()
+    }
+
+
+def _member_briefs(
+    members: Sequence[uuid.UUID], loads: _CardLoads, hiding: Hiding
+) -> list[dict]:
+    """A card's members with S9 off: ``[{"n", "structured_line", "summary", "sources":
+    [{"document_id", "title", "url"}]}]`` in member order. ``summary`` is the member's
+    ``member_deep`` summary after ``hide_deep``, its ``doc:`` references rewritten against the
+    member's own documents (C4), else None; ``sources`` are the member's documents, each
+    once, with their DOI, else PubMed, link."""
+    briefs = []
+    for n, idea_id in enumerate(members, start=1):
+        docs = loads.docs.get(idea_id, {})
+        deep = loads.deep.get(idea_id)
+        summary = hide_deep(_row_values(deep), hiding).get("summary") if deep else None
+        unique = {info["id"]: info for info in docs.values()}
+        briefs.append({
+            "n": n,
+            "structured_line": loads.lines.get(idea_id),
+            "summary": (
+                rewrite_doc_refs(summary, docs, markdown=False)
+                if isinstance(summary, str) and summary.strip() else None
+            ),
+            "sources": [
+                {"document_id": info["id"], "title": info["title"],
+                 "url": doi_url(info["doi"]) or pubmed_url(info["pmid"])}
+                for info in sorted(
+                    unique.values(), key=lambda d: ((d["title"] or "").casefold(), d["id"])
+                )
+            ],
+        })
+    return briefs
 
 
 async def _card_people(
@@ -947,8 +1004,10 @@ def _card_fields(
         "score_rationale": values.get("score_rationale"),
         "recommendation": values.get("recommendation") if called else None,
         "confidence": values.get("confidence") if called else None,
+        # S9's red flags; with S9 off there are none to count, not zero (``s9_switch``).
         "red_flag_count": (
-            (len(red_flags) if isinstance(red_flags, list) else 0) if called else None
+            (len(red_flags) if isinstance(red_flags, list) else 0)
+            if called and final_enabled() else None
         ),
         "confirmed_flags": (
             _confirmed_count((loads.deep.get(i) for i in members), hiding) if called else None
@@ -970,9 +1029,12 @@ def _card(
     values = _rewrite_assessment(hidden, docs)
     decision = viewer.decisions.get(opp.id)
     shown_id = pick.shown.id if pick.shown is not None else None
-    no_assessment = pick.shown is None and not retired
+    s9 = final_enabled()
+    no_assessment = s9 and pick.shown is None and not retired
     label = version.label if version is not None else None
-    lines = _lines(values.get("structured_lines"))
+    lines = _lines(
+        values.get("structured_lines") if s9 else [loads.lines.get(i) for i in members]
+    )
     return {
         "opportunity_id": _sid(opp.id),
         "label": label,
@@ -993,6 +1055,7 @@ def _card(
         "no_assessment": no_assessment,
         "failure": _failure(pick) if no_assessment else None,
         "history_assessment_id": _sid(pick.history.id) if pick.history is not None else None,
+        "member_briefs": [] if s9 else _member_briefs(members, loads, hiding),
         "retired": retired,
         "probe": probe,
         "blind_hidden": hiding.blind,
@@ -1029,7 +1092,9 @@ async def _load_cards(
     ``assigned_names`` (list[str]) and ``decided_by`` (list[str]|None, None until the viewer
     has decided). ``recommendation``, ``confidence`` and both counts are None on an undecided
     blind card and on an expert's open item. ``doc:`` references in the prose are rewritten
-    (C4). The documents, S6 records, decisions and assignments are read once for all cards."""
+    (C4). The documents, S6 records, decisions and assignments are read once for all cards.
+    ``member_briefs`` (``_member_briefs``) is [] unless S9 is off; then ``lines`` are the
+    members' structured lines and ``no_assessment`` is False."""
     ids = set(opportunity_ids)
     visible_probes = issued.visible_probes()
     opps = {o.id: o for o in (await db.scalars(
@@ -1061,6 +1126,7 @@ async def _load_cards(
     loads = _CardLoads(
         docs=await _card_docs(db, all_members), deep=await _card_deep(db, all_members),
         deciders=deciders, assignees=assignees,
+        lines={} if final_enabled() else await _card_lines(db, all_members),
     )
     by_id = {
         o: _card(
@@ -1222,7 +1288,8 @@ async def _list_candidates(
 ) -> tuple[set[uuid.UUID], set[uuid.UUID]]:
     """``(opportunities, probes)`` for a staff list: **Current** is every live non-probe
     opportunity whose latest version belongs to the active epoch; **All assessed** every
-    opportunity with a ``done`` assessment of an active or retired epoch."""
+    opportunity with a ``done`` assessment of an active or retired epoch (S9 off: every
+    opportunity with a version of an active or retired epoch)."""
     V, Opp = LandscapeOpportunityVersion, LandscapeOpportunity
     probes = set((await db.scalars(select(V.opportunity_id).where(V.is_probe.is_(True)))).all())
     if view == "current":
@@ -1236,6 +1303,13 @@ async def _list_candidates(
         )).all()
         return set(rows), probes
     history = [e for e, s in ep.status.items() if s in _HISTORY_EPOCHS]
+    if not final_enabled():
+        # S9 off: no assessment exists to go by, so every opportunity an active or retired
+        # epoch minted a version of.
+        rows = (await db.scalars(
+            select(V.opportunity_id).where(V.epoch_id.in_(history)).distinct()
+        )).all()
+        return set(rows), probes
     A = LandscapeAssessment
     rows = (await db.scalars(
         select(A.opportunity_id).where(
@@ -1265,7 +1339,8 @@ async def lists_view(
     member's lab); ``sort`` orders by the cards' shown values (``_sorted_cards``), so a value
     the viewer's hiding hides sorts with the missing ones. ``lab_options`` (the distinct lab
     names) and ``tiles`` (``_tiles``) cover every card listed before the lab filter and the
-    tab; ``counts`` and ``cards`` are after the lab filter.
+    tab; ``counts`` and ``cards`` are after the lab filter. With S9 off ``sort`` is always
+    ``"pipeline"``: score and recommendation come from S9.
 
     Returns ``{"view": str, "tab": str, "assignment": "mine"|"all", "sort": str, "lab":
     str|None, "lab_options": [str], "tiles": tiles, "epoch": dict|None, "banner": str|None,
@@ -1276,7 +1351,7 @@ async def lists_view(
     view = "all" if view == "all" else "current"
     tab = tab if tab in ("unreviewed", "reviewed") else "all"
     assignment = "mine" if assignment == "mine" else "all"
-    sort = sort if sort in _SORTS else "pipeline"
+    sort = sort if sort in _SORTS and final_enabled() else "pipeline"
     lab = lab or None
     viewer = await _viewer(db, user)
     ep = await _epochs(db)
@@ -1834,7 +1909,8 @@ async def detail_view(
     Returns ``{"opportunity_id": str, "label": str|None, "lines": [str], "show_label": bool,
     "theme": str|None, "retired": bool, "is_history": bool, "history_view": bool, "probe":
     bool, "blind": bool, "hiding": {"blind": bool, "expert": bool}, "epoch": dict|None,
-    "banner": str|None, "assessment": dict|None, "prose_format": str, "no_assessment":
+    "banner": str|None, "rank": int|None (``_shown_rank`` with S9 off; else None, the rank
+    being the assessment's), "assessment": dict|None, "prose_format": str, "no_assessment":
     bool, "failure": {"status", "error"}|None, "history_assessment_id": str|None, "history":
     [{"assessment_id", "epoch_id", "epoch_status", "opportunity_version", "status",
     "headline", "created_at"}], "members": [member], "dimensions": [row],
@@ -1875,7 +1951,11 @@ async def detail_view(
     assessment, which must be a ``done`` row of ``history`` (``_history_row``; anything else
     raises ``LookupError``): ``history_view`` is True, ``assessment`` is that row under the
     same hidings with ``rank`` None, ``members`` is [] and the evidence summary has no panel
-    opinions; its members' sources and quotes still resolve its support and references."""
+    opinions; its members' sources and quotes still resolve its support and references.
+
+    With S9 off (``s9_switch``) no assessment is read: ``assessment`` is None,
+    ``no_assessment`` False, ``history`` [], ``lines`` are the members' structured lines, and
+    any ``history_assessment_id`` raises ``LookupError``."""
     if not await can_view(db, user, opportunity_id):
         return None
     viewer = await _viewer(db, user, opportunity_id)
@@ -1913,12 +1993,22 @@ async def detail_view(
     decision = viewer.decisions.get(opportunity_id)
     judgment = viewer.expert.get(opportunity_id)
     shown_id = pick.shown.id if pick.shown is not None else None
-    no_assessment = pick.shown is None and not retired and not history_view
+    s9 = final_enabled()
+    no_assessment = s9 and pick.shown is None and not retired and not history_view
     batches = issued.batch_of()
     on_blind = any(batches[i.batch_id].blind for i in issued.items
                    if i.opportunity_id == opportunity_id)
     label = version.label if version else None
-    lines = _lines((values or {}).get("structured_lines"))
+    lines = _lines(
+        (values or {}).get("structured_lines") if s9
+        else [m.section["structured_line"] for m in loaded]
+    )
+    rank = None
+    if not (s9 or history_view or hiding.blind or hiding.expert):
+        rank = _shown_rank(
+            opportunity_id, version, [uuid.UUID(m.section["idea_id"]) for m in loaded],
+            _Unranked.of(issued), *await _ranks(db, ep.active_id),
+        )
     view = {
         "opportunity_id": _sid(opportunity_id),
         "label": label, "lines": lines, "show_label": _show_label(label, lines),
@@ -1928,6 +2018,7 @@ async def detail_view(
         "blind": on_blind,
         "hiding": {"blind": hiding.blind, "expert": hiding.expert},
         "epoch": ep.summary(), "banner": _banner(ep),
+        "rank": rank,
         "assessment": values,
         "prose_format": values["prose_format"] if values is not None else "markdown",
         "no_assessment": no_assessment,

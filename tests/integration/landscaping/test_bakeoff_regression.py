@@ -15,9 +15,10 @@ from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.config import get_settings
 from src.landscaping import epochs, ideas
 from src.landscaping.eval import bakeoff, regression
 from src.landscaping.llm_client import CallResult
@@ -672,6 +673,28 @@ async def test_refresh_after_activation_freezes_new_baseline(db_factory, models,
     candidate = await _epoch(db_factory)
     with pytest.raises(ValueError):
         await regression.refresh_after_activation(db_factory, epoch_id=candidate)
+
+
+async def test_s9_off_baseline_takes_s6_items_without_s9(db_factory, models, offline, monkeypatch):
+    """S9 off (``s9_switch``): the baseline frozen at an activation holds no S9 item, and its
+    S6 items come from the live opportunities' members whether or not S9 assessed them."""
+    monkeypatch.setattr(get_settings(), "landscape_final_enabled", False)
+    await _seed_set(db_factory, _screen_items(1))
+    active_id = await _active_epoch_with_outputs(db_factory)
+    async with db_factory() as db:
+        await db.execute(delete(LandscapeAssessment).where(LandscapeAssessment.epoch_id == active_id))
+        await db.commit()
+
+    version = await regression.refresh_after_activation(db_factory, epoch_id=active_id)
+
+    async with db_factory() as db:
+        kinds = [
+            item.item_kind for item in (await db.scalars(
+                select(LandscapeRegressionItem).where(LandscapeRegressionItem.set_version == version)
+            )).all()
+        ]
+    assert "final" not in kinds and kinds.count("deep") == 1
+    assert models.calls == []
 
 
 async def test_positive_controls_join_the_set(db_factory, models):

@@ -607,6 +607,34 @@ async def test_daily_cap_reached_mid_loop_skips_remaining_sync_tasks(
 
 
 @pytest.mark.asyncio
+async def test_s9_off_cut_step_never_submits_final(monkeypatch):
+    """S9 off (``s9_switch``): the cut step submits the label batch but never S9, and no S9
+    fallback chain runs."""
+    stages: list[str] = []
+
+    async def record(db_factory, state, loop, stage, epoch_id):
+        stages.append(stage)
+        return 0
+
+    async def nothing(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(worker, "_maybe_submit", record)
+    monkeypatch.setattr(worker, "_cut_epoch", nothing)
+    monkeypatch.setattr(worker, "_group_epoch", nothing)
+    loop = worker._Loop(now=NOW, phase="continuous", llm=True, funnel=True)
+    await worker._cut_step(None, worker.WorkerState(), loop, [uuid.uuid4()])
+    assert stages == ["label", "final"]
+    assert set(final_stage.FALLBACKS) <= set(worker._fallback_adapters(True))
+
+    stages.clear()
+    monkeypatch.setattr(get_settings(), "landscape_final_enabled", False)
+    await worker._cut_step(None, worker.WorkerState(), loop, [uuid.uuid4()])
+    assert stages == ["label"]
+    assert not set(final_stage.FALLBACKS) & set(worker._fallback_adapters(True))
+
+
+@pytest.mark.asyncio
 async def test_daily_cap_reached_between_stages_skips_next_submission(
     db_factory, settings, calls, monkeypatch,
 ):

@@ -19,6 +19,7 @@ import pytest_asyncio
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.config import get_settings
 from src.landscaping import epochs, review_batches
 from src.landscaping.stages.opportunities import make_probe
 from src.models import AppSetting
@@ -350,6 +351,49 @@ async def test_ten_cards_same_batch_for_all(db_factory):
     shown = {c.opp: c.assessment for c in cards}
     for user in (ash, birch):
         assert review_batches.viewer_cards(pairs, [], shown, frozenset(), user) == []
+
+
+@pytest.mark.asyncio
+async def test_s9_off_issues_unassessed_cards_in_card_order_never_blind(db_factory, monkeypatch):
+    """S9 off (``s9_switch``): no assessment is waited for, cards go in card order (the best
+    member's S7 position, else S5), and the fourth batch is not blind: no probe is drawn."""
+    monkeypatch.setattr(get_settings(), "landscape_final_enabled", False)
+    epoch = await _epoch(db_factory)
+    ideas = await _ideas(db_factory, epoch, 14, k=14)
+    cards = await _cards(db_factory, epoch, ideas, assessed=False)
+    async with db_factory() as db:
+        # S7 places the last idea first, ahead of S5's first (D30).
+        db.add(LandscapeRanking(epoch_id=epoch, idea_id=ideas[13].id, position=1))
+        # A two-idea version whose S8 label is still owed, ranked above every card: not issued.
+        pair = [
+            LandscapeIdea(
+                id=uuid.uuid4(), epoch_id=epoch, idea_key=f"biology;invented-rb-{next(_counter)}",
+                idea_type="biology", direction="inhibit", version_hash="v1",
+                targets=[{"hgnc_id": "HGNC:90001", "symbol": "INVRB"}],
+                disease={"mondo_id": "MONDO:9999999", "label": "invented fibrosis"},
+            )
+            for _ in range(2)
+        ]
+        unlabelled = LandscapeOpportunity(id=uuid.uuid4(), version_counter=1)
+        db.add_all([*pair, unlabelled])
+        await db.flush()
+        db.add(LandscapeOpportunityVersion(
+            opportunity_id=unlabelled.id, version=1, epoch_id=epoch,
+            member_idea_keys=[i.idea_key for i in pair], label=None, status="pending",
+        ))
+        db.add(LandscapeRanking(epoch_id=epoch, idea_id=pair[0].id, position=0))
+        await db.commit()
+    await _past_batches(db_factory, 3)
+
+    assert await review_batches.draw_probes(db_factory, for_issue_on=week(4)) == []
+    batch_id = await review_batches.issue_weekly_batch(db_factory, today=week(4))
+
+    assert (await _get(db_factory, LandscapeReviewBatch, batch_id)).blind is False
+    items = await _items(db_factory, batch_id)
+    assert {i.opportunity_id for i in items} == {c.opp for c in cards[:9]} | {cards[13].opp}
+    assert all(i.position is None and not i.is_probe for i in items)
+    async with db_factory() as db:
+        assert await review_batches._available(db, epoch) == [c.opp for c in cards[9:13]]
 
 
 @pytest.mark.asyncio

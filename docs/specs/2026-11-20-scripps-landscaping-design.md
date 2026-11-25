@@ -490,6 +490,23 @@ can therefore end somewhat over $100.
    - An epoch override still runs through `scripts/scripps_admin.py`, with an account that
      `grant` created by ORCID iD.
    - The setting is off by default and must never be set in production.
+9. **No final assessment (owner, 2026-11-24).** Scripps does not evaluate opportunities the way
+   S9's rubric does, so the su08 deployment runs with `LANDSCAPE_FINAL_ENABLED=false`
+   (`src/landscaping/s9_switch.py`). The opportunities shown are the top results of the S7
+   pairwise ranking:
+   - The worker makes no S9 call: no S9 batch, no S9 fallback, and no regression check of a kind
+     only S9 reads.
+   - A candidate activates once its post-drain cut's S6 and S8 have ended, labels included.
+   - A weekly batch takes the never-issued opportunities in card order (the best member's S7
+     position) without waiting for S9. No batch is blind, so no probe is drawn.
+   - The pages read no S9 row. A card is its S8 label, a "Rank N" chip (the best member's S7
+     position; 1 is the strongest) and each member idea's structured line, S6 summary and
+     sources. The opportunity page adds the members' full S6 sections. There is no score, band,
+     recommendation, pitch, key points, verdict, gating or score section, no count tiles and no
+     sort but the pipeline order, and nothing says an assessment is missing.
+
+   The run's first cut was assessed by S9 before this decision; its 17 rows stay in the
+   database, unread. The setting is on by default, so production is unchanged.
 
 ## 8. Acceptance
 

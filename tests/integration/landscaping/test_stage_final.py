@@ -19,6 +19,7 @@ import pytest_asyncio
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.config import get_settings
 from src.landscaping import batches, epochs
 from src.landscaping.batches import BatchOutcome
 from src.landscaping.schemas import GATING_KEYS, KEY_POINT_KEYS, stage_schema
@@ -652,6 +653,33 @@ async def test_candidate_activates_across_daily_cut_due(db_factory):
         (await db.get(LandscapeAssessment, assessment_id)).status = "done"
         await db.commit()
         assert await final.candidate_ready(db, epoch_id=epoch_id) is True
+
+
+async def test_s9_off_candidate_ready_without_s9_or_probes(db_factory, monkeypatch):
+    """S9 off (``s9_switch``): the candidate activates once the post-drain cut's S6 and S8 have
+    ended, labels included, with no S9 row and an issued probe left unmarked."""
+    active_id = await _epoch(db_factory, "active")
+    probe_key = _key("INV7")
+    await _idea(db_factory, active_id, key=probe_key)
+    await _issue_probe(db_factory, active_id, probe_key)
+    epoch_id = await _epoch(db_factory, "candidate", drained_at=DRAINED)
+    a = await _idea(db_factory, epoch_id)
+    b = await _idea(db_factory, epoch_id, symbol="INV2")
+    cut_id = await _cut(db_factory, epoch_id, [a, b], at=DRAINED + timedelta(hours=1))
+    grouping_id = await _grouping(
+        db_factory, epoch_id, cut_id, [a.idea_key, b.idea_key], status="submitted",
+    )
+
+    monkeypatch.setattr(get_settings(), "landscape_final_enabled", False)
+    async with db_factory() as db:
+        assert await final.candidate_ready(db, epoch_id=epoch_id) is False  # label pending
+        (await db.get(LandscapeCandidateGrouping, grouping_id)).status = "done"
+        await db.commit()
+        assert await final.candidate_ready(db, epoch_id=epoch_id) is True
+    assert await _rows(db_factory, epoch_id) == []  # the probe is not marked
+    monkeypatch.setattr(get_settings(), "landscape_final_enabled", True)
+    async with db_factory() as db:
+        assert await final.candidate_ready(db, epoch_id=epoch_id) is False  # S9 owed
 
 
 # --- S7 and decisions -----------------------------------------------------------------------

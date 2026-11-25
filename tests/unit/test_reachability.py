@@ -1078,10 +1078,12 @@ def test_static_link_resolution_coverage_is_reported():
     # 105 since the Landscape remediation (docs/plans/2026-11-19-landscape-ui-remediation-plan.md):
     # the detail page's bare jump-nav fragments and its source, support and history links
     # built from data. 107 since the compact Landscape card (D95): its headline and
-    # "detail →" links are the card's `{{ detail_href }}`, as on the full card.
-    assert unresolvable <= 107, (
+    # "detail →" links are the card's `{{ detail_href }}`, as on the full card. 108 since the
+    # card with S9 off (src/landscaping/s9_switch.py) lists each member's sources, linked by
+    # `{{ src.url }}` (a DOI or PubMed link built from data).
+    assert unresolvable <= 108, (
         f"{unresolvable} of {len(values)} href/action values do not resolve to a "
-        "checkable local path (was 107) — the matcher probably regressed, or a new "
+        "checkable local path (was 108) — the matcher probably regressed, or a new "
         "link is built from a variable"
     )
 

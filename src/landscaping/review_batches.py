@@ -4,7 +4,8 @@
 **Weekly batch** (D48). One batch a week, the same for everyone: up to ``BATCH_SIZE``
 opportunities never issued before, in card order (D30, ``rerank.card_order``). An opportunity
 is available once it has a ``done`` S9 assessment of its latest version in the active epoch,
-so every issued card has something to show. A normal batch leaves ``position`` NULL, so its
+so every issued card has something to show; with S9 off (``s9_switch``) once its latest
+version is the active epoch's, and no batch is blind. A normal batch leaves ``position`` NULL, so its
 cards follow the live card order; a blind batch stores its shuffled order in ``position``.
 
 **Blind cadence** (L54, D62). Every fourth batch is blind: a batch is due blind once three
@@ -39,6 +40,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.landscaping import epochs
 from src.landscaping.criteria import load_criteria
+from src.landscaping.s9_switch import final_enabled
+from src.landscaping.stages.final import _label_in_flight
 from src.landscaping.stages.opportunities import make_probe
 from src.landscaping.stages.rerank import card_order
 from src.models import AppSetting, User
@@ -139,7 +142,11 @@ async def _done_assessments(
 
 async def _blind_due(db: AsyncSession, issue_on: date) -> bool:
     """Whether the batch issued on ``issue_on`` is due blind: three batches issued before it
-    since the last blind one (L54). A deferred blind batch (D62) stays due."""
+    since the last blind one (L54). A deferred blind batch (D62) stays due. Never with
+    ``final_enabled`` off: a blind batch hides S9's calls and its probes wait for S9, so no
+    batch is blind and ``draw_probes`` draws none (``s9_switch``)."""
+    if not final_enabled():
+        return False
     rows = (
         await db.execute(
             select(LandscapeReviewBatch.blind)
@@ -328,12 +335,23 @@ async def _ready_probes(db: AsyncSession, epoch_id: uuid.UUID) -> list[uuid.UUID
 
 async def _available(db: AsyncSession, epoch_id: uuid.UUID) -> list[uuid.UUID]:
     """Never-issued, non-probe opportunities with a ``done`` assessment of their latest version
-    in the epoch, in card order (D30)."""
+    in the epoch, in card order (D30). With ``final_enabled`` off no assessment is waited for:
+    every never-issued, non-probe opportunity whose latest version is the epoch's, once its
+    S8 label (owed by a version of two or more ideas) has ended."""
     issued = await _issued_ids(db)
-    done = await _done_assessments(db, epoch_id)
+    if final_enabled():
+        done = await _done_assessments(db, epoch_id)
+
+        def ready(v: LandscapeOpportunityVersion) -> bool:
+            return (v.opportunity_id, v.version) in done
+    else:
+        # As S9 would, wait for a version's S8 label (``final._label_in_flight``): a card
+        # issued before it would read "Untitled opportunity".
+        def ready(v: LandscapeOpportunityVersion) -> bool:
+            return v.epoch_id == epoch_id and not _label_in_flight(v)
     versions = [
         v for v in await _latest_versions(db, probe=False)
-        if v.opportunity_id not in issued and (v.opportunity_id, v.version) in done
+        if v.opportunity_id not in issued and ready(v)
     ]
     if not versions:
         return []
@@ -504,7 +522,11 @@ async def _experts(db: AsyncSession) -> list[User]:
 
 async def _sample_pool(db: AsyncSession, epoch_id: uuid.UUID) -> dict[uuid.UUID, uuid.UUID]:
     """Assessed and probe cards (L55): live opportunities with a ``done`` assessment of their
-    latest version in the epoch, probes only once issued. Opportunity -> assessment id."""
+    latest version in the epoch, probes only once issued. Opportunity -> assessment id. Empty
+    with S9 off (``s9_switch``): an expert sample compares an expert with S9's calls, and S9
+    rows stored before the switch are not read."""
+    if not final_enabled():
+        return {}
     done = await _done_assessments(db, epoch_id)
     issued = await _issued_ids(db)
     pool: dict[uuid.UUID, uuid.UUID] = {}

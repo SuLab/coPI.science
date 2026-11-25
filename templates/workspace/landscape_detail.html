@@ -22,7 +22,13 @@
    `data-markdown` when `prose_format` is "markdown" (a NULL stamp already reads as
    markdown, OD2), else as escaped text; every other model-written field goes through
    `plain_citations`. Forms post to literal /reviews/ paths with the page's `list_state` as
-   hidden fields; the routes redirect back here with it (C9). #}
+   hidden fields; the routes redirect back here with it (C9).
+   With S9 off (`landscape_final_enabled()` false, src/landscaping/s9_switch.py) there is no
+   assessment: the page is the label, the members' structured lines (`lines`), the pairwise
+   `rank`, the deal-breakers, the review panel and the member ideas with their S6 records;
+   every S9 section (evidence summary, ask, verdict, gating, red flags, rationale, scores) and
+   every "no assessment" note is left out. #}
+{% set s9 = landscape_final_enabled() %}
 {% set a = assessment or {} %}
 {% set markdown = a.prose_format == 'markdown' %}
 {% set pass_label = banding.pass_label if banding and banding.pass_label else 'pass' %}
@@ -39,20 +45,22 @@
 {% if banner %}<div class="landscape-banner mb-4 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">{{ banner }}</div>{% endif %}
 {% if history_view %}<div class="landscape-history-view-note mb-4 rounded-lg border border-gray-300 bg-gray-50 px-4 py-3 text-sm text-gray-700">This is an earlier assessment of this opportunity, shown as history. <a class="text-indigo-700 underline-offset-2 hover:underline" href="{{ page_url(request, 'workspace_landscape_detail', opportunity_id=opportunity_id, query=state) }}">Show the current page</a></div>
 {% elif is_history %}<div class="landscape-history-note mb-4 rounded-lg border border-gray-300 bg-gray-50 px-4 py-3 text-sm text-gray-700">This opportunity has been retired. Its page shows its last assessment, as history.</div>{% endif %}
-{% if no_assessment %}<div class="landscape-no-assessment mb-4 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">No completed assessment under the current criteria{% if failure and failure.status %} (status: {{ failure.status }}){% endif %}.{% if history_assessment_id %} The last earlier assessment is listed under History below.{% endif %}</div>{% endif %}
+{% if s9 and no_assessment %}<div class="landscape-no-assessment mb-4 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">No completed assessment under the current criteria{% if failure and failure.status %} (status: {{ failure.status }}){% endif %}.{% if history_assessment_id %} The last earlier assessment is listed under History below.{% endif %}</div>{% endif %}
 {% if hiding and hiding.blind %}<div class="landscape-blind-note mb-4 rounded-lg border border-slate-300 bg-slate-50 px-4 py-3 text-sm text-slate-900">This opportunity is in a blind batch: the score, band, dimension scores and their rationales are hidden until you record your decision, and the rank until the next batch is issued.</div>{% endif %}
 {% if hiding and hiding.expert %}<div class="landscape-expert-note mb-4 rounded-lg border border-slate-300 bg-slate-50 px-4 py-3 text-sm text-slate-900">This is one of your expert opportunities: the pipeline's own calls (gates, scores, band, recommendation, red flags, the panel's opinions and the rationales) are hidden until you submit your judgment.</div>{% endif %}
 
 <nav aria-label="On this page" class="assessment-jump-nav sticky top-0 z-10 -mx-2 mb-4 flex flex-wrap gap-x-4 gap-y-1 bg-white/95 px-2 py-2 text-sm text-gray-600 backdrop-blur border-b border-gray-100">
     <a class="text-indigo-700 underline-offset-2 hover:underline" href="#brief">Brief</a>
+    {% if s9 %}
     <a class="text-indigo-700 underline-offset-2 hover:underline" href="#evidence">Evidence</a>
     {% if a.recommended_next_experiment %}<a class="text-indigo-700 underline-offset-2 hover:underline" href="#ask">Ask</a>{% endif %}
     <a class="text-indigo-700 underline-offset-2 hover:underline" href="#verdict">Verdict</a>
     <a class="text-indigo-700 underline-offset-2 hover:underline" href="#gating">Gating</a>
     {% if a.rationale %}<a class="text-indigo-700 underline-offset-2 hover:underline" href="#rationale">Rationale</a>{% endif %}
     <a class="text-indigo-700 underline-offset-2 hover:underline" href="#scores">Scores</a>
+    {% endif %}
     {% if not history_view %}<a class="text-indigo-700 underline-offset-2 hover:underline" href="#deal-breakers">Deal-breakers</a>{% endif %}
-    <a class="text-indigo-700 underline-offset-2 hover:underline" href="#review">Review</a>
+    {% if not permissions.read_only %}<a class="text-indigo-700 underline-offset-2 hover:underline" href="#review">Review</a>{% endif %}
     {% if not history_view %}<a class="text-indigo-700 underline-offset-2 hover:underline" href="#ideas">Ideas</a>{% endif %}
     {# Buttons, not links: they act on the page (static/js/assessment_timeline.js opens or
        closes every <details>), styled apart from the anchors beside them. #}
@@ -64,7 +72,7 @@
    the single structured line does not (D80: a label ending "…" that the line starts with
    counts as the same). The pitch reads left with "Why this score" under it, the key points
    right, each point with its support badge; one column when a side is empty. #}
-{% set lines = (a.structured_lines or []) | unique | list %}
+{% set lines = ((a.structured_lines or []) if s9 else (lines or [])) | unique | list %}
 {% set label_text = label or '' %}
 {% set label_stem = label_text[:-1] if label_text.endswith('…') else label_text %}
 {% set label_is_line = lines | length == 1 and (lines[0] == label_text or (label_text.endswith('…') and lines[0].startswith(label_stem))) %}
@@ -82,6 +90,7 @@
     <p class="assessment-headline text-2xl font-semibold text-gray-900">{{ a.headline or label or 'Opportunity' }}</p>
     {% if a.headline and label_text and not label_is_line %}<div class="assessment-brief-label text-sm text-gray-600 mt-1">{{ label_text }}</div>{% endif %}
     {% if lines %}<ul class="landscape-lines mt-2 space-y-0.5 text-sm text-gray-800">{% for line in lines %}<li>{{ line }}</li>{% endfor %}</ul>{% endif %}
+    {% if not s9 and rank is not none %}<p class="landscape-rank mt-2 text-sm font-medium text-gray-900">Rank {{ rank }} <span class="font-normal text-gray-600">in the pairwise ranking: the best of its ideas' positions when the cut's ideas were compared in pairs on their in-depth analyses (1 is the strongest; an idea not yet compared keeps its triage rank).</span></p>{% endif %}
     <p class="text-sm text-gray-600 mt-1">{% if theme %}{{ theme }}{% endif %}{% if probe %}{{ ' · ' if theme }}probe{% endif %}{% if blind %}{{ ' · ' if theme or probe }}issued in a blind batch{% endif %}{% if retired %}{{ ' · ' if theme or probe or blind }}retired{% endif %}</p>
     {% if a.elevator_pitch or kps %}
     <div class="assessment-brief-grid mt-4 grid grid-cols-1 {% if a.elevator_pitch and kps %}md:grid-cols-2{% else %}md:grid-cols-1{% endif %} gap-6">
@@ -113,9 +122,10 @@
     </div>
     {% endif %}
     {% if not (a.elevator_pitch and kps) %}{{ why_this_score(a.score_rationale, markdown) }}{% endif %}
-    {% if not assessment %}<p class="mt-2 text-sm text-gray-600">No assessment to show.</p>{% endif %}
+    {% if s9 and not assessment %}<p class="mt-2 text-sm text-gray-600">No assessment to show.</p>{% endif %}
 </div>
 
+{% if s9 %}
 {# Evidence summary, copied from the assessment page: derived from the stored dimension
    scores, gates, red flags and panel opinions (`verdict_signals`). Every section renders,
    and an empty one says what its emptiness means. With no dimension rows (hidden, or an
@@ -422,6 +432,7 @@
     {% else %}<p class="text-sm text-gray-600">No dimension scores to show.</p>{% endif %}
 </div>
 </details>
+{% endif %}{# s9 #}
 
 {# Deal-breaker flags (contract C6), not on the history view: only flags raised or
    reviewed, confirmed and cleared told apart, readable evidence, and the unraised ones in

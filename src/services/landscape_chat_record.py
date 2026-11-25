@@ -43,6 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.landscaping import epochs
 from src.landscaping.ideas import dossier_documents
+from src.landscaping.s9_switch import final_enabled
 from src.landscaping.structured_lines import structured_line
 from src.models.assessment_chat import CHAT_TIER_STAFF
 from src.models.landscape import (
@@ -592,7 +593,10 @@ def _values(row: Any) -> dict[str, Any]:
 async def _current_assessment(
     db: AsyncSession, opportunity_id: uuid.UUID, epoch_id: uuid.UUID
 ) -> LandscapeAssessment | None:
-    """The opportunity's newest complete assessment in ``epoch_id``."""
+    """The opportunity's newest complete assessment in ``epoch_id``; None with S9 off
+    (``s9_switch``), so the chat, which answers only on an assessment, is unavailable."""
+    if not final_enabled():
+        return None
     A = LandscapeAssessment
     return await db.scalar(
         select(A)

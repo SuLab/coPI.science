@@ -57,4 +57,10 @@ def make_templates() -> Jinja2Templates:
     # None for a value that is not a DOI-shaped DOI or an all-digit PMID.
     templates.env.globals["doi_url"] = doi_url
     templates.env.globals["pubmed_url"] = pubmed_url
+    # Whether S9 runs here (src/landscaping/s9_switch.py): the Landscape templates leave out
+    # every S9 section when it does not. A global, read at render time, so a page context
+    # never carries it through the presentation allowlist.
+    from src.landscaping.s9_switch import final_enabled
+
+    templates.env.globals["landscape_final_enabled"] = final_enabled
     return templates

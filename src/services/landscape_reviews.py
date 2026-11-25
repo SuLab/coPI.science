@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.landscaping import epochs
 from src.landscaping.criteria import load_criteria
 from src.landscaping.review_batches import EXPERTS_KEY
+from src.landscaping.s9_switch import final_enabled
 from src.models import AppSetting, User
 from src.models.landscape import (
     DECISIONS,
@@ -108,8 +109,11 @@ async def shown_assessment_id(
 
     ``posted`` (the id the form carried, i.e. the assessment the page showed) when it is an
     assessment of this opportunity; otherwise the opportunity's current completed assessment in
-    the active epoch, or None when it has none (spec §7.10, X1).
+    the active epoch, or None when it has none (spec §7.10, X1). Always None with S9 off: the
+    pages show no assessment (``s9_switch``).
     """
+    if not final_enabled():
+        return None
     if posted is not None:
         owner = await db.scalar(
             select(LandscapeAssessment.opportunity_id).where(LandscapeAssessment.id == posted)
